@@ -15,6 +15,11 @@ const MediaSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+      mediaId: {
+      type: String,
+      unique: true,
+        sparse: true,
+    },
     mediaName: {
       type: String,
       required: true,

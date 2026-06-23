@@ -4,14 +4,14 @@ const multer   = require("multer");
 const router = express.Router();
 const {mediaOnboarding,mediaList,uploadExcel} = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
-
+const protect = require("../../../middleware/authMiddleware");
 // Create uploader for media images
 const { upload, processFile } = createUploader("mediaImages", {
   agreementPDF: "agreementPDF",
 });
 // Only TWO routes
 router.post(
-  "/media-onboarding",
+  "/media-onboarding",protect,
   upload.fields([
     { name: "agreementPDF", maxCount: 1 },
     { name: "frontView", maxCount: 1 },
@@ -26,7 +26,7 @@ router.post(
   mediaOnboarding,
 );
 
-router.post("/media-list", mediaList);
+router.post("/media-list",protect, mediaList);
 const uploads = multer({
   storage: multer.memoryStorage(),
   limits : { fileSize: 10 * 1024 * 1024 }, // 10 MB max
