@@ -30,6 +30,7 @@ Thumbs.db
 
 # Upload folders (if storing locally)
 uploads/
+public/
 temp/
 
 # Coverage
