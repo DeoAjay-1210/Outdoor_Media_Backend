@@ -1,5 +1,3 @@
-
-
 const mongoose = require("mongoose");
 
 // ─────────────────────────────────────────────────────────────
@@ -100,10 +98,10 @@ const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    updatedBy: { type: String, default: null },
+    updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -342,6 +340,10 @@ const MediaSchema = new mongoose.Schema(
         enum: [10, 30, 60, 90],
         required: true,
       },
+      advanceRent: {
+        type: Number,
+        default: 0,
+      },
       status: {
         type: Number,
         enum: [1, 2, 3], // 1=Active 2=Expire Zone 3=Expired
@@ -491,7 +493,9 @@ MediaSchema.pre("save", function () {
     const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
     rp.gstPercentage = envGstPct;
     gstAmount = parseFloat(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-    totalRentalAmountWithGst = parseFloat((amountAfterTds + gstAmount).toFixed(2));
+    totalRentalAmountWithGst = parseFloat(
+      (amountAfterTds + gstAmount).toFixed(2),
+    );
   } else {
     rp.gstPercentage = 0;
     gstAmount = 0;
@@ -524,7 +528,7 @@ MediaSchema.pre("save", function () {
               (item) =>
                 item.appraisalDate &&
                 new Date(item.appraisalDate).setHours(0, 0, 0, 0) ===
-                  appraisalDay.getTime()
+                  appraisalDay.getTime(),
             )
           : null;
 
@@ -553,7 +557,7 @@ MediaSchema.pre("save", function () {
     if (Number(owner.typeShare) === 1) {
       const sharePercentage = Number(owner.sharePercentage || 0);
       owner.shareAmount = parseFloat(
-        ((ownerSplitBaseAmount * sharePercentage) / 100).toFixed(2)
+        ((ownerSplitBaseAmount * sharePercentage) / 100).toFixed(2),
       );
     } else if (Number(owner.typeShare) === 2) {
       owner.sharePercentage = undefined;
@@ -583,12 +587,12 @@ MediaSchema.pre("save", function () {
       }
 
       const ownerGstAmount = parseFloat(
-        ((onlinePortionForGst * envGstPct) / 100).toFixed(2)
+        ((onlinePortionForGst * envGstPct) / 100).toFixed(2),
       );
       owner.gstPercentage = envGstPct;
       owner.gstAmount = ownerGstAmount;
       owner.totalAmountWithGst = parseFloat(
-        (Number(owner.shareAmount || 0) + ownerGstAmount).toFixed(2)
+        (Number(owner.shareAmount || 0) + ownerGstAmount).toFixed(2),
       );
     } else {
       // No per-owner GST
@@ -615,7 +619,8 @@ MediaSchema.pre("save", function () {
       amount: ownerAmount,
       paymentCategory,
       gstApplicable: ownerGstApplicable,
-      gstPercentage: ownerGstApplicable === 1 ? Number(owner.gstPercentage || 0) : 0,
+      gstPercentage:
+        ownerGstApplicable === 1 ? Number(owner.gstPercentage || 0) : 0,
       gstAmount: ownerGstApplicable === 1 ? Number(owner.gstAmount || 0) : 0,
       totalAmountWithGst:
         ownerGstApplicable === 1
@@ -650,7 +655,10 @@ MediaSchema.pre("save", function () {
 
   if (isNewDoc && billingDateProvided) return;
 
-  if (this.rentalPayment.lastBillPaidDate && this.rentalPayment.paymentFrequency) {
+  if (
+    this.rentalPayment.lastBillPaidDate &&
+    this.rentalPayment.paymentFrequency
+  ) {
     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
     const monthsToAdd = frequencyMap[this.rentalPayment.paymentFrequency] || 1;
     const nextDate = new Date(this.rentalPayment.lastBillPaidDate);
@@ -690,7 +698,10 @@ MediaSchema.pre("save", function () {
     return;
   }
 
-  const expireZoneDays = parseInt(process.env.RENTAL_EXPIRE_ZONE_DAYS || "3", 10);
+  const expireZoneDays = parseInt(
+    process.env.RENTAL_EXPIRE_ZONE_DAYS || "3",
+    10,
+  );
   const now = new Date();
   const billingDate = new Date(nextBillingDate);
   const daysUntilBill = Math.ceil((billingDate - now) / (1000 * 60 * 60 * 24));
@@ -707,324 +718,354 @@ MediaSchema.pre("save", function () {
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 6 — Appraisal Schedule
 // ─────────────────────────────────────────────────────────────
-const APPRAISAL_FREQUENCY_MONTHS_MAP = {
-  1: 6,
-  2: 12,
-  3: 24,
-};
+// const APPRAISAL_FREQUENCY_MONTHS_MAP = {
+//   1: 6,
+//   2: 12,
+//   3: 24,
+// };
 
-MediaSchema.pre("save", async function () {
-  if (this.appraisal?.applicable !== 1) return;
+// MediaSchema.pre("save", async function () {
+//   if (this.appraisal?.applicable !== 1) return;
 
-  if (!this.agreement?.startDate || !this.agreement?.endDate) return;
+//   if (!this.agreement?.startDate || !this.agreement?.endDate) return;
 
-  const agreementStartDate = new Date(this.agreement.startDate);
-  const agreementEndDate = new Date(this.agreement.endDate);
+//   const agreementStartDate = new Date(this.agreement.startDate);
+//   const agreementEndDate = new Date(this.agreement.endDate);
 
-  if (this.appraisal.nextAppraisalDate) {
-    const nextDate = new Date(this.appraisal.nextAppraisalDate);
-    if (nextDate > agreementEndDate) {
-      throw new Error("Next appraisal date cannot be greater than agreement end date");
-    }
-  }
+//   if (this.appraisal.nextAppraisalDate) {
+//     const nextDate = new Date(this.appraisal.nextAppraisalDate);
+//     if (nextDate > agreementEndDate) {
+//       throw new Error(
+//         "Next appraisal date cannot be greater than agreement end date",
+//       );
+//     }
+//   }
 
-  let months = 0;
+//   let months = 0;
 
-  if (Number(this.appraisal.frequency) === 4) {
-    months = Number(this.appraisal.customFrequencyMonths || 0);
-    if (months <= 0) {
-      throw new Error("Custom frequency months must be greater than 0");
-    }
-  } else {
-    months = APPRAISAL_FREQUENCY_MONTHS_MAP[Number(this.appraisal.frequency)] || 12;
-  }
+//   if (Number(this.appraisal.frequency) === 4) {
+//     months = Number(this.appraisal.customFrequencyMonths || 0);
+//     if (months <= 0) {
+//       throw new Error("Custom frequency months must be greater than 0");
+//     }
+//   } else {
+//     months =
+//       APPRAISAL_FREQUENCY_MONTHS_MAP[Number(this.appraisal.frequency)] || 12;
+//   }
 
-  if (!Array.isArray(this.appraisal.history)) {
-    this.appraisal.history = [];
-  }
+//   if (!Array.isArray(this.appraisal.history)) {
+//     this.appraisal.history = [];
+//   }
 
-  let oldDoc = null;
-  if (!this.isNew) {
-    oldDoc = await this.constructor.findById(this._id).lean();
-  }
+//   let oldDoc = null;
+//   if (!this.isNew) {
+//     oldDoc = await this.constructor.findById(this._id).lean();
+//   }
 
-  const netPayable = Number(this.rentalPayment?.totalRentalAmount || 0);
+//   const netPayable = Number(this.rentalPayment?.totalRentalAmount || 0);
 
-  // Initialize currentRent for new documents
-  if (this.isNew) {
-    this.appraisal.currentRent = netPayable;
-  } else if (!this.appraisal.currentRent || this.appraisal.currentRent <= 0) {
-    this.appraisal.currentRent = netPayable;
-  }
+//   // Initialize currentRent for new documents
+//   if (this.isNew) {
+//     this.appraisal.currentRent = netPayable;
+//   } else if (!this.appraisal.currentRent || this.appraisal.currentRent <= 0) {
+//     this.appraisal.currentRent = netPayable;
+//   }
 
-  // On update, restore history and currentRent from oldDoc
-  if (!this.isNew && oldDoc) {
-    if (Array.isArray(oldDoc.appraisal?.history) && oldDoc.appraisal.history.length > 0) {
-      this.appraisal.history = oldDoc.appraisal.history.map((h) => ({ ...h }));
-    }
-    if (oldDoc.appraisal?.currentRent && oldDoc.appraisal.currentRent > 0) {
-      this.appraisal.currentRent = oldDoc.appraisal.currentRent;
-    }
-    if (oldDoc.appraisal?.lastAppraisalDate) {
-      this.appraisal.lastAppraisalDate = oldDoc.appraisal.lastAppraisalDate;
-    }
-  }
+//   // On update, restore history and currentRent from oldDoc
+//   if (!this.isNew && oldDoc) {
+//     if (
+//       Array.isArray(oldDoc.appraisal?.history) &&
+//       oldDoc.appraisal.history.length > 0
+//     ) {
+//       this.appraisal.history = oldDoc.appraisal.history.map((h) => ({ ...h }));
+//     }
+//     if (oldDoc.appraisal?.currentRent && oldDoc.appraisal.currentRent > 0) {
+//       this.appraisal.currentRent = oldDoc.appraisal.currentRent;
+//     }
+//     if (oldDoc.appraisal?.lastAppraisalDate) {
+//       this.appraisal.lastAppraisalDate = oldDoc.appraisal.lastAppraisalDate;
+//     }
+//   }
 
-  // Check what changed
-  let fixedAmountChanged = false;
-  let nextDateChanged = false;
-  let previousAppraisalAmount = 0;
+//   // Check what changed
+//   let fixedAmountChanged = false;
+//   let nextDateChanged = false;
+//   let previousAppraisalAmount = 0;
 
-  if (!this.isNew && oldDoc) {
-    // Get the last appraisal amount from history
-    if (Array.isArray(this.appraisal.history) && this.appraisal.history.length > 0) {
-      const lastEntry = this.appraisal.history[this.appraisal.history.length - 1];
-      previousAppraisalAmount = Number(lastEntry.appraisalAmount || 0);
-    }
+//   if (!this.isNew && oldDoc) {
+//     // Get the last appraisal amount from history
+//     if (
+//       Array.isArray(this.appraisal.history) &&
+//       this.appraisal.history.length > 0
+//     ) {
+//       const lastEntry =
+//         this.appraisal.history[this.appraisal.history.length - 1];
+//       previousAppraisalAmount = Number(lastEntry.appraisalAmount || 0);
+//     }
 
-    // Check if fixedAmount changed (for type 2)
-    if (Number(this.appraisal.type) === 2) {
-      const oldFixedAmount = Number(oldDoc.appraisal?.fixedAmount || 0);
-      const newFixedAmount = Number(this.appraisal.fixedAmount || 0);
-      if (oldFixedAmount !== newFixedAmount) {
-        fixedAmountChanged = true;
-      }
-    }
-    
-    // Check if nextAppraisalDate changed
-    if (oldDoc.appraisal?.nextAppraisalDate && this.appraisal?.nextAppraisalDate) {
-      const oldNextDate = new Date(oldDoc.appraisal.nextAppraisalDate);
-      const newNextDate = new Date(this.appraisal.nextAppraisalDate);
-      if (oldNextDate.getTime() !== newNextDate.getTime()) {
-        nextDateChanged = true;
-      }
-    }
-  }
+//     // Check if fixedAmount changed (for type 2)
+//     if (Number(this.appraisal.type) === 2) {
+//       const oldFixedAmount = Number(oldDoc.appraisal?.fixedAmount || 0);
+//       const newFixedAmount = Number(this.appraisal.fixedAmount || 0);
+//       if (oldFixedAmount !== newFixedAmount) {
+//         fixedAmountChanged = true;
+//       }
+//     }
 
-  // Handle fixedAmount change only (same date) - UPDATE existing entry
-  if (fixedAmountChanged && !nextDateChanged) {
-    if (Array.isArray(this.appraisal.history) && this.appraisal.history.length > 0) {
-      const lastIndex = this.appraisal.history.length - 1;
-      const lastEntry = this.appraisal.history[lastIndex];
-      
-      const previousRent = Number(lastEntry.previousRent || 0);
-      const newAppraisalAmount = Number(this.appraisal.fixedAmount || 0);
-      const newRent = Math.round(previousRent + newAppraisalAmount);
-      
-      this.appraisal.history[lastIndex] = {
-        ...lastEntry,
-        fixedAmount: Number(this.appraisal.fixedAmount || 0),
-        appraisalAmount: newAppraisalAmount,
-        newRent: newRent,
-        updatedBy: this._updatedBy || null,
-        updatedAt: new Date(),
-      };
-      
-      this.appraisal.currentRent = newRent;
-      this.appraisal.appraisalAmount = newAppraisalAmount;
-      
-      if (oldDoc?.appraisal?.nextAppraisalDate) {
-        this.appraisal.nextAppraisalDate = oldDoc.appraisal.nextAppraisalDate;
-      }
-      
-      // Update totalAppraisalAmount
-      const totalAppraisal = this.appraisal.history.reduce((sum, entry) => {
-        return sum + Number(entry.appraisalAmount || 0);
-      }, 0);
-      const baseRent = Number(this.appraisal.history[0]?.previousRent || netPayable);
-      this.appraisal.totalAppraisalAmount = Math.round(baseRent + totalAppraisal);
-      
-      return;
-    }
-  }
+//     // Check if nextAppraisalDate changed
+//     if (
+//       oldDoc.appraisal?.nextAppraisalDate &&
+//       this.appraisal?.nextAppraisalDate
+//     ) {
+//       const oldNextDate = new Date(oldDoc.appraisal.nextAppraisalDate);
+//       const newNextDate = new Date(this.appraisal.nextAppraisalDate);
+//       if (oldNextDate.getTime() !== newNextDate.getTime()) {
+//         nextDateChanged = true;
+//       }
+//     }
+//   }
 
-  // Handle nextAppraisalDate change
-  if (nextDateChanged && oldDoc) {
-    const oldNextDate = new Date(oldDoc.appraisal.nextAppraisalDate);
-    const newNextDate = new Date(this.appraisal.nextAppraisalDate);
+//   // Handle fixedAmount change only (same date) - UPDATE existing entry
+//   if (fixedAmountChanged && !nextDateChanged) {
+//     if (
+//       Array.isArray(this.appraisal.history) &&
+//       this.appraisal.history.length > 0
+//     ) {
+//       const lastIndex = this.appraisal.history.length - 1;
+//       const lastEntry = this.appraisal.history[lastIndex];
 
-    // Get existing history from oldDoc
-    let updatedHistory = Array.isArray(oldDoc.appraisal?.history)
-      ? oldDoc.appraisal.history.map((h) => ({ ...h }))
-      : [];
+//       const previousRent = Number(lastEntry.previousRent || 0);
+//       const newAppraisalAmount = Number(this.appraisal.fixedAmount || 0);
+//       const newRent = Math.round(previousRent + newAppraisalAmount);
 
-    // If fixedAmount also changed, update the last entry in history
-    if (fixedAmountChanged && updatedHistory.length > 0) {
-      const lastIndex = updatedHistory.length - 1;
-      const lastEntry = updatedHistory[lastIndex];
-      
-      const previousRent = Number(lastEntry.previousRent || 0);
-      const newAppraisalAmount = Number(this.appraisal.fixedAmount || 0);
-      const newRent = Math.round(previousRent + newAppraisalAmount);
-      
-      updatedHistory[lastIndex] = {
-        ...lastEntry,
-        fixedAmount: Number(this.appraisal.fixedAmount || 0),
-        appraisalAmount: newAppraisalAmount,
-        newRent: newRent,
-        updatedBy: this._updatedBy || null,
-        updatedAt: new Date(),
-      };
-    }
+//       this.appraisal.history[lastIndex] = {
+//         ...lastEntry,
+//         fixedAmount: Number(this.appraisal.fixedAmount || 0),
+//         appraisalAmount: newAppraisalAmount,
+//         newRent: newRent,
+//         updatedBy: this._updatedBy || null,
+//         updatedAt: new Date(),
+//       };
 
-    // Get the entry that corresponds to the old nextAppraisalDate
-    const oldNextDateEntryIndex = updatedHistory.findIndex(
-      (item) =>
-        item.appraisalDate &&
-        new Date(item.appraisalDate).getTime() === oldNextDate.getTime()
-    );
+//       this.appraisal.currentRent = newRent;
+//       this.appraisal.appraisalAmount = newAppraisalAmount;
 
-    // If there's an entry for the old next date, update or remove it based on new date
-    let currentRentValue = 0;
-    
-    if (oldNextDateEntryIndex !== -1) {
-      // Get the entry at old date
-      const oldEntry = updatedHistory[oldNextDateEntryIndex];
-      
-      // Check if we should keep this entry or not
-      // We keep it only if it's before the new date
-      if (oldNextDate < newNextDate) {
-        // Keep the entry as is (it's before the new date)
-        currentRentValue = Number(oldEntry.newRent || 0);
-      } else {
-        // If old date is after new date, we need to remove this entry
-        updatedHistory.splice(oldNextDateEntryIndex, 1);
-        // Recalculate currentRent from the last remaining entry
-        if (updatedHistory.length > 0) {
-          const lastEntry = updatedHistory[updatedHistory.length - 1];
-          currentRentValue = Number(lastEntry.newRent || 0);
-        } else {
-          currentRentValue = Number(oldDoc.appraisal?.currentRent || netPayable);
-        }
-      }
-    } else {
-      // No entry for old date, get current rent from last entry
-      if (updatedHistory.length > 0) {
-        const lastEntry = updatedHistory[updatedHistory.length - 1];
-        currentRentValue = Number(lastEntry.newRent || 0);
-      } else {
-        currentRentValue = Number(oldDoc.appraisal?.currentRent || netPayable);
-      }
-    }
+//       if (oldDoc?.appraisal?.nextAppraisalDate) {
+//         this.appraisal.nextAppraisalDate = oldDoc.appraisal.nextAppraisalDate;
+//       }
 
-    // Now, only add new entry if the new date doesn't already exist and it's after the old date
-    const newNextDateExists = updatedHistory.some(
-      (item) =>
-        item.appraisalDate &&
-        new Date(item.appraisalDate).getTime() === newNextDate.getTime()
-    );
+//       // Update totalAppraisalAmount
+//       const totalAppraisal = this.appraisal.history.reduce((sum, entry) => {
+//         return sum + Number(entry.appraisalAmount || 0);
+//       }, 0);
+//       const baseRent = Number(
+//         this.appraisal.history[0]?.previousRent || netPayable,
+//       );
+//       this.appraisal.totalAppraisalAmount = Math.round(
+//         baseRent + totalAppraisal,
+//       );
 
-    if (!newNextDateExists && oldNextDate < newNextDate) {
-      // Get previous rent from the last entry in history
-      let previousRent = currentRentValue;
-      let latestAppraisalAmount = 0;
-      
-      if (updatedHistory.length > 0) {
-        const lastEntry = updatedHistory[updatedHistory.length - 1];
-        latestAppraisalAmount = Number(lastEntry.appraisalAmount || 0);
-        previousRent = Number(lastEntry.newRent || currentRentValue);
-      }
+//       return;
+//     }
+//   }
 
-      // Calculate appraisal amount
-      let appraisalAmount = 0;
-      if (Number(this.appraisal.type) === 1) {
-        appraisalAmount = (latestAppraisalAmount * Number(this.appraisal.percentage || 0)) / 100;
-      } else if (Number(this.appraisal.type) === 2) {
-        appraisalAmount = Number(this.appraisal.fixedAmount || 0);
-      }
-      appraisalAmount = Math.round(appraisalAmount);
-      
-      const newRent = Math.round(previousRent + appraisalAmount);
+//   // Handle nextAppraisalDate change
+//   if (nextDateChanged && oldDoc) {
+//     const oldNextDate = new Date(oldDoc.appraisal.nextAppraisalDate);
+//     const newNextDate = new Date(this.appraisal.nextAppraisalDate);
 
-      updatedHistory.push({
-        appraisalDate: newNextDate,
-        type: this.appraisal.type,
-        percentage: this.appraisal.percentage || 0,
-        fixedAmount: this.appraisal.fixedAmount || 0,
-        previousRent: previousRent,
-        previousAppraisalAmount: latestAppraisalAmount,
-        appraisalAmount: appraisalAmount,
-        newRent: newRent,
-        updatedBy: this._updatedBy || null,
-        updatedAt: new Date(),
-      });
-      
-      currentRentValue = newRent;
-    }
+//     // Get existing history from oldDoc
+//     let updatedHistory = Array.isArray(oldDoc.appraisal?.history)
+//       ? oldDoc.appraisal.history.map((h) => ({ ...h }))
+//       : [];
 
-    // Update the document with the new history
-    this.appraisal.history = updatedHistory;
-    this.appraisal.lastAppraisalDate = oldNextDate;
-    this.appraisal.currentRent = currentRentValue;
-    
-    // Update appraisal amount and total
-    if (updatedHistory.length > 0) {
-      const lastEntry = updatedHistory[updatedHistory.length - 1];
-      this.appraisal.appraisalAmount = Number(lastEntry.appraisalAmount || 0);
-      
-      // Calculate total appraisal amount
-      const totalAppraisal = updatedHistory.reduce((sum, entry) => {
-        return sum + Number(entry.appraisalAmount || 0);
-      }, 0);
-      
-      // Get the base rent from the first entry or use netPayable
-      const baseRent = updatedHistory.length > 0 && updatedHistory[0].previousRent 
-        ? Number(updatedHistory[0].previousRent) 
-        : netPayable;
-      
-      this.appraisal.totalAppraisalAmount = Math.round(baseRent + totalAppraisal);
-    }
-    
-    return;
-  }
+//     // If fixedAmount also changed, update the last entry in history
+//     if (fixedAmountChanged && updatedHistory.length > 0) {
+//       const lastIndex = updatedHistory.length - 1;
+//       const lastEntry = updatedHistory[lastIndex];
 
-  // Handle new document
-  if (this.isNew && !this.appraisal.nextAppraisalDate) {
-    const firstDate = new Date(agreementStartDate);
-    firstDate.setMonth(firstDate.getMonth() + months);
+//       const previousRent = Number(lastEntry.previousRent || 0);
+//       const newAppraisalAmount = Number(this.appraisal.fixedAmount || 0);
+//       const newRent = Math.round(previousRent + newAppraisalAmount);
 
-    if (firstDate <= agreementEndDate) {
-      this.appraisal.nextAppraisalDate = firstDate;
-    }
-  }
+//       updatedHistory[lastIndex] = {
+//         ...lastEntry,
+//         fixedAmount: Number(this.appraisal.fixedAmount || 0),
+//         appraisalAmount: newAppraisalAmount,
+//         newRent: newRent,
+//         updatedBy: this._updatedBy || null,
+//         updatedAt: new Date(),
+//       };
+//     }
 
-  if (this.isNew && this.appraisal.nextAppraisalDate) {
-    const baseRent = Number(this.rentalPayment?.totalRentalAmount || 0);
+//     // Get the entry that corresponds to the old nextAppraisalDate
+//     const oldNextDateEntryIndex = updatedHistory.findIndex(
+//       (item) =>
+//         item.appraisalDate &&
+//         new Date(item.appraisalDate).getTime() === oldNextDate.getTime(),
+//     );
 
-    let initialAppraisalAmount = 0;
-    if (Number(this.appraisal.type) === 1) {
-      initialAppraisalAmount = (baseRent * Number(this.appraisal.percentage || 0)) / 100;
-    } else if (Number(this.appraisal.type) === 2) {
-      initialAppraisalAmount = Number(this.appraisal.fixedAmount || 0);
-    }
+//     // If there's an entry for the old next date, update or remove it based on new date
+//     let currentRentValue = 0;
 
-    initialAppraisalAmount = Math.round(initialAppraisalAmount);
-    const newRent = Math.round(baseRent + initialAppraisalAmount);
+//     if (oldNextDateEntryIndex !== -1) {
+//       // Get the entry at old date
+//       const oldEntry = updatedHistory[oldNextDateEntryIndex];
 
-    const dateExists = this.appraisal.history.some(
-      (item) =>
-        item.appraisalDate &&
-        new Date(item.appraisalDate).getTime() ===
-          new Date(this.appraisal.nextAppraisalDate).getTime()
-    );
+//       // Check if we should keep this entry or not
+//       // We keep it only if it's before the new date
+//       if (oldNextDate < newNextDate) {
+//         // Keep the entry as is (it's before the new date)
+//         currentRentValue = Number(oldEntry.newRent || 0);
+//       } else {
+//         // If old date is after new date, we need to remove this entry
+//         updatedHistory.splice(oldNextDateEntryIndex, 1);
+//         // Recalculate currentRent from the last remaining entry
+//         if (updatedHistory.length > 0) {
+//           const lastEntry = updatedHistory[updatedHistory.length - 1];
+//           currentRentValue = Number(lastEntry.newRent || 0);
+//         } else {
+//           currentRentValue = Number(
+//             oldDoc.appraisal?.currentRent || netPayable,
+//           );
+//         }
+//       }
+//     } else {
+//       // No entry for old date, get current rent from last entry
+//       if (updatedHistory.length > 0) {
+//         const lastEntry = updatedHistory[updatedHistory.length - 1];
+//         currentRentValue = Number(lastEntry.newRent || 0);
+//       } else {
+//         currentRentValue = Number(oldDoc.appraisal?.currentRent || netPayable);
+//       }
+//     }
 
-    if (!dateExists) {
-      this.appraisal.history.push({
-        appraisalDate: new Date(this.appraisal.nextAppraisalDate),
-        type: this.appraisal.type,
-        percentage: this.appraisal.percentage || 0,
-        fixedAmount: this.appraisal.fixedAmount || 0,
-        previousRent: baseRent,
-        previousAppraisalAmount: 0,
-        appraisalAmount: initialAppraisalAmount,
-        newRent,
-        updatedBy: this._updatedBy || null,
-        updatedAt: new Date(),
-      });
-    }
+//     // Now, only add new entry if the new date doesn't already exist and it's after the old date
+//     const newNextDateExists = updatedHistory.some(
+//       (item) =>
+//         item.appraisalDate &&
+//         new Date(item.appraisalDate).getTime() === newNextDate.getTime(),
+//     );
 
-    this.appraisal.appraisalAmount = initialAppraisalAmount;
-    this.appraisal.totalAppraisalAmount = Math.round(baseRent + initialAppraisalAmount);
-  }
-});
+//     if (!newNextDateExists && oldNextDate < newNextDate) {
+//       // Get previous rent from the last entry in history
+//       let previousRent = currentRentValue;
+//       let latestAppraisalAmount = 0;
+
+//       if (updatedHistory.length > 0) {
+//         const lastEntry = updatedHistory[updatedHistory.length - 1];
+//         latestAppraisalAmount = Number(lastEntry.appraisalAmount || 0);
+//         previousRent = Number(lastEntry.newRent || currentRentValue);
+//       }
+
+//       // Calculate appraisal amount
+//       let appraisalAmount = 0;
+//       if (Number(this.appraisal.type) === 1) {
+//         appraisalAmount =
+//           (latestAppraisalAmount * Number(this.appraisal.percentage || 0)) /
+//           100;
+//       } else if (Number(this.appraisal.type) === 2) {
+//         appraisalAmount = Number(this.appraisal.fixedAmount || 0);
+//       }
+//       appraisalAmount = Math.round(appraisalAmount);
+
+//       const newRent = Math.round(previousRent + appraisalAmount);
+
+//       updatedHistory.push({
+//         appraisalDate: newNextDate,
+//         type: this.appraisal.type,
+//         percentage: this.appraisal.percentage || 0,
+//         fixedAmount: this.appraisal.fixedAmount || 0,
+//         previousRent: previousRent,
+//         previousAppraisalAmount: latestAppraisalAmount,
+//         appraisalAmount: appraisalAmount,
+//         newRent: newRent,
+//         updatedBy: this._updatedBy || null,
+//         updatedAt: new Date(),
+//       });
+
+//       currentRentValue = newRent;
+//     }
+
+//     // Update the document with the new history
+//     this.appraisal.history = updatedHistory;
+//     this.appraisal.lastAppraisalDate = oldNextDate;
+//     this.appraisal.currentRent = currentRentValue;
+
+//     // Update appraisal amount and total
+//     if (updatedHistory.length > 0) {
+//       const lastEntry = updatedHistory[updatedHistory.length - 1];
+//       this.appraisal.appraisalAmount = Number(lastEntry.appraisalAmount || 0);
+
+//       // Calculate total appraisal amount
+//       const totalAppraisal = updatedHistory.reduce((sum, entry) => {
+//         return sum + Number(entry.appraisalAmount || 0);
+//       }, 0);
+
+//       // Get the base rent from the first entry or use netPayable
+//       const baseRent =
+//         updatedHistory.length > 0 && updatedHistory[0].previousRent
+//           ? Number(updatedHistory[0].previousRent)
+//           : netPayable;
+
+//       this.appraisal.totalAppraisalAmount = Math.round(
+//         baseRent + totalAppraisal,
+//       );
+//     }
+
+//     return;
+//   }
+
+//   // Handle new document
+//   if (this.isNew && !this.appraisal.nextAppraisalDate) {
+//     const firstDate = new Date(agreementStartDate);
+//     firstDate.setMonth(firstDate.getMonth() + months);
+
+//     if (firstDate <= agreementEndDate) {
+//       this.appraisal.nextAppraisalDate = firstDate;
+//     }
+//   }
+
+//   if (this.isNew && this.appraisal.nextAppraisalDate) {
+//     const baseRent = Number(this.rentalPayment?.totalRentalAmount || 0);
+
+//     let initialAppraisalAmount = 0;
+//     if (Number(this.appraisal.type) === 1) {
+//       initialAppraisalAmount =
+//         (baseRent * Number(this.appraisal.percentage || 0)) / 100;
+//     } else if (Number(this.appraisal.type) === 2) {
+//       initialAppraisalAmount = Number(this.appraisal.fixedAmount || 0);
+//     }
+
+//     initialAppraisalAmount = Math.round(initialAppraisalAmount);
+//     const newRent = Math.round(baseRent + initialAppraisalAmount);
+
+//     const dateExists = this.appraisal.history.some(
+//       (item) =>
+//         item.appraisalDate &&
+//         new Date(item.appraisalDate).getTime() ===
+//           new Date(this.appraisal.nextAppraisalDate).getTime(),
+//     );
+
+//     if (!dateExists) {
+//       this.appraisal.history.push({
+//         appraisalDate: new Date(this.appraisal.nextAppraisalDate),
+//         type: this.appraisal.type,
+//         percentage: this.appraisal.percentage || 0,
+//         fixedAmount: this.appraisal.fixedAmount || 0,
+//         previousRent: baseRent,
+//         previousAppraisalAmount: 0,
+//         appraisalAmount: initialAppraisalAmount,
+//         newRent,
+//         updatedBy: this._updatedBy || null,
+//         updatedAt: new Date(),
+//       });
+//     }
+
+//     this.appraisal.appraisalAmount = initialAppraisalAmount;
+//     this.appraisal.totalAppraisalAmount = Math.round(
+//       baseRent + initialAppraisalAmount,
+//     );
+//   }
+// });
 module.exports = mongoose.model("MediaOnboarding", MediaSchema);

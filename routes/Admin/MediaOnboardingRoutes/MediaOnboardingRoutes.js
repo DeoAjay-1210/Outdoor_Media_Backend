@@ -42,6 +42,13 @@ const uploads = multer({
     }
   },
 });
-router.post("/media-excel-upload", uploads.single("file"), uploadExcel);
+router.post("/media-excel-upload",protect, uploads.single("file"), uploadExcel);
+router.get("/profile", protect, async (req, res) => {
+  console.log(req.user.userName);
 
+  res.json({
+    success: true,
+    userName: req.user.userName
+  });
+});
 module.exports = router;

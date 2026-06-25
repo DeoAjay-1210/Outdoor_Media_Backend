@@ -18,7 +18,7 @@ const protect = (req, res, next) => {
        req.user = {
         id: decoded.id,
         userType: decoded.userType,
-        name: decoded.name // Get name directly from token
+        userName: decoded.userName // Get name directly from token
       };
       next();
     } catch (error) {
