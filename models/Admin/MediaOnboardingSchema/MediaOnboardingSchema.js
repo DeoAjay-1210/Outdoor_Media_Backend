@@ -115,6 +115,18 @@ const agreementHistorySchema = new mongoose.Schema({
     uploadedAt: { type: Date, default: Date.now },
   },
   reason: { type: String, trim: true },
+  rentalPayment: {
+    totalRentalAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    paymentFrequency: {
+      type: Number,
+      enum: [1, 2, 3, 4, 5, 6],
+      default: 1,
+    },
+  },
   updatedBy: {
     type: String,
   },
@@ -273,12 +285,12 @@ const MediaSchema = new mongoose.Schema(
         panNumber: { type: String, trim: true, uppercase: true },
         paymentCategory: {
           type: Number,
-          enum: [1, 2, 3],
+          enum: [1, 2, 3],  // 1 cash, 2 online 3 cash + online
           required: true,
         },
         onlineMode: {
           type: Number,
-          enum: [1, 2, 3],
+          enum: [1, 2, 3], // 
         },
         cashAmount: {
           type: Number,
@@ -292,7 +304,7 @@ const MediaSchema = new mongoose.Schema(
         },
         typeShare: {
           type: Number,
-          enum: [1, 2],
+          enum: [1, 2],  // 1.percentage 2.amount
         },
         sharePercentage: {
           type: Number,
@@ -365,6 +377,18 @@ const MediaSchema = new mongoose.Schema(
         type: String,
       },
       uploadedAt: { type: Date, default: Date.now },
+      rentalPayment: {
+        totalRentalAmount: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        paymentFrequency: {
+          type: Number,
+          enum: [1, 2, 3, 4, 5, 6],
+          default: 1,
+        },
+      },
     },
 
     // ─────────────────────────────────────────────────────────
