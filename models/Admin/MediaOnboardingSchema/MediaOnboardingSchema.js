@@ -114,6 +114,7 @@ const agreementHistorySchema = new mongoose.Schema({
     fileType: { type: String, enum: ["pdf"], default: "pdf" },
     uploadedAt: { type: Date, default: Date.now },
   },
+  reason: { type: String, trim: true },
   updatedBy: {
     type: String,
   },
@@ -350,6 +351,7 @@ const MediaSchema = new mongoose.Schema(
         enum: [1, 2, 3], // 1=Active 2=Expire Zone 3=Expired
         default: 1,
       },
+      reason: { type: String, trim: true },
       agreementPDF: {
         originalName: { type: String },
         fileName: { type: String },
