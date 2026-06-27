@@ -1136,7 +1136,8 @@ const resolveActiveAgreement = (historyArr) => {
 //agreement Save 
 const updateAgreement = async (req, res) => {
   try {
-    const { id } = req.body;
+    // const { id } = req.body;
+     const id = req.body?.id;
     const userName = req.user?.userName || "Admin";
 
     if (!id) {
@@ -1158,9 +1159,14 @@ const updateAgreement = async (req, res) => {
     }
     delete agreementData.id;
 
-    const incoming = agreementData.startDate
-      ? agreementData
-      : agreementData.agreement || {};
+    // const incoming = agreementData.startDate
+    //   ? agreementData
+    //   : agreementData.agreement || {};
+     const incoming = agreementData.startDate
+      ? agreementData // flat FormData or plain JSON body
+      : agreementData.agreement && typeof agreementData.agreement === "object"
+        ? agreementData.agreement // nested { agreement: { startDate, ... } }
+        : {};
 
     if (!incoming.startDate || !incoming.endDate) {
       return errorResponse(res, "startDate and endDate are required", null, 400);

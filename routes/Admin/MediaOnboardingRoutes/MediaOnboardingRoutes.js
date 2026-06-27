@@ -27,7 +27,11 @@ router.post(
 );
 
 router.post("/media-list",protect, mediaList);
-router.post("/update-agreement",protect, updateAgreement);
+// router.post("/update-agreement",protect, updateAgreement);
+router.post('/update-agreement',protect, upload.fields([{ name: 'agreementPDF' }]), (req, res, next) => {
+    req.processFile = processFile;
+    next();
+  }, updateAgreement);
 router.get("/media-details",protect, getMediaById);
 const uploads = multer({
   storage: multer.memoryStorage(),
