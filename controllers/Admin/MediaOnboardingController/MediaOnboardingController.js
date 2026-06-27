@@ -1134,10 +1134,385 @@ const resolveActiveAgreement = (historyArr) => {
   return null;
 };
 //agreement Save 
+// const updateAgreement = async (req, res) => {
+//   try {
+//     // const { id } = req.body;
+//      const id = req.body?.id;
+//     const userName = req.user?.userName || "Admin";
+
+//     if (!id) {
+//       return errorResponse(res, "Media ID is required in request body", null, 400);
+//     }
+
+//     const media = await MediaOnboarding.findById(id);
+//     if (!media) {
+//       return errorResponse(res, "Media not found with this ID", null, 404);
+//     }
+
+//     let agreementData = req.body;
+//     if (agreementData.agreement && typeof agreementData.agreement === "string") {
+//       try {
+//         agreementData = JSON.parse(agreementData.agreement);
+//       } catch (error) {
+//         return errorResponse(res, "Invalid agreement JSON format", null, 400);
+//       }
+//     }
+//     delete agreementData.id;
+
+//     // const incoming = agreementData.startDate
+//     //   ? agreementData
+//     //   : agreementData.agreement || {};
+//      const incoming = agreementData.startDate
+//       ? agreementData // flat FormData or plain JSON body
+//       : agreementData.agreement && typeof agreementData.agreement === "object"
+//         ? agreementData.agreement // nested { agreement: { startDate, ... } }
+//         : {};
+
+//     if (!incoming.startDate || !incoming.endDate) {
+//       return errorResponse(res, "startDate and endDate are required", null, 400);
+//     }
+
+//     // ─────────────────────────────────────────────
+//     // PDF Upload
+//     // ─────────────────────────────────────────────
+//     const uploadedAgreementPDF = req.files?.agreementPDF?.[0];
+//     if (uploadedAgreementPDF) {
+//       incoming.agreementPDF = req.processFile(uploadedAgreementPDF);
+//     } else if (media.agreement?.agreementPDF) {
+//       incoming.agreementPDF = media.agreement.agreementPDF.toObject
+//         ? media.agreement.agreementPDF.toObject()
+//         : { ...media.agreement.agreementPDF };
+//     }
+
+//     // ─────────────────────────────────────────────
+//     // Build new agreement object with rentalPayment
+//     // ─────────────────────────────────────────────
+//     const paymentFrequencyValue =
+//       incoming.paymentFrequency !== undefined
+//         ? Number(incoming.paymentFrequency)
+//         : media.agreement?.rentalPayment?.paymentFrequency || 1;
+
+//     const incomingTotalRentalAmount =
+//       incoming.totalRentalAmount !== undefined
+//         ? Number(incoming.totalRentalAmount)
+//         : media.agreement?.rentalPayment?.totalRentalAmount || 0;
+
+//     // ── Detect if totalRentalAmount changed so we can stamp updatedAt/updatedBy ──
+//     const existingTotalRentalAmount =
+//       Number(media.agreement?.rentalPayment?.totalRentalAmount ?? 0);
+
+//     const rentalAmountChanged =
+//       incomingTotalRentalAmount !== existingTotalRentalAmount;
+
+//     // Carry forward the existing stamp when the amount did NOT change.
+//     const rentalPaymentUpdatedAt = rentalAmountChanged
+//       ? nowIST()
+//       : (media.agreement?.rentalPayment?.updatedAt ?? nowIST());
+
+//     const rentalPaymentUpdatedBy = rentalAmountChanged
+//       ? userName
+//       : (media.agreement?.rentalPayment?.updatedBy ?? userName);
+
+//     const newAgreement = {
+//       startDate: new Date(incoming.startDate),
+//       endDate: new Date(incoming.endDate),
+//       reminderBeforeExpiry:
+//         incoming.reminderBeforeExpiry !== undefined
+//           ? Number(incoming.reminderBeforeExpiry)
+//           : media.agreement?.reminderBeforeExpiry || 30,
+//       advanceRent:
+//         incoming.advanceRent !== undefined
+//           ? Number(incoming.advanceRent)
+//           : media.agreement?.advanceRent || 0,
+//       agreementPDF: incoming.agreementPDF,
+//       reason: incoming.reason?.trim() || media.agreement?.reason || "",
+//       rentalPayment: {
+//         totalRentalAmount: incomingTotalRentalAmount,
+//         paymentFrequency: paymentFrequencyValue,
+//         // ← NEW: stamp who changed totalRentalAmount and when
+//         updatedBy: rentalPaymentUpdatedBy,
+//         updatedAt: rentalPaymentUpdatedAt,
+//       },
+//     };
+
+//     // ─────────────────────────────────────────────
+//     // Validation
+//     // ─────────────────────────────────────────────
+//     if (newAgreement.startDate >= newAgreement.endDate) {
+//       return errorResponse(res, "Start date must be before end date", null, 400);
+//     }
+
+//     const validReminderValues = [10, 30, 60, 90];
+//     if (!validReminderValues.includes(newAgreement.reminderBeforeExpiry)) {
+//       return errorResponse(
+//         res,
+//         `reminderBeforeExpiry must be one of: ${validReminderValues.join(", ")}`,
+//         null,
+//         400,
+//       );
+//     }
+
+//     if (newAgreement.rentalPayment.totalRentalAmount < 0) {
+//       return errorResponse(
+//         res,
+//         "Total rental amount must be a positive number",
+//         null,
+//         400,
+//       );
+//     }
+
+//     const validPaymentFrequencies = [1, 2, 3, 4, 5, 6];
+//     if (!validPaymentFrequencies.includes(newAgreement.rentalPayment.paymentFrequency)) {
+//       return errorResponse(
+//         res,
+//         `paymentFrequency must be one of: ${validPaymentFrequencies.join(", ")} (1=Monthly, 2=2M, 3=3M, 4=6M, 5=1Y, 6=2Y)`,
+//         null,
+//         400,
+//       );
+//     }
+
+//     // ─────────────────────────────────────────────
+//     // Helper: compare two dates by day only
+//     // ─────────────────────────────────────────────
+//     const sameDay = (a, b) =>
+//       new Date(a).setHours(0, 0, 0, 0) === new Date(b).setHours(0, 0, 0, 0);
+
+//     // ─────────────────────────────────────────────
+//     // Get existing history
+//     // ─────────────────────────────────────────────
+//     let existingHistory = (media.agreementHistory || []).map((h) =>
+//       h.toObject ? h.toObject() : { ...h },
+//     );
+
+//     const currentAgreement = media.agreement;
+
+//     // ─────────────────────────────────────────────
+//     // 1. Preserve the current active agreement in history
+//     // ─────────────────────────────────────────────
+//     if (currentAgreement) {
+//       const alreadyArchived = existingHistory.some(
+//         (h) =>
+//           h.startDate &&
+//           h.endDate &&
+//           sameDay(h.startDate, currentAgreement.startDate) &&
+//           sameDay(h.endDate, currentAgreement.endDate),
+//       );
+
+//       if (!alreadyArchived) {
+//         const currentPaymentFrequency =
+//           currentAgreement.rentalPayment?.paymentFrequency || 1;
+
+//         existingHistory.push({
+//           startDate: new Date(currentAgreement.startDate),
+//           endDate: new Date(currentAgreement.endDate),
+//           reminderBeforeExpiry: currentAgreement.reminderBeforeExpiry || 30,
+//           advanceRent: currentAgreement.advanceRent || 0,
+//           reason: currentAgreement.reason || "",
+//           status: computeAgreementStatus(
+//             currentAgreement.startDate,
+//             currentAgreement.endDate,
+//             currentAgreement.reminderBeforeExpiry || 30,
+//           ),
+//           agreementPDF: currentAgreement.agreementPDF
+//             ? {
+//                 ...(currentAgreement.agreementPDF.toObject
+//                   ? currentAgreement.agreementPDF.toObject()
+//                   : currentAgreement.agreementPDF),
+//               }
+//             : undefined,
+//           rentalPayment: {
+//             totalRentalAmount: currentAgreement.rentalPayment?.totalRentalAmount || 0,
+//             paymentFrequency: currentPaymentFrequency,
+//             // ← Carry forward the existing stamp when archiving the current agreement
+//             updatedBy: currentAgreement.rentalPayment?.updatedBy ?? userName,
+//             updatedAt: currentAgreement.rentalPayment?.updatedAt ?? nowIST(),
+//           },
+//           updatedBy: userName,
+//           uploadedAt: nowIST(),
+//         });
+//       }
+//     }
+
+//     // ─────────────────────────────────────────────
+//     // 2. Does a history entry with the INCOMING dates already exist?
+//     // ─────────────────────────────────────────────
+//     let entryIndex = -1;
+//     for (let i = existingHistory.length - 1; i >= 0; i--) {
+//       const h = existingHistory[i];
+//       if (!h.startDate || !h.endDate) continue;
+//       if (
+//         sameDay(h.startDate, newAgreement.startDate) &&
+//         sameDay(h.endDate, newAgreement.endDate)
+//       ) {
+//         entryIndex = i;
+//         break;
+//       }
+//     }
+
+//     const shouldCreateNewEntry = entryIndex === -1;
+
+//     // ─────────────────────────────────────────────
+//     // 3. Build the entry payload with rentalPayment
+//     // ─────────────────────────────────────────────
+
+//     // For the history snapshot: detect if totalRentalAmount changed vs the
+//     // existing history entry (if updating an existing one).
+//     const existingHistoryEntryRentalAmount =
+//       entryIndex !== -1
+//         ? Number(existingHistory[entryIndex]?.rentalPayment?.totalRentalAmount ?? 0)
+//         : null;
+
+//     const historyEntryRentalAmountChanged =
+//       existingHistoryEntryRentalAmount === null ||
+//       incomingTotalRentalAmount !== existingHistoryEntryRentalAmount;
+
+//     const historyRentalUpdatedAt = historyEntryRentalAmountChanged
+//       ? nowIST()
+//       : (existingHistory[entryIndex]?.rentalPayment?.updatedAt ?? nowIST());
+
+//     const historyRentalUpdatedBy = historyEntryRentalAmountChanged
+//       ? userName
+//       : (existingHistory[entryIndex]?.rentalPayment?.updatedBy ?? userName);
+
+//     const entryPayload = {
+//       startDate: new Date(newAgreement.startDate),
+//       endDate: new Date(newAgreement.endDate),
+//       reminderBeforeExpiry: newAgreement.reminderBeforeExpiry,
+//       advanceRent: newAgreement.advanceRent || 0,
+//       reason: newAgreement.reason || "",
+//       status: computeAgreementStatus(
+//         newAgreement.startDate,
+//         newAgreement.endDate,
+//         newAgreement.reminderBeforeExpiry,
+//       ),
+//       agreementPDF: newAgreement.agreementPDF
+//         ? {
+//             ...(newAgreement.agreementPDF.toObject
+//               ? newAgreement.agreementPDF.toObject()
+//               : newAgreement.agreementPDF),
+//           }
+//         : entryIndex !== -1
+//           ? existingHistory[entryIndex].agreementPDF
+//           : undefined,
+//       rentalPayment: {
+//         totalRentalAmount: newAgreement.rentalPayment.totalRentalAmount,
+//         paymentFrequency: newAgreement.rentalPayment.paymentFrequency,
+//         // ← NEW: stamp on the history snapshot entry
+//         updatedBy: historyRentalUpdatedBy,
+//         updatedAt: historyRentalUpdatedAt,
+//       },
+//       updatedBy: userName,
+//       uploadedAt: nowIST(),
+//     };
+
+//     // ─────────────────────────────────────────────
+//     // 4. Create new entry OR update existing one in place
+//     // ─────────────────────────────────────────────
+//     if (shouldCreateNewEntry) {
+//       existingHistory.push(entryPayload);
+//     } else {
+//       const existingRentalPayment = existingHistory[entryIndex]?.rentalPayment || {};
+//       const paymentFreq =
+//         incoming.paymentFrequency !== undefined
+//           ? Number(incoming.paymentFrequency)
+//           : existingRentalPayment.paymentFrequency || 1;
+
+//       const updatedTotalRentalAmount =
+//         incoming.totalRentalAmount !== undefined
+//           ? Number(incoming.totalRentalAmount)
+//           : existingRentalPayment.totalRentalAmount || 0;
+
+//       // Re-check change against the existing entry's amount.
+//       const entryAmountChanged =
+//         updatedTotalRentalAmount !== Number(existingRentalPayment.totalRentalAmount ?? 0);
+
+//       existingHistory[entryIndex] = {
+//         ...existingHistory[entryIndex],
+//         ...entryPayload,
+//         rentalPayment: {
+//           totalRentalAmount: updatedTotalRentalAmount,
+//           paymentFrequency: paymentFreq,
+//           // ← NEW: only refresh stamp when amount actually changed
+//           updatedBy: entryAmountChanged
+//             ? userName
+//             : (existingRentalPayment.updatedBy ?? userName),
+//           updatedAt: entryAmountChanged
+//             ? nowIST()
+//             : (existingRentalPayment.updatedAt ?? nowIST()),
+//         },
+//       };
+//     }
+
+//     // ─────────────────────────────────────────────
+//     // Resolve which agreement should be "active"
+//     // ─────────────────────────────────────────────
+//     const activeAgreement = resolveActiveAgreement(existingHistory);
+
+//     // ─────────────────────────────────────────────
+//     // Persist
+//     // ─────────────────────────────────────────────
+//     media.agreementHistory = existingHistory;
+
+//     if (activeAgreement) {
+//       const activePaymentFreq = activeAgreement.rentalPayment?.paymentFrequency || 1;
+
+//       media.agreement = {
+//         startDate: activeAgreement.startDate,
+//         endDate: activeAgreement.endDate,
+//         reminderBeforeExpiry: activeAgreement.reminderBeforeExpiry,
+//         advanceRent: activeAgreement.advanceRent || 0,
+//         reason: activeAgreement.reason || "",
+//         updatedBy: userName,
+//         status: computeAgreementStatus(
+//           activeAgreement.startDate,
+//           activeAgreement.endDate,
+//           activeAgreement.reminderBeforeExpiry,
+//         ),
+//         agreementPDF: activeAgreement.agreementPDF,
+//         rentalPayment: {
+//           totalRentalAmount: activeAgreement.rentalPayment?.totalRentalAmount || 0,
+//           paymentFrequency: activePaymentFreq,
+//           // ← NEW: carry the stamp from the active history entry into the live agreement
+//           updatedBy: activeAgreement.rentalPayment?.updatedBy ?? userName,
+//           updatedAt: activeAgreement.rentalPayment?.updatedAt ?? nowIST(),
+//         },
+//       };
+//     } else {
+//       // Fallback: use the new agreement directly
+//       media.agreement = {
+//         ...newAgreement,
+//         status: computeAgreementStatus(
+//           newAgreement.startDate,
+//           newAgreement.endDate,
+//           newAgreement.reminderBeforeExpiry,
+//         ),
+//       };
+//     }
+
+//     media.updatedAt = nowIST();
+//     await media.save();
+
+//     const saved = await MediaOnboarding.findById(media._id)
+//       .select("agreement agreementHistory")
+//       .lean();
+
+//     return successResponse(
+//       res,
+//       shouldCreateNewEntry
+//         ? "Agreement updated successfully and previous agreement moved to history"
+//         : "Agreement details updated successfully",
+//       saved,
+//       200,
+//     );
+//   } catch (error) {
+//     console.error("Error updating agreement:", error);
+//     return errorResponse(res, error.message || "Failed to update agreement", null, 500);
+//   }
+// };
 const updateAgreement = async (req, res) => {
   try {
     // const { id } = req.body;
-     const id = req.body?.id;
+    const id = req.body?.id;
     const userName = req.user?.userName || "Admin";
 
     if (!id) {
@@ -1162,7 +1537,7 @@ const updateAgreement = async (req, res) => {
     // const incoming = agreementData.startDate
     //   ? agreementData
     //   : agreementData.agreement || {};
-     const incoming = agreementData.startDate
+    const incoming = agreementData.startDate
       ? agreementData // flat FormData or plain JSON body
       : agreementData.agreement && typeof agreementData.agreement === "object"
         ? agreementData.agreement // nested { agreement: { startDate, ... } }
@@ -1229,7 +1604,7 @@ const updateAgreement = async (req, res) => {
       rentalPayment: {
         totalRentalAmount: incomingTotalRentalAmount,
         paymentFrequency: paymentFrequencyValue,
-        // ← NEW: stamp who changed totalRentalAmount and when
+        // ← stamp who changed totalRentalAmount and when
         updatedBy: rentalPaymentUpdatedBy,
         updatedAt: rentalPaymentUpdatedAt,
       },
@@ -1397,7 +1772,7 @@ const updateAgreement = async (req, res) => {
       rentalPayment: {
         totalRentalAmount: newAgreement.rentalPayment.totalRentalAmount,
         paymentFrequency: newAgreement.rentalPayment.paymentFrequency,
-        // ← NEW: stamp on the history snapshot entry
+        // ← stamp on the history snapshot entry
         updatedBy: historyRentalUpdatedBy,
         updatedAt: historyRentalUpdatedAt,
       },
@@ -1432,7 +1807,7 @@ const updateAgreement = async (req, res) => {
         rentalPayment: {
           totalRentalAmount: updatedTotalRentalAmount,
           paymentFrequency: paymentFreq,
-          // ← NEW: only refresh stamp when amount actually changed
+          // ← only refresh stamp when amount actually changed
           updatedBy: entryAmountChanged
             ? userName
             : (existingRentalPayment.updatedBy ?? userName),
@@ -1449,7 +1824,7 @@ const updateAgreement = async (req, res) => {
     const activeAgreement = resolveActiveAgreement(existingHistory);
 
     // ─────────────────────────────────────────────
-    // Persist
+    // Persist agreement + history
     // ─────────────────────────────────────────────
     media.agreementHistory = existingHistory;
 
@@ -1472,7 +1847,7 @@ const updateAgreement = async (req, res) => {
         rentalPayment: {
           totalRentalAmount: activeAgreement.rentalPayment?.totalRentalAmount || 0,
           paymentFrequency: activePaymentFreq,
-          // ← NEW: carry the stamp from the active history entry into the live agreement
+          // ← carry the stamp from the active history entry into the live agreement
           updatedBy: activeAgreement.rentalPayment?.updatedBy ?? userName,
           updatedAt: activeAgreement.rentalPayment?.updatedAt ?? nowIST(),
         },
@@ -1489,11 +1864,52 @@ const updateAgreement = async (req, res) => {
       };
     }
 
+    // ─────────────────────────────────────────────
+    // NEW: Sync top-level media.rentalPayment with the now-active agreement's
+    // totalRentalAmount. Only totalRentalAmount + rentalAmountHistory are
+    // touched here — gstAmount/tdsAmount/netPayable/ownerPayments are left
+    // alone since they're recalculated by a separate flow (e.g. appraisal).
+    // ─────────────────────────────────────────────
+    const activeTotalRentalAmount = media.agreement?.rentalPayment?.totalRentalAmount ?? 0;
+
+    if (!media.rentalPayment) {
+      // No top-level rentalPayment block exists yet — initialize minimally.
+      media.rentalPayment = {
+        totalRentalAmount: activeTotalRentalAmount,
+        rentalAmountHistory: [
+          {
+            amount: activeTotalRentalAmount,
+            updatedBy: userName,
+            updatedAt: nowIST(),
+          },
+        ],
+      };
+    } else {
+      const existingTopLevelAmount = Number(media.rentalPayment.totalRentalAmount ?? 0);
+
+      if (activeTotalRentalAmount !== existingTopLevelAmount) {
+        const rentalAmountHistory = (media.rentalPayment.rentalAmountHistory || []).map((h) =>
+          h.toObject ? h.toObject() : { ...h },
+        );
+
+        rentalAmountHistory.push({
+          amount: activeTotalRentalAmount,
+          updatedBy: userName,
+          updatedAt: nowIST(),
+        });
+
+        media.rentalPayment.totalRentalAmount = activeTotalRentalAmount;
+        media.rentalPayment.rentalAmountHistory = rentalAmountHistory;
+        // NOTE: gstAmount, tdsAmount, netPayable, ownerPayments are intentionally
+        // left untouched — they're recalculated elsewhere (e.g. appraisal flow).
+      }
+    }
+
     media.updatedAt = nowIST();
     await media.save();
 
     const saved = await MediaOnboarding.findById(media._id)
-      .select("agreement agreementHistory")
+      .select("agreement agreementHistory rentalPayment")
       .lean();
 
     return successResponse(

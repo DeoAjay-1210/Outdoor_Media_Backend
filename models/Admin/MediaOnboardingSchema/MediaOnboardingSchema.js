@@ -53,7 +53,7 @@ const ownerPaymentSchema = new mongoose.Schema(
     },
     gstApplicable: {
       type: Number,
-      enum: [0, 1],
+      enum: [0, 1], // 0 no 1 yes
       default: 0,
     },
     gstPercentage: {
@@ -101,7 +101,7 @@ const agreementHistorySchema = new mongoose.Schema({
   endDate: { type: Date },
   reminderBeforeExpiry: {
     type: Number,
-    enum: [10, 30, 60, 90],
+    enum: [10, 30, 60, 90],   // 10 10days 30 30days 60 60days 90
   },
   advanceRent: {
     type: Number,
