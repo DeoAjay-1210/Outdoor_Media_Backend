@@ -1,5 +1,12 @@
 const mongoose = require("mongoose");
-
+const rentalAmountHistorySchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    updatedBy: { type: String },
+    updatedAt: { type: Date, default: null },
+  },
+  { _id: false },
+);
 // ─────────────────────────────────────────────────────────────
 // OWNER PAYMENT SCHEMA
 // ─────────────────────────────────────────────────────────────
@@ -126,6 +133,9 @@ const agreementHistorySchema = new mongoose.Schema({
       enum: [1, 2, 3, 4, 5, 6],
       default: 1,
     },
+    // ← NEW: who changed totalRentalAmount in this agreement snapshot
+    updatedBy: { type: String },
+    updatedAt: { type: Date, default: null },
   },
   updatedBy: {
     type: String,
@@ -209,6 +219,7 @@ const MediaSchema = new mongoose.Schema(
         required: true,
         min: 0,
       },
+      rentalAmountHistory: [rentalAmountHistorySchema],
       gstApplicable: {
         type: Number,
         enum: [0, 1],
@@ -388,6 +399,8 @@ const MediaSchema = new mongoose.Schema(
           enum: [1, 2, 3, 4, 5, 6],
           default: 1,
         },
+        updatedBy: { type: String },
+        updatedAt: { type: Date, default: null },
       },
     },
 
