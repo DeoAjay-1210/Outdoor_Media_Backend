@@ -1,4 +1,8 @@
 const mongoose = require("mongoose");
+const {
+  rentalDueEntrySchema,
+  rentalDueHistoryYearSchema,
+} = require("./RentalDueModel");
 const rentalAmountHistorySchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0 },
@@ -87,6 +91,14 @@ const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
     previousRent: { type: Number, default: 0 },
     appraisalAmount: { type: Number, default: 0 },
     newRent: { type: Number, default: 0 },
+       frequency: {
+        type: Number,
+        enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
+      },
+      customFrequencyMonths: {
+        type: Number,
+        default: 0,
+      },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },
@@ -143,6 +155,49 @@ const agreementHistorySchema = new mongoose.Schema({
   uploadedAt: { type: Date, default: Date.now }, // timestamp when this snapshot was pushed
 });
 
+
+const ledgerSchema = new mongoose.Schema(
+  {
+    utrNumber: { type: String, trim: true },
+    date: { type: Date, default: Date.now },
+    status: {
+      type: Number,
+      enum: [0, 1], // 0=not Approve 1=Approve 
+      default: 0,
+    },
+    updatedBy: { type: String },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { timestamps: true },
+);
+ 
+
+const ledgerHistoryEntrySchema = new mongoose.Schema(
+  {
+    siteName: { type: String, trim: true },
+    utrNumber: { type: String, trim: true },
+    date: { type: Date },
+    updatedAt: { type: Date },
+    updatedBy: { type: String },
+  },
+  { _id: false },
+);
+ 
+const ledgerHistoryMonthSchema = new mongoose.Schema(
+  {
+    month: { type: String }, // e.g. "June"
+    entries: [ledgerHistoryEntrySchema],
+  },
+  { _id: false },
+);
+ 
+const ledgerHistoryYearSchema = new mongoose.Schema(
+  {
+    year: { type: String }, // e.g. "2026"
+    months: [ledgerHistoryMonthSchema],
+  },
+  { _id: false },
+);
 // ─────────────────────────────────────────────────────────────
 // MAIN SCHEMA
 // ─────────────────────────────────────────────────────────────
@@ -299,21 +354,7 @@ const MediaSchema = new mongoose.Schema(
           enum: [1, 2, 3],  // 1 cash, 2 online 3 cash + online
           required: true,
         },
-        onlineMode: {
-          type: Number,
-          enum: [1, 2, 3], // 
-        },
-        cashAmount: {
-          type: Number,
-          min: 0,
-          default: 0,
-        },
-        onlineAmount: {
-          type: Number,
-          min: 0,
-          default: 0,
-        },
-        typeShare: {
+         typeShare: {
           type: Number,
           enum: [1, 2],  // 1.percentage 2.amount
         },
@@ -326,9 +367,25 @@ const MediaSchema = new mongoose.Schema(
           type: Number,
           min: 0,
         },
+        onlineMode: {
+          type: Number,
+          enum: [1, 2, 3], // 1=Bank Transfer  2=UPI  3=Cheque
+        },
+         onlineAmount: {
+          type: Number,
+          min: 0,
+          default: 0,
+        },
+        cashAmount: {
+          type: Number,
+          min: 0,
+          default: 0,
+        },
+       
+       
         gstApplicable: {
           type: Number,
-          enum: [0, 1],
+          enum: [0, 1],   // 0 no  1 yes 
           default: 0,
         },
         gstPercentage: {
@@ -396,7 +453,7 @@ const MediaSchema = new mongoose.Schema(
         },
         paymentFrequency: {
           type: Number,
-          enum: [1, 2, 3, 4, 5, 6],
+          enum: [1, 2, 3, 4, 5, 6],   // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
           default: 1,
         },
         updatedBy: { type: String },
@@ -417,7 +474,7 @@ const MediaSchema = new mongoose.Schema(
     appraisal: {
       applicable: {
         type: Number,
-        enum: [0, 1],
+        enum: [0, 1],   // 0 no 1 yes
         default: 0,
       },
       type: {
@@ -496,6 +553,39 @@ const MediaSchema = new mongoose.Schema(
       fileType: { type: String, enum: ["image"], default: "image" },
       uploadedAt: { type: Date, default: Date.now },
     },
+
+
+
+    // ─────────────────────────────────────────────────────────
+    // LEDGER  ← NEW
+    // status: 0=In Progress 1=Approve (default) 2=Reject
+    // Each pushed entry's _id is the "objectId" used by the list/filter API.
+    // ─────────────────────────────────────────────────────────
+    ledger: [ledgerSchema],
+ 
+    // ─────────────────────────────────────────────────────────
+    // LEDGER HISTORY  ← NEW
+    // Auto-bucketed by year -> month. Whenever a ledger entry is
+    // created, the same entry is also appended here under the
+    // current year (e.g. "2026") and current month name (e.g. "June"),
+    // auto-creating those buckets the first time they're needed.
+    // ─────────────────────────────────────────────────────────
+    ledgerHistory: [ledgerHistoryYearSchema],
+
+
+       // ─────────────────────────────────────────────────────────
+    // RENTAL DUE  ← NEW MODULE
+    // Each entry represents one billing cycle's due record.
+    // Tracks campaign, proof image, agreement doc verification,
+    // 3-level approval chain, and who saved the entry.
+    // ─────────────────────────────────────────────────────────
+    rentalDue: [rentalDueEntrySchema],
+ 
+    // ─────────────────────────────────────────────────────────
+    // RENTAL DUE HISTORY  ← NEW
+    // Auto-bucketed Year → Month audit trail, mirroring ledgerHistory.
+    // ─────────────────────────────────────────────────────────
+    rentalDueHistory: [rentalDueHistoryYearSchema],
   },
   { timestamps: true },
 );
