@@ -13,7 +13,7 @@ const approvalStepSchema = new mongoose.Schema(
     },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      // required: true,
     },
     userName: { type: String, trim: true },
     approvedAt: { type: Date, default: null },
@@ -32,48 +32,12 @@ const approvalStepSchema = new mongoose.Schema(
 // AGREEMENT DOC VERIFICATION SCHEMA
 // Snapshot of the agreement PDF verified before saving rental due
 // ─────────────────────────────────────────────────────────────
-const agreementDocVerificationSchema = new mongoose.Schema(
-  {
-    // Whether the agreement doc was verified before this rental due entry was saved
-    isVerified: {
-      type: Boolean,
-      default: false,
-    },
-    verifiedBy: { type: String, trim: true }, // userName who verified
-    verifiedByRole: {
-      type: Number,
-      enum: [1, 2, 3], // 1=Staff  2=TeamLead  3=Owner
-    },
-    verifiedAt: { type: Date, default: null },
-    // Snapshot of the agreement PDF at time of verification
-    agreementPDF: {
-      originalName: { type: String },
-      fileName: { type: String },
-      filePath: { type: String },
-      mimeType: { type: String },
-      size: { type: Number },
-      fileType: { type: String, enum: ["pdf"], default: "pdf" },
-      uploadedAt: { type: Date, default: null },
-    },
-  },
-  { _id: false },
-);
+
 
 // ─────────────────────────────────────────────────────────────
 // PROOF OF CAMPAIGN IMAGE SCHEMA
 // ─────────────────────────────────────────────────────────────
-const proofOfCampaignSchema = new mongoose.Schema(
-  {
-    originalName: { type: String },
-    fileName: { type: String },
-    filePath: { type: String },
-    mimeType: { type: String },
-    size: { type: Number },
-    fileType: { type: String, enum: ["image"], default: "image" },
-    uploadedAt: { type: Date, default: null },
-  },
-  { _id: false },
-);
+
 
 // ─────────────────────────────────────────────────────────────
 // RENTAL DUE ENTRY SCHEMA
@@ -96,10 +60,15 @@ const rentalDueEntrySchema = new mongoose.Schema(
 
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
-    proofOfCampaign: proofOfCampaignSchema,
-
-    // ── Agreement Doc Verification ────────────────────────────
-    agreementDocVerification: agreementDocVerificationSchema,
+    proofOfCampaign: {
+      originalName: { type: String },
+      fileName: { type: String },
+      filePath: { type: String },
+      mimeType: { type: String },
+      size: { type: Number },
+      fileType: { type: String, enum: ["image"], default: "image" },
+      uploadedAt: { type: Date, default: Date.now },
+    },
 
     // ── Who Saved This Entry ──────────────────────────────────
     // Identifies which role created this due entry

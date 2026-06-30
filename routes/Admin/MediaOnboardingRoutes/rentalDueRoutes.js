@@ -4,7 +4,10 @@ const router = express.Router();
 
 // Controllers
 const ctrl = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
-const {getRentalDueListWithStats,verifyAgreementDoc} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
+const {
+  getRentalDueListWithStats,
+  verifyAgreementDoc,
+} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
@@ -23,7 +26,7 @@ const { upload, processFile } = createUploader("rentalDueProofs", {
 // Returns: totalSites, dueThisMonth, overDue, pendingApproval breakdown
 // Accessible by: all roles (1, 2, 3)
 // ─────────────────────────────────────────────────────────────
-router.post("/rental-due-list",protect, getRentalDueListWithStats);
+router.post("/rental-due-list", protect, getRentalDueListWithStats);
 
 // ─────────────────────────────────────────────────────────────
 // LIST
@@ -52,7 +55,7 @@ router.post("/rental-due-list",protect, getRentalDueListWithStats);
 // Accessible by: all roles (1=Staff, 2=TeamLead, 3=Owner)
 // ─────────────────────────────────────────────────────────────
 router.post(
-  "/:mediaId/save",
+  "/rental-due-save",protect,
   upload.single("proofOfCampaign"),
   (req, res, next) => {
     req.processFile = processFile;
@@ -86,7 +89,7 @@ router.patch("/:mediaId/:dueId/approve", ctrl.approveRentalDue);
 // Can be done before or after saving, by any role.
 // Accessible by: all roles
 // ─────────────────────────────────────────────────────────────
-router.post("/verify-agreement",protect, verifyAgreementDoc);
+router.post("/verify-agreement", protect, verifyAgreementDoc);
 
 // ─────────────────────────────────────────────────────────────
 // APPROVAL GAP REPORT

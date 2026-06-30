@@ -91,14 +91,14 @@ const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
     previousRent: { type: Number, default: 0 },
     appraisalAmount: { type: Number, default: 0 },
     newRent: { type: Number, default: 0 },
-       frequency: {
-        type: Number,
-        enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
-      },
-      customFrequencyMonths: {
-        type: Number,
-        default: 0,
-      },
+    frequency: {
+      type: Number,
+      enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
+    },
+    customFrequencyMonths: {
+      type: Number,
+      default: 0,
+    },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },
@@ -113,7 +113,7 @@ const agreementHistorySchema = new mongoose.Schema({
   endDate: { type: Date },
   reminderBeforeExpiry: {
     type: Number,
-    enum: [10, 30, 60, 90],   // 10 10days 30 30days 60 60days 90
+    enum: [10, 30, 60, 90], // 10 10days 30 30days 60 60days 90
   },
   advanceRent: {
     type: Number,
@@ -155,14 +155,13 @@ const agreementHistorySchema = new mongoose.Schema({
   uploadedAt: { type: Date, default: Date.now }, // timestamp when this snapshot was pushed
 });
 
-
 const ledgerSchema = new mongoose.Schema(
   {
     utrNumber: { type: String, trim: true },
     date: { type: Date, default: Date.now },
     status: {
       type: Number,
-      enum: [0, 1], // 0=not Approve 1=Approve 
+      enum: [0, 1], // 0=not Approve 1=Approve
       default: 0,
     },
     updatedBy: { type: String },
@@ -170,7 +169,6 @@ const ledgerSchema = new mongoose.Schema(
   },
   // { timestamps: true },
 );
- 
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
   {
@@ -182,7 +180,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
   },
   { _id: false },
 );
- 
+
 const ledgerHistoryMonthSchema = new mongoose.Schema(
   {
     month: { type: String }, // e.g. "June"
@@ -190,7 +188,7 @@ const ledgerHistoryMonthSchema = new mongoose.Schema(
   },
   { _id: false },
 );
- 
+
 const ledgerHistoryYearSchema = new mongoose.Schema(
   {
     year: { type: String }, // e.g. "2026"
@@ -351,12 +349,12 @@ const MediaSchema = new mongoose.Schema(
         panNumber: { type: String, trim: true, uppercase: true },
         paymentCategory: {
           type: Number,
-          enum: [1, 2, 3],  // 1 cash, 2 online 3 cash + online
+          enum: [1, 2, 3], // 1 cash, 2 online 3 cash + online
           required: true,
         },
-         typeShare: {
+        typeShare: {
           type: Number,
-          enum: [1, 2],  // 1.percentage 2.amount
+          enum: [1, 2], // 1.percentage 2.amount
         },
         sharePercentage: {
           type: Number,
@@ -371,7 +369,7 @@ const MediaSchema = new mongoose.Schema(
           type: Number,
           enum: [1, 2, 3], // 1=Bank Transfer  2=UPI  3=Cheque
         },
-         onlineAmount: {
+        onlineAmount: {
           type: Number,
           min: 0,
           default: 0,
@@ -381,11 +379,10 @@ const MediaSchema = new mongoose.Schema(
           min: 0,
           default: 0,
         },
-       
-       
+
         gstApplicable: {
           type: Number,
-          enum: [0, 1],   // 0 no  1 yes 
+          enum: [0, 1], // 0 no  1 yes
           default: 0,
         },
         gstPercentage: {
@@ -453,7 +450,7 @@ const MediaSchema = new mongoose.Schema(
         },
         paymentFrequency: {
           type: Number,
-          enum: [1, 2, 3, 4, 5, 6],   // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+          enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
           default: 1,
         },
         updatedBy: { type: String },
@@ -474,7 +471,7 @@ const MediaSchema = new mongoose.Schema(
     appraisal: {
       applicable: {
         type: Number,
-        enum: [0, 1],   // 0 no 1 yes
+        enum: [0, 1], // 0 no 1 yes
         default: 0,
       },
       type: {
@@ -554,15 +551,13 @@ const MediaSchema = new mongoose.Schema(
       uploadedAt: { type: Date, default: Date.now },
     },
 
-
-
     // ─────────────────────────────────────────────────────────
     // LEDGER  ← NEW
     // status: 0=In Progress 1=Approve (default) 2=Reject
     // Each pushed entry's _id is the "objectId" used by the list/filter API.
     // ─────────────────────────────────────────────────────────
     ledger: [ledgerSchema],
- 
+
     // ─────────────────────────────────────────────────────────
     // LEDGER HISTORY  ← NEW
     // Auto-bucketed by year -> month. Whenever a ledger entry is
@@ -572,15 +567,48 @@ const MediaSchema = new mongoose.Schema(
     // ─────────────────────────────────────────────────────────
     ledgerHistory: [ledgerHistoryYearSchema],
 
-
-       // ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────
     // RENTAL DUE  ← NEW MODULE
     // Each entry represents one billing cycle's due record.
     // Tracks campaign, proof image, agreement doc verification,
     // 3-level approval chain, and who saved the entry.
     // ─────────────────────────────────────────────────────────
+    agreementDocVerification: {
+      isVerified: {
+        type: Boolean,
+        default: false,
+      },
+      verifiedBy: {
+        type: String,
+        trim: true,
+      },
+      verifiedByRole: {
+        type: Number,
+        enum: [1, 2, 3], // 1=Staff, 2=TeamLead, 3=Owner
+      },
+      verifiedAt: {
+        type: Date,
+        default: null,
+      },
+      agreementPDF: {
+        originalName: { type: String },
+        fileName: { type: String },
+        filePath: { type: String },
+        mimeType: { type: String },
+        size: { type: Number },
+        fileType: {
+          type: String,
+          enum: ["pdf"],
+          default: "pdf",
+        },
+        uploadedAt: {
+          type: Date,
+          default: null,
+        },
+      },
+    },
     rentalDue: [rentalDueEntrySchema],
- 
+
     // ─────────────────────────────────────────────────────────
     // RENTAL DUE HISTORY  ← NEW
     // Auto-bucketed Year → Month audit trail, mirroring ledgerHistory.
