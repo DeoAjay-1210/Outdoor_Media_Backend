@@ -166,9 +166,9 @@ const ledgerSchema = new mongoose.Schema(
       default: 0,
     },
     updatedBy: { type: String },
-    updatedAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: null },
   },
-  { timestamps: true },
+  // { timestamps: true },
 );
  
 
@@ -177,7 +177,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     siteName: { type: String, trim: true },
     utrNumber: { type: String, trim: true },
     date: { type: Date },
-    updatedAt: { type: Date },
+    updatedAt: { type: Date, default: null },
     updatedBy: { type: String },
   },
   { _id: false },

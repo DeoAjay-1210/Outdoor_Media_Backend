@@ -1,8 +1,10 @@
 const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
-const nowIST = require("../../../utils/updatedAt")
+// const nowIST = require("../../../utils/updatedAt")
+const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -43,7 +45,7 @@ exports.createLedgerEntry = async (req, res) => {
       date: entryDate,
       status: 1,
       updatedBy:req.user?.userName || "Admin",
-      updatedAt: nowIST,
+      updatedAt: nowIST(),
     };
 
     media.ledger.push(ledgerEntry);
@@ -69,7 +71,7 @@ exports.createLedgerEntry = async (req, res) => {
       utrNumber: savedLedgerEntry.utrNumber,
       date: savedLedgerEntry.date,
       updatedBy:req.user?.userName || "Admin",
-      updatedAt: nowIST,
+      updatedAt: nowIST(),
     });
 
     await media.save();
@@ -140,9 +142,24 @@ exports.listMediaByLedger = async (req, res) => {
     ]);
 
     // Transform data if needed
-    const mediaListData = results.map((media) => ({
-      ...media.toObject(),
-    }));
+     const mediaListData = results.map((media) => {
+      const mediaObj = media.toObject();
+
+      let latestLedger = [];
+
+      if (Array.isArray(mediaObj.ledger) && mediaObj.ledger.length > 0) {
+        latestLedger = [
+          [...mediaObj.ledger].sort(
+            (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+          )[0],
+        ];
+      }
+
+      return {
+        ...mediaObj,
+        ledger: latestLedger,
+      };
+    });
 
     return successResponse(
       res,

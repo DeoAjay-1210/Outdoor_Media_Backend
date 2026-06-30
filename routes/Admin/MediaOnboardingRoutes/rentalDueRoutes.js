@@ -4,7 +4,7 @@ const router = express.Router();
 
 // Controllers
 const ctrl = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
-const {getRentalDueListWithStats} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
+const {getRentalDueListWithStats,verifyAgreementDoc} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
@@ -23,7 +23,7 @@ const { upload, processFile } = createUploader("rentalDueProofs", {
 // Returns: totalSites, dueThisMonth, overDue, pendingApproval breakdown
 // Accessible by: all roles (1, 2, 3)
 // ─────────────────────────────────────────────────────────────
-router.post("/stats",protect, getRentalDueListWithStats);
+router.post("/rental-due-list",protect, getRentalDueListWithStats);
 
 // ─────────────────────────────────────────────────────────────
 // LIST
@@ -86,7 +86,7 @@ router.patch("/:mediaId/:dueId/approve", ctrl.approveRentalDue);
 // Can be done before or after saving, by any role.
 // Accessible by: all roles
 // ─────────────────────────────────────────────────────────────
-router.patch("/:mediaId/:dueId/verify-agreement", ctrl.verifyAgreementDoc);
+router.post("/verify-agreement",protect, verifyAgreementDoc);
 
 // ─────────────────────────────────────────────────────────────
 // APPROVAL GAP REPORT

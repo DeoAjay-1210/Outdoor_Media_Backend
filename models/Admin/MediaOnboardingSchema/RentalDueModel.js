@@ -39,7 +39,7 @@ const agreementDocVerificationSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    verifiedBy: { type: String, trim: true },       // userName who verified
+    verifiedBy: { type: String, trim: true }, // userName who verified
     verifiedByRole: {
       type: Number,
       enum: [1, 2, 3], // 1=Staff  2=TeamLead  3=Owner
@@ -48,12 +48,12 @@ const agreementDocVerificationSchema = new mongoose.Schema(
     // Snapshot of the agreement PDF at time of verification
     agreementPDF: {
       originalName: { type: String },
-      fileName:     { type: String },
-      filePath:     { type: String },
-      mimeType:     { type: String },
-      size:         { type: Number },
-      fileType:     { type: String, enum: ["pdf"], default: "pdf" },
-      uploadedAt:   { type: Date },
+      fileName: { type: String },
+      filePath: { type: String },
+      mimeType: { type: String },
+      size: { type: Number },
+      fileType: { type: String, enum: ["pdf"], default: "pdf" },
+      uploadedAt: { type: Date, default: null },
     },
   },
   { _id: false },
@@ -65,12 +65,12 @@ const agreementDocVerificationSchema = new mongoose.Schema(
 const proofOfCampaignSchema = new mongoose.Schema(
   {
     originalName: { type: String },
-    fileName:     { type: String },
-    filePath:     { type: String },
-    mimeType:     { type: String },
-    size:         { type: Number },
-    fileType:     { type: String, enum: ["image"], default: "image" },
-    uploadedAt:   { type: Date, default: Date.now },
+    fileName: { type: String },
+    filePath: { type: String },
+    mimeType: { type: String },
+    size: { type: Number },
+    fileType: { type: String, enum: ["image"], default: "image" },
+    uploadedAt: { type: Date, default: null },
   },
   { _id: false },
 );
@@ -82,8 +82,8 @@ const proofOfCampaignSchema = new mongoose.Schema(
 const rentalDueEntrySchema = new mongoose.Schema(
   {
     // ── Billing Info ──────────────────────────────────────────
-    dueMonth: { type: String, trim: true },   // e.g. "June 2026"
-    dueDate:  { type: Date, required: true }, // actual due date
+    dueMonth: { type: String, trim: true }, // e.g. "June 2026"
+    dueDate: { type: Date, required: true }, // actual due date
 
     // Amount snapshotted from rentalPayment.netPayable at time of entry creation
     netPayable: { type: Number, default: 0, min: 0 },
@@ -104,7 +104,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // ── Who Saved This Entry ──────────────────────────────────
     // Identifies which role created this due entry
     savedBy: {
-      userId:   { type: mongoose.Schema.Types.ObjectId },
+      userId: { type: mongoose.Schema.Types.ObjectId },
       userName: { type: String, trim: true },
       role: {
         type: Number,
@@ -145,7 +145,10 @@ const rentalDueEntrySchema = new mongoose.Schema(
       enum: [1, 2, 3],
       default: 1,
     },
-
+    agreementDocVerified: {
+      type: Boolean,
+      default: false,
+    },
     // ── Overall Status ────────────────────────────────────────
     // 1=Pending  2=PartiallyApproved  3=Approved  4=Overdue
     status: {
@@ -167,23 +170,23 @@ const rentalDueEntrySchema = new mongoose.Schema(
 // ─────────────────────────────────────────────────────────────
 const rentalDueHistoryEntrySchema = new mongoose.Schema(
   {
-    rentalDueId:    { type: mongoose.Schema.Types.ObjectId }, // ref to rentalDue[]._id
-    siteName:       { type: String, trim: true },
-    campaignName:   { type: String, trim: true },
-    dueDate:        { type: Date },
-    netPayable:     { type: Number },
+    rentalDueId: { type: mongoose.Schema.Types.ObjectId }, // ref to rentalDue[]._id
+    siteName: { type: String, trim: true },
+    campaignName: { type: String, trim: true },
+    dueDate: { type: Date },
+    netPayable: { type: Number },
     approvalStatus: { type: Number, enum: [1, 2, 3, 4] },
-    savedBy:        { type: String, trim: true },
-    savedByRole:    { type: Number, enum: [1, 2, 3] },
-    updatedAt:      { type: Date },
-    updatedBy:      { type: String, trim: true },
+    savedBy: { type: String, trim: true },
+    savedByRole: { type: Number, enum: [1, 2, 3] },
+    updatedAt: { type: Date },
+    updatedBy: { type: String, trim: true },
   },
   { _id: false },
 );
 
 const rentalDueHistoryMonthSchema = new mongoose.Schema(
   {
-    month:   { type: String }, // e.g. "June"
+    month: { type: String }, // e.g. "June"
     entries: [rentalDueHistoryEntrySchema],
   },
   { _id: false },
@@ -191,7 +194,7 @@ const rentalDueHistoryMonthSchema = new mongoose.Schema(
 
 const rentalDueHistoryYearSchema = new mongoose.Schema(
   {
-    year:   { type: String }, // e.g. "2026"
+    year: { type: String }, // e.g. "2026"
     months: [rentalDueHistoryMonthSchema],
   },
   { _id: false },
