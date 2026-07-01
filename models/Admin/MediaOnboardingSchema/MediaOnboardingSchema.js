@@ -172,7 +172,9 @@ const ledgerSchema = new mongoose.Schema(
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
   {
-    siteName: { type: String, trim: true },
+    mediaName: { type: String, trim: true },
+    paymentFrequency: { type: Number, trim: true },
+    netPayable: { type: Number, trim: true },
     utrNumber: { type: String, trim: true },
     date: { type: Date },
     updatedAt: { type: Date, default: null },
