@@ -253,6 +253,103 @@ exports.listMediaByLedger = async (req, res) => {
   }
 };
 
+// exports.getLedgerHistory = async (req, res) => {
+//   try {
+//     const { mediaId, year, month } = req.query;
+
+//     if (!mongoose.Types.ObjectId.isValid(mediaId)) {
+//       return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
+//     }
+
+//     // Use .lean() to get plain JSON objects
+//     const media = await Media.findById(mediaId)
+//       .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory")
+//       .lean();
+
+//     if (!media) {
+//       return errorResponse(res, "Media not found for given mediaId", null, 404);
+//     }
+
+//     let ledgerHistory = media.ledgerHistory || [];
+
+//     // Filter by Year
+//     if (year) {
+//       ledgerHistory = ledgerHistory.filter(
+//         (item) => item.year === String(year),
+//       );
+//     }
+
+//     // Filter by Month
+//     if (month) {
+//       const monthNames = [
+//         "January",
+//         "February",
+//         "March",
+//         "April",
+//         "May",
+//         "June",
+//         "July",
+//         "August",
+//         "September",
+//         "October",
+//         "November",
+//         "December",
+//       ];
+
+//       const monthName = monthNames[Number(month) - 1];
+
+//       ledgerHistory = ledgerHistory
+//         .map((item) => ({
+//           ...item,
+//           months: item.months.filter(
+//             (m) => m.month.toLowerCase() === monthName.toLowerCase(),
+//           ),
+//         }))
+//         .filter((item) => item.months.length > 0);
+//     }
+
+//     // Transform ledgerHistory to include mediaName in each ledger entry
+//     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
+//       ...yearEntry,
+//       months: yearEntry.months.map((monthEntry) => ({
+//         ...monthEntry,
+//         entries: monthEntry.entries.map((entry) => ({
+//           ...entry,
+//           mediaName: media.mediaName, // Add mediaName to each entry
+//         })),
+//       })),
+//     }));
+
+//     return successResponse(
+//       res,
+//       "Ledger history fetched successfully",
+//       {
+//         mediaId: media._id,
+//         mediaName: media.mediaName,
+//         mediaType: media.mediaType,
+//         mediaCode: media.mediaCode,
+//         city: media.city,
+//         rentalPayment: media.rentalPayment,
+//          currentRentalPayment: {
+//           paymentFrequency: media.rentalPayment.paymentFrequency,
+//           netPayable: media.rentalPayment.netPayable,
+//           nextBillingDate: media.rentalPayment.nextBillingDate,
+//         },
+//         ledgerHistory: transformedLedgerHistory,
+//       },
+//       200,
+//     );
+//   } catch (error) {
+//     console.error("getLedgerHistory error:", error);
+
+//     return errorResponse(
+//       res,
+//       "Something went wrong while fetching ledger history",
+//       { error: error.message },
+//       500,
+//     );
+//   }
+// };
 exports.getLedgerHistory = async (req, res) => {
   try {
     const { mediaId, year, month } = req.query;
@@ -308,16 +405,34 @@ exports.getLedgerHistory = async (req, res) => {
         .filter((item) => item.months.length > 0);
     }
 
-    // Transform ledgerHistory to include mediaName in each ledger entry
+    // Transform ledgerHistory to include mediaName and show only latest entry per month based on updatedAt
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
       ...yearEntry,
-      months: yearEntry.months.map((monthEntry) => ({
-        ...monthEntry,
-        entries: monthEntry.entries.map((entry) => ({
-          ...entry,
-          mediaName: media.mediaName, // Add mediaName to each entry
-        })),
-      })),
+      months: yearEntry.months.map((monthEntry) => {
+        // Sort entries by updatedAt (newest first)
+        const sortedEntries = [...monthEntry.entries].sort((a, b) => {
+          return new Date(b.updatedAt) - new Date(a.updatedAt);
+        });
+
+        // Get the latest entry (first after sorting by updatedAt)
+        const latestEntry = sortedEntries[0];
+
+        return {
+          month: monthEntry.month,
+          // Only show the latest entry based on updatedAt
+          entries: latestEntry ? [
+            {
+              ...latestEntry,
+              mediaName: media.mediaName,
+            }
+          ] : [],
+          // Keep all entries for historical data
+          allEntries: monthEntry.entries.map((entry) => ({
+            ...entry,
+            mediaName: media.mediaName,
+          })),
+        };
+      }),
     }));
 
     return successResponse(
@@ -330,7 +445,7 @@ exports.getLedgerHistory = async (req, res) => {
         mediaCode: media.mediaCode,
         city: media.city,
         rentalPayment: media.rentalPayment,
-         currentRentalPayment: {
+        currentRentalPayment: {
           paymentFrequency: media.rentalPayment.paymentFrequency,
           netPayable: media.rentalPayment.netPayable,
           nextBillingDate: media.rentalPayment.nextBillingDate,

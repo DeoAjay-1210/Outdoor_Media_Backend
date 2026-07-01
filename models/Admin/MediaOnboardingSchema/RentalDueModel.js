@@ -62,8 +62,10 @@ const agreementDocVerificationSchema = new mongoose.Schema(
       fileType: { type: String, enum: ["pdf"], default: "pdf" },
       uploadedAt: { type: Date, default: null },
     },
+      updatedBy: { type: String, trim: true },
+    updatedAt: { type: Date, default: null },
   },
-  { _id: false, timestamps: true },
+  { _id: false},
 );
  
 
@@ -171,7 +173,7 @@ const rentalDueHistoryEntrySchema = new mongoose.Schema(
     approvalStatus: { type: Number, enum: [1, 2, 3, 4] },
     savedBy: { type: String, trim: true },
     savedByRole: { type: Number, enum: [1, 2, 3] },
-    updatedAt: { type: Date },
+     updatedAt: { type: Date, default: null },
     updatedBy: { type: String, trim: true },
   },
   { _id: false },
