@@ -263,7 +263,7 @@ exports.getLedgerHistory = async (req, res) => {
 
     // Use .lean() to get plain JSON objects
     const media = await Media.findById(mediaId)
-      .select("mediaName city mediaType rentalPayment ledgerHistory")
+      .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory")
       .lean();
 
     if (!media) {
@@ -327,6 +327,7 @@ exports.getLedgerHistory = async (req, res) => {
         mediaId: media._id,
         mediaName: media.mediaName,
         mediaType: media.mediaType,
+        mediaCode: media.mediaCode,
         city: media.city,
         rentalPayment: media.rentalPayment,
          currentRentalPayment: {
