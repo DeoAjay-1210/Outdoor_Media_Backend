@@ -1,9 +1,27 @@
 const mongoose = require("mongoose");
 
 // ─────────────────────────────────────────────────────────────
-// APPROVAL STEP SCHEMA
-// Tracks each individual role's approval action
+// ROLE / FLOW CONSTANTS
 // ─────────────────────────────────────────────────────────────
+const ROLE = { STAFF: 1, TEAM_LEAD: 2, OWNER: 3 };
+ 
+const ROLE_LABEL = {
+  [ROLE.STAFF]: "Staff",
+  [ROLE.TEAM_LEAD]: "Team Lead",
+  [ROLE.OWNER]: "Owner",
+};
+ 
+// approvalFlow → ordered chain of roles that must approve, in order.
+//  1 = Full flow:   Staff → TeamLead → Owner
+//  2 = Skip Staff:  TeamLead → Owner   (owner-granted TL permission)
+//  3 = Owner Only:  Owner directly
+const FLOW_CHAIN = {
+  1: [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER],
+  2: [ROLE.TEAM_LEAD, ROLE.OWNER],
+  3: [ROLE.OWNER],
+};
+
+
 const approvalStepSchema = new mongoose.Schema(
   {
     role: {
@@ -23,26 +41,32 @@ const approvalStepSchema = new mongoose.Schema(
       enum: [1, 2, 3],
       default: 1,
     },
+    docVerified: { type: Boolean, default: false },
     remarks: { type: String, trim: true },
   },
   { _id: false },
 );
+const agreementDocVerificationSchema = new mongoose.Schema(
+  {
+    isVerified: { type: Boolean, default: false },
+    verifiedBy: { type: String, trim: true },
+    verifiedByRole: { type: Number, enum: [1, 2, 3] },
+    verifiedAt: { type: Date, default: null },
+    rentalDueId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    agreementPDF: {
+      originalName: { type: String },
+      fileName: { type: String },
+      filePath: { type: String },
+      mimeType: { type: String },
+      size: { type: Number },
+      fileType: { type: String, enum: ["pdf"], default: "pdf" },
+      uploadedAt: { type: Date, default: null },
+    },
+  },
+  { _id: false, timestamps: true },
+);
+ 
 
-// ─────────────────────────────────────────────────────────────
-// AGREEMENT DOC VERIFICATION SCHEMA
-// Snapshot of the agreement PDF verified before saving rental due
-// ─────────────────────────────────────────────────────────────
-
-
-// ─────────────────────────────────────────────────────────────
-// PROOF OF CAMPAIGN IMAGE SCHEMA
-// ─────────────────────────────────────────────────────────────
-
-
-// ─────────────────────────────────────────────────────────────
-// RENTAL DUE ENTRY SCHEMA
-// One entry per billing cycle / due date
-// ─────────────────────────────────────────────────────────────
 const rentalDueEntrySchema = new mongoose.Schema(
   {
     // ── Billing Info ──────────────────────────────────────────
@@ -173,6 +197,12 @@ const rentalDueHistoryYearSchema = new mongoose.Schema(
 // EXPORTS — attach these to your MediaSchema
 // ─────────────────────────────────────────────────────────────
 module.exports = {
+  ROLE,
+  ROLE_LABEL,
+  FLOW_CHAIN,
+   approvalStepSchema,
+  agreementDocVerificationSchema,
   rentalDueEntrySchema,
   rentalDueHistoryYearSchema,
+  
 };

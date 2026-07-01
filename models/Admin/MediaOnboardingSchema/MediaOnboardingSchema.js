@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const {
   rentalDueEntrySchema,
   rentalDueHistoryYearSchema,
+  agreementDocVerificationSchema,
 } = require("./RentalDueModel");
 const rentalAmountHistorySchema = new mongoose.Schema(
   {
@@ -175,6 +176,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     mediaName: { type: String, trim: true },
     paymentFrequency: { type: Number, trim: true },
     netPayable: { type: Number, trim: true },
+    nextBillingDate: {type: Date},
     utrNumber: { type: String, trim: true },
     date: { type: Date },
     updatedAt: { type: Date, default: null },
@@ -575,40 +577,7 @@ const MediaSchema = new mongoose.Schema(
     // Tracks campaign, proof image, agreement doc verification,
     // 3-level approval chain, and who saved the entry.
     // ─────────────────────────────────────────────────────────
-    agreementDocVerification: {
-      isVerified: {
-        type: Boolean,
-        default: false,
-      },
-      verifiedBy: {
-        type: String,
-        trim: true,
-      },
-      verifiedByRole: {
-        type: Number,
-        enum: [1, 2, 3], // 1=Staff, 2=TeamLead, 3=Owner
-      },
-      verifiedAt: {
-        type: Date,
-        default: null,
-      },
-      agreementPDF: {
-        originalName: { type: String },
-        fileName: { type: String },
-        filePath: { type: String },
-        mimeType: { type: String },
-        size: { type: Number },
-        fileType: {
-          type: String,
-          enum: ["pdf"],
-          default: "pdf",
-        },
-        uploadedAt: {
-          type: Date,
-          default: null,
-        },
-      },
-    },
+   agreementDocVerification: [agreementDocVerificationSchema],
     rentalDue: [rentalDueEntrySchema],
 
     // ─────────────────────────────────────────────────────────

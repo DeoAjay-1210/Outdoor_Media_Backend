@@ -78,6 +78,7 @@ exports.createLedgerEntry = async (req, res) => {
       mediaName: media.mediaName,
       paymentFrequency: media.rentalPayment.paymentFrequency,
       netPayable: media.rentalPayment.netPayable,
+      nextBillingDate: media.rentalPayment.nextBillingDate,
       utrNumber: savedLedgerEntry.utrNumber,
       date: savedLedgerEntry.date,
       updatedBy: req.user?.userName || "Admin",
@@ -262,7 +263,7 @@ exports.getLedgerHistory = async (req, res) => {
 
     // Use .lean() to get plain JSON objects
     const media = await Media.findById(mediaId)
-      .select("mediaName rentalPayment ledgerHistory")
+      .select("mediaName city mediaType rentalPayment ledgerHistory")
       .lean();
 
     if (!media) {
@@ -315,8 +316,6 @@ exports.getLedgerHistory = async (req, res) => {
         entries: monthEntry.entries.map((entry) => ({
           ...entry,
           mediaName: media.mediaName, // Add mediaName to each entry
-          // netPayable: media.rentalPayment.netPayable,
-          // paymentFrequency: media.rentalPayment.paymentFrequency,
         })),
       })),
     }));
@@ -327,10 +326,13 @@ exports.getLedgerHistory = async (req, res) => {
       {
         mediaId: media._id,
         mediaName: media.mediaName,
+        mediaType: media.mediaType,
+        city: media.city,
         rentalPayment: media.rentalPayment,
          currentRentalPayment: {
           paymentFrequency: media.rentalPayment.paymentFrequency,
           netPayable: media.rentalPayment.netPayable,
+          nextBillingDate: media.rentalPayment.nextBillingDate,
         },
         ledgerHistory: transformedLedgerHistory,
       },
