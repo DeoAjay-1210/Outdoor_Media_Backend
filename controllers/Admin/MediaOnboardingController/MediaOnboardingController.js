@@ -1916,9 +1916,9 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
-    const statusFilter = [
-      ...new Set(allData.map((item) => item.status)),
-    ].filter(Boolean);
+    // const statusFilter = [
+    //   ...new Set(allData.map((item) => item.status)),
+    // ].filter(Boolean);
 
     return successResponse(
       res,
@@ -1930,7 +1930,7 @@ const mediaList = async (req, res) => {
         totalPages: Math.ceil(totalCount / pageSize),
         cityFilter,
         mediaTypeFilter,
-        statusFilter,
+        // statusFilter,
         mediaList: mediaListData,
       },
       200,

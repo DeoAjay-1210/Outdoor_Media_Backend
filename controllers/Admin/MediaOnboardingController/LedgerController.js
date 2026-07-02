@@ -28,9 +28,89 @@ function getYearAndMonthName(date) {
   };
 }
 
+// exports.createLedgerEntry = async (req, res) => {
+//   try {
+//     const { mediaId, utrNumber, date } = req.body;
+
+//     if (!mediaId) {
+//       return errorResponse(res, "mediaId is required", null, 400);
+//     }
+
+//     if (!mongoose.Types.ObjectId.isValid(mediaId)) {
+//       return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
+//     }
+
+//     const media = await Media.findById(mediaId);
+//     if (!media) {
+//       return errorResponse(res, "Media not found for given mediaId", null, 404);
+//     }
+
+//     const entryDate = date ? new Date(date) : new Date();
+
+//     // 1. Build the ledger entry
+//     const ledgerEntry = {
+//       utrNumber,
+//       date: entryDate,
+//       status: 1,
+//       updatedBy: req.user?.userName || "Admin",
+//       updatedAt: nowIST(),
+//     };
+
+//     media.ledger.push(ledgerEntry);
+//     const savedLedgerEntry = media.ledger[media.ledger.length - 1];
+
+//     // 2. Auto-bucket into ledgerHistory: year -> month -> entries
+//     const { year, month } = getYearAndMonthName(entryDate);
+
+//     let yearBucket = media.ledgerHistory.find((y) => y.year === year);
+//     if (!yearBucket) {
+//       media.ledgerHistory.push({ year, months: [] });
+//       yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
+//     }
+
+//     let monthBucket = yearBucket.months.find((m) => m.month === month);
+//     if (!monthBucket) {
+//       yearBucket.months.push({ month, entries: [] });
+//       monthBucket = yearBucket.months[yearBucket.months.length - 1];
+//     }
+
+//     monthBucket.entries.push({
+//       mediaName: media.mediaName,
+//       paymentFrequency: media.rentalPayment.paymentFrequency,
+//       netPayable: media.rentalPayment.netPayable,
+//       nextBillingDate: media.rentalPayment.nextBillingDate,
+//       utrNumber: savedLedgerEntry.utrNumber,
+//       date: savedLedgerEntry.date,
+//       updatedBy: req.user?.userName || "Admin",
+//       updatedAt: nowIST(),
+//     });
+
+//     await media.save();
+
+//     return successResponse(
+//       res,
+//       "Ledger entry created successfully",
+//       {
+//         mediaId: media._id,
+//         mediaName: media.mediaName,
+//         ledgerEntry: savedLedgerEntry,
+//         ledgerHistoryBucket: { year, month },
+//       },
+//       201,
+//     );
+//   } catch (error) {
+//     console.error("createLedgerEntry error:", error);
+//     return errorResponse(
+//       res,
+//       "Something went wrong while creating ledger entry",
+//       { error: error.message },
+//       500,
+//     );
+//   }
+// };
 exports.createLedgerEntry = async (req, res) => {
   try {
-    const { mediaId, utrNumber, date } = req.body;
+    const { mediaId, entries, utrNumber, date, landOwnerId } = req.body;
 
     if (!mediaId) {
       return errorResponse(res, "mediaId is required", null, 400);
@@ -45,45 +125,116 @@ exports.createLedgerEntry = async (req, res) => {
       return errorResponse(res, "Media not found for given mediaId", null, 404);
     }
 
-    const entryDate = date ? new Date(date) : new Date();
+    // ── Normalize input: support both the OLD single-entry format
+    //    and the NEW multi-entry (multiple landOwners) format ──
+    let entryList = [];
 
-    // 1. Build the ledger entry
-    const ledgerEntry = {
-      utrNumber,
-      date: entryDate,
-      status: 1,
-      updatedBy: req.user?.userName || "Admin",
-      updatedAt: nowIST(),
-    };
-
-    media.ledger.push(ledgerEntry);
-    const savedLedgerEntry = media.ledger[media.ledger.length - 1];
-
-    // 2. Auto-bucket into ledgerHistory: year -> month -> entries
-    const { year, month } = getYearAndMonthName(entryDate);
-
-    let yearBucket = media.ledgerHistory.find((y) => y.year === year);
-    if (!yearBucket) {
-      media.ledgerHistory.push({ year, months: [] });
-      yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
+    if (Array.isArray(entries) && entries.length > 0) {
+      entryList = entries;
+    } else if (utrNumber) {
+      // backward-compatible single entry
+      entryList = [{ utrNumber, date, landOwnerId }];
+    } else {
+      return errorResponse(
+        res,
+        "Either 'entries' (array of { utrNumber, date, landOwnerId }) or a top-level 'utrNumber' is required",
+        null,
+        400,
+      );
     }
 
-    let monthBucket = yearBucket.months.find((m) => m.month === month);
-    if (!monthBucket) {
-      yearBucket.months.push({ month, entries: [] });
-      monthBucket = yearBucket.months[yearBucket.months.length - 1];
+    // ── Validate every entry: utrNumber required, landOwnerId (if given)
+    //    must exist in media.landOwners ──
+    for (let i = 0; i < entryList.length; i++) {
+      const item = entryList[i];
+
+      if (!item.utrNumber) {
+        return errorResponse(
+          res,
+          `entries[${i}].utrNumber is required`,
+          null,
+          400,
+        );
+      }
+
+      if (item.landOwnerId) {
+        if (!mongoose.Types.ObjectId.isValid(item.landOwnerId)) {
+          return errorResponse(
+            res,
+            `entries[${i}].landOwnerId is not a valid ObjectId`,
+            null,
+            400,
+          );
+        }
+
+        const matchedOwner = media.landOwners.id(item.landOwnerId);
+        if (!matchedOwner) {
+          return errorResponse(
+            res,
+            `entries[${i}].landOwnerId does not match any landOwner on this media`,
+            null,
+            400,
+          );
+        }
+      }
     }
 
-    monthBucket.entries.push({
-      mediaName: media.mediaName,
-      paymentFrequency: media.rentalPayment.paymentFrequency,
-      netPayable: media.rentalPayment.netPayable,
-      nextBillingDate: media.rentalPayment.nextBillingDate,
-      utrNumber: savedLedgerEntry.utrNumber,
-      date: savedLedgerEntry.date,
-      updatedBy: req.user?.userName || "Admin",
-      updatedAt: nowIST(),
-    });
+    const savedLedgerEntries = [];
+    const historyBuckets = [];
+
+    // 1. Build + push a ledger entry AND its history bucket entry for EACH item
+    for (const item of entryList) {
+      const entryDate = item.date ? new Date(item.date) : new Date();
+
+      // Look up the matched land owner again (to pull name + auto-fill it)
+      const matchedOwner = item.landOwnerId
+        ? media.landOwners.id(item.landOwnerId)
+        : null;
+
+      const ledgerEntry = {
+        landOwnerId: matchedOwner ? matchedOwner._id : null,
+        landOwnerName: matchedOwner ? matchedOwner.name : "",
+        utrNumber: item.utrNumber,
+        date: entryDate,
+        status: 1,
+        updatedBy: req.user?.userName || "Admin",
+        updatedAt: nowIST(),
+      };
+
+      media.ledger.push(ledgerEntry);
+      const savedLedgerEntry = media.ledger[media.ledger.length - 1];
+      savedLedgerEntries.push(savedLedgerEntry);
+
+      // 2. Auto-bucket into ledgerHistory: year -> month -> entries
+      const { year, month } = getYearAndMonthName(entryDate);
+
+      let yearBucket = media.ledgerHistory.find((y) => y.year === year);
+      if (!yearBucket) {
+        media.ledgerHistory.push({ year, months: [] });
+        yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
+      }
+
+      let monthBucket = yearBucket.months.find((m) => m.month === month);
+      if (!monthBucket) {
+        yearBucket.months.push({ month, entries: [] });
+        monthBucket = yearBucket.months[yearBucket.months.length - 1];
+      }
+
+      monthBucket.entries.push({
+        landOwnerId: matchedOwner ? matchedOwner._id : null,
+        landOwnerName: matchedOwner ? matchedOwner.name : "",
+        mediaName: media.mediaName,
+        paymentFrequency: media.rentalPayment.paymentFrequency,
+        netPayable: media.rentalPayment.netPayable,
+        nextBillingDate: media.rentalPayment.nextBillingDate,
+        utrNumber: savedLedgerEntry.utrNumber,
+        date: savedLedgerEntry.date,
+        updatedBy: req.user?.userName || "Admin",
+        updatedAt: nowIST(),
+      });
+
+      historyBuckets.push({ year, month });
+    }
 
     await media.save();
 
@@ -93,8 +244,8 @@ exports.createLedgerEntry = async (req, res) => {
       {
         mediaId: media._id,
         mediaName: media.mediaName,
-        ledgerEntry: savedLedgerEntry,
-        ledgerHistoryBucket: { year, month },
+        ledgerEntries: savedLedgerEntries,      // array (1 or many)
+        ledgerHistoryBuckets: historyBuckets,   // array (1 or many)
       },
       201,
     );
@@ -129,7 +280,7 @@ exports.listMediaByLedger = async (req, res) => {
       filter.mediaName = { $regex: search, $options: "i" };
     }
 
-    if (status !== undefined && status !== "") {
+    if (status !== undefined && status !== null && status !== "") {
       const statusNum = Number(status);
       if (![0, 1].includes(statusNum)) {
         return errorResponse(
@@ -139,7 +290,23 @@ exports.listMediaByLedger = async (req, res) => {
           400,
         );
       }
-      filter["ledger.status"] = statusNum;
+      // filter["ledger.status"] = statusNum;
+       
+      if (statusNum === 1) {
+        // Status 1: Show media with at least one approved ledger entry
+        filter["ledger"] = {
+          $exists: true,
+          $not: { $size: 0 },
+          $elemMatch: { status: 1 }
+        };
+      } else if (statusNum === 0) {
+        // Status 0: Show media with NO ledger entries OR ledger entries with status 0
+        filter.$or = [
+          { ledger: { $exists: false } },
+          { ledger: { $size: 0 } },
+          { "ledger.status": 0 }
+        ];
+      }
     }
 
     // Helper function to validate MM-YYYY format
@@ -170,7 +337,7 @@ exports.listMediaByLedger = async (req, res) => {
       const { startDate, endDate } = getMonthDateRange(monthYear);
 
       // Filter on rentalPayment.nextBillingDate (not ledger.nextBillingDate)
-      filterObj["rentalPayment.nextBillingDate"] = {
+      filterObj["rentalPayment.lastBillPaidDate"] = {
         $gte: startDate,
         $lte: endDate,
       };
@@ -209,23 +376,39 @@ exports.listMediaByLedger = async (req, res) => {
       Media.countDocuments(filter),
     ]);
 
-    // Transform data - Get latest ledger entry
+    // Transform data - Get latest ledger entry PER landOwner (not just one overall)
     const mediaListData = results.map((media) => {
       const mediaObj = media.toObject();
 
       let latestLedger = [];
 
       if (Array.isArray(mediaObj.ledger) && mediaObj.ledger.length > 0) {
-        // Sort by updatedAt and get the latest
+        // Sort newest first
         const sortedLedger = [...mediaObj.ledger].sort(
           (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
         );
-        latestLedger = [sortedLedger[0]];
+
+        // ✅ Keep only the latest entry PER landOwnerId
+        // (entries with no landOwnerId are each kept individually,
+        //  since there's nothing to dedupe them against)
+        const seenOwners = new Set();
+        latestLedger = [];
+
+        for (const entry of sortedLedger) {
+          const ownerKey = entry.landOwnerId
+            ? String(entry.landOwnerId)
+            : `__no_owner_${entry._id}`;
+
+          if (!seenOwners.has(ownerKey)) {
+            seenOwners.add(ownerKey);
+            latestLedger.push(entry);
+          }
+        }
       }
 
       return {
         ...mediaObj,
-        ledger: latestLedger,
+        ledger: latestLedger, // ✅ now shows 1 latest entry PER landOwner
       };
     });
 
@@ -251,7 +434,6 @@ exports.listMediaByLedger = async (req, res) => {
     );
   }
 };
-
 // exports.getLedgerHistory = async (req, res) => {
 //   try {
 //     const { mediaId, year, month } = req.query;
@@ -262,7 +444,7 @@ exports.listMediaByLedger = async (req, res) => {
 
 //     // Use .lean() to get plain JSON objects
 //     const media = await Media.findById(mediaId)
-//       .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory")
+//       .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners")
 //       .lean();
 
 //     if (!media) {
@@ -307,16 +489,36 @@ exports.listMediaByLedger = async (req, res) => {
 //         .filter((item) => item.months.length > 0);
 //     }
 
-//     // Transform ledgerHistory to include mediaName in each ledger entry
+//     // Transform ledgerHistory to include mediaName and show only latest entry per month based on updatedAt
 //     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
 //       ...yearEntry,
-//       months: yearEntry.months.map((monthEntry) => ({
-//         ...monthEntry,
-//         entries: monthEntry.entries.map((entry) => ({
-//           ...entry,
-//           mediaName: media.mediaName, // Add mediaName to each entry
-//         })),
-//       })),
+//       months: yearEntry.months.map((monthEntry) => {
+//         // Sort entries by updatedAt (newest first)
+//         const sortedEntries = [...monthEntry.entries].sort((a, b) => {
+//           return new Date(b.updatedAt) - new Date(a.updatedAt);
+//         });
+
+//         // Get the latest entry (first after sorting by updatedAt)
+//         const latestEntry = sortedEntries[0];
+
+//         return {
+//           month: monthEntry.month,
+//           // Only show the latest entry based on updatedAt
+//           entries: latestEntry
+//             ? [
+//                 {
+//                   ...latestEntry,
+//                   mediaName: media.mediaName,
+//                 },
+//               ]
+//             : [],
+//           // Keep all entries for historical data
+//           allEntries: monthEntry.entries.map((entry) => ({
+//             ...entry,
+//             mediaName: media.mediaName,
+//           })),
+//         };
+//       }),
 //     }));
 
 //     return successResponse(
@@ -329,7 +531,7 @@ exports.listMediaByLedger = async (req, res) => {
 //         mediaCode: media.mediaCode,
 //         city: media.city,
 //         rentalPayment: media.rentalPayment,
-//          currentRentalPayment: {
+//         currentRentalPayment: {
 //           paymentFrequency: media.rentalPayment.paymentFrequency,
 //           netPayable: media.rentalPayment.netPayable,
 //           nextBillingDate: media.rentalPayment.nextBillingDate,
@@ -404,30 +606,44 @@ exports.getLedgerHistory = async (req, res) => {
         .filter((item) => item.months.length > 0);
     }
 
-    // Transform ledgerHistory to include mediaName and show only latest entry per month based on updatedAt
+    // ✅ Helper: get latest entry PER landOwnerId (not just one overall)
+    const getLatestPerLandOwner = (entries) => {
+      const sortedEntries = [...entries].sort(
+        (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+      );
+
+      const seenOwners = new Set();
+      const latestPerOwner = [];
+
+      for (const entry of sortedEntries) {
+        const ownerKey = entry.landOwnerId
+          ? String(entry.landOwnerId)
+          : `__no_owner_${entry.utrNumber}_${entry.date}`;
+
+        if (!seenOwners.has(ownerKey)) {
+          seenOwners.add(ownerKey);
+          latestPerOwner.push(entry);
+        }
+      }
+
+      return latestPerOwner;
+    };
+
+    // Transform ledgerHistory to include mediaName and show latest entry PER landOwner
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
       ...yearEntry,
       months: yearEntry.months.map((monthEntry) => {
-        // Sort entries by updatedAt (newest first)
-        const sortedEntries = [...monthEntry.entries].sort((a, b) => {
-          return new Date(b.updatedAt) - new Date(a.updatedAt);
-        });
-
-        // Get the latest entry (first after sorting by updatedAt)
-        const latestEntry = sortedEntries[0];
+        // ✅ latest entry per landOwner instead of a single overall latest
+        const latestEntries = getLatestPerLandOwner(monthEntry.entries);
 
         return {
           month: monthEntry.month,
-          // Only show the latest entry based on updatedAt
-          entries: latestEntry
-            ? [
-                {
-                  ...latestEntry,
-                  mediaName: media.mediaName,
-                },
-              ]
-            : [],
-          // Keep all entries for historical data
+          // Now shows one latest entry PER landOwner (e.g. 2 owners -> 2 entries)
+          entries: latestEntries.map((entry) => ({
+            ...entry,
+            mediaName: media.mediaName,
+          })),
+          // Keep all entries for historical/audit data
           allEntries: monthEntry.entries.map((entry) => ({
             ...entry,
             mediaName: media.mediaName,
@@ -444,6 +660,7 @@ exports.getLedgerHistory = async (req, res) => {
         mediaName: media.mediaName,
         mediaType: media.mediaType,
         mediaCode: media.mediaCode,
+        landOwners: media.landOwners,
         city: media.city,
         rentalPayment: media.rentalPayment,
         currentRentalPayment: {

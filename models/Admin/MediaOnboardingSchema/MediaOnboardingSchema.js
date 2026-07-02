@@ -143,7 +143,7 @@ const agreementHistorySchema = new mongoose.Schema({
     },
     paymentFrequency: {
       type: Number,
-      enum: [1, 2, 3, 4, 5, 6],
+      enum: [1, 2, 3, 4, 5, 6],  // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
       default: 1,
     },
     // ← NEW: who changed totalRentalAmount in this agreement snapshot
@@ -158,6 +158,8 @@ const agreementHistorySchema = new mongoose.Schema({
 
 const ledgerSchema = new mongoose.Schema(
   {
+    landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null }, // ✅ added
+    landOwnerName: { type: String, trim: true, default: "" }, // ✅ added
     utrNumber: { type: String, trim: true },
     date: { type: Date, default: Date.now },
     status: {
@@ -173,6 +175,8 @@ const ledgerSchema = new mongoose.Schema(
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
   {
+    landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null }, // ✅ added
+    landOwnerName: { type: String, trim: true, default: "" }, // ✅ added
     mediaName: { type: String, trim: true },
     paymentFrequency: { type: Number, trim: true },
     netPayable: { type: Number, trim: true },
