@@ -30,26 +30,25 @@ const buildApprovalSteps = (approvalFlow) => {
   }));
 };
 
-
 function getAgreementVerificationStatus(item) {
   const history = item.agreementDocVerification || [];
   const currentFile = item.agreement?.agreementPDF?.fileName;
- 
+
   const isRoleVerified = (role) => {
     const roleRecords = history
       .filter((h) => h.verifiedByRole === role && h.isVerified)
       .sort((a, b) => new Date(b.verifiedAt) - new Date(a.verifiedAt));
- 
+
     const latest = roleRecords[0];
     if (!latest) return false;
- 
+
     const verifiedFile = latest.agreementPDF?.fileName;
     if (currentFile && verifiedFile) {
       return currentFile === verifiedFile;
     }
     return true;
   };
- 
+
   return {
     staff: isRoleVerified(ROLE.STAFF),
     teamLead: isRoleVerified(ROLE.TEAM_LEAD),
@@ -57,12 +56,16 @@ function getAgreementVerificationStatus(item) {
   };
 }
 
-
+const RENTAL_STATUS_MAP = {
+  [ROLE.STAFF]: 1,
+  [ROLE.TEAM_LEAD]: 2,
+  [ROLE.OWNER]: 3,
+};
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
     const { mediaId, campaignName } = req.body;
- 
+
     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
       return res
         .status(400)
@@ -73,28 +76,28 @@ exports.saveRentalDue = async (req, res) => {
         .status(403)
         .json({ success: false, message: "Invalid or missing user role" });
     }
- 
+
     const media = await Media.findById(mediaId);
     if (!media) {
       return res
         .status(404)
         .json({ success: false, message: "Media not found" });
     }
- 
+
     // Helper to check if duplicate verification exists
     const isAlreadyVerified = (rentalDueId, role) => {
       return media.agreementDocVerification.some(
-        (v) => 
-          String(v.rentalDueId) === String(rentalDueId) && 
-          v.verifiedByRole === role
+        (v) =>
+          String(v.rentalDueId) === String(rentalDueId) &&
+          v.verifiedByRole === role,
       );
     };
- 
+
     // Most recently created entry that hasn't been fully approved yet
     const pendingEntry = [...media.rentalDue]
       .reverse()
       .find((e) => e.approvalStatus !== 3);
- 
+
     // ═══════════════════════════════════════
     // BRANCH 1: pending entry exists → this call is an APPROVAL
     // ═══════════════════════════════════════
@@ -103,16 +106,16 @@ exports.saveRentalDue = async (req, res) => {
       const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
       const isOwnerOverride =
         userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
- 
+
       if (!isOwnerOverride && userType !== entry.currentPendingRole) {
         return res.status(403).json({
           success: false,
           message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
         });
       }
- 
+
       let wasAgreementVerified = false;
-      
+
       if (isOwnerOverride) {
         entry.approvalSteps.forEach((step) => {
           if (step.status !== 1) return;
@@ -132,6 +135,7 @@ exports.saveRentalDue = async (req, res) => {
         entry.status = 3;
         entry.currentPendingRole = null;
         entry.agreementDocVerified = true;
+        media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
         wasAgreementVerified = true;
       } else {
         const step = entry.approvalSteps.find(
@@ -148,10 +152,10 @@ exports.saveRentalDue = async (req, res) => {
         step.userName = userName;
         step.approvedAt = nowIST();
         step.docVerified = true;
- 
+        media.rentalStatus = RENTAL_STATUS_MAP[userType];
         const roleIndex = chain.indexOf(userType);
         const nextRole = chain[roleIndex + 1];
- 
+
         if (nextRole) {
           entry.currentPendingRole = nextRole;
           entry.approvalStatus = 2;
@@ -164,10 +168,10 @@ exports.saveRentalDue = async (req, res) => {
           wasAgreementVerified = true;
         }
       }
- 
+
       entry.updatedBy = userName;
       entry.updatedAt = nowIST();
- 
+
       // ✅ Only push if agreement is verified AND no duplicate exists
       // if (wasAgreementVerified && !isAlreadyVerified(entry._id, userType)) {
       //   media.agreementDocVerification.push({
@@ -181,7 +185,7 @@ exports.saveRentalDue = async (req, res) => {
       //     updatedBy: userName,
       //   });
       // }
- 
+
       const yearLabel = getYearLabel(entry.dueDate);
       const monthLabel = getMonthLabel(entry.dueDate);
       const yearBucket = media.rentalDueHistory.find(
@@ -198,11 +202,11 @@ exports.saveRentalDue = async (req, res) => {
         historyRecord.updatedAt = nowIST();
         historyRecord.updatedBy = userName;
       }
- 
+
       media.updatedBy = userName;
       media.updatedAt = nowIST();
       await media.save();
- 
+
       return res.status(200).json({
         success: true,
         message: isOwnerOverride
@@ -217,12 +221,13 @@ exports.saveRentalDue = async (req, res) => {
           currentPendingRoleLabel: entry.currentPendingRole
             ? ROLE_LABEL[entry.currentPendingRole]
             : "Completed",
+          rentalStatus: media.rentalStatus,
           agreementDocVerified: entry.agreementDocVerified,
           agreementDocVerificationStatus: getAgreementVerificationStatus(media),
         },
       });
     }
- 
+
     // ═══════════════════════════════════════
     // BRANCH 2: no pending entry → CREATE.
     // ═══════════════════════════════════════
@@ -231,7 +236,7 @@ exports.saveRentalDue = async (req, res) => {
         .status(400)
         .json({ success: false, message: "campaignName is required" });
     }
- 
+
     let proofOfCampaign = null;
     if (req.file) {
       if (!req.file.mimetype?.startsWith("image/")) {
@@ -250,11 +255,11 @@ exports.saveRentalDue = async (req, res) => {
         uploadedAt: nowIST(),
       };
     }
- 
+
     const dueDateObj = media.rentalPayment?.nextBillingDate
       ? new Date(media.rentalPayment.nextBillingDate)
       : new Date();
- 
+
     const chainSteps = buildApprovalSteps(2);
     const steps = [
       {
@@ -268,12 +273,12 @@ exports.saveRentalDue = async (req, res) => {
       },
       ...chainSteps,
     ];
- 
+
     const isOwnerOverride = userType === ROLE.OWNER;
     const isTeamLeadCreating = userType === ROLE.TEAM_LEAD;
     const staffStep = steps.find((s) => s.role === ROLE.STAFF);
     let wasAgreementVerified = false;
- 
+
     if (isOwnerOverride) {
       steps.forEach((step) => {
         if (step.role === ROLE.OWNER) {
@@ -292,7 +297,7 @@ exports.saveRentalDue = async (req, res) => {
     } else if (isTeamLeadCreating) {
       staffStep.status = 3;
       staffStep.remarks = "Skipped — created directly by Team Lead";
- 
+
       const teamLeadStep = steps.find((s) => s.role === ROLE.TEAM_LEAD);
       teamLeadStep.status = 2;
       teamLeadStep.userId = userId;
@@ -310,10 +315,10 @@ exports.saveRentalDue = async (req, res) => {
       staffStep.remarks = "Entry created by Staff";
       wasAgreementVerified = false;
     }
- 
+
     const nextPendingStep = steps.find((s) => s.status === 1);
     const allApproved = !nextPendingStep;
- 
+
     const newEntry = {
       dueMonth: getDueMonthLabel(dueDateObj),
       dueDate: dueDateObj,
@@ -331,13 +336,13 @@ exports.saveRentalDue = async (req, res) => {
       updatedBy: userName,
       updatedAt: nowIST(),
     };
- 
+    media.rentalStatus = RENTAL_STATUS_MAP[userType];
     media.rentalDue.push(newEntry);
     const savedEntry = media.rentalDue[media.rentalDue.length - 1];
- 
+
     const yearLabel = getYearLabel(dueDateObj);
     const monthLabel = getMonthLabel(dueDateObj);
- 
+
     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
     if (!yearBucket) {
       media.rentalDueHistory.push({ year: yearLabel, months: [] });
@@ -360,7 +365,7 @@ exports.saveRentalDue = async (req, res) => {
       updatedAt: nowIST(),
       updatedBy: userName,
     });
- 
+
     // ✅ Only push if agreement is verified AND no duplicate exists
     // if (wasAgreementVerified && !isAlreadyVerified(savedEntry._id, userType)) {
     //   media.agreementDocVerification.push({
@@ -374,11 +379,11 @@ exports.saveRentalDue = async (req, res) => {
     //     updatedBy: userName,
     //   });
     // }
- 
+
     media.updatedBy = userName;
     media.updatedAt = nowIST();
     await media.save();
- 
+
     return res.status(201).json({
       success: true,
       message: isOwnerOverride
@@ -406,6 +411,7 @@ exports.saveRentalDue = async (req, res) => {
         currentPendingRoleLabel: newEntry.currentPendingRole
           ? ROLE_LABEL[newEntry.currentPendingRole]
           : "Completed",
+        rentalStatus: media.rentalStatus,
         agreementDocVerified: newEntry.agreementDocVerified,
         agreementDocVerificationStatus: getAgreementVerificationStatus(media),
       },
@@ -417,100 +423,7 @@ exports.saveRentalDue = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
-// exports.verifyAgreementDoc = async (req, res) => {
-//   try {
-//     const { mediaId } = req.body;
-//     const { userType, userName } = req.user;
- 
-//     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
-//       return res
-//         .status(400)
-//         .json({ success: false, message: "A valid mediaId is required" });
-//     }
- 
-//     const media = await Media.findById(mediaId);
-//     if (!media) {
-//       return res
-//         .status(404)
-//         .json({ success: false, message: "Media not found" });
-//     }
- 
-//     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
-//       return res
-//         .status(403)
-//         .json({ success: false, message: "Invalid or missing user role" });
-//     }
- 
-//     const currentFile = media.agreement?.agreementPDF?.fileName;
- 
-//     // Whether a given role already has a verification record against the
-//     // CURRENT agreement PDF — if the PDF was re-uploaded, old records no
-//     // longer count, so verification can happen again in order.
-//     const isVerifiedByRole = (role) =>
-//       media.agreementDocVerification.some((h) => {
-//         if (h.verifiedByRole !== role || !h.isVerified) return false;
-//         const verifiedFile = h.agreementPDF?.fileName;
-//         if (currentFile && verifiedFile) return currentFile === verifiedFile;
-//         return true;
-//       });
- 
-//     // ── Staff can verify first, but once Team Lead has verified, Staff's
-//     //    window is closed — they can no longer verify after that. ──
-//     if (userType === ROLE.STAFF && isVerifiedByRole(ROLE.TEAM_LEAD)) {
-//       return res.status(403).json({
-//         success: false,
-//         message: "Staff cannot verify after Team Lead has already verified",
-//       });
-//     }
- 
-//     // ── Owner can only verify AFTER Team Lead has verified ──
-//     if (userType === ROLE.OWNER && !isVerifiedByRole(ROLE.TEAM_LEAD)) {
-//       return res.status(403).json({
-//         success: false,
-//         message: "Team Lead must verify the agreement document before Owner",
-//       });
-//     }
- 
-//     // ── Block duplicate verification by the same role ──
-//     if (isVerifiedByRole(userType)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: `${ROLE_LABEL[userType]} has already verified this agreement document`,
-//       });
-//     }
- 
-//     const verificationRecord = {
-//       isVerified: true,
-//       verifiedBy: userName,
-//       verifiedByRole: userType,
-//       verifiedAt: nowIST(),
-//       rentalDueId: null,
-//       agreementPDF: media.agreement?.agreementPDF || {},
-//       updatedAt: nowIST(),
-//       updatedBy: userName,
-//     };
- 
-//     media.agreementDocVerification.push(verificationRecord);
-//     media.updatedBy = userName;
-//     media.updatedAt = nowIST();
- 
-//     await media.save();
- 
-//     return res.status(200).json({
-//       success: true,
-//       message: `${ROLE_LABEL[userType]} verified the agreement document successfully`,
-//       data: {
-//         verificationRecord,
-//         agreementDocVerificationStatus: getAgreementVerificationStatus(media),
-//       },
-//     });
-//   } catch (err) {
-//     console.error("verifyAgreementDoc error:", err);
-//     return res
-//       .status(500)
-//       .json({ success: false, message: "Server error", error: err.message });
-//   }
-// };
+
 const ROLE_RANK = {
   [ROLE.STAFF]: 1,
   [ROLE.TEAM_LEAD]: 2,
@@ -768,6 +681,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           mediaType: 1,
           city: 1,
           state: 1,
+          rentalStatus: 1,
           location: 1,
           rentalPayment: 1,
           agreement: 1,
@@ -795,6 +709,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       city: item.city,
       state: item.state,
       location: item.location,
+      rentalStatus: item.rentalStatus,
       netPayable: item.rentalPayment?.netPayable || 0,
       paymentFrequency: item.rentalPayment?.paymentFrequency,
       paymentFrequencyLabel:

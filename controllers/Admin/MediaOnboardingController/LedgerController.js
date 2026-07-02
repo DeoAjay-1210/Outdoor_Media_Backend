@@ -109,7 +109,6 @@ exports.createLedgerEntry = async (req, res) => {
   }
 };
 
-
 exports.listMediaByLedger = async (req, res) => {
   try {
     const {
@@ -125,7 +124,7 @@ exports.listMediaByLedger = async (req, res) => {
     const pageSize = parseInt(count) || 10;
 
     const filter = {};
-
+    filter.rentalStatus = 3;
     if (search) {
       filter.mediaName = { $regex: search, $options: "i" };
     }
@@ -202,7 +201,7 @@ exports.listMediaByLedger = async (req, res) => {
     const [results, totalCount] = await Promise.all([
       Media.find(filter)
         .select(
-          "mediaCode mediaName mediaType state city location rentalPayment ledger",
+          "mediaCode mediaName mediaType state city location rentalStatus rentalPayment landOwners ledger",
         )
         .sort({ updatedAt: -1 })
         .skip(skip)
@@ -360,7 +359,7 @@ exports.getLedgerHistory = async (req, res) => {
 
     // Use .lean() to get plain JSON objects
     const media = await Media.findById(mediaId)
-      .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory")
+      .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners")
       .lean();
 
     if (!media) {
@@ -420,12 +419,14 @@ exports.getLedgerHistory = async (req, res) => {
         return {
           month: monthEntry.month,
           // Only show the latest entry based on updatedAt
-          entries: latestEntry ? [
-            {
-              ...latestEntry,
-              mediaName: media.mediaName,
-            }
-          ] : [],
+          entries: latestEntry
+            ? [
+                {
+                  ...latestEntry,
+                  mediaName: media.mediaName,
+                },
+              ]
+            : [],
           // Keep all entries for historical data
           allEntries: monthEntry.entries.map((entry) => ({
             ...entry,

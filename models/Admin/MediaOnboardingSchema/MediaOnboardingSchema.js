@@ -176,7 +176,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     mediaName: { type: String, trim: true },
     paymentFrequency: { type: Number, trim: true },
     netPayable: { type: Number, trim: true },
-    nextBillingDate: {type: Date},
+    nextBillingDate: { type: Date },
     utrNumber: { type: String, trim: true },
     date: { type: Date },
     updatedAt: { type: Date, default: null },
@@ -577,9 +577,13 @@ const MediaSchema = new mongoose.Schema(
     // Tracks campaign, proof image, agreement doc verification,
     // 3-level approval chain, and who saved the entry.
     // ─────────────────────────────────────────────────────────
-   agreementDocVerification: [agreementDocVerificationSchema],
+    agreementDocVerification: [agreementDocVerificationSchema],
     rentalDue: [rentalDueEntrySchema],
-
+    rentalStatus: {
+      type: Number,
+      enum: [0, 1, 2, 3], // 0=null 1=staff Approve 2= Team Lead Approve 3=Owner Approve
+      default: 0,
+    },
     // ─────────────────────────────────────────────────────────
     // RENTAL DUE HISTORY  ← NEW
     // Auto-bucketed Year → Month audit trail, mirroring ledgerHistory.
