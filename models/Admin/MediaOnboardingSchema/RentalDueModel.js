@@ -278,6 +278,8 @@ const agreementDocVerificationSchema = new mongoose.Schema(
       fileType: { type: String, enum: ["pdf"], default: "pdf" },
       uploadedAt: { type: Date, default: null },
     },
+     cycle: { type: Date, default: null },            // ✅ added — this was missing, causing the whole bug
+    cycleStartDate: { type: Date, default: null }, 
     updatedBy: { type: String, trim: true },
     updatedAt: { type: Date, default: null },
   },

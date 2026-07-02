@@ -3,10 +3,11 @@ const express = require("express");
 const router = express.Router();
 
 // Controllers
-const ctrl = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
+// const ctrl = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 const {
   getRentalDueListWithStats,
   verifyAgreementDoc,
+  saveRentalDue
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -26,16 +27,24 @@ const { upload, processFile } = createUploader("rentalDueProofs", {
 router.post("/rental-due-list", protect, getRentalDueListWithStats);
 
 
+// router.post(
+//   "/rental-due-save",protect,
+//   upload.single("proofOfCampaign"),
+//   (req, res, next) => {
+//     req.processFile = processFile;
+//     next();
+//   },
+//   ctrl.saveRentalDue,
+// );
 router.post(
-  "/rental-due-save",protect,
-  upload.single("proofOfCampaign"),
+  "/rental-due-save", protect,
+  upload.fields([{ name: "proofOfCampaign", maxCount: 1 }]),
   (req, res, next) => {
     req.processFile = processFile;
     next();
   },
-  ctrl.saveRentalDue,
+  saveRentalDue,
 );
-
 
 router.post("/verify-agreement", protect, verifyAgreementDoc);
 
