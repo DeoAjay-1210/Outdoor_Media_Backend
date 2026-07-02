@@ -12,7 +12,7 @@ const userSchema = new mongoose.Schema(
       // 1 = Staff
       // 2 = Team Head
       // 3 = Owner
-      required: true, 
+      required: true,
     },
       registerPassword: {
       type: String,
