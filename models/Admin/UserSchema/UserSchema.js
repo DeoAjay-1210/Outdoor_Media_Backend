@@ -13,7 +13,6 @@ const userSchema = new mongoose.Schema(
       // 2 = Team Head
       // 3 = Owner
       required: true, 
-      
     },
       registerPassword: {
       type: String,
