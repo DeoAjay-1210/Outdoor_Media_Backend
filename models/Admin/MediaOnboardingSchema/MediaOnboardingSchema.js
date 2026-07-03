@@ -466,11 +466,7 @@ const MediaSchema = new mongoose.Schema(
       },
     },
 
-    // ─────────────────────────────────────────────────────────
-    // AGREEMENT HISTORY  ← NEW
-    // Every create, and every update where startDate or endDate changes,
-    // pushes a snapshot here so you have a full audit trail.
-    // ─────────────────────────────────────────────────────────
+    
     agreementHistory: [agreementHistorySchema],
 
     // ─────────────────────────────────────────────────────────
@@ -559,28 +555,13 @@ const MediaSchema = new mongoose.Schema(
       uploadedAt: { type: Date, default: Date.now },
     },
 
-    // ─────────────────────────────────────────────────────────
-    // LEDGER  ← NEW
-    // status: 0=In Progress 1=Approve (default) 2=Reject
-    // Each pushed entry's _id is the "objectId" used by the list/filter API.
-    // ─────────────────────────────────────────────────────────
+    
     ledger: [ledgerSchema],
 
-    // ─────────────────────────────────────────────────────────
-    // LEDGER HISTORY  ← NEW
-    // Auto-bucketed by year -> month. Whenever a ledger entry is
-    // created, the same entry is also appended here under the
-    // current year (e.g. "2026") and current month name (e.g. "June"),
-    // auto-creating those buckets the first time they're needed.
-    // ─────────────────────────────────────────────────────────
+    
     ledgerHistory: [ledgerHistoryYearSchema],
 
-    // ─────────────────────────────────────────────────────────
-    // RENTAL DUE  ← NEW MODULE
-    // Each entry represents one billing cycle's due record.
-    // Tracks campaign, proof image, agreement doc verification,
-    // 3-level approval chain, and who saved the entry.
-    // ─────────────────────────────────────────────────────────
+
     agreementDocVerification: [agreementDocVerificationSchema],
     rentalDue: [rentalDueEntrySchema],
     rentalStatus: {
@@ -588,10 +569,7 @@ const MediaSchema = new mongoose.Schema(
       enum: [0, 1, 2, 3], // 0=null 1=staff Approve 2= Team Lead Approve 3=Owner Approve
       default: 0,
     },
-    // ─────────────────────────────────────────────────────────
-    // RENTAL DUE HISTORY  ← NEW
-    // Auto-bucketed Year → Month audit trail, mirroring ledgerHistory.
-    // ─────────────────────────────────────────────────────────
+  
     rentalDueHistory: [rentalDueHistoryYearSchema],
   },
   { timestamps: true },
