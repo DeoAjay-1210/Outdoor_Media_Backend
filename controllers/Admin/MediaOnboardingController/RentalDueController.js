@@ -136,11 +136,579 @@ function getAgreementVerificationStatus(media) {
   return "Not Verified";
 }
 
+// Computes the base/gst/netPayable split for a rentalDue entry based on
+// the requested withGst mode, using the media's CURRENT rentalPayment
+// figures as the source of truth for this cycle.
+function computeGstSplit(media, withGst) {
+  const totalRentalAmount = media.rentalPayment?.netPayable || 0;
+  const gstAmountFull = media.rentalPayment?.gstAmount || 0;
+  const totalWithGst =
+    media.rentalPayment?.totalRentalAmountWithGst ||
+    totalRentalAmount + gstAmountFull;
 
+  if (withGst === 1) {
+    // With GST: client billed ONLY the base amount; GST held back to be
+    // tracked in balanceGstAmount (pending remittance to government).
+    return {
+      baseAmount: totalRentalAmount,
+      gstAmount: gstAmountFull,
+      netPayable: totalRentalAmount,
+    };
+  }
+
+  // withGst === 2 (Without GST): client billed the full inclusive amount,
+  // nothing held back / tracked separately.
+  return {
+    baseAmount: totalWithGst,
+    gstAmount: 0,
+    netPayable: totalWithGst,
+  };
+}
+
+// Adds this entry's GST amount to the running balanceGstAmount tracker —
+// call this at the moment the cycle is CLOSED (Owner's final approval),
+// not at creation, since that's when the billing amount is considered
+// finalized for the cycle.
+function addGstToBalanceIfApplicable(media, entry) {
+  if (entry?.withGst === 1 && entry.gstAmount > 0) {
+    media.rentalPayment.balanceGstAmount =
+      (media.rentalPayment.balanceGstAmount || 0) + entry.gstAmount;
+  }
+}
+// exports.saveRentalDue = async (req, res) => {
+//   try {
+//     const { userType, userId, userName } = req.user;
+//     const { mediaId, campaignName } = req.body;
+
+//     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "A valid mediaId is required" });
+//     }
+//     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
+//       return res
+//         .status(403)
+//         .json({ success: false, message: "Invalid or missing user role" });
+//     }
+
+//     const media = await Media.findById(mediaId);
+//     if (!media) {
+//       return res
+//         .status(404)
+//         .json({ success: false, message: "Media not found" });
+//     }
+
+//     // Defensive init — older docs saved before this migration may not
+//     // have these fields yet.
+//     if (!media.agreementDocVerified) {
+//       media.agreementDocVerified = {
+//         staff: false,
+//         teamLead: false,
+//         owner: false,
+//       };
+//     }
+//     if (!media.agreementDocVerificationHistory) {
+//       media.agreementDocVerificationHistory = [];
+//     }
+//     if (!Array.isArray(media.rentalDueEntries)) {
+//       media.rentalDueEntries = Array.isArray(media.rentalDue)
+//         ? media.rentalDue
+//         : [];
+//     }
+//     if (!Array.isArray(media.rentalDueHistory)) {
+//       media.rentalDueHistory = [];
+//     }
+//     if (!Array.isArray(media.agreementDocVerification)) {
+//       media.agreementDocVerification = [];
+//     }
+
+//     // ══════════════════════════════════════════════════════════════
+//     // 🔒 NEW GUARD — "verify first, then save"
+//     // The caller's role must have already verified the agreement
+//     // document (via verifyAgreementDoc) for the CURRENT billing
+//     // cycle before they're allowed to create OR approve a rental
+//     // due entry. This applies identically to Staff, Team Lead and
+//     // Owner, and to both branches below (approval + create), since
+//     // it's checked before the branch split.
+//     //
+//     // Reuses the exact same cycle-matching logic as verifyAgreementDoc
+//     // (getCurrentCycle + isSameCycle via getTime comparison) so the
+//     // "current cycle" here always matches the one verification was
+//     // recorded against — no drift between the two endpoints.
+//     // ══════════════════════════════════════════════════════════════
+//     const currentCycleForVerification = getCurrentCycle(
+//       media.rentalPayment?.nextBillingDate,
+//     );
+
+//     if (!currentCycleForVerification) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Unable to determine current billing cycle",
+//       });
+//     }
+
+//     const isSameCycle = (a, b) => {
+//       if (!a || !b) return false;
+//       const t1 = new Date(a).getTime();
+//       const t2 = new Date(b).getTime();
+//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+//     };
+
+//     // const hasVerifiedThisCycle = media.agreementDocVerification.some(
+//     //   (h) =>
+//     //     h.isVerified &&
+//     //     h.verifiedByRole === userType &&
+//     //     isSameCycle(h.cycle, currentCycleForVerification),
+//     // );
+
+//     // if (!hasVerifiedThisCycle) {
+//     //   return res.status(400).json({
+//     //     success: false,
+//     //     message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
+//     //   });
+//     // }
+//     const currentCycleVerificationsForSave =
+//       media.agreementDocVerification.filter(
+//         (h) =>
+//           h.isVerified && isSameCycle(h.cycle, currentCycleForVerification),
+//       );
+
+//     // ✅ "2 verified is enough" rule — same as verifyAgreementDoc.
+//     // Count DISTINCT roles that verified this cycle (dedupe defensively,
+//     // in case of any legacy duplicate records).
+//     const verifiedRolesThisCycle = new Set(
+//       currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
+//     );
+//     const verifiedCountThisCycle = verifiedRolesThisCycle.size;
+
+//     const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
+
+//     // Allowed to save if EITHER:
+//     //   a) 2+ distinct roles have already verified this cycle (quorum met —
+//     //      the caller doesn't need to have personally verified), OR
+//     //   b) the caller's own role has verified this cycle
+//     const canProceedToSave =
+//       verifiedCountThisCycle >= 2 || hasVerifiedThisCycle;
+
+//     if (!canProceedToSave) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
+//       });
+//     }
+//     // Most recently created entry that hasn't been fully approved yet.
+//     const pendingEntry = [...media.rentalDueEntries]
+//       .reverse()
+//       .find((e) => e.approvalStatus !== 3);
+
+//     // ── Current cycle = the billing date this request is acting against ──
+//     const currentCycleDate = media.rentalPayment?.nextBillingDate
+//       ? new Date(media.rentalPayment.nextBillingDate).getTime()
+//       : null;
+
+//     // ── SELF-CONTAINED GUARD — doesn't depend on any external helper.
+//     // Checks the actual entries array: has ANY entry for this exact
+//     // billing cycle (same dueDate) already been fully approved (status
+//     // === 3) by the Owner? If yes, block — regardless of what
+//     // agreementDocVerified.owner currently says. ──
+//     const ownerAlreadyClosedThisCycle = media.rentalDueEntries.some((e) => {
+//       if (e.status !== 3) return false;
+//       if (!currentCycleDate || !e.dueDate) return false;
+//       if (new Date(e.dueDate).getTime() !== currentCycleDate) return false;
+//       // final approver was Owner for this entry
+//       const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
+//       return ownerStep?.status === 2;
+//     });
+
+//     if (userType === ROLE.OWNER && ownerAlreadyClosedThisCycle) {
+//       return res.status(400).json({
+//         success: false,
+//         message:
+//           "Owner has already approved this document for the current cycle",
+//       });
+//     }
+
+//     // ═══════════════════════════════════════
+//     // BRANCH 1: pending entry exists → this call is an APPROVAL
+//     // ═══════════════════════════════════════
+//     if (pendingEntry) {
+//       const entry = pendingEntry;
+//       const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
+//       const isOwnerOverride =
+//         userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
+
+//       if (!isOwnerOverride && userType !== entry.currentPendingRole) {
+//         return res.status(403).json({
+//           success: false,
+//           message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
+//         });
+//       }
+
+//       if (isOwnerOverride) {
+//         entry.approvalSteps.forEach((step) => {
+//           if (step.status !== 1) return;
+//           if (step.role === ROLE.OWNER) {
+//             step.status = 2;
+//             step.userId = userId;
+//             step.userName = userName;
+//             step.approvedAt = nowIST();
+//             step.docVerified = true;
+//             step.remarks = "Direct owner approval";
+//           } else {
+//             step.status = 3;
+//             step.remarks = "Skipped — owner approved directly";
+//           }
+//         });
+//         entry.approvalStatus = 3;
+//         entry.status = 3;
+//         entry.currentPendingRole = null;
+//         entry.agreementDocVerified = true;
+//         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
+
+//         markRoleVerified(media, entry, ROLE.OWNER, userName);
+//         advanceRentalPaymentOnOwnerApproval(media);
+
+//         // ✅ redundant safety reset — guarantees the live flags are
+//         // false for the NEW cycle even if advanceRentalPaymentOnOwnerApproval
+//         // doesn't do it correctly internally.
+//         media.agreementDocVerified = {
+//           staff: false,
+//           teamLead: false,
+//           owner: false,
+//         };
+//         media.markModified("agreementDocVerified");
+//       } else {
+//         const step = entry.approvalSteps.find(
+//           (s) => s.role === userType && s.status === 1,
+//         );
+//         if (!step) {
+//           return res.status(400).json({
+//             success: false,
+//             message: "No pending step found for your role",
+//           });
+//         }
+//         step.status = 2;
+//         step.userId = userId;
+//         step.userName = userName;
+//         step.approvedAt = nowIST();
+//         step.docVerified = true;
+//         media.rentalStatus = RENTAL_STATUS_MAP[userType];
+
+//         markRoleVerified(media, entry, userType, userName);
+
+//         const roleIndex = chain.indexOf(userType);
+//         const nextRole = chain[roleIndex + 1];
+
+//         if (nextRole) {
+//           entry.currentPendingRole = nextRole;
+//           entry.approvalStatus = 2;
+//           entry.status = 2;
+//         } else {
+//           entry.currentPendingRole = null;
+//           entry.approvalStatus = 3;
+//           entry.status = 3;
+//           entry.agreementDocVerified = true;
+
+//           if (userType === ROLE.OWNER) {
+//             advanceRentalPaymentOnOwnerApproval(media);
+
+//             // ✅ redundant safety reset — same as above
+//             media.agreementDocVerified = {
+//               staff: false,
+//               teamLead: false,
+//               owner: false,
+//             };
+//             media.markModified("agreementDocVerified");
+//           }
+//         }
+//       }
+
+//       entry.updatedBy = userName;
+//       entry.updatedAt = nowIST();
+
+//       const yearLabel = getYearLabel(entry.dueDate);
+//       const monthLabel = getMonthLabel(entry.dueDate);
+//       const yearBucket = media.rentalDueHistory.find(
+//         (y) => y.year === yearLabel,
+//       );
+//       const monthBucket = yearBucket?.months.find(
+//         (m) => m.month === monthLabel,
+//       );
+//       const historyRecord = monthBucket?.entries.find(
+//         (e) => String(e.rentalDueId) === String(entry._id),
+//       );
+//       if (historyRecord) {
+//         historyRecord.approvalStatus = entry.approvalStatus;
+//         historyRecord.updatedAt = nowIST();
+//         historyRecord.updatedBy = userName;
+//       }
+
+//       media.updatedBy = userName;
+//       media.updatedAt = nowIST();
+//       await media.save();
+
+//       return res.status(200).json({
+//         success: true,
+//         message: isOwnerOverride
+//           ? "Approved directly by Owner"
+//           : `${ROLE_LABEL[userType]} approval recorded`,
+//         data: {
+//           mediaId: media._id,
+//           rentalDueId: entry._id,
+//           approvalSteps: entry.approvalSteps,
+//           approvalStatus: entry.approvalStatus,
+//           currentPendingRole: entry.currentPendingRole,
+//           currentPendingRoleLabel: entry.currentPendingRole
+//             ? ROLE_LABEL[entry.currentPendingRole]
+//             : "Completed",
+//           rentalStatus: media.rentalStatus,
+//           agreementDocVerified: media.agreementDocVerified,
+//           agreementDocVerificationHistory:
+//             media.agreementDocVerificationHistory,
+//           agreementDocVerificationStatus: getAgreementVerificationStatus(media),
+//           rentalPayment: media.rentalPayment,
+//         },
+//       });
+//     }
+
+//     // ═══════════════════════════════════════
+//     // BRANCH 2: no pending entry → CREATE (opens a new cycle)
+//     // ═══════════════════════════════════════
+//     if (!campaignName) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "campaignName is required" });
+//     }
+
+//     // ✅ Extra guard specifically for the CREATE + Owner-override path —
+//     // even if two requests race and both pass the pendingEntry check above
+//     // (both read before either saved), this catches an owner trying to
+//     // create-and-approve a SECOND entry for a dueDate that already has a
+//     // fully-approved-by-owner entry sitting in rentalDueEntries.
+//     if (userType === ROLE.OWNER) {
+//       const dueDateObjPreCheck = media.rentalPayment?.nextBillingDate
+//         ? new Date(media.rentalPayment.nextBillingDate)
+//         : new Date();
+//       const alreadyClosed = media.rentalDueEntries.some((e) => {
+//         if (e.status !== 3 || !e.dueDate) return false;
+//         if (new Date(e.dueDate).getTime() !== dueDateObjPreCheck.getTime())
+//           return false;
+//         const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
+//         return ownerStep?.status === 2;
+//       });
+//       if (alreadyClosed) {
+//         return res.status(400).json({
+//           success: false,
+//           message:
+//             "Owner has already approved this document for the current cycle",
+//         });
+//       }
+//     }
+
+//     // let proofOfCampaign = null;
+//     // if (req.file) {
+//     //   if (!req.file.mimetype?.startsWith("image/")) {
+//     //     return res.status(400).json({
+//     //       success: false,
+//     //       message: "Proof of campaign must be an image file",
+//     //     });
+//     //   }
+//     //   proofOfCampaign = {
+//     //     originalName: req.file.originalname,
+//     //     fileName: req.file.filename,
+//     //     filePath: req.file.path,
+//     //     mimeType: req.file.mimetype,
+//     //     size: req.file.size,
+//     //     fileType: "image",
+//     //     uploadedAt: nowIST(),
+//     //   };
+//     // }
+//     let proofOfCampaign = null;
+//     if (req.files?.proofOfCampaign?.[0]) {
+//       const file = req.files.proofOfCampaign[0];
+//       if (!file.mimetype?.startsWith("image/")) {
+//         return res.status(400).json({
+//           success: false,
+//           message: "Proof of campaign must be an image file",
+//         });
+//       }
+//       proofOfCampaign = req.processFile(file);
+//     }
+//     const dueDateObj = media.rentalPayment?.nextBillingDate
+//       ? new Date(media.rentalPayment.nextBillingDate)
+//       : new Date();
+
+//     const chainSteps = buildApprovalSteps(2);
+//     const steps = [
+//       {
+//         role: ROLE.STAFF,
+//         userId: null,
+//         userName: "",
+//         approvedAt: null,
+//         status: 1,
+//         docVerified: false,
+//         remarks: "",
+//       },
+//       ...chainSteps,
+//     ];
+
+//     const isOwnerOverride = userType === ROLE.OWNER;
+//     const isTeamLeadCreating = userType === ROLE.TEAM_LEAD;
+//     const staffStep = steps.find((s) => s.role === ROLE.STAFF);
+
+//     if (isOwnerOverride) {
+//       steps.forEach((step) => {
+//         if (step.role === ROLE.OWNER) {
+//           step.status = 2;
+//           step.userId = userId;
+//           step.userName = userName;
+//           step.approvedAt = nowIST();
+//           step.docVerified = true;
+//           step.remarks = "Direct owner approval";
+//         } else {
+//           step.status = 3;
+//           step.remarks = "Skipped — owner approved directly";
+//         }
+//       });
+//     } else if (isTeamLeadCreating) {
+//       staffStep.status = 3;
+//       staffStep.remarks = "Skipped — created directly by Team Lead";
+
+//       const teamLeadStep = steps.find((s) => s.role === ROLE.TEAM_LEAD);
+//       teamLeadStep.status = 2;
+//       teamLeadStep.userId = userId;
+//       teamLeadStep.userName = userName;
+//       teamLeadStep.approvedAt = nowIST();
+//       teamLeadStep.docVerified = true;
+//       teamLeadStep.remarks = "Created and approved by Team Lead";
+//     } else {
+//       staffStep.status = 2;
+//       staffStep.userId = userId;
+//       staffStep.userName = userName;
+//       staffStep.approvedAt = nowIST();
+//       staffStep.docVerified = false;
+//       staffStep.remarks = "Entry created by Staff";
+//     }
+
+//     const nextPendingStep = steps.find((s) => s.status === 1);
+//     const allApproved = !nextPendingStep;
+
+//     const newEntry = {
+//       dueMonth: getDueMonthLabel(dueDateObj),
+//       dueDate: dueDateObj,
+//       netPayable: media.rentalPayment?.netPayable || 0,
+//       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
+//       campaignName,
+//       proofOfCampaign,
+//       savedBy: { userId, userName, role: userType, savedAt: nowIST() },
+//       approvalFlow: 2,
+//       approvalSteps: steps,
+//       approvalStatus: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
+//       currentPendingRole: nextPendingStep ? nextPendingStep.role : null,
+//       agreementDocVerified: allApproved,
+//       status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
+//       updatedBy: userName,
+//       updatedAt: nowIST(),
+//     };
+//     media.rentalStatus = RENTAL_STATUS_MAP[userType];
+
+//     media.rentalDueEntries.push(newEntry);
+//     const savedEntry =
+//       media.rentalDueEntries[media.rentalDueEntries.length - 1];
+
+//     if (isOwnerOverride) {
+//       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
+//     } else if (isTeamLeadCreating) {
+//       markRoleVerified(media, savedEntry, ROLE.TEAM_LEAD, userName);
+//     }
+
+//     if (isOwnerOverride) {
+//       advanceRentalPaymentOnOwnerApproval(media);
+
+//       // ✅ redundant safety reset — guarantees flags are false for the
+//       // NEW cycle that was just opened
+//       media.agreementDocVerified = {
+//         staff: false,
+//         teamLead: false,
+//         owner: false,
+//       };
+//       media.markModified("agreementDocVerified");
+//     }
+
+//     const yearLabel = getYearLabel(dueDateObj);
+//     const monthLabel = getMonthLabel(dueDateObj);
+
+//     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+//     if (!yearBucket) {
+//       media.rentalDueHistory.push({ year: yearLabel, months: [] });
+//       yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
+//     }
+//     let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
+//     if (!monthBucket) {
+//       yearBucket.months.push({ month: monthLabel, entries: [] });
+//       monthBucket = yearBucket.months[yearBucket.months.length - 1];
+//     }
+//     monthBucket.entries.push({
+//       rentalDueId: savedEntry._id,
+//       siteName: media.mediaName,
+//       campaignName,
+//       dueDate: dueDateObj,
+//       netPayable: media.rentalPayment?.netPayable || 0,
+//       approvalStatus: newEntry.approvalStatus,
+//       savedBy: userName,
+//       savedByRole: userType,
+//       updatedAt: nowIST(),
+//       updatedBy: userName,
+//     });
+
+//     media.updatedBy = userName;
+//     media.updatedAt = nowIST();
+//     await media.save();
+
+//     return res.status(201).json({
+//       success: true,
+//       message: isOwnerOverride
+//         ? "Rental due entry created and approved directly by Owner"
+//         : isTeamLeadCreating
+//           ? "Rental due entry created and approved by Team Lead — waiting on Owner approval"
+//           : "Rental due entry saved — waiting on Team Lead approval",
+//       data: {
+//         rentalDueId: savedEntry._id,
+//         mediaId: media._id,
+//         mediaName: media.mediaName,
+//         campaignName,
+//         proofOfCampaign,
+//         dueDate: dueDateObj,
+//         netPayable: newEntry.netPayable,
+//         savedBy: {
+//           userId,
+//           userName,
+//           role: userType,
+//           roleLabel: ROLE_LABEL[userType] || "",
+//         },
+//         approvalSteps: steps,
+//         approvalStatus: newEntry.approvalStatus,
+//         currentPendingRole: newEntry.currentPendingRole,
+//         currentPendingRoleLabel: newEntry.currentPendingRole
+//           ? ROLE_LABEL[newEntry.currentPendingRole]
+//           : "Completed",
+//         rentalStatus: media.rentalStatus,
+//         agreementDocVerified: media.agreementDocVerified,
+//         agreementDocVerificationHistory: media.agreementDocVerificationHistory,
+//         agreementDocVerificationStatus: getAgreementVerificationStatus(media),
+//         rentalPayment: media.rentalPayment,
+//       },
+//     });
+//   } catch (err) {
+//     return res
+//       .status(500)
+//       .json({ success: false, message: "Server error", error: err.message });
+//   }
+// };
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
-    const { mediaId, campaignName } = req.body;
+    const { mediaId, campaignName, withGst } = req.body; // ✅ withGst added
 
     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
       return res
@@ -160,8 +728,6 @@ exports.saveRentalDue = async (req, res) => {
         .json({ success: false, message: "Media not found" });
     }
 
-    // Defensive init — older docs saved before this migration may not
-    // have these fields yet.
     if (!media.agreementDocVerified) {
       media.agreementDocVerified = {
         staff: false,
@@ -183,21 +749,11 @@ exports.saveRentalDue = async (req, res) => {
     if (!Array.isArray(media.agreementDocVerification)) {
       media.agreementDocVerification = [];
     }
+    // ✅ defensive init for the new GST balance field on older docs
+    if (media.rentalPayment && media.rentalPayment.balanceGstAmount == null) {
+      media.rentalPayment.balanceGstAmount = 0;
+    }
 
-    // ══════════════════════════════════════════════════════════════
-    // 🔒 NEW GUARD — "verify first, then save"
-    // The caller's role must have already verified the agreement
-    // document (via verifyAgreementDoc) for the CURRENT billing
-    // cycle before they're allowed to create OR approve a rental
-    // due entry. This applies identically to Staff, Team Lead and
-    // Owner, and to both branches below (approval + create), since
-    // it's checked before the branch split.
-    //
-    // Reuses the exact same cycle-matching logic as verifyAgreementDoc
-    // (getCurrentCycle + isSameCycle via getTime comparison) so the
-    // "current cycle" here always matches the one verification was
-    // recorded against — no drift between the two endpoints.
-    // ══════════════════════════════════════════════════════════════
     const currentCycleForVerification = getCurrentCycle(
       media.rentalPayment?.nextBillingDate,
     );
@@ -216,39 +772,18 @@ exports.saveRentalDue = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    // const hasVerifiedThisCycle = media.agreementDocVerification.some(
-    //   (h) =>
-    //     h.isVerified &&
-    //     h.verifiedByRole === userType &&
-    //     isSameCycle(h.cycle, currentCycleForVerification),
-    // );
-
-    // if (!hasVerifiedThisCycle) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
-    //   });
-    // }
     const currentCycleVerificationsForSave =
       media.agreementDocVerification.filter(
         (h) =>
           h.isVerified && isSameCycle(h.cycle, currentCycleForVerification),
       );
 
-    // ✅ "2 verified is enough" rule — same as verifyAgreementDoc.
-    // Count DISTINCT roles that verified this cycle (dedupe defensively,
-    // in case of any legacy duplicate records).
     const verifiedRolesThisCycle = new Set(
       currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
     );
     const verifiedCountThisCycle = verifiedRolesThisCycle.size;
-
     const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
 
-    // Allowed to save if EITHER:
-    //   a) 2+ distinct roles have already verified this cycle (quorum met —
-    //      the caller doesn't need to have personally verified), OR
-    //   b) the caller's own role has verified this cycle
     const canProceedToSave =
       verifiedCountThisCycle >= 2 || hasVerifiedThisCycle;
 
@@ -258,26 +793,19 @@ exports.saveRentalDue = async (req, res) => {
         message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
       });
     }
-    // Most recently created entry that hasn't been fully approved yet.
+
     const pendingEntry = [...media.rentalDueEntries]
       .reverse()
       .find((e) => e.approvalStatus !== 3);
 
-    // ── Current cycle = the billing date this request is acting against ──
     const currentCycleDate = media.rentalPayment?.nextBillingDate
       ? new Date(media.rentalPayment.nextBillingDate).getTime()
       : null;
 
-    // ── SELF-CONTAINED GUARD — doesn't depend on any external helper.
-    // Checks the actual entries array: has ANY entry for this exact
-    // billing cycle (same dueDate) already been fully approved (status
-    // === 3) by the Owner? If yes, block — regardless of what
-    // agreementDocVerified.owner currently says. ──
     const ownerAlreadyClosedThisCycle = media.rentalDueEntries.some((e) => {
       if (e.status !== 3) return false;
       if (!currentCycleDate || !e.dueDate) return false;
       if (new Date(e.dueDate).getTime() !== currentCycleDate) return false;
-      // final approver was Owner for this entry
       const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
       return ownerStep?.status === 2;
     });
@@ -328,11 +856,14 @@ exports.saveRentalDue = async (req, res) => {
         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
 
         markRoleVerified(media, entry, ROLE.OWNER, userName);
+
+        // ✅ NEW — cycle is closing now: add this entry's GST (if
+        // withGst === 1) to the running balance BEFORE the billing
+        // date rolls forward.
+        addGstToBalanceIfApplicable(media, entry);
+
         advanceRentalPaymentOnOwnerApproval(media);
 
-        // ✅ redundant safety reset — guarantees the live flags are
-        // false for the NEW cycle even if advanceRentalPaymentOnOwnerApproval
-        // doesn't do it correctly internally.
         media.agreementDocVerified = {
           staff: false,
           teamLead: false,
@@ -372,9 +903,12 @@ exports.saveRentalDue = async (req, res) => {
           entry.agreementDocVerified = true;
 
           if (userType === ROLE.OWNER) {
+            // ✅ NEW — same GST balance update for the normal-chain
+            // final-step-by-Owner completion path.
+            addGstToBalanceIfApplicable(media, entry);
+
             advanceRentalPaymentOnOwnerApproval(media);
 
-            // ✅ redundant safety reset — same as above
             media.agreementDocVerified = {
               staff: false,
               teamLead: false,
@@ -424,6 +958,11 @@ exports.saveRentalDue = async (req, res) => {
             ? ROLE_LABEL[entry.currentPendingRole]
             : "Completed",
           rentalStatus: media.rentalStatus,
+          withGst: entry.withGst, // ✅ added
+          gstAmount: entry.gstAmount, // ✅ added
+          baseAmount: entry.baseAmount, // ✅ added
+          netPayable: entry.netPayable,
+          balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0, // ✅ added
           agreementDocVerified: media.agreementDocVerified,
           agreementDocVerificationHistory:
             media.agreementDocVerificationHistory,
@@ -442,11 +981,6 @@ exports.saveRentalDue = async (req, res) => {
         .json({ success: false, message: "campaignName is required" });
     }
 
-    // ✅ Extra guard specifically for the CREATE + Owner-override path —
-    // even if two requests race and both pass the pendingEntry check above
-    // (both read before either saved), this catches an owner trying to
-    // create-and-approve a SECOND entry for a dueDate that already has a
-    // fully-approved-by-owner entry sitting in rentalDueEntries.
     if (userType === ROLE.OWNER) {
       const dueDateObjPreCheck = media.rentalPayment?.nextBillingDate
         ? new Date(media.rentalPayment.nextBillingDate)
@@ -467,24 +1001,6 @@ exports.saveRentalDue = async (req, res) => {
       }
     }
 
-    // let proofOfCampaign = null;
-    // if (req.file) {
-    //   if (!req.file.mimetype?.startsWith("image/")) {
-    //     return res.status(400).json({
-    //       success: false,
-    //       message: "Proof of campaign must be an image file",
-    //     });
-    //   }
-    //   proofOfCampaign = {
-    //     originalName: req.file.originalname,
-    //     fileName: req.file.filename,
-    //     filePath: req.file.path,
-    //     mimeType: req.file.mimetype,
-    //     size: req.file.size,
-    //     fileType: "image",
-    //     uploadedAt: nowIST(),
-    //   };
-    // }
     let proofOfCampaign = null;
     if (req.files?.proofOfCampaign?.[0]) {
       const file = req.files.proofOfCampaign[0];
@@ -496,6 +1012,7 @@ exports.saveRentalDue = async (req, res) => {
       }
       proofOfCampaign = req.processFile(file);
     }
+
     const dueDateObj = media.rentalPayment?.nextBillingDate
       ? new Date(media.rentalPayment.nextBillingDate)
       : new Date();
@@ -555,10 +1072,17 @@ exports.saveRentalDue = async (req, res) => {
     const nextPendingStep = steps.find((s) => s.status === 1);
     const allApproved = !nextPendingStep;
 
+    // ✅ NEW — resolve withGst mode for this entry (default to 1 /
+    // With GST if not provided or invalid)
+    const resolvedWithGst = [1, 2].includes(Number(withGst))
+      ? Number(withGst)
+      : 1;
+    const gstSplit = computeGstSplit(media, resolvedWithGst);
+
     const newEntry = {
       dueMonth: getDueMonthLabel(dueDateObj),
       dueDate: dueDateObj,
-      netPayable: media.rentalPayment?.netPayable || 0,
+      netPayable: gstSplit.netPayable, // ✅ changed — base-only if withGst===1
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
       campaignName,
       proofOfCampaign,
@@ -569,6 +1093,9 @@ exports.saveRentalDue = async (req, res) => {
       currentPendingRole: nextPendingStep ? nextPendingStep.role : null,
       agreementDocVerified: allApproved,
       status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
+      withGst: resolvedWithGst, // ✅ added
+      gstAmount: gstSplit.gstAmount, // ✅ added
+      baseAmount: gstSplit.baseAmount, // ✅ added
       updatedBy: userName,
       updatedAt: nowIST(),
     };
@@ -585,10 +1112,12 @@ exports.saveRentalDue = async (req, res) => {
     }
 
     if (isOwnerOverride) {
+      // ✅ NEW — Owner created AND fully approved directly, so the cycle
+      // closes right here too: add GST to balance before rolling dates.
+      addGstToBalanceIfApplicable(media, savedEntry);
+
       advanceRentalPaymentOnOwnerApproval(media);
 
-      // ✅ redundant safety reset — guarantees flags are false for the
-      // NEW cycle that was just opened
       media.agreementDocVerified = {
         staff: false,
         teamLead: false,
@@ -615,7 +1144,7 @@ exports.saveRentalDue = async (req, res) => {
       siteName: media.mediaName,
       campaignName,
       dueDate: dueDateObj,
-      netPayable: media.rentalPayment?.netPayable || 0,
+      netPayable: newEntry.netPayable,
       approvalStatus: newEntry.approvalStatus,
       savedBy: userName,
       savedByRole: userType,
@@ -642,6 +1171,10 @@ exports.saveRentalDue = async (req, res) => {
         proofOfCampaign,
         dueDate: dueDateObj,
         netPayable: newEntry.netPayable,
+        withGst: newEntry.withGst, // ✅ added
+        gstAmount: newEntry.gstAmount, // ✅ added
+        baseAmount: newEntry.baseAmount, // ✅ added
+        balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0, // ✅ added
         savedBy: {
           userId,
           userName,
@@ -667,7 +1200,6 @@ exports.saveRentalDue = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
-
 const ROLE_RANK = {
   [ROLE.STAFF]: 1,
   [ROLE.TEAM_LEAD]: 2,

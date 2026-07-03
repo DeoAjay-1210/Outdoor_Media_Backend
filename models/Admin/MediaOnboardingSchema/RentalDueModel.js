@@ -94,7 +94,16 @@ const rentalDueEntrySchema = new mongoose.Schema(
     dueDate: { type: Date, required: true }, // actual due date
 
     netPayable: { type: Number, default: 0, min: 0 },
+ withGst: { type: Number, enum: [1, 2], default: null },
 
+    // ✅ NEW — snapshot of the GST amount for THIS cycle (only relevant
+    // when withGst === 1). Stored on the entry itself so the historical
+    // record stays accurate even if rentalPayment.gstAmount changes later.
+    gstAmount: { type: Number, default: 0, min: 0 },
+
+    // ✅ NEW — snapshot of the base (pre-GST) amount actually billed to
+    // the client this cycle.
+    baseAmount: { type: Number, default: 0, min: 0 },
     paymentFrequency: {
       type: Number,
       enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y

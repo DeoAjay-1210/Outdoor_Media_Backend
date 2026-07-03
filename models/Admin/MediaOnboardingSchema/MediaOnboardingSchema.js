@@ -335,6 +335,12 @@ const MediaSchema = new mongoose.Schema(
         type: Number,
         default: 0,
       },
+      // ✅ NEW — running total of GST amounts collected across cycles where
+  // withGst === 1 (client billed base-only, GST held separately). This
+  // represents GST owed to the government that hasn't been remitted yet.
+  // Reduce this manually (via a separate "settle GST" action/endpoint)
+  // once the amount is actually paid to the government.
+  balanceGstAmount: { type: Number, default: 0, min: 0 },
       status: {
         type: Number,
         enum: [1, 2, 3], // 1=Active 2=Expire Zone 3=Expired
