@@ -57,7 +57,6 @@ function getAgreementVerificationStatus(item) {
   };
 }
 
-
 // const RENTAL_STATUS_MAP = {
 //   [ROLE.STAFF]: 1,
 //   [ROLE.TEAM_LEAD]: 2,
@@ -482,7 +481,7 @@ const RENTAL_STATUS_MAP = {
   [ROLE.TEAM_LEAD]: 2,
   [ROLE.OWNER]: 3,
 };
- 
+
 // paymentFrequency -> number of months to add
 const FREQUENCY_MONTHS_MAP = {
   1: 1, // 1 month
@@ -492,20 +491,20 @@ const FREQUENCY_MONTHS_MAP = {
   5: 12, // 1 year
   6: 24, // 2 years
 };
- 
+
 // Adds N months to a date, safely (handles month-end overflow)
 function addMonths(date, months) {
   const d = new Date(date);
   d.setMonth(d.getMonth() + months);
   return d;
 }
- 
+
 // Reset the live "current cycle" flags back to false/false/false.
 // Called the instant a cycle closes, so the next cycle starts clean.
 function resetLiveAgreementFlags(media) {
   media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
 }
- 
+
 // Push a permanent, immutable snapshot into the history log.
 // Deduped on (rentalDueId, role) so re-saves never create doubles.
 function pushVerificationHistory(media, entry, role, userName) {
@@ -514,7 +513,7 @@ function pushVerificationHistory(media, entry, role, userName) {
       String(v.rentalDueId) === String(entry._id) && v.verifiedByRole === role,
   );
   if (alreadyLogged) return;
- 
+
   media.agreementDocVerificationHistory.push({
     isVerified: true,
     verifiedBy: userName,
@@ -528,14 +527,14 @@ function pushVerificationHistory(media, entry, role, userName) {
     updatedBy: userName,
   });
 }
- 
+
 // Marks a role's live flag as verified for the CURRENT cycle and logs it
 // to permanent history in the same step.
 function markRoleVerified(media, entry, role, userName) {
   media.agreementDocVerified[ROLE_FLAG_KEY[role]] = true;
   pushVerificationHistory(media, entry, role, userName);
 }
- 
+
 // Rolls rentalPayment forward on final Owner approval, closes out the
 // current cycle's live flags, and resets them for the next cycle.
 // lastBillPaidDate = current nextBillingDate
@@ -544,20 +543,20 @@ function advanceRentalPaymentOnOwnerApproval(media) {
   const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
   const frequency = media.rentalPayment?.paymentFrequency;
   const monthsToAdd = FREQUENCY_MONTHS_MAP[frequency] || 1;
- 
+
   const baseDate = currentNextBillingDate
     ? new Date(currentNextBillingDate)
     : new Date();
- 
+
   media.rentalPayment.lastBillPaidDate = baseDate;
   media.rentalPayment.nextBillingDate = addMonths(baseDate, monthsToAdd);
- 
+
   // ✅ cycle is now closed — reset live flags so next month starts clean.
   // (History for this closing cycle was already logged via
   // markRoleVerified as each role approved, so nothing is lost.)
   resetLiveAgreementFlags(media);
 }
- 
+
 // Derives a quick verification status string from the live flags —
 // use this in place of any old getAgreementVerificationStatus(media)
 // helper that read off the removed agreementDocVerification array.
@@ -567,12 +566,12 @@ function getAgreementVerificationStatus(media) {
   if (f.staff || f.teamLead || f.owner) return "Partially Verified";
   return "Not Verified";
 }
- 
+
 // exports.saveRentalDue = async (req, res) => {
 //   try {
 //     const { userType, userId, userName } = req.user;
 //     const { mediaId, campaignName } = req.body;
- 
+
 //     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
 //       return res
 //         .status(400)
@@ -583,14 +582,14 @@ function getAgreementVerificationStatus(media) {
 //         .status(403)
 //         .json({ success: false, message: "Invalid or missing user role" });
 //     }
- 
+
 //     const media = await Media.findById(mediaId);
 //     if (!media) {
 //       return res
 //         .status(404)
 //         .json({ success: false, message: "Media not found" });
 //     }
- 
+
 //     // Defensive init — older docs saved before this migration may not
 //     // have these fields yet.
 //     if (!media.agreementDocVerified) {
@@ -610,7 +609,7 @@ function getAgreementVerificationStatus(media) {
 //     if (!Array.isArray(media.rentalDueHistory)) {
 //       media.rentalDueHistory = [];
 //     }
- 
+
 //     // Most recently created entry that hasn't been fully approved yet.
 //     // Because a closed cycle always ends at approvalStatus === 3, this
 //     // correctly returns nothing once the current cycle is fully approved,
@@ -618,7 +617,7 @@ function getAgreementVerificationStatus(media) {
 //     const pendingEntry = [...media.rentalDueEntries]
 //       .reverse()
 //       .find((e) => e.approvalStatus !== 3);
- 
+
 //     // ═══════════════════════════════════════
 //     // BRANCH 1: pending entry exists → this call is an APPROVAL
 //     // ═══════════════════════════════════════
@@ -627,14 +626,14 @@ function getAgreementVerificationStatus(media) {
 //       const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
 //       const isOwnerOverride =
 //         userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
- 
+
 //       if (!isOwnerOverride && userType !== entry.currentPendingRole) {
 //         return res.status(403).json({
 //           success: false,
 //           message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
 //         });
 //       }
- 
+
 //       if (isOwnerOverride) {
 //         entry.approvalSteps.forEach((step) => {
 //           if (step.status !== 1) return;
@@ -655,7 +654,7 @@ function getAgreementVerificationStatus(media) {
 //         entry.currentPendingRole = null;
 //         entry.agreementDocVerified = true;
 //         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
- 
+
 //         // log + close out the cycle (this also resets the live flags)
 //         markRoleVerified(media, entry, ROLE.OWNER, userName);
 //         advanceRentalPaymentOnOwnerApproval(media);
@@ -675,14 +674,14 @@ function getAgreementVerificationStatus(media) {
 //         step.approvedAt = nowIST();
 //         step.docVerified = true;
 //         media.rentalStatus = RENTAL_STATUS_MAP[userType];
- 
+
 //         // ✅ live flag + history for THIS role, every time — not just on
 //         // final approval. This is what was missing before.
 //         markRoleVerified(media, entry, userType, userName);
- 
+
 //         const roleIndex = chain.indexOf(userType);
 //         const nextRole = chain[roleIndex + 1];
- 
+
 //         if (nextRole) {
 //           entry.currentPendingRole = nextRole;
 //           entry.approvalStatus = 2;
@@ -692,7 +691,7 @@ function getAgreementVerificationStatus(media) {
 //           entry.approvalStatus = 3;
 //           entry.status = 3;
 //           entry.agreementDocVerified = true;
- 
+
 //           // Chain completed and the final approver was the Owner —
 //           // close out the cycle (rolls billing date + resets live flags)
 //           if (userType === ROLE.OWNER) {
@@ -700,10 +699,10 @@ function getAgreementVerificationStatus(media) {
 //           }
 //         }
 //       }
- 
+
 //       entry.updatedBy = userName;
 //       entry.updatedAt = nowIST();
- 
+
 //       const yearLabel = getYearLabel(entry.dueDate);
 //       const monthLabel = getMonthLabel(entry.dueDate);
 //       const yearBucket = media.rentalDueHistory.find(
@@ -720,11 +719,11 @@ function getAgreementVerificationStatus(media) {
 //         historyRecord.updatedAt = nowIST();
 //         historyRecord.updatedBy = userName;
 //       }
- 
+
 //       media.updatedBy = userName;
 //       media.updatedAt = nowIST();
 //       await media.save();
- 
+
 //       return res.status(200).json({
 //         success: true,
 //         message: isOwnerOverride
@@ -747,7 +746,7 @@ function getAgreementVerificationStatus(media) {
 //         },
 //       });
 //     }
- 
+
 //     // ═══════════════════════════════════════
 //     // BRANCH 2: no pending entry → CREATE (opens a new cycle)
 //     // ═══════════════════════════════════════
@@ -756,7 +755,7 @@ function getAgreementVerificationStatus(media) {
 //         .status(400)
 //         .json({ success: false, message: "campaignName is required" });
 //     }
- 
+
 //     let proofOfCampaign = null;
 //     if (req.file) {
 //       if (!req.file.mimetype?.startsWith("image/")) {
@@ -775,11 +774,11 @@ function getAgreementVerificationStatus(media) {
 //         uploadedAt: nowIST(),
 //       };
 //     }
- 
+
 //     const dueDateObj = media.rentalPayment?.nextBillingDate
 //       ? new Date(media.rentalPayment.nextBillingDate)
 //       : new Date();
- 
+
 //     const chainSteps = buildApprovalSteps(2);
 //     const steps = [
 //       {
@@ -793,11 +792,11 @@ function getAgreementVerificationStatus(media) {
 //       },
 //       ...chainSteps,
 //     ];
- 
+
 //     const isOwnerOverride = userType === ROLE.OWNER;
 //     const isTeamLeadCreating = userType === ROLE.TEAM_LEAD;
 //     const staffStep = steps.find((s) => s.role === ROLE.STAFF);
- 
+
 //     if (isOwnerOverride) {
 //       steps.forEach((step) => {
 //         if (step.role === ROLE.OWNER) {
@@ -815,7 +814,7 @@ function getAgreementVerificationStatus(media) {
 //     } else if (isTeamLeadCreating) {
 //       staffStep.status = 3;
 //       staffStep.remarks = "Skipped — created directly by Team Lead";
- 
+
 //       const teamLeadStep = steps.find((s) => s.role === ROLE.TEAM_LEAD);
 //       teamLeadStep.status = 2;
 //       teamLeadStep.userId = userId;
@@ -831,10 +830,10 @@ function getAgreementVerificationStatus(media) {
 //       staffStep.docVerified = false;
 //       staffStep.remarks = "Entry created by Staff";
 //     }
- 
+
 //     const nextPendingStep = steps.find((s) => s.status === 1);
 //     const allApproved = !nextPendingStep;
- 
+
 //     const newEntry = {
 //       dueMonth: getDueMonthLabel(dueDateObj),
 //       dueDate: dueDateObj,
@@ -853,10 +852,10 @@ function getAgreementVerificationStatus(media) {
 //       updatedAt: nowIST(),
 //     };
 //     media.rentalStatus = RENTAL_STATUS_MAP[userType];
- 
+
 //     media.rentalDueEntries.push(newEntry);
 //     const savedEntry = media.rentalDueEntries[media.rentalDueEntries.length - 1];
- 
+
 //     // ✅ live flags + history for whichever role(s) just approved on creation
 //     if (isOwnerOverride) {
 //       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
@@ -865,16 +864,16 @@ function getAgreementVerificationStatus(media) {
 //     }
 //     // plain Staff creation leaves all flags false — correct, nobody has
 //     // verified anything yet.
- 
+
 //     // Owner created AND fully approved it directly — roll billing date
 //     // forward and reset the live flags for the cycle after this one.
 //     if (isOwnerOverride) {
 //       advanceRentalPaymentOnOwnerApproval(media);
 //     }
- 
+
 //     const yearLabel = getYearLabel(dueDateObj);
 //     const monthLabel = getMonthLabel(dueDateObj);
- 
+
 //     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
 //     if (!yearBucket) {
 //       media.rentalDueHistory.push({ year: yearLabel, months: [] });
@@ -897,11 +896,11 @@ function getAgreementVerificationStatus(media) {
 //       updatedAt: nowIST(),
 //       updatedBy: userName,
 //     });
- 
+
 //     media.updatedBy = userName;
 //     media.updatedAt = nowIST();
 //     await media.save();
- 
+
 //     return res.status(201).json({
 //       success: true,
 //       message: isOwnerOverride
@@ -948,7 +947,6 @@ function getAgreementVerificationStatus(media) {
 //   [ROLE.TEAM_LEAD]: 2,
 //   [ROLE.OWNER]: 3,
 // };
-
 
 // exports.verifyAgreementDoc = async (req, res) => {
 //   try {
@@ -1223,7 +1221,11 @@ exports.saveRentalDue = async (req, res) => {
     // Defensive init — older docs saved before this migration may not
     // have these fields yet.
     if (!media.agreementDocVerified) {
-      media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
+      media.agreementDocVerified = {
+        staff: false,
+        teamLead: false,
+        owner: false,
+      };
     }
     if (!media.agreementDocVerificationHistory) {
       media.agreementDocVerificationHistory = [];
@@ -1272,20 +1274,48 @@ exports.saveRentalDue = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    const hasVerifiedThisCycle = media.agreementDocVerification.some(
-      (h) =>
-        h.isVerified &&
-        h.verifiedByRole === userType &&
-        isSameCycle(h.cycle, currentCycleForVerification),
-    );
+    // const hasVerifiedThisCycle = media.agreementDocVerification.some(
+    //   (h) =>
+    //     h.isVerified &&
+    //     h.verifiedByRole === userType &&
+    //     isSameCycle(h.cycle, currentCycleForVerification),
+    // );
 
-    if (!hasVerifiedThisCycle) {
+    // if (!hasVerifiedThisCycle) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
+    //   });
+    // }
+    const currentCycleVerificationsForSave =
+      media.agreementDocVerification.filter(
+        (h) =>
+          h.isVerified && isSameCycle(h.cycle, currentCycleForVerification),
+      );
+
+    // ✅ "2 verified is enough" rule — same as verifyAgreementDoc.
+    // Count DISTINCT roles that verified this cycle (dedupe defensively,
+    // in case of any legacy duplicate records).
+    const verifiedRolesThisCycle = new Set(
+      currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
+    );
+    const verifiedCountThisCycle = verifiedRolesThisCycle.size;
+
+    const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
+
+    // Allowed to save if EITHER:
+    //   a) 2+ distinct roles have already verified this cycle (quorum met —
+    //      the caller doesn't need to have personally verified), OR
+    //   b) the caller's own role has verified this cycle
+    const canProceedToSave =
+      verifiedCountThisCycle >= 2 || hasVerifiedThisCycle;
+
+    if (!canProceedToSave) {
       return res.status(400).json({
         success: false,
         message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
       });
     }
-
     // Most recently created entry that hasn't been fully approved yet.
     const pendingEntry = [...media.rentalDueEntries]
       .reverse()
@@ -1313,7 +1343,8 @@ exports.saveRentalDue = async (req, res) => {
     if (userType === ROLE.OWNER && ownerAlreadyClosedThisCycle) {
       return res.status(400).json({
         success: false,
-        message: "Owner has already approved this document for the current cycle",
+        message:
+          "Owner has already approved this document for the current cycle",
       });
     }
 
@@ -1360,7 +1391,11 @@ exports.saveRentalDue = async (req, res) => {
         // ✅ redundant safety reset — guarantees the live flags are
         // false for the NEW cycle even if advanceRentalPaymentOnOwnerApproval
         // doesn't do it correctly internally.
-        media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
+        media.agreementDocVerified = {
+          staff: false,
+          teamLead: false,
+          owner: false,
+        };
         media.markModified("agreementDocVerified");
       } else {
         const step = entry.approvalSteps.find(
@@ -1398,7 +1433,11 @@ exports.saveRentalDue = async (req, res) => {
             advanceRentalPaymentOnOwnerApproval(media);
 
             // ✅ redundant safety reset — same as above
-            media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
+            media.agreementDocVerified = {
+              staff: false,
+              teamLead: false,
+              owner: false,
+            };
             media.markModified("agreementDocVerified");
           }
         }
@@ -1444,7 +1483,8 @@ exports.saveRentalDue = async (req, res) => {
             : "Completed",
           rentalStatus: media.rentalStatus,
           agreementDocVerified: media.agreementDocVerified,
-          agreementDocVerificationHistory: media.agreementDocVerificationHistory,
+          agreementDocVerificationHistory:
+            media.agreementDocVerificationHistory,
           agreementDocVerificationStatus: getAgreementVerificationStatus(media),
           rentalPayment: media.rentalPayment,
         },
@@ -1471,14 +1511,16 @@ exports.saveRentalDue = async (req, res) => {
         : new Date();
       const alreadyClosed = media.rentalDueEntries.some((e) => {
         if (e.status !== 3 || !e.dueDate) return false;
-        if (new Date(e.dueDate).getTime() !== dueDateObjPreCheck.getTime()) return false;
+        if (new Date(e.dueDate).getTime() !== dueDateObjPreCheck.getTime())
+          return false;
         const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
         return ownerStep?.status === 2;
       });
       if (alreadyClosed) {
         return res.status(400).json({
           success: false,
-          message: "Owner has already approved this document for the current cycle",
+          message:
+            "Owner has already approved this document for the current cycle",
         });
       }
     }
@@ -1501,17 +1543,17 @@ exports.saveRentalDue = async (req, res) => {
     //     uploadedAt: nowIST(),
     //   };
     // }
-let proofOfCampaign = null;
-if (req.files?.proofOfCampaign?.[0]) {
-  const file = req.files.proofOfCampaign[0];
-  if (!file.mimetype?.startsWith("image/")) {
-    return res.status(400).json({
-      success: false,
-      message: "Proof of campaign must be an image file",
-    });
-  }
-  proofOfCampaign = req.processFile(file);
-}
+    let proofOfCampaign = null;
+    if (req.files?.proofOfCampaign?.[0]) {
+      const file = req.files.proofOfCampaign[0];
+      if (!file.mimetype?.startsWith("image/")) {
+        return res.status(400).json({
+          success: false,
+          message: "Proof of campaign must be an image file",
+        });
+      }
+      proofOfCampaign = req.processFile(file);
+    }
     const dueDateObj = media.rentalPayment?.nextBillingDate
       ? new Date(media.rentalPayment.nextBillingDate)
       : new Date();
@@ -1591,7 +1633,8 @@ if (req.files?.proofOfCampaign?.[0]) {
     media.rentalStatus = RENTAL_STATUS_MAP[userType];
 
     media.rentalDueEntries.push(newEntry);
-    const savedEntry = media.rentalDueEntries[media.rentalDueEntries.length - 1];
+    const savedEntry =
+      media.rentalDueEntries[media.rentalDueEntries.length - 1];
 
     if (isOwnerOverride) {
       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
@@ -1604,7 +1647,11 @@ if (req.files?.proofOfCampaign?.[0]) {
 
       // ✅ redundant safety reset — guarantees flags are false for the
       // NEW cycle that was just opened
-      media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
+      media.agreementDocVerified = {
+        staff: false,
+        teamLead: false,
+        owner: false,
+      };
       media.markModified("agreementDocVerified");
     }
 
@@ -1678,12 +1725,564 @@ if (req.files?.proofOfCampaign?.[0]) {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
+// const ROLE_RANK = {
+//   [ROLE.STAFF]: 1,
+//   [ROLE.TEAM_LEAD]: 2,
+//   [ROLE.OWNER]: 3,
+// };
+
+// exports.verifyAgreementDoc = async (req, res) => {
+//   try {
+//     const { mediaId } = req.body;
+//     const { userType, userName } = req.user;
+
+//     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "A valid mediaId is required" });
+//     }
+
+//     let media = await Media.findById(mediaId);
+//     if (!media) {
+//       return res
+//         .status(404)
+//         .json({ success: false, message: "Media not found" });
+//     }
+
+//     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
+//       return res
+//         .status(403)
+//         .json({ success: false, message: "Invalid or missing user role" });
+//     }
+
+//     // ── Get current cycle from nextBillingDate ──
+//     const currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
+
+//     if (!currentCycle) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Unable to determine current billing cycle"
+//       });
+//     }
+
+//     // ── Safe cycle comparison ──
+//     // IMPORTANT: `h.cycle` and `currentCycle` are Date values. Comparing
+//     // them with strict equality (===) compares object references, NOT the
+//     // actual date/time — two Date objects for the exact same moment are
+//     // never === equal. Always compare via getTime() (or a normalized string).
+//     const isSameCycle = (a, b) => {
+//       if (!a || !b) return false;
+//       const t1 = new Date(a).getTime();
+//       const t2 = new Date(b).getTime();
+//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+//     };
+
+//     // ── Get all verifications for the current cycle ──
+//     const currentCycleVerifications = media.agreementDocVerification.filter(
+//       h => h.isVerified && isSameCycle(h.cycle, currentCycle)
+//     );
+
+//     // ── Check verification status of each role in current cycle ──
+//     const staffVerified = currentCycleVerifications.some(
+//       h => h.verifiedByRole === ROLE.STAFF
+//     );
+//     const teamLeadVerified = currentCycleVerifications.some(
+//       h => h.verifiedByRole === ROLE.TEAM_LEAD
+//     );
+//     const ownerVerified = currentCycleVerifications.some(
+//       h => h.verifiedByRole === ROLE.OWNER
+//     );
+
+//     // ── Get the highest role that has verified, given a set of flags ──
+//     // (made into a pure function that takes flags as params, so we can
+//     //  call it BOTH before the write [pre-check] and after [response],
+//     //  without one call silently reading stale closured variables) ──
+//     const getHighestVerifiedRole = (staff, teamLead, owner) => {
+//       if (owner) return ROLE.OWNER;
+//       if (teamLead) return ROLE.TEAM_LEAD;
+//       if (staff) return ROLE.STAFF;
+//       return null;
+//     };
+
+//     const highestVerifiedRole = getHighestVerifiedRole(
+//       staffVerified,
+//       teamLeadVerified,
+//       ownerVerified,
+//     );
+//     const userRank = ROLE_RANK[userType];
+
+//     // ── VALIDATION 1: Check if user already verified in this cycle ──
+//     if (userType === ROLE.STAFF && staffVerified) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[ROLE.STAFF]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//       });
+//     }
+//     if (userType === ROLE.TEAM_LEAD && teamLeadVerified) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[ROLE.TEAM_LEAD]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//       });
+//     }
+//     if (userType === ROLE.OWNER && ownerVerified) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[ROLE.OWNER]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//       });
+//     }
+
+//     // ── VALIDATION 2: A lower-ranked role can never verify AFTER a
+//     //    higher-ranked role has already verified in this cycle.
+//     //    - If Team Lead verifies first  -> Staff is blocked (Owner can still verify).
+//     //    - If Owner verifies first      -> Staff and Team Lead are both blocked.
+//     //    A higher role is NEVER blocked by a lower role having verified first,
+//     //    and there is no requirement for lower roles to verify first anymore.
+//     if (highestVerifiedRole) {
+//       const highestRank = ROLE_RANK[highestVerifiedRole];
+
+//       if (highestRank > userRank) {
+//         return res.status(403).json({
+//           success: false,
+//           message: `${ROLE_LABEL[userType]} cannot verify because ${ROLE_LABEL[highestVerifiedRole]} has already verified for this billing cycle`,
+//         });
+//       }
+//     }
+
+//     // ── Create verification record ──
+//     const verificationRecord = {
+//       isVerified: true,
+//       verifiedBy: userName,
+//       verifiedByRole: userType,
+//       verifiedAt: nowIST(),
+//       rentalDueId: null,
+//       agreementPDF: media.agreement?.agreementPDF || {},
+//       cycle: currentCycle,
+//       cycleStartDate: media.rentalPayment?.nextBillingDate,
+//       updatedAt: nowIST(),
+//       updatedBy: userName,
+//     };
+
+//     // ── Roles that would block this user from verifying (own role +
+//     //    any higher-ranked role) for this cycle ──
+//     const blockingRoles = [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].filter(
+//       role => role === userType || ROLE_RANK[role] > userRank
+//     );
+
+//     // ── ATOMIC WRITE ──
+//     // Instead of "read media -> check in JS -> push -> save" (which has a
+//     // race-condition window: two near-simultaneous requests, e.g. an owner
+//     // double-clicking Verify or duplicate network retries, can both read
+//     // the doc BEFORE either save() completes, both see "not verified yet",
+//     // and both push a record — causing the same role to end up verified
+//     // more than once in one cycle), we do a single atomic Mongo update.
+//     // The $push only happens if, at write time, the DB does NOT already
+//     // contain a matching blocking record for this cycle. Mongo compares
+//     // the `cycle` Date by actual value, so this also avoids any JS
+//     // Date-reference comparison issues.
+//     const updatedMedia = await Media.findOneAndUpdate(
+//       {
+//         _id: mediaId,
+//         agreementDocVerification: {
+//           $not: {
+//             $elemMatch: {
+//               isVerified: true,
+//               cycle: currentCycle,
+//               verifiedByRole: { $in: blockingRoles },
+//             },
+//           },
+//         },
+//       },
+//       {
+//         $push: { agreementDocVerification: verificationRecord },
+//         $set: { updatedBy: userName, updatedAt: nowIST() },
+//       },
+//       { new: true }
+//     );
+
+//     // ── If the atomic update matched nothing, someone else (or a
+//     //    duplicate request) already wrote a blocking record between our
+//     //    initial read and this write. Re-check to give an accurate message
+//     //    instead of silently failing or double-verifying. ──
+//     if (!updatedMedia) {
+//       const latestMedia = await Media.findById(mediaId);
+//       const latestVerifications = (latestMedia?.agreementDocVerification || []).filter(
+//         h => h.isVerified && isSameCycle(h.cycle, currentCycle)
+//       );
+//       const selfAlreadyVerified = latestVerifications.some(
+//         h => h.verifiedByRole === userType
+//       );
+//       const blocker = latestVerifications.find(
+//         h => ROLE_RANK[h.verifiedByRole] > userRank
+//       );
+
+//       if (selfAlreadyVerified) {
+//         return res.status(400).json({
+//           success: false,
+//           message: `${ROLE_LABEL[userType]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//         });
+//       }
+//       if (blocker) {
+//         return res.status(403).json({
+//           success: false,
+//           message: `${ROLE_LABEL[userType]} cannot verify because ${ROLE_LABEL[blocker.verifiedByRole]} has already verified for this billing cycle`,
+//         });
+//       }
+//       return res.status(409).json({
+//         success: false,
+//         message: "Verification could not be completed due to a conflicting update. Please try again.",
+//       });
+//     }
+
+//     media = updatedMedia;
+
+//     // ── Get updated verification status (post-write, from the DB) ──
+//     const updatedVerifications = media.agreementDocVerification.filter(
+//       h => h.isVerified && isSameCycle(h.cycle, currentCycle)
+//     );
+
+//     const updatedStaffVerified = updatedVerifications.some(
+//       h => h.verifiedByRole === ROLE.STAFF
+//     );
+//     const updatedTeamLeadVerified = updatedVerifications.some(
+//       h => h.verifiedByRole === ROLE.TEAM_LEAD
+//     );
+//     const updatedOwnerVerified = updatedVerifications.some(
+//       h => h.verifiedByRole === ROLE.OWNER
+//     );
+
+//     return res.status(200).json({
+//       success: true,
+//       message: `${ROLE_LABEL[userType]} verified the agreement document successfully for the billing cycle starting ${formatDate(currentCycle)}`,
+//       data: {
+//         verificationRecord,
+//         // agreementDocVerificationStatus: getAgreementVerificationStatus(media),
+//         currentCycle: formatDate(currentCycle),
+//         verificationProgress: {
+//           staffVerified: updatedStaffVerified,
+//           teamLeadVerified: updatedTeamLeadVerified,
+//           ownerVerified: updatedOwnerVerified,
+//           isComplete: updatedStaffVerified && updatedTeamLeadVerified && updatedOwnerVerified,
+//           // ✅ fixed — now uses the FRESH post-write flags instead of the
+//           // stale pre-write closured variables (staffVerified/teamLeadVerified/ownerVerified)
+//           highestVerifiedRole: getHighestVerifiedRole(
+//             updatedStaffVerified,
+//             updatedTeamLeadVerified,
+//             updatedOwnerVerified,
+//           ),
+//         }
+//       },
+//     });
+//   } catch (err) {
+//     return res
+//       .status(500)
+//       .json({ success: false, message: "Server error", error: err.message });
+//   }
+// };
+// const ROLE_RANK = {
+//   [ROLE.STAFF]: 1,
+//   [ROLE.TEAM_LEAD]: 2,
+//   [ROLE.OWNER]: 3,
+// };
+
+// exports.verifyAgreementDoc = async (req, res) => {
+//   try {
+//     const { mediaId } = req.body;
+//     const { userType, userName } = req.user;
+
+//     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "A valid mediaId is required" });
+//     }
+
+//     let media = await Media.findById(mediaId);
+//     if (!media) {
+//       return res
+//         .status(404)
+//         .json({ success: false, message: "Media not found" });
+//     }
+
+//     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
+//       return res
+//         .status(403)
+//         .json({ success: false, message: "Invalid or missing user role" });
+//     }
+
+//     // ── Get current cycle from nextBillingDate ──
+//     const currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
+
+//     if (!currentCycle) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Unable to determine current billing cycle",
+//       });
+//     }
+
+//     const isSameCycle = (a, b) => {
+//       if (!a || !b) return false;
+//       const t1 = new Date(a).getTime();
+//       const t2 = new Date(b).getTime();
+//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+//     };
+
+//     // ── Get all verifications for the current cycle ──
+//     const currentCycleVerifications = media.agreementDocVerification.filter(
+//       (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+//     );
+
+//     const staffVerified = currentCycleVerifications.some(
+//       (h) => h.verifiedByRole === ROLE.STAFF,
+//     );
+//     const teamLeadVerified = currentCycleVerifications.some(
+//       (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+//     );
+//     const ownerVerified = currentCycleVerifications.some(
+//       (h) => h.verifiedByRole === ROLE.OWNER,
+//     );
+
+//     // ✅ NEW — count of distinct roles that have verified this cycle
+//     const verifiedCount = [
+//       staffVerified,
+//       teamLeadVerified,
+//       ownerVerified,
+//     ].filter(Boolean).length;
+
+//     const getHighestVerifiedRole = (staff, teamLead, owner) => {
+//       if (owner) return ROLE.OWNER;
+//       if (teamLead) return ROLE.TEAM_LEAD;
+//       if (staff) return ROLE.STAFF;
+//       return null;
+//     };
+
+//     const highestVerifiedRole = getHighestVerifiedRole(
+//       staffVerified,
+//       teamLeadVerified,
+//       ownerVerified,
+//     );
+//     const userRank = ROLE_RANK[userType];
+
+//     // ── VALIDATION 1: user already verified this cycle ──
+//     if (userType === ROLE.STAFF && staffVerified) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[ROLE.STAFF]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//       });
+//     }
+//     if (userType === ROLE.TEAM_LEAD && teamLeadVerified) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[ROLE.TEAM_LEAD]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//       });
+//     }
+//     if (userType === ROLE.OWNER && ownerVerified) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `${ROLE_LABEL[ROLE.OWNER]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//       });
+//     }
+
+//     // ✅ VALIDATION 2 (NEW, checked BEFORE rank-block, since it's the
+//     // stronger/final rule) — 2 distinct roles verifying is enough. Once
+//     // reached, block the remaining role outright, regardless of rank.
+//     if (verifiedCount >= 2) {
+//       return res.status(400).json({
+//         success: false,
+//         message: `This agreement document has already been verified by 2 roles (${
+//           ROLE_LABEL[
+//             currentCycleVerifications.find((h) => h.verifiedByRole !== userType)
+//               ?.verifiedByRole
+//           ] || "two roles"
+//         } and another) for the billing cycle starting ${formatDate(currentCycle)}. No further verification is needed.`,
+//       });
+//     }
+
+//     // ── VALIDATION 3 (existing rank block): a lower-ranked role can
+//     //    never verify AFTER a higher-ranked role has already verified.
+//     //    - Team Lead verifies first  -> Staff is blocked (Owner can still verify).
+//     //    - Owner verifies first      -> Staff and Team Lead are both blocked.
+//     if (highestVerifiedRole) {
+//       const highestRank = ROLE_RANK[highestVerifiedRole];
+
+//       if (highestRank > userRank) {
+//         return res.status(403).json({
+//           success: false,
+//           message: `${ROLE_LABEL[userType]} cannot verify because ${ROLE_LABEL[highestVerifiedRole]} has already verified for this billing cycle`,
+//         });
+//       }
+//     }
+
+//     // ── Create verification record ──
+//     const verificationRecord = {
+//       isVerified: true,
+//       verifiedBy: userName,
+//       verifiedByRole: userType,
+//       verifiedAt: nowIST(),
+//       rentalDueId: null,
+//       agreementPDF: media.agreement?.agreementPDF || {},
+//       cycle: currentCycle,
+//       cycleStartDate: media.rentalPayment?.nextBillingDate,
+//       updatedAt: nowIST(),
+//       updatedBy: userName,
+//     };
+
+//     // ── Roles that would block this user from verifying (own role +
+//     //    any higher-ranked role) for this cycle ──
+//     const blockingRoles = [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].filter(
+//       (role) => role === userType || ROLE_RANK[role] > userRank,
+//     );
+
+//     // ── ATOMIC WRITE ──
+//     // The $push only happens if, at write time:
+//     //   1. No blocking role (self or higher-ranked) has already verified, AND
+//     //   2. Fewer than 2 distinct roles have verified this cycle so far
+//     //      (via $expr counting the filtered array size).
+//     // This closes the same race-condition window as before, now also
+//     // covering the "2 verifications = done" rule at the DB level.
+//     const updatedMedia = await Media.findOneAndUpdate(
+//       {
+//         _id: mediaId,
+//         $and: [
+//           {
+//             agreementDocVerification: {
+//               $not: {
+//                 $elemMatch: {
+//                   isVerified: true,
+//                   cycle: currentCycle,
+//                   verifiedByRole: { $in: blockingRoles },
+//                 },
+//               },
+//             },
+//           },
+//           {
+//             $expr: {
+//               $lt: [
+//                 {
+//                   $size: {
+//                     $filter: {
+//                       input: { $ifNull: ["$agreementDocVerification", []] },
+//                       as: "h",
+//                       cond: {
+//                         $and: [
+//                           { $eq: ["$$h.isVerified", true] },
+//                           { $eq: ["$$h.cycle", currentCycle] },
+//                         ],
+//                       },
+//                     },
+//                   },
+//                 },
+//                 2,
+//               ],
+//             },
+//           },
+//         ],
+//       },
+//       {
+//         $push: { agreementDocVerification: verificationRecord },
+//         $set: { updatedBy: userName, updatedAt: nowIST() },
+//       },
+//       { new: true },
+//     );
+
+//     // ── If the atomic update matched nothing, someone else (or a
+//     //    duplicate request) already wrote a blocking record between our
+//     //    initial read and this write. Re-check to give an accurate message. ──
+//     if (!updatedMedia) {
+//       const latestMedia = await Media.findById(mediaId);
+//       const latestVerifications = (
+//         latestMedia?.agreementDocVerification || []
+//       ).filter((h) => h.isVerified && isSameCycle(h.cycle, currentCycle));
+//       const selfAlreadyVerified = latestVerifications.some(
+//         (h) => h.verifiedByRole === userType,
+//       );
+//       const latestCount = [
+//         latestVerifications.some((h) => h.verifiedByRole === ROLE.STAFF),
+//         latestVerifications.some((h) => h.verifiedByRole === ROLE.TEAM_LEAD),
+//         latestVerifications.some((h) => h.verifiedByRole === ROLE.OWNER),
+//       ].filter(Boolean).length;
+//       const blocker = latestVerifications.find(
+//         (h) => ROLE_RANK[h.verifiedByRole] > userRank,
+//       );
+
+//       if (selfAlreadyVerified) {
+//         return res.status(400).json({
+//           success: false,
+//           message: `${ROLE_LABEL[userType]} has already verified for the billing cycle starting ${formatDate(currentCycle)}`,
+//         });
+//       }
+//       if (latestCount >= 2) {
+//         return res.status(400).json({
+//           success: false,
+//           message: `This agreement document has already been verified by 2 roles for the billing cycle starting ${formatDate(currentCycle)}. No further verification is needed.`,
+//         });
+//       }
+//       if (blocker) {
+//         return res.status(403).json({
+//           success: false,
+//           message: `${ROLE_LABEL[userType]} cannot verify because ${ROLE_LABEL[blocker.verifiedByRole]} has already verified for this billing cycle`,
+//         });
+//       }
+//       return res.status(409).json({
+//         success: false,
+//         message:
+//           "Verification could not be completed due to a conflicting update. Please try again.",
+//       });
+//     }
+
+//     media = updatedMedia;
+
+//     // ── Get updated verification status (post-write, from the DB) ──
+//     const updatedVerifications = media.agreementDocVerification.filter(
+//       (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+//     );
+
+//     const updatedStaffVerified = updatedVerifications.some(
+//       (h) => h.verifiedByRole === ROLE.STAFF,
+//     );
+//     const updatedTeamLeadVerified = updatedVerifications.some(
+//       (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+//     );
+//     const updatedOwnerVerified = updatedVerifications.some(
+//       (h) => h.verifiedByRole === ROLE.OWNER,
+//     );
+
+//     // ✅ isComplete now means "2 or more roles verified", not "all 3"
+//     const updatedVerifiedCount = [
+//       updatedStaffVerified,
+//       updatedTeamLeadVerified,
+//       updatedOwnerVerified,
+//     ].filter(Boolean).length;
+
+//     return res.status(200).json({
+//       success: true,
+//       message: `${ROLE_LABEL[userType]} verified the agreement document successfully for the billing cycle starting ${formatDate(currentCycle)}`,
+//       data: {
+//         verificationRecord,
+//         currentCycle: formatDate(currentCycle),
+//         verificationProgress: {
+//           staffVerified: updatedStaffVerified,
+//           teamLeadVerified: updatedTeamLeadVerified,
+//           ownerVerified: updatedOwnerVerified,
+//           verifiedCount: updatedVerifiedCount, // ✅ added — 1 or 2
+//           isComplete: updatedVerifiedCount >= 2, // ✅ changed — 2 of 3 is enough
+//           highestVerifiedRole: getHighestVerifiedRole(
+//             updatedStaffVerified,
+//             updatedTeamLeadVerified,
+//             updatedOwnerVerified,
+//           ),
+//         },
+//       },
+//     });
+//   } catch (err) {
+//     return res
+//       .status(500)
+//       .json({ success: false, message: "Server error", error: err.message });
+//   }
+// };
 const ROLE_RANK = {
   [ROLE.STAFF]: 1,
   [ROLE.TEAM_LEAD]: 2,
   [ROLE.OWNER]: 3,
 };
-
 
 exports.verifyAgreementDoc = async (req, res) => {
   try {
@@ -1715,15 +2314,10 @@ exports.verifyAgreementDoc = async (req, res) => {
     if (!currentCycle) {
       return res.status(400).json({
         success: false,
-        message: "Unable to determine current billing cycle"
+        message: "Unable to determine current billing cycle",
       });
     }
 
-    // ── Safe cycle comparison ──
-    // IMPORTANT: `h.cycle` and `currentCycle` are Date values. Comparing
-    // them with strict equality (===) compares object references, NOT the
-    // actual date/time — two Date objects for the exact same moment are
-    // never === equal. Always compare via getTime() (or a normalized string).
     const isSameCycle = (a, b) => {
       if (!a || !b) return false;
       const t1 = new Date(a).getTime();
@@ -1733,24 +2327,25 @@ exports.verifyAgreementDoc = async (req, res) => {
 
     // ── Get all verifications for the current cycle ──
     const currentCycleVerifications = media.agreementDocVerification.filter(
-      h => h.isVerified && isSameCycle(h.cycle, currentCycle)
+      (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
     );
 
-    // ── Check verification status of each role in current cycle ──
     const staffVerified = currentCycleVerifications.some(
-      h => h.verifiedByRole === ROLE.STAFF
+      (h) => h.verifiedByRole === ROLE.STAFF,
     );
     const teamLeadVerified = currentCycleVerifications.some(
-      h => h.verifiedByRole === ROLE.TEAM_LEAD
+      (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
     );
     const ownerVerified = currentCycleVerifications.some(
-      h => h.verifiedByRole === ROLE.OWNER
+      (h) => h.verifiedByRole === ROLE.OWNER,
     );
 
-    // ── Get the highest role that has verified, given a set of flags ──
-    // (made into a pure function that takes flags as params, so we can
-    //  call it BOTH before the write [pre-check] and after [response],
-    //  without one call silently reading stale closured variables) ──
+    const verifiedCount = [
+      staffVerified,
+      teamLeadVerified,
+      ownerVerified,
+    ].filter(Boolean).length;
+
     const getHighestVerifiedRole = (staff, teamLead, owner) => {
       if (owner) return ROLE.OWNER;
       if (teamLead) return ROLE.TEAM_LEAD;
@@ -1765,7 +2360,7 @@ exports.verifyAgreementDoc = async (req, res) => {
     );
     const userRank = ROLE_RANK[userType];
 
-    // ── VALIDATION 1: Check if user already verified in this cycle ──
+    // ── VALIDATION 1: user already verified this cycle ──
     if (userType === ROLE.STAFF && staffVerified) {
       return res.status(400).json({
         success: false,
@@ -1785,12 +2380,15 @@ exports.verifyAgreementDoc = async (req, res) => {
       });
     }
 
-    // ── VALIDATION 2: A lower-ranked role can never verify AFTER a
-    //    higher-ranked role has already verified in this cycle.
-    //    - If Team Lead verifies first  -> Staff is blocked (Owner can still verify).
-    //    - If Owner verifies first      -> Staff and Team Lead are both blocked.
-    //    A higher role is NEVER blocked by a lower role having verified first,
-    //    and there is no requirement for lower roles to verify first anymore.
+    // ❌ REMOVED — the old "verifiedCount >= 2 => block" rule.
+    // Owner verification stays OPTIONAL once 2 have verified, but is
+    // still ALLOWED if Owner chooses to verify anyway. Nothing blocks
+    // it here anymore; only VALIDATION 3 (rank block) below still applies.
+
+    // ── VALIDATION 3 (rank block): a lower-ranked role can never verify
+    //    AFTER a higher-ranked role has already verified.
+    //    - Team Lead verifies first  -> Staff is blocked (Owner can still verify).
+    //    - Owner verifies first      -> Staff and Team Lead are both blocked.
     if (highestVerifiedRole) {
       const highestRank = ROLE_RANK[highestVerifiedRole];
 
@@ -1819,20 +2417,15 @@ exports.verifyAgreementDoc = async (req, res) => {
     // ── Roles that would block this user from verifying (own role +
     //    any higher-ranked role) for this cycle ──
     const blockingRoles = [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].filter(
-      role => role === userType || ROLE_RANK[role] > userRank
+      (role) => role === userType || ROLE_RANK[role] > userRank,
     );
 
     // ── ATOMIC WRITE ──
-    // Instead of "read media -> check in JS -> push -> save" (which has a
-    // race-condition window: two near-simultaneous requests, e.g. an owner
-    // double-clicking Verify or duplicate network retries, can both read
-    // the doc BEFORE either save() completes, both see "not verified yet",
-    // and both push a record — causing the same role to end up verified
-    // more than once in one cycle), we do a single atomic Mongo update.
-    // The $push only happens if, at write time, the DB does NOT already
-    // contain a matching blocking record for this cycle. Mongo compares
-    // the `cycle` Date by actual value, so this also avoids any JS
-    // Date-reference comparison issues.
+    // The $push only happens if, at write time, no blocking role (self
+    // or higher-ranked) has already verified this cycle. The old "fewer
+    // than 2 verified" $expr condition has been REMOVED — a 3rd/optional
+    // verification (e.g. Owner, after Staff+TeamLead) is now allowed
+    // through at the DB level too.
     const updatedMedia = await Media.findOneAndUpdate(
       {
         _id: mediaId,
@@ -1850,23 +2443,22 @@ exports.verifyAgreementDoc = async (req, res) => {
         $push: { agreementDocVerification: verificationRecord },
         $set: { updatedBy: userName, updatedAt: nowIST() },
       },
-      { new: true }
+      { new: true },
     );
 
     // ── If the atomic update matched nothing, someone else (or a
     //    duplicate request) already wrote a blocking record between our
-    //    initial read and this write. Re-check to give an accurate message
-    //    instead of silently failing or double-verifying. ──
+    //    initial read and this write. Re-check to give an accurate message. ──
     if (!updatedMedia) {
       const latestMedia = await Media.findById(mediaId);
-      const latestVerifications = (latestMedia?.agreementDocVerification || []).filter(
-        h => h.isVerified && isSameCycle(h.cycle, currentCycle)
-      );
+      const latestVerifications = (
+        latestMedia?.agreementDocVerification || []
+      ).filter((h) => h.isVerified && isSameCycle(h.cycle, currentCycle));
       const selfAlreadyVerified = latestVerifications.some(
-        h => h.verifiedByRole === userType
+        (h) => h.verifiedByRole === userType,
       );
       const blocker = latestVerifications.find(
-        h => ROLE_RANK[h.verifiedByRole] > userRank
+        (h) => ROLE_RANK[h.verifiedByRole] > userRank,
       );
 
       if (selfAlreadyVerified) {
@@ -1883,7 +2475,8 @@ exports.verifyAgreementDoc = async (req, res) => {
       }
       return res.status(409).json({
         success: false,
-        message: "Verification could not be completed due to a conflicting update. Please try again.",
+        message:
+          "Verification could not be completed due to a conflicting update. Please try again.",
       });
     }
 
@@ -1891,39 +2484,46 @@ exports.verifyAgreementDoc = async (req, res) => {
 
     // ── Get updated verification status (post-write, from the DB) ──
     const updatedVerifications = media.agreementDocVerification.filter(
-      h => h.isVerified && isSameCycle(h.cycle, currentCycle)
+      (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
     );
 
     const updatedStaffVerified = updatedVerifications.some(
-      h => h.verifiedByRole === ROLE.STAFF
+      (h) => h.verifiedByRole === ROLE.STAFF,
     );
     const updatedTeamLeadVerified = updatedVerifications.some(
-      h => h.verifiedByRole === ROLE.TEAM_LEAD
+      (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
     );
     const updatedOwnerVerified = updatedVerifications.some(
-      h => h.verifiedByRole === ROLE.OWNER
+      (h) => h.verifiedByRole === ROLE.OWNER,
     );
+
+    // "isComplete" stays true once 2 of 3 verified — this only signals
+    // the quorum requirement is met, it does NOT block the 3rd role from
+    // optionally verifying too.
+    const updatedVerifiedCount = [
+      updatedStaffVerified,
+      updatedTeamLeadVerified,
+      updatedOwnerVerified,
+    ].filter(Boolean).length;
 
     return res.status(200).json({
       success: true,
       message: `${ROLE_LABEL[userType]} verified the agreement document successfully for the billing cycle starting ${formatDate(currentCycle)}`,
       data: {
         verificationRecord,
-        // agreementDocVerificationStatus: getAgreementVerificationStatus(media),
         currentCycle: formatDate(currentCycle),
         verificationProgress: {
           staffVerified: updatedStaffVerified,
           teamLeadVerified: updatedTeamLeadVerified,
           ownerVerified: updatedOwnerVerified,
-          isComplete: updatedStaffVerified && updatedTeamLeadVerified && updatedOwnerVerified,
-          // ✅ fixed — now uses the FRESH post-write flags instead of the
-          // stale pre-write closured variables (staffVerified/teamLeadVerified/ownerVerified)
+          verifiedCount: updatedVerifiedCount,
+          isComplete: updatedVerifiedCount >= 2,
           highestVerifiedRole: getHighestVerifiedRole(
             updatedStaffVerified,
             updatedTeamLeadVerified,
             updatedOwnerVerified,
           ),
-        }
+        },
       },
     });
   } catch (err) {
@@ -1935,366 +2535,91 @@ exports.verifyAgreementDoc = async (req, res) => {
 // ── Helper functions ──
 function getCurrentCycle(nextBillingDate) {
   if (!nextBillingDate) return null;
-  
+
   const billingDate = new Date(nextBillingDate);
   const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, '0');
-  const day = String(billingDate.getDate()).padStart(2, '0');
-  
+  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+  const day = String(billingDate.getDate()).padStart(2, "0");
+
   return `${year}-${month}-${day}`;
 }
 
 function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return 'Unknown';
-  
+  if (!cycleIdentifier) return "Unknown";
+
   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split('-');
+    const [year, month, day] = cycleIdentifier.split("-");
     const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
+    return date.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
     });
   }
-  
+
   return cycleIdentifier;
 }
 
 // ── Helper functions ──
 function getCurrentCycle(nextBillingDate) {
   if (!nextBillingDate) return null;
-  
+
   const billingDate = new Date(nextBillingDate);
   const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, '0');
-  const day = String(billingDate.getDate()).padStart(2, '0');
-  
+  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+  const day = String(billingDate.getDate()).padStart(2, "0");
+
   return `${year}-${month}-${day}`;
 }
 
 function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return 'Unknown';
-  
+  if (!cycleIdentifier) return "Unknown";
+
   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split('-');
+    const [year, month, day] = cycleIdentifier.split("-");
     const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
+    return date.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
     });
   }
-  
+
   return cycleIdentifier;
 }
 // ── Helper function to get current cycle based on nextBillingDate ──
 function getCurrentCycle(nextBillingDate) {
   if (!nextBillingDate) return null;
-  
+
   // Parse the nextBillingDate
   const billingDate = new Date(nextBillingDate);
-  
+
   // Create a cycle identifier using year, month, and day
   // This ensures each billing cycle is uniquely identified
   const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, '0');
-  const day = String(billingDate.getDate()).padStart(2, '0');
-  
+  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+  const day = String(billingDate.getDate()).padStart(2, "0");
+
   return `${year}-${month}-${day}`;
 }
 
 // ── Helper function to format date for display ──
 function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return 'Unknown';
-  
+  if (!cycleIdentifier) return "Unknown";
+
   // If it's in YYYY-MM-DD format
   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split('-');
+    const [year, month, day] = cycleIdentifier.split("-");
     const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
+    return date.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
     });
   }
-  
+
   return cycleIdentifier;
 }
-exports.getRentalDueListWithStats = async (req, res) => {
-  try {
-    const {
-      dueDate,
-      city,
-      mediaType,
-      frequency,
-      status,
-      search,
-      pageNumber = 1,
-      count = 10,
-    } = req.body;
-
-    if (!dueDate) {
-      return res.status(400).json({
-        success: false,
-        message: "dueDate is required. Please use format MM-YYYY (e.g., 07-2026)",
-      });
-    }
-
-    if (!dueDate.match(/^\d{2}-\d{4}$/)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid dueDate format. Please use MM-YYYY (e.g., 07-2026)",
-      });
-    }
-
-    const pageNumbers = parseInt(pageNumber) || 1;
-    const pageSize = parseInt(count) || 10;
-    const skip = (pageNumbers - 1) * pageSize;
-
-    const [mo, yr] = dueDate.split("-").map(Number);
-    const monthStart = new Date(yr, mo - 1, 1);
-    const monthEnd = new Date(yr, mo, 0, 23, 59, 59);
-    const dateFilter = { $gte: monthStart, $lte: monthEnd };
-
-    const mediaMatch = { status: 1 };
-    if (city) mediaMatch.city = { $regex: city, $options: "i" };
-    if (mediaType) mediaMatch.mediaType = { $regex: mediaType, $options: "i" };
-    if (frequency)
-      mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
-
-    if (status !== undefined && status !== null && status !== "") {
-      const statusMap = { active: 1, expirezone: 2, overdue: 3, expired: 3 };
-      const parsed = parseInt(status, 10);
-      const resolvedStatus = isNaN(parsed)
-        ? statusMap[String(status).toLowerCase()]
-        : parsed;
-      if (resolvedStatus) mediaMatch["rentalPayment.status"] = resolvedStatus;
-    }
-
-    if (search) {
-      mediaMatch.$or = [
-        { mediaCode: { $regex: search, $options: "i" } },
-        { mediaName: { $regex: search, $options: "i" } },
-        { city: { $regex: search, $options: "i" } },
-        { location: { $regex: search, $options: "i" } },
-      ];
-    }
-
-    const totalSites = await Media.countDocuments({ status: 1 });
-
-    const dueThisMonthAgg = await Media.aggregate([
-      { $match: { status: 1 } },
-      {
-        $match: {
-          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalNetPayable: { $sum: "$rentalPayment.netPayable" },
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-    const dueThisMonth = {
-      totalNetPayable: dueThisMonthAgg[0]?.totalNetPayable || 0,
-      count: dueThisMonthAgg[0]?.count || 0,
-    };
-
-    const dueAmountOpenAgg = await Media.aggregate([
-      {
-        $match: {
-          status: 1,
-          "rentalPayment.status": { $in: [2, 3] },
-          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
-        },
-      },
-      {
-        $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
-      },
-    ]);
-    const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
-
-    const overDueSiteCount = await Media.countDocuments({
-      status: 1,
-      "rentalPayment.status": 3,
-      "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
-    });
-
-    const approvalBreakdownAgg = await Media.aggregate([
-      { $match: { status: 1 } },
-      { $unwind: "$rentalDue" },
-      { $match: { "rentalDue.approvalStatus": { $in: [1, 2] } } },
-      { $group: { _id: "$rentalDue.currentPendingRole", count: { $sum: 1 } } },
-    ]);
-    const pendingByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
-    approvalBreakdownAgg.forEach(({ _id, count }) => {
-      if (_id === 1) pendingByRole.staff = count;
-      if (_id === 2) pendingByRole.teamLead = count;
-      if (_id === 3) pendingByRole.owner = count;
-      pendingByRole.total += count;
-    });
-
-    // ✅ approvedCount = sites where Owner has approved (top-level rentalStatus === 3)
-    const approvedCount = await Media.countDocuments({
-      status: 1,
-      rentalStatus: 3,
-    });
-
-    // ✅ pendingCount = totalSites minus approved minus overdue (this month)
-    const pendingCount = Math.max(totalSites - approvedCount - overDueSiteCount, 0);
-
-    const listMatch = {
-      ...mediaMatch,
-      "rentalPayment.nextBillingDate": dateFilter,
-    };
-
-    const listPipeline = [
-      { $match: listMatch },
-      {
-        $project: {
-          mediaCode: 1,
-          mediaName: 1,
-          mediaType: 1,
-          city: 1,
-          state: 1,
-          rentalStatus: 1,
-          totalSqFt: 1,
-          location: 1,
-          rentalPayment: 1,
-          agreement: 1,
-          agreementDocVerification: 1,
-          rentalDue: 1,
-        },
-      },
-      {
-        $facet: {
-          data: [{ $skip: skip }, { $limit: pageSize }],
-          total: [{ $count: "count" }],
-        },
-      },
-    ];
-
-    const result = await Media.aggregate(listPipeline);
-    const data = result[0]?.data || [];
-    const total = result[0]?.total[0]?.count || 0;
-
-    // ── Same cycle comparison logic used in verifyAgreementDoc ──
-    // Compares Date VALUES, not references — required since two Date
-    // objects for the same moment are never === equal.
-    const isSameCycle = (a, b) => {
-      if (!a || !b) return false;
-      const t1 = new Date(a).getTime();
-      const t2 = new Date(b).getTime();
-      return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
-    };
-
-    // ── Builds the per-item cycle-based verification progress ──
-    // Cycle = the site's OWN current rentalPayment.nextBillingDate.
-    // When nextBillingDate advances (after Owner approval on saveRentalDue),
-    // the cycle changes automatically, so old verifications from the
-    // previous cycle no longer match -> staff/teamLead/owner all reset
-    // to false for the new cycle without needing to delete old records.
-    const buildVerificationProgress = (item) => {
-      const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
-
-      if (!currentCycle) {
-        return {
-          currentCycle: null,
-          staffVerified: false,
-          teamLeadVerified: false,
-          ownerVerified: false,
-          isComplete: false,
-          highestVerifiedRole: null,
-        };
-      }
-
-      const cycleVerifications = (item.agreementDocVerification || []).filter(
-        (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
-      );
-
-      const staffVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.STAFF,
-      );
-      const teamLeadVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
-      );
-      const ownerVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.OWNER,
-      );
-
-      const highestVerifiedRole = ownerVerified
-        ? ROLE.OWNER
-        : teamLeadVerified
-          ? ROLE.TEAM_LEAD
-          : staffVerified
-            ? ROLE.STAFF
-            : null;
-
-      return {
-        currentCycle: formatDate(currentCycle),
-        staffVerified,
-        teamLeadVerified,
-        ownerVerified,
-        isComplete: staffVerified && teamLeadVerified && ownerVerified,
-        highestVerifiedRole,
-      };
-    };
-
-    const enriched = data.map((item) => ({
-      _id: item._id,
-      mediaCode: item.mediaCode,
-      mediaName: item.mediaName,
-      mediaType: item.mediaType,
-      city: item.city,
-      state: item.state,
-      location: item.location,
-      rentalStatus: item.rentalStatus,
-      totalSqFt: item.totalSqFt,
-      netPayable: item.rentalPayment?.netPayable || 0,
-      paymentFrequency: item.rentalPayment?.paymentFrequency,
-      paymentFrequencyLabel:
-        FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
-      nextBillingDate: item.rentalPayment?.nextBillingDate,
-      lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
-      dueStatus: item.rentalPayment?.status,
-      dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
-      agreementPeriod: {
-        startDate: item.agreement?.startDate,
-        endDate: item.agreement?.endDate,
-        agreementPDF: item.agreement?.agreementPDF,
-      },
-      // agreementDocVerified: getAgreementVerificationStatus(item),
-      agreementDocVerificationHistory: item.agreementDocVerification || [],
-      verificationProgress: buildVerificationProgress(item), // ✅ added — cycle-based staff/teamLead/owner true/false
-      rentalDueEntries: item.rentalDue || [],
-    }));
-
-    return res.status(200).json({
-      success: true,
-      value: {
-        totalSites,
-        dueThisMonth,
-        dueAmountOpen,
-        overDue: { siteCount: overDueSiteCount },
-        approvedCount,
-        pendingCount,
-        pendingApproval: {
-          staff: pendingByRole.staff,
-          teamLead: pendingByRole.teamLead,
-          owner: pendingByRole.owner,
-          total: pendingByRole.total,
-        },
-      },
-      data: enriched,
-    });
-  } catch (err) {
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error", error: err.message });
-  }
-};
 // exports.getRentalDueListWithStats = async (req, res) => {
 //   try {
 //     const {
@@ -2455,6 +2780,68 @@ exports.getRentalDueListWithStats = async (req, res) => {
 //     const data = result[0]?.data || [];
 //     const total = result[0]?.total[0]?.count || 0;
 
+//     // ── Same cycle comparison logic used in verifyAgreementDoc ──
+//     // Compares Date VALUES, not references — required since two Date
+//     // objects for the same moment are never === equal.
+//     const isSameCycle = (a, b) => {
+//       if (!a || !b) return false;
+//       const t1 = new Date(a).getTime();
+//       const t2 = new Date(b).getTime();
+//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+//     };
+
+//     // ── Builds the per-item cycle-based verification progress ──
+//     // Cycle = the site's OWN current rentalPayment.nextBillingDate.
+//     // When nextBillingDate advances (after Owner approval on saveRentalDue),
+//     // the cycle changes automatically, so old verifications from the
+//     // previous cycle no longer match -> staff/teamLead/owner all reset
+//     // to false for the new cycle without needing to delete old records.
+//     const buildVerificationProgress = (item) => {
+//       const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
+
+//       if (!currentCycle) {
+//         return {
+//           currentCycle: null,
+//           staffVerified: false,
+//           teamLeadVerified: false,
+//           ownerVerified: false,
+//           isComplete: false,
+//           highestVerifiedRole: null,
+//         };
+//       }
+
+//       const cycleVerifications = (item.agreementDocVerification || []).filter(
+//         (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+//       );
+
+//       const staffVerified = cycleVerifications.some(
+//         (h) => h.verifiedByRole === ROLE.STAFF,
+//       );
+//       const teamLeadVerified = cycleVerifications.some(
+//         (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+//       );
+//       const ownerVerified = cycleVerifications.some(
+//         (h) => h.verifiedByRole === ROLE.OWNER,
+//       );
+
+//       const highestVerifiedRole = ownerVerified
+//         ? ROLE.OWNER
+//         : teamLeadVerified
+//           ? ROLE.TEAM_LEAD
+//           : staffVerified
+//             ? ROLE.STAFF
+//             : null;
+
+//       return {
+//         currentCycle: formatDate(currentCycle),
+//         staffVerified,
+//         teamLeadVerified,
+//         ownerVerified,
+//         isComplete: staffVerified && teamLeadVerified && ownerVerified,
+//         highestVerifiedRole,
+//       };
+//     };
+
 //     const enriched = data.map((item) => ({
 //       _id: item._id,
 //       mediaCode: item.mediaCode,
@@ -2478,8 +2865,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
 //         endDate: item.agreement?.endDate,
 //         agreementPDF: item.agreement?.agreementPDF,
 //       },
-//       agreementDocVerified: getAgreementVerificationStatus(item),
+//       // agreementDocVerified: getAgreementVerificationStatus(item),
 //       agreementDocVerificationHistory: item.agreementDocVerification || [],
+//       verificationProgress: buildVerificationProgress(item), // ✅ added — cycle-based staff/teamLead/owner true/false
 //       rentalDueEntries: item.rentalDue || [],
 //     }));
 
@@ -2502,9 +2890,352 @@ exports.getRentalDueListWithStats = async (req, res) => {
 //       data: enriched,
 //     });
 //   } catch (err) {
-//     console.error("getRentalDueListWithStats error:", err);
 //     return res
 //       .status(500)
 //       .json({ success: false, message: "Server error", error: err.message });
 //   }
 // };
+exports.getRentalDueListWithStats = async (req, res) => {
+  try {
+    const {
+      dueDate,
+      city,
+      mediaType,
+      frequency,
+      status,
+      search,
+      pageNumber = 1,
+      count = 10,
+    } = req.body;
+
+    if (!dueDate) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "dueDate is required. Please use format MM-YYYY (e.g., 07-2026)",
+      });
+    }
+
+    if (!dueDate.match(/^\d{2}-\d{4}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid dueDate format. Please use MM-YYYY (e.g., 07-2026)",
+      });
+    }
+
+    const pageNumbers = parseInt(pageNumber) || 1;
+    const pageSize = parseInt(count) || 10;
+    const skip = (pageNumbers - 1) * pageSize;
+
+    const [mo, yr] = dueDate.split("-").map(Number);
+    const monthStart = new Date(yr, mo - 1, 1);
+    const monthEnd = new Date(yr, mo, 0, 23, 59, 59);
+    const dateFilter = { $gte: monthStart, $lte: monthEnd };
+
+    const mediaMatch = { status: 1 };
+    if (city) mediaMatch.city = { $regex: city, $options: "i" };
+    if (mediaType) mediaMatch.mediaType = { $regex: mediaType, $options: "i" };
+    if (frequency)
+      mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
+
+    if (status !== undefined && status !== null && status !== "") {
+      const statusMap = { active: 1, expirezone: 2, overdue: 3, expired: 3 };
+      const parsed = parseInt(status, 10);
+      const resolvedStatus = isNaN(parsed)
+        ? statusMap[String(status).toLowerCase()]
+        : parsed;
+      if (resolvedStatus) mediaMatch["rentalPayment.status"] = resolvedStatus;
+    }
+
+    if (search) {
+      mediaMatch.$or = [
+        { mediaCode: { $regex: search, $options: "i" } },
+        { mediaName: { $regex: search, $options: "i" } },
+        { city: { $regex: search, $options: "i" } },
+        { location: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const totalSites = await Media.countDocuments({ status: 1 });
+
+    const dueThisMonthAgg = await Media.aggregate([
+      { $match: { status: 1 } },
+      {
+        $match: {
+          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalNetPayable: { $sum: "$rentalPayment.netPayable" },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    const dueThisMonth = {
+      totalNetPayable: dueThisMonthAgg[0]?.totalNetPayable || 0,
+      count: dueThisMonthAgg[0]?.count || 0,
+    };
+
+    const dueAmountOpenAgg = await Media.aggregate([
+      {
+        $match: {
+          status: 1,
+          "rentalPayment.status": { $in: [2, 3] },
+          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+        },
+      },
+      {
+        $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
+      },
+    ]);
+    const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
+
+    const overDueSiteCount = await Media.countDocuments({
+      status: 1,
+      "rentalPayment.status": 3,
+      "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+    });
+
+    const approvalBreakdownAgg = await Media.aggregate([
+      { $match: { status: 1 } },
+      { $unwind: "$rentalDue" },
+      { $match: { "rentalDue.approvalStatus": { $in: [1, 2] } } },
+      { $group: { _id: "$rentalDue.currentPendingRole", count: { $sum: 1 } } },
+    ]);
+    const pendingByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
+    approvalBreakdownAgg.forEach(({ _id, count }) => {
+      if (_id === 1) pendingByRole.staff = count;
+      if (_id === 2) pendingByRole.teamLead = count;
+      if (_id === 3) pendingByRole.owner = count;
+      pendingByRole.total += count;
+    });
+
+    const approvedCount = await Media.countDocuments({
+      status: 1,
+      rentalStatus: 3,
+      "rentalPayment.nextBillingDate": dateFilter,
+    });
+
+    const pendingCount = Math.max(
+     dueThisMonth.count - approvedCount - overDueSiteCount,
+      0,
+    );
+
+    const listMatch = {
+      ...mediaMatch,
+      "rentalPayment.nextBillingDate": dateFilter,
+    };
+
+    const listPipeline = [
+      { $match: listMatch },
+      {
+        $project: {
+          mediaCode: 1,
+          mediaName: 1,
+          mediaType: 1,
+          city: 1,
+          state: 1,
+          rentalStatus: 1,
+          totalSqFt: 1,
+          location: 1,
+          rentalPayment: 1,
+          agreement: 1,
+          agreementDocVerification: 1,
+          rentalDue: 1,
+        },
+      },
+      {
+        $facet: {
+          data: [{ $skip: skip }, { $limit: pageSize }],
+          total: [{ $count: "count" }],
+        },
+      },
+    ];
+
+    const result = await Media.aggregate(listPipeline);
+    const data = result[0]?.data || [];
+    const total = result[0]?.total[0]?.count || 0;
+
+    const isSameCycle = (a, b) => {
+      if (!a || !b) return false;
+      const t1 = new Date(a).getTime();
+      const t2 = new Date(b).getTime();
+      return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+    };
+
+    // const buildVerificationProgress = (item) => {
+    //   const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
+
+    //   if (!currentCycle) {
+    //     return {
+    //       currentCycle: null,
+    //       staffVerified: false,
+    //       teamLeadVerified: false,
+    //       ownerVerified: false,
+    //       verifiedCount: 0,
+    //       isComplete: false,
+    //       highestVerifiedRole: null,
+    //     };
+    //   }
+
+    //   const cycleVerifications = (item.agreementDocVerification || []).filter(
+    //     (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+    //   );
+
+    //   // ── ACTUAL flags — reflect only real verification records ──
+    //   const staffVerifiedActual = cycleVerifications.some(
+    //     (h) => h.verifiedByRole === ROLE.STAFF,
+    //   );
+    //   const teamLeadVerifiedActual = cycleVerifications.some(
+    //     (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+    //   );
+    //   const ownerVerifiedActual = cycleVerifications.some(
+    //     (h) => h.verifiedByRole === ROLE.OWNER,
+    //   );
+
+    //   const highestVerifiedRole = ownerVerifiedActual
+    //     ? ROLE.OWNER
+    //     : teamLeadVerifiedActual
+    //       ? ROLE.TEAM_LEAD
+    //       : staffVerifiedActual
+    //         ? ROLE.STAFF
+    //         : null;
+
+    //   const verifiedCount = [
+    //     staffVerifiedActual,
+    //     teamLeadVerifiedActual,
+    //     ownerVerifiedActual,
+    //   ].filter(Boolean).length;
+
+    //   const isComplete = verifiedCount >= 2;
+
+    //   // ── EFFECTIVE flags for display — once quorum (2 of 3) is met, the
+    //   // requirement is fully satisfied and the remaining role's action is
+    //   // no longer needed, so show it as verified too. Before quorum, flags
+    //   // reflect only actual verifications. ──
+    //   const staffVerified = isComplete ? true : staffVerifiedActual;
+    //   const teamLeadVerified = isComplete ? true : teamLeadVerifiedActual;
+    //   const ownerVerified = isComplete ? true : ownerVerifiedActual;
+
+    //   return {
+    //     currentCycle: formatDate(currentCycle),
+    //     staffVerified,
+    //     teamLeadVerified,
+    //     ownerVerified,
+    //     verifiedCount,
+    //     isComplete,
+    //     highestVerifiedRole,
+    //   };
+    // };
+const buildVerificationProgress = (item) => {
+  const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
+
+  if (!currentCycle) {
+    return {
+      currentCycle: null,
+      staffVerified: false,
+      teamLeadVerified: false,
+      ownerVerified: false,
+      verifiedCount: 0,
+      isComplete: false,
+      highestVerifiedRole: null,
+    };
+  }
+
+  const cycleVerifications = (item.agreementDocVerification || []).filter(
+    (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+  );
+
+  // ── These now reflect ONLY actual verification records — never
+  // auto-marked true just because quorum (2 of 3) was reached by
+  // other roles. ──
+  const staffVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.STAFF,
+  );
+  const teamLeadVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+  );
+  const ownerVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.OWNER,
+  );
+
+  const highestVerifiedRole = ownerVerified
+    ? ROLE.OWNER
+    : teamLeadVerified
+      ? ROLE.TEAM_LEAD
+      : staffVerified
+        ? ROLE.STAFF
+        : null;
+
+  const verifiedCount = [staffVerified, teamLeadVerified, ownerVerified].filter(
+    Boolean,
+  ).length;
+
+  // ── "isComplete" is the ONLY field that reflects the quorum rule —
+  // Staff + Team Lead verifying (2 of 3) is enough to close the cycle,
+  // Owner verification is then optional. But individual flags never lie
+  // about who actually verified. ──
+  return {
+    currentCycle: formatDate(currentCycle),
+    staffVerified,
+    teamLeadVerified,
+    ownerVerified, // ✅ true ONLY if Owner actually verified this cycle
+    verifiedCount,
+    isComplete: verifiedCount >= 2,
+    highestVerifiedRole,
+  };
+};
+    const enriched = data.map((item) => ({
+      _id: item._id,
+      mediaCode: item.mediaCode,
+      mediaName: item.mediaName,
+      mediaType: item.mediaType,
+      city: item.city,
+      state: item.state,
+      location: item.location,
+      rentalStatus: item.rentalStatus,
+      totalSqFt: item.totalSqFt,
+      netPayable: item.rentalPayment?.netPayable || 0,
+      paymentFrequency: item.rentalPayment?.paymentFrequency,
+      paymentFrequencyLabel:
+        FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
+      nextBillingDate: item.rentalPayment?.nextBillingDate,
+      lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+      dueStatus: item.rentalPayment?.status,
+      dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+      agreementPeriod: {
+        startDate: item.agreement?.startDate,
+        endDate: item.agreement?.endDate,
+        agreementPDF: item.agreement?.agreementPDF,
+      },
+      agreementDocVerificationHistory: item.agreementDocVerification || [],
+      verificationProgress: buildVerificationProgress(item),
+      rentalDueEntries: item.rentalDue || [],
+    }));
+
+    return res.status(200).json({
+      success: true,
+      value: {
+        totalSites,
+        dueThisMonth,
+        dueAmountOpen,
+        overDue: { siteCount: overDueSiteCount },
+        approvedCount,
+        pendingCount,
+        // pendingApproval: {
+        //   staff: pendingByRole.staff,
+        //   teamLead: pendingByRole.teamLead,
+        //   owner: pendingByRole.owner,
+        //   total: pendingByRole.total,
+        // },
+      },
+      data: enriched,
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
+  }
+};
