@@ -80,16 +80,16 @@ const validateOwnerPaymentCategories = (
 
         let ownerShare = 0;
         if (Number(owner.typeShare) === 1) {
-          ownerShare = parseFloat(
+          ownerShare =  Math.floor(
             ((netPayable * (Number(owner.sharePercentage) || 0)) / 100).toFixed(
               2,
             ),
           );
         } else {
-          ownerShare = parseFloat((Number(owner.shareAmount) || 0).toFixed(2));
+          ownerShare =  Math.floor((Number(owner.shareAmount) || 0).toFixed(2));
         }
 
-        const splitTotal = parseFloat((cashAmt + onlineAmt).toFixed(2));
+        const splitTotal =  Math.floor((cashAmt + onlineAmt).toFixed(2));
         if (Math.abs(splitTotal - ownerShare) > 0.01) {
           return {
             valid: false,
@@ -129,21 +129,21 @@ const validateLandOwnerShares = (
 ) => {
   const tdsAmount =
     tdsApplicable === 1 && tdsPercentage > 0
-      ? parseFloat(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
+      ?  Math.floor(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
       : 0;
 
-  const amountAfterTds = parseFloat((totalRentalAmount - tdsAmount).toFixed(2));
+  const amountAfterTds =  Math.floor((totalRentalAmount - tdsAmount).toFixed(2));
 
   let gstAmount = 0;
   let totalWithGst = amountAfterTds;
 
   if (gstApplicable === 1) {
-    const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
-    gstAmount = parseFloat(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-    totalWithGst = parseFloat((amountAfterTds + gstAmount).toFixed(2));
+    const envGstPct =  Math.floor(process.env.GST_PERCENTAGE || "18");
+    gstAmount =  Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
+    totalWithGst =  Math.floor((amountAfterTds + gstAmount).toFixed(2));
   }
 
-  const netPayable = parseFloat(totalWithGst.toFixed(2));
+  const netPayable =  Math.floor(totalWithGst.toFixed(2));
 
   if (!landOwners || !landOwners.length) {
     return { valid: false, message: "At least one land owner is required" };
@@ -178,7 +178,7 @@ const validateLandOwnerShares = (
         };
       }
 
-      totalComputedAmount += parseFloat(
+      totalComputedAmount +=  Math.floor(
         ((netPayable * sharePercentage) / 100).toFixed(2),
       );
     } else if (typeShare === 2) {
@@ -192,7 +192,7 @@ const validateLandOwnerShares = (
         };
       }
 
-      totalComputedAmount += parseFloat(shareAmount.toFixed(2));
+      totalComputedAmount +=  Math.floor(shareAmount.toFixed(2));
     }
   }
 
@@ -984,7 +984,7 @@ const mediaOnboarding = async (req, res) => {
       mediaData.rentalPayment?.totalRentalAmount
     ) {
       const tdsApplicable = Number(mediaData.rentalPayment.tdsApplicable) || 0;
-      const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
+      const envTdsPercent =  Math.floor(process.env.TDS_PERCENTAGE || "0");
       const tdsPercentage =
         tdsApplicable === 1
           ? envTdsPercent > 0
@@ -1826,9 +1826,9 @@ const uploadExcel = async (req, res) => {
         continue;
       }
 
-      mapped.width = parseFloat(mapped.width);
-      mapped.height = parseFloat(mapped.height);
-      mapped.totalSqFt = parseFloat((mapped.width * mapped.height).toFixed(2));
+      mapped.width =  Math.floor(mapped.width);
+      mapped.height =  Math.floor(mapped.height);
+      mapped.totalSqFt =  Math.floor((mapped.width * mapped.height).toFixed(2));
       mapped.excelRowNumber = excelRow;
 
       // ── Assign unique mediaId from in-memory counter ──

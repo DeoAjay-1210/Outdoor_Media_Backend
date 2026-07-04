@@ -705,10 +705,24 @@ function addGstToBalanceIfApplicable(media, entry) {
 //       .json({ success: false, message: "Server error", error: err.message });
 //   }
 // };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
-    const { mediaId, campaignName, withGst } = req.body; // ✅ withGst added
+    const { mediaId, campaignName, withGst } = req.body;
 
     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
       return res
@@ -728,6 +742,8 @@ exports.saveRentalDue = async (req, res) => {
         .json({ success: false, message: "Media not found" });
     }
 
+    // Defensive init — older docs saved before this migration may not
+    // have these fields yet.
     if (!media.agreementDocVerified) {
       media.agreementDocVerified = {
         staff: false,
@@ -749,11 +765,16 @@ exports.saveRentalDue = async (req, res) => {
     if (!Array.isArray(media.agreementDocVerification)) {
       media.agreementDocVerification = [];
     }
-    // ✅ defensive init for the new GST balance field on older docs
+    if (!Array.isArray(media.ledger)) {
+      media.ledger = [];
+    }
     if (media.rentalPayment && media.rentalPayment.balanceGstAmount == null) {
       media.rentalPayment.balanceGstAmount = 0;
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // 🔒 GUARD — "verify first, then save"
+    // ══════════════════════════════════════════════════════════════
     const currentCycleForVerification = getCurrentCycle(
       media.rentalPayment?.nextBillingDate,
     );
@@ -778,10 +799,12 @@ exports.saveRentalDue = async (req, res) => {
           h.isVerified && isSameCycle(h.cycle, currentCycleForVerification),
       );
 
+    // "2 verified is enough" rule — same as verifyAgreementDoc.
     const verifiedRolesThisCycle = new Set(
       currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
     );
     const verifiedCountThisCycle = verifiedRolesThisCycle.size;
+
     const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
 
     const canProceedToSave =
@@ -794,10 +817,12 @@ exports.saveRentalDue = async (req, res) => {
       });
     }
 
+    // Most recently created entry that hasn't been fully approved yet.
     const pendingEntry = [...media.rentalDueEntries]
       .reverse()
       .find((e) => e.approvalStatus !== 3);
 
+    // ── Current cycle = the billing date this request is acting against ──
     const currentCycleDate = media.rentalPayment?.nextBillingDate
       ? new Date(media.rentalPayment.nextBillingDate).getTime()
       : null;
@@ -853,17 +878,25 @@ exports.saveRentalDue = async (req, res) => {
         entry.status = 3;
         entry.currentPendingRole = null;
         entry.agreementDocVerified = true;
+        entry.ownerApprovalDate = nowIST();
         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
 
         markRoleVerified(media, entry, ROLE.OWNER, userName);
 
-        // ✅ NEW — cycle is closing now: add this entry's GST (if
-        // withGst === 1) to the running balance BEFORE the billing
-        // date rolls forward.
+        // ✅ close out GST for this cycle BEFORE billing date rolls forward
         addGstToBalanceIfApplicable(media, entry);
 
         advanceRentalPaymentOnOwnerApproval(media);
 
+        // ✅ reset ledger the moment the cycle rolls over — old cycle's
+        // entries are already permanently preserved in ledgerHistory
+        if (Array.isArray(media.ledger) && media.ledger.length > 0) {
+          media.ledger = [];
+          media.markModified("ledger");
+        }
+
+        // redundant safety reset — guarantees the live flags are
+        // false for the NEW cycle
         media.agreementDocVerified = {
           staff: false,
           teamLead: false,
@@ -903,11 +936,16 @@ exports.saveRentalDue = async (req, res) => {
           entry.agreementDocVerified = true;
 
           if (userType === ROLE.OWNER) {
-            // ✅ NEW — same GST balance update for the normal-chain
-            // final-step-by-Owner completion path.
+
+             entry.ownerApprovalDate = nowIST(); 
             addGstToBalanceIfApplicable(media, entry);
 
             advanceRentalPaymentOnOwnerApproval(media);
+
+            if (Array.isArray(media.ledger) && media.ledger.length > 0) {
+              media.ledger = [];
+              media.markModified("ledger");
+            }
 
             media.agreementDocVerified = {
               staff: false,
@@ -958,16 +996,17 @@ exports.saveRentalDue = async (req, res) => {
             ? ROLE_LABEL[entry.currentPendingRole]
             : "Completed",
           rentalStatus: media.rentalStatus,
-          withGst: entry.withGst, // ✅ added
-          gstAmount: entry.gstAmount, // ✅ added
-          baseAmount: entry.baseAmount, // ✅ added
+          withGst: entry.withGst,
+          gstAmount: entry.gstAmount,
+          baseAmount: entry.baseAmount,
           netPayable: entry.netPayable,
-          balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0, // ✅ added
+          balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
           agreementDocVerified: media.agreementDocVerified,
           agreementDocVerificationHistory:
             media.agreementDocVerificationHistory,
           agreementDocVerificationStatus: getAgreementVerificationStatus(media),
           rentalPayment: media.rentalPayment,
+          ledger: media.ledger,
         },
       });
     }
@@ -1072,8 +1111,7 @@ exports.saveRentalDue = async (req, res) => {
     const nextPendingStep = steps.find((s) => s.status === 1);
     const allApproved = !nextPendingStep;
 
-    // ✅ NEW — resolve withGst mode for this entry (default to 1 /
-    // With GST if not provided or invalid)
+    // ✅ resolve withGst mode for this entry (default to 1 / With GST)
     const resolvedWithGst = [1, 2].includes(Number(withGst))
       ? Number(withGst)
       : 1;
@@ -1082,8 +1120,9 @@ exports.saveRentalDue = async (req, res) => {
     const newEntry = {
       dueMonth: getDueMonthLabel(dueDateObj),
       dueDate: dueDateObj,
-      netPayable: gstSplit.netPayable, // ✅ changed — base-only if withGst===1
+      netPayable: Number(gstSplit.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
+       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
       campaignName,
       proofOfCampaign,
       savedBy: { userId, userName, role: userType, savedAt: nowIST() },
@@ -1093,9 +1132,9 @@ exports.saveRentalDue = async (req, res) => {
       currentPendingRole: nextPendingStep ? nextPendingStep.role : null,
       agreementDocVerified: allApproved,
       status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
-      withGst: resolvedWithGst, // ✅ added
-      gstAmount: gstSplit.gstAmount, // ✅ added
-      baseAmount: gstSplit.baseAmount, // ✅ added
+      withGst: resolvedWithGst,
+      gstAmount: Number(gstSplit.gstAmount) || 0,
+      baseAmount: Number(gstSplit.baseAmount) || 0,
       updatedBy: userName,
       updatedAt: nowIST(),
     };
@@ -1112,11 +1151,16 @@ exports.saveRentalDue = async (req, res) => {
     }
 
     if (isOwnerOverride) {
-      // ✅ NEW — Owner created AND fully approved directly, so the cycle
-      // closes right here too: add GST to balance before rolling dates.
+      // Owner created AND fully approved directly — cycle closes here too
       addGstToBalanceIfApplicable(media, savedEntry);
 
       advanceRentalPaymentOnOwnerApproval(media);
+
+      // ✅ reset ledger for the new cycle that just opened
+      if (Array.isArray(media.ledger) && media.ledger.length > 0) {
+        media.ledger = [];
+        media.markModified("ledger");
+      }
 
       media.agreementDocVerified = {
         staff: false,
@@ -1144,7 +1188,7 @@ exports.saveRentalDue = async (req, res) => {
       siteName: media.mediaName,
       campaignName,
       dueDate: dueDateObj,
-      netPayable: newEntry.netPayable,
+      netPayable: Number(newEntry.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
       approvalStatus: newEntry.approvalStatus,
       savedBy: userName,
       savedByRole: userType,
@@ -1171,10 +1215,10 @@ exports.saveRentalDue = async (req, res) => {
         proofOfCampaign,
         dueDate: dueDateObj,
         netPayable: newEntry.netPayable,
-        withGst: newEntry.withGst, // ✅ added
-        gstAmount: newEntry.gstAmount, // ✅ added
-        baseAmount: newEntry.baseAmount, // ✅ added
-        balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0, // ✅ added
+        withGst: newEntry.withGst,
+        gstAmount: newEntry.gstAmount,
+        baseAmount: newEntry.baseAmount,
+        balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
         savedBy: {
           userId,
           userName,
@@ -1192,6 +1236,7 @@ exports.saveRentalDue = async (req, res) => {
         agreementDocVerificationHistory: media.agreementDocVerificationHistory,
         agreementDocVerificationStatus: getAgreementVerificationStatus(media),
         rentalPayment: media.rentalPayment,
+        ledger: media.ledger,
       },
     });
   } catch (err) {
@@ -1693,11 +1738,22 @@ exports.getRentalDueListWithStats = async (req, res) => {
           agreement: 1,
           agreementDocVerification: 1,
           rentalDue: 1,
+            updatedAt: 1,
+            lastUpdateDate: {
+        $max: [
+          "$updatedAt",
+          "$createdAt",
+          { $max: "$rentalDue.updatedAt" },
+          { $max: "$rentalDue.createdAt" },
+          { $max: "$agreementDocVerification.updatedAt" },
+          { $max: "$agreementDocVerification.createdAt" }
+        ]
+      }
         },
       },
       {
         $facet: {
-          data: [{ $skip: skip }, { $limit: pageSize }],
+          data: [ { $sort: { lastUpdateDate: -1 } },{ $skip: skip }, { $limit: pageSize }],
           total: [{ $count: "count" }],
         },
       },

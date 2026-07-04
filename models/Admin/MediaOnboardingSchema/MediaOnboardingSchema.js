@@ -167,6 +167,7 @@ const ledgerSchema = new mongoose.Schema(
       enum: [0, 1], // 0=not Approve 1=Approve
       default: 0,
     },
+     cycle: { type: Date, default: null },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },

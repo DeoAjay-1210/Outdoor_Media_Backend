@@ -83,6 +83,7 @@ const agreementDocVerifiedSchema = new mongoose.Schema(
     staff: { type: Boolean, default: false },
     teamLead: { type: Boolean, default: false },
     owner: { type: Boolean, default: false },
+    
   },
   { _id: false },
 );
@@ -94,7 +95,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     dueDate: { type: Date, required: true }, // actual due date
 
     netPayable: { type: Number, default: 0, min: 0 },
- withGst: { type: Number, enum: [1, 2], default: null },
+ withGst: { type: Number, enum: [1, 2], default: null }, // 1 withoutGST 2. withGST
 
     // ✅ NEW — snapshot of the GST amount for THIS cycle (only relevant
     // when withGst === 1). Stored on the entry itself so the historical
@@ -108,7 +109,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
       type: Number,
       enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
     },
-
+ownerApprovalDate: { type: Date, default: null },
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
     proofOfCampaign: {
