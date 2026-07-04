@@ -1,5 +1,6 @@
 // controllers/rentalDue.controller.js
 const mongoose = require("mongoose");
+const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const path = require("path");
 const {
@@ -57,8 +58,6 @@ function getAgreementVerificationStatus(item) {
   };
 }
 
-
-
 const RENTAL_STATUS_MAP = {
   [ROLE.STAFF]: 1,
   [ROLE.TEAM_LEAD]: 2,
@@ -84,7 +83,6 @@ function addMonths(date, months) {
 function resetLiveAgreementFlags(media) {
   media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
 }
-
 
 function pushVerificationHistory(media, entry, role, userName) {
   const alreadyLogged = media.agreementDocVerificationHistory.some(
@@ -112,7 +110,6 @@ function markRoleVerified(media, entry, role, userName) {
   pushVerificationHistory(media, entry, role, userName);
 }
 
-
 function advanceRentalPaymentOnOwnerApproval(media) {
   const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
   const frequency = media.rentalPayment?.paymentFrequency;
@@ -127,7 +124,6 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 
   resetLiveAgreementFlags(media);
 }
-
 
 function getAgreementVerificationStatus(media) {
   const f = media.agreementDocVerified || {};
@@ -706,18 +702,176 @@ function addGstToBalanceIfApplicable(media, entry) {
 //   }
 // };
 
+async function sendRentalDueApprovalMail(media, entry) {
+  try {
+    const toMail = process.env.T0_EMail;
+    const ccMail = process.env.CC_EMail;
+    const mailMode = process.env.MAIL_MODE || "development";
+    const formatDMY = (date) =>
+      date
+        ? new Date(date).toLocaleDateString("en-GB").replace(/\//g, "-")
+        : null;
 
+    const rp = media.rentalPayment || {};
+    const appraisal = media.appraisal || {};
+    const agreement = media.agreement || {};
 
+    const landOwnersPayload = (media.landOwners || []).map((owner) => ({
+      name: owner.name || "",
+      phone: owner.phone || "",
+      bankName: owner.bankName || "",
+      ifsc: owner.ifsc || "",
+      accountNumber: owner.accountNumber || "",
+      panNumber: owner.panNumber || "",
+      paymentCategory: owner.paymentCategory || 0,
+      typeShare: owner.typeShare || 0,
+      shareAmount: owner.shareAmount || 0,
+      onlineMode: owner.onlineMode || 0,
+      onlineAmount: owner.onlineAmount || 0,
+      cashAmount: owner.cashAmount || 0,
+      gstApplicable: owner.gstApplicable || 0,
+      gstPercentage: owner.gstPercentage || 0,
+      gstAmount: owner.gstAmount || 0,
+      totalAmountWithGst: owner.totalAmountWithGst || 0,
+    }));
 
+    const mailPayload = {
+      mailtype: "cmdapproval",
+      to: [toMail],
+      cc: [ccMail],
+      data: {
+        _id: media._id,
+        mediaCode: media.mediaCode || "",
+        mediaName: media.mediaName || "",
+        mediaType: media.mediaType || "",
+        state: media.state || "",
+        city: media.city || "",
+        location: media.location || "",
+        fullAddress: media.fullAddress || "",
+        width: media.width || 0,
+        height: media.height || 0,
+        status: media.status || 0,
+        totalSqFt: media.totalSqFt || 0,
+        numberOfLandOwners: media.numberOfLandOwners || 0,
 
+        rentalPayment: {
+          totalRentalAmount: rp.totalRentalAmount || 0,
+          gstApplicable: rp.gstApplicable || 0,
+          gstNumber: rp.gstNumber || "",
+          gstPercentage: rp.gstPercentage || 0,
+          gstAmount: rp.gstAmount || 0,
+          totalRentalAmountWithGst: rp.totalRentalAmountWithGst || 0,
+          tdsApplicable: rp.tdsApplicable || 0,
+          tdsPercentage: rp.tdsPercentage || 0,
+          tdsAmount: rp.tdsAmount || 0,
+          netPayable: rp.netPayable || 0,
+          paymentFrequency: rp.paymentFrequency || 0,
+          lastBillPaidDate: formatDMY(rp.lastBillPaidDate),
+          nextBillingDate: formatDMY(rp.nextBillingDate),
+          balanceGstAmount: rp.balanceGstAmount || 0,
+          status: rp.status || 0,
+        },
 
+        // rentalDueEntry: {
+        //   withGst: entry?.withGst ?? null,
+        //   baseAmount: entry?.baseAmount || 0,
+        //   gstAmount: entry?.gstAmount || 0,
+        //   netPayable: entry?.netPayable || 0,
+        //   dueMonth: entry?.dueMonth || "",
+        //   dueDate: formatDMY(entry?.dueDate),
+        //   ownerApprovalDate: formatDMY(entry?.ownerApprovalDate),
+        //   campaignName: entry?.campaignName || "",
+        //   approvalFlow: entry?.approvalFlow || null,
+        //   approvalSteps: entry?.approvalSteps || [],
+        // },
 
+        appraisal: {
+          applicable: appraisal.applicable || 0,
+          type: appraisal.type || 0,
+          percentage: appraisal.percentage || 0,
+          fixedAmount: appraisal.fixedAmount || 0,
+          frequency: appraisal.frequency || 0,
+          currentRent: appraisal.currentRent || 0,
+          appraisalAmount: appraisal.appraisalAmount || 0,
+          totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
+          lastAppraisalDate: formatDMY(appraisal.lastAppraisalDate),
+          nextAppraisalDate: formatDMY(appraisal.nextAppraisalDate),
+        },
 
+        agreement: {
+          startDate: formatDMY(agreement.startDate),
+          endDate: formatDMY(agreement.endDate),
+          reminderBeforeExpiry: agreement.reminderBeforeExpiry || 0,
+          advanceRent: agreement.advanceRent || 0,
+          status: agreement.status || 0,
+        },
 
+        landOwners: landOwnersPayload,
+      },
+    };
 
+    // console.log(
+    //   "📧 RENTAL DUE MAIL PAYLOAD:",
+    //   JSON.stringify(mailPayload, null, 2),
+    // );
+   if (mailMode !== "production") {
+      console.log(
+        `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`,
+      );
+      return {
+        mailtype: "cmdapproval",
+        to: [toMail],
+        cc: [ccMail],
+        success: true,
+        sent: false, // ✅ mail wasn't actually sent, so mailSent stays false on the entry
+        statusCode: 200,
+        message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
+        data: mailPayload.data,
+      };
+    }
+    const response = await axios.post(
+      "https://adinndigital.com/api/outdoormedia/index_cmdapproval.php",
+      mailPayload,
+      { headers: { "Content-Type": "application/json" } },
+    );
 
+    // console.log("✅ Rental due approval mail sent:", response.data);
 
+    const isMailSuccess =
+      response.data &&
+      (response.data.success === true ||
+        response.data.status === "success" ||
+        response.status === 200);
 
+    return {
+      mailtype: "cmdapproval",
+      to: [toMail],
+      cc: [ccMail],
+      success: !!isMailSuccess,
+      sent: !!isMailSuccess, // ✅ NEW — controller reads `sent` to set entry.mailSent
+      statusCode: response.status || (isMailSuccess ? 200 : 500),
+      message: isMailSuccess
+        ? "Rental due approval mail sent successfully"
+        : "Rental due approval mail failed",
+      data: mailPayload.data,
+    };
+  } catch (mailErr) {
+    console.error(
+      "❌ Rental due approval mail error:",
+      mailErr?.message || mailErr,
+    );
+    return {
+      mailtype: "cmdapproval",
+      to: [process.env.T0_EMail],
+      cc: [process.env.CC_EMail],
+      success: false,
+      sent: false, // ✅ NEW — ensures mailResult.sent is always defined, even on error
+      statusCode: 500,
+      message: mailErr?.message || "Unknown mail error",
+      data: null,
+    };
+  }
+}
 
 exports.saveRentalDue = async (req, res) => {
   try {
@@ -842,7 +996,7 @@ exports.saveRentalDue = async (req, res) => {
           "Owner has already approved this document for the current cycle",
       });
     }
-
+    let mailResult = null;
     // ═══════════════════════════════════════
     // BRANCH 1: pending entry exists → this call is an APPROVAL
     // ═══════════════════════════════════════
@@ -936,8 +1090,7 @@ exports.saveRentalDue = async (req, res) => {
           entry.agreementDocVerified = true;
 
           if (userType === ROLE.OWNER) {
-
-             entry.ownerApprovalDate = nowIST(); 
+            entry.ownerApprovalDate = nowIST();
             addGstToBalanceIfApplicable(media, entry);
 
             advanceRentalPaymentOnOwnerApproval(media);
@@ -981,6 +1134,12 @@ exports.saveRentalDue = async (req, res) => {
       media.updatedAt = nowIST();
       await media.save();
 
+      // ✅ Send owner-approval mail + persist mailSent on THIS entry/cycle
+      if (userType === ROLE.OWNER && entry.approvalStatus === 3) {
+        const mailResult = await sendRentalDueApprovalMail(media, entry);
+        entry.mailSent = !!mailResult.sent;
+        await media.save();
+      }
       return res.status(200).json({
         success: true,
         message: isOwnerOverride
@@ -1007,6 +1166,7 @@ exports.saveRentalDue = async (req, res) => {
           agreementDocVerificationStatus: getAgreementVerificationStatus(media),
           rentalPayment: media.rentalPayment,
           ledger: media.ledger,
+          mailSent: entry.mailSent,
         },
       });
     }
@@ -1122,7 +1282,8 @@ exports.saveRentalDue = async (req, res) => {
       dueDate: dueDateObj,
       netPayable: Number(gstSplit.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
-       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
+      ownerApprovalDate: isOwnerOverride ? nowIST() : null,
+      mailSent: false,
       campaignName,
       proofOfCampaign,
       savedBy: { userId, userName, role: userType, savedAt: nowIST() },
@@ -1200,6 +1361,11 @@ exports.saveRentalDue = async (req, res) => {
     media.updatedAt = nowIST();
     await media.save();
 
+    if (isOwnerOverride && savedEntry.approvalStatus === 3) {
+      const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
+      savedEntry.mailSent = !!mailResult.sent;
+      await media.save();
+    }
     return res.status(201).json({
       success: true,
       message: isOwnerOverride
@@ -1237,6 +1403,7 @@ exports.saveRentalDue = async (req, res) => {
         agreementDocVerificationStatus: getAgreementVerificationStatus(media),
         rentalPayment: media.rentalPayment,
         ledger: media.ledger,
+        mailSent: savedEntry.mailSent,
       },
     });
   } catch (err) {
@@ -1245,6 +1412,7 @@ exports.saveRentalDue = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
+
 const ROLE_RANK = {
   [ROLE.STAFF]: 1,
   [ROLE.TEAM_LEAD]: 2,
@@ -1712,7 +1880,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
     });
 
     const pendingCount = Math.max(
-     dueThisMonth.count - approvedCount - overDueSiteCount,
+      dueThisMonth.count - approvedCount - overDueSiteCount,
       0,
     );
 
@@ -1738,22 +1906,26 @@ exports.getRentalDueListWithStats = async (req, res) => {
           agreement: 1,
           agreementDocVerification: 1,
           rentalDue: 1,
-            updatedAt: 1,
-            lastUpdateDate: {
-        $max: [
-          "$updatedAt",
-          "$createdAt",
-          { $max: "$rentalDue.updatedAt" },
-          { $max: "$rentalDue.createdAt" },
-          { $max: "$agreementDocVerification.updatedAt" },
-          { $max: "$agreementDocVerification.createdAt" }
-        ]
-      }
+          updatedAt: 1,
+          lastUpdateDate: {
+            $max: [
+              "$updatedAt",
+              "$createdAt",
+              { $max: "$rentalDue.updatedAt" },
+              { $max: "$rentalDue.createdAt" },
+              { $max: "$agreementDocVerification.updatedAt" },
+              { $max: "$agreementDocVerification.createdAt" },
+            ],
+          },
         },
       },
       {
         $facet: {
-          data: [ { $sort: { lastUpdateDate: -1 } },{ $skip: skip }, { $limit: pageSize }],
+          data: [
+            { $sort: { updatedAt: -1 } },
+            { $skip: skip },
+            { $limit: pageSize },
+          ],
           total: [{ $count: "count" }],
         },
       },
@@ -1770,128 +1942,66 @@ exports.getRentalDueListWithStats = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    // const buildVerificationProgress = (item) => {
-    //   const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
+    const buildVerificationProgress = (item) => {
+      const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
 
-    //   if (!currentCycle) {
-    //     return {
-    //       currentCycle: null,
-    //       staffVerified: false,
-    //       teamLeadVerified: false,
-    //       ownerVerified: false,
-    //       verifiedCount: 0,
-    //       isComplete: false,
-    //       highestVerifiedRole: null,
-    //     };
-    //   }
+      if (!currentCycle) {
+        return {
+          currentCycle: null,
+          staffVerified: false,
+          teamLeadVerified: false,
+          ownerVerified: false,
+          verifiedCount: 0,
+          isComplete: false,
+          highestVerifiedRole: null,
+        };
+      }
 
-    //   const cycleVerifications = (item.agreementDocVerification || []).filter(
-    //     (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
-    //   );
+      const cycleVerifications = (item.agreementDocVerification || []).filter(
+        (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+      );
 
-    //   // ── ACTUAL flags — reflect only real verification records ──
-    //   const staffVerifiedActual = cycleVerifications.some(
-    //     (h) => h.verifiedByRole === ROLE.STAFF,
-    //   );
-    //   const teamLeadVerifiedActual = cycleVerifications.some(
-    //     (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
-    //   );
-    //   const ownerVerifiedActual = cycleVerifications.some(
-    //     (h) => h.verifiedByRole === ROLE.OWNER,
-    //   );
+      // ── These now reflect ONLY actual verification records — never
+      // auto-marked true just because quorum (2 of 3) was reached by
+      // other roles. ──
+      const staffVerified = cycleVerifications.some(
+        (h) => h.verifiedByRole === ROLE.STAFF,
+      );
+      const teamLeadVerified = cycleVerifications.some(
+        (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+      );
+      const ownerVerified = cycleVerifications.some(
+        (h) => h.verifiedByRole === ROLE.OWNER,
+      );
 
-    //   const highestVerifiedRole = ownerVerifiedActual
-    //     ? ROLE.OWNER
-    //     : teamLeadVerifiedActual
-    //       ? ROLE.TEAM_LEAD
-    //       : staffVerifiedActual
-    //         ? ROLE.STAFF
-    //         : null;
+      const highestVerifiedRole = ownerVerified
+        ? ROLE.OWNER
+        : teamLeadVerified
+          ? ROLE.TEAM_LEAD
+          : staffVerified
+            ? ROLE.STAFF
+            : null;
 
-    //   const verifiedCount = [
-    //     staffVerifiedActual,
-    //     teamLeadVerifiedActual,
-    //     ownerVerifiedActual,
-    //   ].filter(Boolean).length;
+      const verifiedCount = [
+        staffVerified,
+        teamLeadVerified,
+        ownerVerified,
+      ].filter(Boolean).length;
 
-    //   const isComplete = verifiedCount >= 2;
-
-    //   // ── EFFECTIVE flags for display — once quorum (2 of 3) is met, the
-    //   // requirement is fully satisfied and the remaining role's action is
-    //   // no longer needed, so show it as verified too. Before quorum, flags
-    //   // reflect only actual verifications. ──
-    //   const staffVerified = isComplete ? true : staffVerifiedActual;
-    //   const teamLeadVerified = isComplete ? true : teamLeadVerifiedActual;
-    //   const ownerVerified = isComplete ? true : ownerVerifiedActual;
-
-    //   return {
-    //     currentCycle: formatDate(currentCycle),
-    //     staffVerified,
-    //     teamLeadVerified,
-    //     ownerVerified,
-    //     verifiedCount,
-    //     isComplete,
-    //     highestVerifiedRole,
-    //   };
-    // };
-const buildVerificationProgress = (item) => {
-  const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
-
-  if (!currentCycle) {
-    return {
-      currentCycle: null,
-      staffVerified: false,
-      teamLeadVerified: false,
-      ownerVerified: false,
-      verifiedCount: 0,
-      isComplete: false,
-      highestVerifiedRole: null,
+      // ── "isComplete" is the ONLY field that reflects the quorum rule —
+      // Staff + Team Lead verifying (2 of 3) is enough to close the cycle,
+      // Owner verification is then optional. But individual flags never lie
+      // about who actually verified. ──
+      return {
+        currentCycle: formatDate(currentCycle),
+        staffVerified,
+        teamLeadVerified,
+        ownerVerified, // ✅ true ONLY if Owner actually verified this cycle
+        verifiedCount,
+        isComplete: verifiedCount >= 2,
+        highestVerifiedRole,
+      };
     };
-  }
-
-  const cycleVerifications = (item.agreementDocVerification || []).filter(
-    (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
-  );
-
-  // ── These now reflect ONLY actual verification records — never
-  // auto-marked true just because quorum (2 of 3) was reached by
-  // other roles. ──
-  const staffVerified = cycleVerifications.some(
-    (h) => h.verifiedByRole === ROLE.STAFF,
-  );
-  const teamLeadVerified = cycleVerifications.some(
-    (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
-  );
-  const ownerVerified = cycleVerifications.some(
-    (h) => h.verifiedByRole === ROLE.OWNER,
-  );
-
-  const highestVerifiedRole = ownerVerified
-    ? ROLE.OWNER
-    : teamLeadVerified
-      ? ROLE.TEAM_LEAD
-      : staffVerified
-        ? ROLE.STAFF
-        : null;
-
-  const verifiedCount = [staffVerified, teamLeadVerified, ownerVerified].filter(
-    Boolean,
-  ).length;
-
-  // ── "isComplete" is the ONLY field that reflects the quorum rule —
-  // Staff + Team Lead verifying (2 of 3) is enough to close the cycle,
-  // Owner verification is then optional. But individual flags never lie
-  // about who actually verified. ──
-  return {
-    currentCycle: formatDate(currentCycle),
-    staffVerified,
-    teamLeadVerified,
-    ownerVerified, // ✅ true ONLY if Owner actually verified this cycle
-    verifiedCount,
-    isComplete: verifiedCount >= 2,
-    highestVerifiedRole,
-  };
-};
     const enriched = data.map((item) => ({
       _id: item._id,
       mediaCode: item.mediaCode,

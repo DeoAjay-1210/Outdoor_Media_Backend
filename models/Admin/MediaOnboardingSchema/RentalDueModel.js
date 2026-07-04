@@ -110,6 +110,8 @@ const rentalDueEntrySchema = new mongoose.Schema(
       enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
     },
 ownerApprovalDate: { type: Date, default: null },
+// ✅ NEW — cycle-based mail status for this entry's approval mail
+    mailSent: { type: Boolean, default: false },
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
     proofOfCampaign: {

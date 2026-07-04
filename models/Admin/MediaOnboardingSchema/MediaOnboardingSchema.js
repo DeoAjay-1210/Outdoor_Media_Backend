@@ -143,7 +143,7 @@ const agreementHistorySchema = new mongoose.Schema({
     },
     paymentFrequency: {
       type: Number,
-      enum: [1, 2, 3, 4, 5, 6],  // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+      enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
       default: 1,
     },
     // ← NEW: who changed totalRentalAmount in this agreement snapshot
@@ -167,7 +167,7 @@ const ledgerSchema = new mongoose.Schema(
       enum: [0, 1], // 0=not Approve 1=Approve
       default: 0,
     },
-     cycle: { type: Date, default: null },
+    cycle: { type: Date, default: null },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },
@@ -337,17 +337,17 @@ const MediaSchema = new mongoose.Schema(
         default: 0,
       },
       // ✅ NEW — running total of GST amounts collected across cycles where
-  // withGst === 1 (client billed base-only, GST held separately). This
-  // represents GST owed to the government that hasn't been remitted yet.
-  // Reduce this manually (via a separate "settle GST" action/endpoint)
-  // once the amount is actually paid to the government.
-  balanceGstAmount: { type: Number, default: 0, min: 0 },
+      // withGst === 1 (client billed base-only, GST held separately). This
+      // represents GST owed to the government that hasn't been remitted yet.
+      // Reduce this manually (via a separate "settle GST" action/endpoint)
+      // once the amount is actually paid to the government.
+      balanceGstAmount: { type: Number, default: 0, min: 0 },
       status: {
         type: Number,
         enum: [1, 2, 3], // 1=Active 2=Expire Zone 3=Expired
         default: 1,
       },
-      ownerPayments: [ownerPaymentSchema],
+      // ownerPayments: [ownerPaymentSchema],
     },
 
     // ─────────────────────────────────────────────────────────
@@ -473,7 +473,6 @@ const MediaSchema = new mongoose.Schema(
       },
     },
 
-    
     agreementHistory: [agreementHistorySchema],
 
     // ─────────────────────────────────────────────────────────
@@ -562,12 +561,9 @@ const MediaSchema = new mongoose.Schema(
       uploadedAt: { type: Date, default: Date.now },
     },
 
-    
     ledger: [ledgerSchema],
 
-    
     ledgerHistory: [ledgerHistoryYearSchema],
-
 
     agreementDocVerification: [agreementDocVerificationSchema],
     rentalDue: [rentalDueEntrySchema],
@@ -576,7 +572,7 @@ const MediaSchema = new mongoose.Schema(
       enum: [0, 1, 2, 3], // 0=null 1=staff Approve 2= Team Lead Approve 3=Owner Approve
       default: 0,
     },
-  
+
     rentalDueHistory: [rentalDueHistoryYearSchema],
   },
   { timestamps: true },
