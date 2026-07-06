@@ -166,9 +166,13 @@ function computeGstSplit(media, withGst) {
 // not at creation, since that's when the billing amount is considered
 // finalized for the cycle.
 function addGstToBalanceIfApplicable(media, entry) {
+  if (entry.gstAddedToBalance) return; // already counted — never add twice
+
   if (entry?.withGst === 1 && entry.gstAmount > 0) {
     media.rentalPayment.balanceGstAmount =
       (media.rentalPayment.balanceGstAmount || 0) + entry.gstAmount;
+    media.markModified("rentalPayment");
+    entry.gstAddedToBalance = true; // ✅ mark so later approval steps don't re-add
   }
 }
 // exports.saveRentalDue = async (req, res) => {
@@ -747,7 +751,7 @@ async function sendRentalDueApprovalMail(media, entry) {
         state: media.state || "",
         city: media.city || "",
         location: media.location || "",
-        fullAddress: media.fullAddress || "",
+        // fullAddress: media.fullAddress || "",
         width: media.width || 0,
         height: media.height || 0,
         status: media.status || 0,
@@ -814,7 +818,7 @@ async function sendRentalDueApprovalMail(media, entry) {
     //   "📧 RENTAL DUE MAIL PAYLOAD:",
     //   JSON.stringify(mailPayload, null, 2),
     // );
-   if (mailMode !== "production") {
+    if (mailMode !== "production") {
       console.log(
         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`,
       );
@@ -872,6 +876,9 @@ async function sendRentalDueApprovalMail(media, entry) {
     };
   }
 }
+// Upserts a verification-progress SNAPSHOT for the given cycle — one
+// record per cycle, always overwritten in place as verification status
+// changes within that cycle (not appended repeatedly).
 
 exports.saveRentalDue = async (req, res) => {
   try {
@@ -925,7 +932,28 @@ exports.saveRentalDue = async (req, res) => {
     if (media.rentalPayment && media.rentalPayment.balanceGstAmount == null) {
       media.rentalPayment.balanceGstAmount = 0;
     }
-
+    //  let uploadedProofOfCampaign = null;
+    //     if (req.files?.proofOfCampaign?.[0]) {
+    //       const file = req.files.proofOfCampaign[0];
+    //       if (!file.mimetype?.startsWith("image/")) {
+    //         return res.status(400).json({
+    //           success: false,
+    //           message: "Proof of campaign must be an image file",
+    //         });
+    //       }
+    //       uploadedProofOfCampaign = req.processFile(file);
+    //     }
+    let proofOfCampaign = null;
+    if (req.files?.proofOfCampaign?.[0]) {
+      const file = req.files.proofOfCampaign[0];
+      if (!file.mimetype?.startsWith("image/")) {
+        return res.status(400).json({
+          success: false,
+          message: "Proof of campaign must be an image file",
+        });
+      }
+      proofOfCampaign = req.processFile(file);
+    }
     // ══════════════════════════════════════════════════════════════
     // 🔒 GUARD — "verify first, then save"
     // ══════════════════════════════════════════════════════════════
@@ -1012,7 +1040,35 @@ exports.saveRentalDue = async (req, res) => {
           message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
         });
       }
+      if (campaignName) {
+        entry.campaignName = campaignName;
+      }
+      if (proofOfCampaign) {
+        entry.proofOfCampaign = proofOfCampaign;
+      }
+      // ✅ Applies to EVERY approving role (Staff/Team Lead/Owner), not just
+      // Owner's final closure. Tracks/updates balanceGstAmount immediately
+      // whenever withGst is 1, at any approval step.
+      if ([1, 2].includes(Number(withGst))) {
+        const newWithGst = Number(withGst);
+        const oldGstAmount = entry.gstAmount || 0;
 
+        if (entry.withGst !== newWithGst) {
+          entry.withGst = newWithGst;
+          const recomputedSplit = computeGstSplit(media, newWithGst);
+          entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
+          entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
+          entry.netPayable = Number(recomputedSplit.netPayable) || 0;
+        }
+
+        // Adjust balanceGstAmount to reflect the CURRENT gstAmount for this
+        // entry — remove the old contribution (if any), add the new one.
+        media.rentalPayment.balanceGstAmount =
+          (media.rentalPayment.balanceGstAmount || 0) -
+          (entry.withGst === newWithGst ? oldGstAmount : 0) +
+          (newWithGst === 1 ? entry.gstAmount : 0);
+        media.markModified("rentalPayment");
+      }
       if (isOwnerOverride) {
         entry.approvalSteps.forEach((step) => {
           if (step.status !== 1) return;
@@ -1091,7 +1147,7 @@ exports.saveRentalDue = async (req, res) => {
 
           if (userType === ROLE.OWNER) {
             entry.ownerApprovalDate = nowIST();
-            addGstToBalanceIfApplicable(media, entry);
+            // addGstToBalanceIfApplicable(media, entry);
 
             advanceRentalPaymentOnOwnerApproval(media);
 
@@ -1126,6 +1182,7 @@ exports.saveRentalDue = async (req, res) => {
       );
       if (historyRecord) {
         historyRecord.approvalStatus = entry.approvalStatus;
+        historyRecord.campaignName = entry.campaignName;
         historyRecord.updatedAt = nowIST();
         historyRecord.updatedBy = userName;
       }
@@ -1148,6 +1205,8 @@ exports.saveRentalDue = async (req, res) => {
         data: {
           mediaId: media._id,
           rentalDueId: entry._id,
+          campaignName: entry.campaignName, // ✅ reflects any update
+          proofOfCampaign: entry.proofOfCampaign, // ✅ reflects any update
           approvalSteps: entry.approvalSteps,
           approvalStatus: entry.approvalStatus,
           currentPendingRole: entry.currentPendingRole,
@@ -1198,18 +1257,6 @@ exports.saveRentalDue = async (req, res) => {
             "Owner has already approved this document for the current cycle",
         });
       }
-    }
-
-    let proofOfCampaign = null;
-    if (req.files?.proofOfCampaign?.[0]) {
-      const file = req.files.proofOfCampaign[0];
-      if (!file.mimetype?.startsWith("image/")) {
-        return res.status(400).json({
-          success: false,
-          message: "Proof of campaign must be an image file",
-        });
-      }
-      proofOfCampaign = req.processFile(file);
     }
 
     const dueDateObj = media.rentalPayment?.nextBillingDate
@@ -1284,8 +1331,9 @@ exports.saveRentalDue = async (req, res) => {
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
       mailSent: false,
+      gstAddedToBalance: false,
       campaignName,
-      proofOfCampaign,
+      proofOfCampaign: proofOfCampaign,
       savedBy: { userId, userName, role: userType, savedAt: nowIST() },
       approvalFlow: 2,
       approvalSteps: steps,
@@ -1304,7 +1352,7 @@ exports.saveRentalDue = async (req, res) => {
     media.rentalDueEntries.push(newEntry);
     const savedEntry =
       media.rentalDueEntries[media.rentalDueEntries.length - 1];
-
+    addGstToBalanceIfApplicable(media, savedEntry);
     if (isOwnerOverride) {
       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
     } else if (isTeamLeadCreating) {
@@ -1313,7 +1361,7 @@ exports.saveRentalDue = async (req, res) => {
 
     if (isOwnerOverride) {
       // Owner created AND fully approved directly — cycle closes here too
-      addGstToBalanceIfApplicable(media, savedEntry);
+      // addGstToBalanceIfApplicable(media, savedEntry);
 
       advanceRentalPaymentOnOwnerApproval(media);
 
@@ -1418,7 +1466,62 @@ const ROLE_RANK = {
   [ROLE.TEAM_LEAD]: 2,
   [ROLE.OWNER]: 3,
 };
+// function saveVerificationProgressSnapshot(media, cycle, progress, userName) {
+//   if (!Array.isArray(media.verificationProgressHistory)) {
+//     media.verificationProgressHistory = [];
+//   }
 
+//   const cycleTime = new Date(cycle).getTime();
+//   const existing = media.verificationProgressHistory.find(
+//     (v) => new Date(v.cycle).getTime() === cycleTime,
+//   );
+
+//   const snapshot = {
+//     cycle,
+//     currentCycleLabel: formatDate(cycle),
+//     staffVerified: progress.staffVerified,
+//     teamLeadVerified: progress.teamLeadVerified,
+//     ownerVerified: progress.ownerVerified,
+//     verifiedCount: progress.verifiedCount,
+//     isComplete: progress.isComplete,
+//     highestVerifiedRole: progress.highestVerifiedRole,
+//     updatedAt: nowIST(),
+//     updatedBy: userName,
+//   };
+
+//   if (existing) {
+//     Object.assign(existing, snapshot);
+//   } else {
+//     media.verificationProgressHistory.push(snapshot);
+//   }
+
+//   media.markModified("verificationProgressHistory");
+// }
+// Always APPENDS a new snapshot — one entry per verification ACTION,
+// not one per cycle. This preserves the full progression (e.g. Staff's
+// snapshot, then Team Lead's snapshot, then Owner's) instead of
+// overwriting earlier entries as the cycle progresses.
+function saveVerificationProgressSnapshot(media, cycle, progress, userName) {
+  if (!Array.isArray(media.verificationProgressHistory)) {
+    media.verificationProgressHistory = [];
+  }
+
+  const snapshot = {
+    cycle,
+    currentCycleLabel: formatDate(cycle),
+    staffVerified: progress.staffVerified,
+    teamLeadVerified: progress.teamLeadVerified,
+    ownerVerified: progress.ownerVerified,
+    verifiedCount: progress.verifiedCount,
+    isComplete: progress.isComplete,
+    highestVerifiedRole: progress.highestVerifiedRole,
+    updatedAt: nowIST(),
+    updatedBy: userName,
+  };
+
+  media.verificationProgressHistory.push(snapshot);
+  media.markModified("verificationProgressHistory");
+}
 exports.verifyAgreementDoc = async (req, res) => {
   try {
     const { mediaId } = req.body;
@@ -1641,24 +1744,47 @@ exports.verifyAgreementDoc = async (req, res) => {
       updatedOwnerVerified,
     ].filter(Boolean).length;
 
+    const finalHighestVerifiedRole = getHighestVerifiedRole(
+      updatedStaffVerified,
+      updatedTeamLeadVerified,
+      updatedOwnerVerified,
+    );
+
+    const verificationProgress = {
+      staffVerified: updatedStaffVerified,
+      teamLeadVerified: updatedTeamLeadVerified,
+      ownerVerified: updatedOwnerVerified,
+      verifiedCount: updatedVerifiedCount,
+      isComplete: updatedVerifiedCount >= 2,
+      highestVerifiedRole: finalHighestVerifiedRole,
+    };
+    saveVerificationProgressSnapshot(
+      media,
+      currentCycle,
+      verificationProgress,
+      userName,
+    );
+    await media.save();
     return res.status(200).json({
       success: true,
       message: `${ROLE_LABEL[userType]} verified the agreement document successfully for the billing cycle starting ${formatDate(currentCycle)}`,
       data: {
         verificationRecord,
         currentCycle: formatDate(currentCycle),
-        verificationProgress: {
-          staffVerified: updatedStaffVerified,
-          teamLeadVerified: updatedTeamLeadVerified,
-          ownerVerified: updatedOwnerVerified,
-          verifiedCount: updatedVerifiedCount,
-          isComplete: updatedVerifiedCount >= 2,
-          highestVerifiedRole: getHighestVerifiedRole(
-            updatedStaffVerified,
-            updatedTeamLeadVerified,
-            updatedOwnerVerified,
-          ),
-        },
+        verificationProgress,
+        verificationProgressHistory: media.verificationProgressHistory,
+        // verificationProgress: {
+        //   staffVerified: updatedStaffVerified,
+        //   teamLeadVerified: updatedTeamLeadVerified,
+        //   ownerVerified: updatedOwnerVerified,
+        //   verifiedCount: updatedVerifiedCount,
+        //   isComplete: updatedVerifiedCount >= 2,
+        //   highestVerifiedRole: getHighestVerifiedRole(
+        //     updatedStaffVerified,
+        //     updatedTeamLeadVerified,
+        //     updatedOwnerVerified,
+        //   ),
+        // },
       },
     });
   } catch (err) {
@@ -1756,6 +1882,433 @@ function formatDate(cycleIdentifier) {
   return cycleIdentifier;
 }
 
+// exports.getRentalDueListWithStats = async (req, res) => {
+//   try {
+//     const {
+//       dueDate,
+//       city,
+//       mediaType,
+//       frequency,
+//       status,
+//       search,
+//       pageNumber = 1,
+//       count = 10,
+//     } = req.body;
+
+//     if (!dueDate) {
+//       return res.status(400).json({
+//         success: false,
+//         message:
+//           "dueDate is required. Please use format MM-YYYY (e.g., 07-2026)",
+//       });
+//     }
+
+//     if (!dueDate.match(/^\d{2}-\d{4}$/)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Invalid dueDate format. Please use MM-YYYY (e.g., 07-2026)",
+//       });
+//     }
+
+//     const pageNumbers = parseInt(pageNumber) || 1;
+//     const pageSize = parseInt(count) || 10;
+//     const skip = (pageNumbers - 1) * pageSize;
+
+//     const [mo, yr] = dueDate.split("-").map(Number);
+//     const monthStart = new Date(yr, mo - 1, 1);
+//     const monthEnd = new Date(yr, mo, 0, 23, 59, 59);
+//     const dateFilter = { $gte: monthStart, $lte: monthEnd };
+
+//     const mediaMatch = { status: 1 };
+//     if (city) mediaMatch.city = { $regex: city, $options: "i" };
+//     if (mediaType) mediaMatch.mediaType = { $regex: mediaType, $options: "i" };
+//     if (frequency)
+//       mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
+
+//     if (status !== undefined && status !== null && status !== "") {
+//       const statusMap = { active: 1, expirezone: 2, overdue: 3, expired: 3 };
+//       const parsed = parseInt(status, 10);
+//       const resolvedStatus = isNaN(parsed)
+//         ? statusMap[String(status).toLowerCase()]
+//         : parsed;
+//       if (resolvedStatus) mediaMatch["rentalPayment.status"] = resolvedStatus;
+//     }
+
+//     if (search) {
+//       mediaMatch.$or = [
+//         { mediaCode: { $regex: search, $options: "i" } },
+//         { mediaName: { $regex: search, $options: "i" } },
+//         { city: { $regex: search, $options: "i" } },
+//         { location: { $regex: search, $options: "i" } },
+//       ];
+//     }
+
+//     const totalSites = await Media.countDocuments({ status: 1 });
+
+//     const dueThisMonthAgg = await Media.aggregate([
+//       { $match: { status: 1 } },
+//       {
+//         $match: {
+//           "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+//         },
+//       },
+//       {
+//         $group: {
+//           _id: null,
+//           totalNetPayable: { $sum: "$rentalPayment.netPayable" },
+//           count: { $sum: 1 },
+//         },
+//       },
+//     ]);
+//     const dueThisMonth = {
+//       totalNetPayable: dueThisMonthAgg[0]?.totalNetPayable || 0,
+//       count: dueThisMonthAgg[0]?.count || 0,
+//     };
+
+//     const dueAmountOpenAgg = await Media.aggregate([
+//       {
+//         $match: {
+//           status: 1,
+//           "rentalPayment.status": { $in: [2, 3] },
+//           "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+//         },
+//       },
+//       {
+//         $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
+//       },
+//     ]);
+//     const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
+
+//     const overDueSiteCount = await Media.countDocuments({
+//       status: 1,
+//       "rentalPayment.status": 3,
+//       "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+//     });
+
+//     const approvalBreakdownAgg = await Media.aggregate([
+//       { $match: { status: 1 } },
+//       { $unwind: "$rentalDue" },
+//       { $match: { "rentalDue.approvalStatus": { $in: [1, 2] } } },
+//       { $group: { _id: "$rentalDue.currentPendingRole", count: { $sum: 1 } } },
+//     ]);
+//     const pendingByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
+//     approvalBreakdownAgg.forEach(({ _id, count }) => {
+//       if (_id === 1) pendingByRole.staff = count;
+//       if (_id === 2) pendingByRole.teamLead = count;
+//       if (_id === 3) pendingByRole.owner = count;
+//       pendingByRole.total += count;
+//     });
+
+//     const approvedCount = await Media.countDocuments({
+//       status: 1,
+//       rentalStatus: 3,
+//       "rentalPayment.nextBillingDate": dateFilter,
+//     });
+
+//     const pendingCount = Math.max(
+//       dueThisMonth.count - approvedCount - overDueSiteCount,
+//       0,
+//     );
+
+//     // const listMatch = {
+//     //   ...mediaMatch,
+//     //   "rentalPayment.nextBillingDate": dateFilter,
+//     // };
+// const listMatch = {
+//   ...mediaMatch,
+//   $and: [
+//     {
+//       $or: [
+//         { "rentalPayment.nextBillingDate": dateFilter },
+//         { "rentalDue.dueDate": dateFilter },
+//       ],
+//     },
+//   ],
+// };
+//     const listPipeline = [
+//       { $match: listMatch },
+//       {
+//         $project: {
+//           mediaCode: 1,
+//           mediaName: 1,
+//           landOwners: 1,
+//           mediaType: 1,
+//           city: 1,
+//           state: 1,
+//           rentalStatus: 1,
+//           totalSqFt: 1,
+//           location: 1,
+//           rentalPayment: 1,
+//           agreement: 1,
+//           agreementDocVerification: 1,
+//           verificationProgressHistory: 1,
+//           rentalDue: 1,
+//           updatedAt: 1,
+//           lastUpdateDate: {
+//             $max: [
+//               "$updatedAt",
+//               "$createdAt",
+//               { $max: "$rentalDue.updatedAt" },
+//               { $max: "$rentalDue.createdAt" },
+//               { $max: "$agreementDocVerification.updatedAt" },
+//               { $max: "$agreementDocVerification.createdAt" },
+//             ],
+//           },
+//         },
+//       },
+//       {
+//         $facet: {
+//           data: [
+//             { $sort: { updatedAt: -1 } },
+//             { $skip: skip },
+//             { $limit: pageSize },
+//           ],
+//           total: [{ $count: "count" }],
+//         },
+//       },
+//     ];
+
+//     const result = await Media.aggregate(listPipeline);
+//     const data = result[0]?.data || [];
+//     const total = result[0]?.total[0]?.count || 0;
+
+//     const isSameCycle = (a, b) => {
+//       if (!a || !b) return false;
+//       const t1 = new Date(a).getTime();
+//       const t2 = new Date(b).getTime();
+//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+//     };
+
+//     // const buildVerificationProgress = (item) => {
+//     //   const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
+
+//     //   if (!currentCycle) {
+//     //     return {
+//     //       currentCycle: null,
+//     //       staffVerified: false,
+//     //       teamLeadVerified: false,
+//     //       ownerVerified: false,
+//     //       verifiedCount: 0,
+//     //       isComplete: false,
+//     //       highestVerifiedRole: null,
+//     //     };
+//     //   }
+
+//     //   const cycleVerifications = (item.agreementDocVerification || []).filter(
+//     //     (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+//     //   );
+
+//     //   // ── These now reflect ONLY actual verification records — never
+//     //   // auto-marked true just because quorum (2 of 3) was reached by
+//     //   // other roles. ──
+//     //   const staffVerified = cycleVerifications.some(
+//     //     (h) => h.verifiedByRole === ROLE.STAFF,
+//     //   );
+//     //   const teamLeadVerified = cycleVerifications.some(
+//     //     (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+//     //   );
+//     //   const ownerVerified = cycleVerifications.some(
+//     //     (h) => h.verifiedByRole === ROLE.OWNER,
+//     //   );
+
+//     //   const highestVerifiedRole = ownerVerified
+//     //     ? ROLE.OWNER
+//     //     : teamLeadVerified
+//     //       ? ROLE.TEAM_LEAD
+//     //       : staffVerified
+//     //         ? ROLE.STAFF
+//     //         : null;
+
+//     //   const verifiedCount = [
+//     //     staffVerified,
+//     //     teamLeadVerified,
+//     //     ownerVerified,
+//     //   ].filter(Boolean).length;
+
+//     //   // ── "isComplete" is the ONLY field that reflects the quorum rule —
+//     //   // Staff + Team Lead verifying (2 of 3) is enough to close the cycle,
+//     //   // Owner verification is then optional. But individual flags never lie
+//     //   // about who actually verified. ──
+//     //   return {
+//     //     currentCycle: formatDate(currentCycle),
+//     //     staffVerified,
+//     //     teamLeadVerified,
+//     //     ownerVerified, // ✅ true ONLY if Owner actually verified this cycle
+//     //     verifiedCount,
+//     //     isComplete: verifiedCount >= 2,
+//     //     highestVerifiedRole,
+//     //   };
+//     // };
+//     // const enriched = data.map((item) => ({
+
+//     //   _id: item._id,
+//     //   mediaCode: item.mediaCode,
+//     //   mediaName: item.mediaName,
+//     //   mediaType: item.mediaType,
+//     //   city: item.city,
+//     //   state: item.state,
+//     //   location: item.location,
+//     //   rentalStatus: item.rentalStatus,
+//     //   totalSqFt: item.totalSqFt,
+//     //   netPayable: item.rentalPayment?.netPayable || 0,
+//     //   landOwners: item.landOwners,
+//     //   paymentFrequency: item.rentalPayment?.paymentFrequency,
+//     //   paymentFrequencyLabel:
+//     //     FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
+//     //   nextBillingDate: item.rentalPayment?.nextBillingDate,
+//     //   lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+//     //   dueStatus: item.rentalPayment?.status,
+//     //   dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+//     //   agreementPeriod: {
+//     //     startDate: item.agreement?.startDate,
+//     //     endDate: item.agreement?.endDate,
+//     //     agreementPDF: item.agreement?.agreementPDF,
+//     //   },
+//     //   agreementDocVerificationHistory: item.agreementDocVerification || [],
+//     //   verificationProgress: buildVerificationProgress(item),
+//     //   verificationProgressHistory: item.verificationProgressHistory || [],
+//     //   rentalDueEntries: item.rentalDue || [],
+//     // }));
+// // ✅ Now takes the requested month's range and looks up the matching
+// // snapshot from verificationProgressHistory (or falls back to computing
+// // from agreementDocVerification if no snapshot exists yet for that
+// // month) — instead of always using the LIVE nextBillingDate, which may
+// // have already advanced past the requested month after Owner's approval.
+// const buildVerificationProgress = (item, monthStart, monthEnd) => {
+//   // 1️⃣ Try to find a persisted snapshot whose cycle falls in the
+//   // requested month — this reflects what actually happened THAT month,
+//   // even if nextBillingDate has since moved forward.
+//   const historyForMonth = (item.verificationProgressHistory || []).filter(
+//     (v) => {
+//       const cycleDate = new Date(v.cycle);
+//       return cycleDate >= monthStart && cycleDate <= monthEnd;
+//     },
+//   );
+
+//   if (historyForMonth.length > 0) {
+//     // Use the LATEST snapshot for that month (last one pushed = most
+//     // complete state, e.g. after Team Lead verified following Staff)
+//     const latest = historyForMonth[historyForMonth.length - 1];
+//     return {
+//       currentCycle: latest.currentCycleLabel,
+//       staffVerified: latest.staffVerified,
+//       teamLeadVerified: latest.teamLeadVerified,
+//       ownerVerified: latest.ownerVerified,
+//       verifiedCount: latest.verifiedCount,
+//       isComplete: latest.isComplete,
+//       highestVerifiedRole: latest.highestVerifiedRole,
+//     };
+//   }
+
+//   // 2️⃣ Fallback — no snapshot exists yet for this month (e.g. nobody
+//   // has verified for it at all). Compute directly from
+//   // agreementDocVerification, filtering by cycle falling in the
+//   // requested month range instead of matching the live nextBillingDate.
+//   const cycleVerifications = (item.agreementDocVerification || []).filter(
+//     (h) => {
+//       if (!h.isVerified || !h.cycle) return false;
+//       const cycleDate = new Date(h.cycle);
+//       return cycleDate >= monthStart && cycleDate <= monthEnd;
+//     },
+//   );
+
+//   const staffVerified = cycleVerifications.some(
+//     (h) => h.verifiedByRole === ROLE.STAFF,
+//   );
+//   const teamLeadVerified = cycleVerifications.some(
+//     (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+//   );
+//   const ownerVerified = cycleVerifications.some(
+//     (h) => h.verifiedByRole === ROLE.OWNER,
+//   );
+
+//   const highestVerifiedRole = ownerVerified
+//     ? ROLE.OWNER
+//     : teamLeadVerified
+//       ? ROLE.TEAM_LEAD
+//       : staffVerified
+//         ? ROLE.STAFF
+//         : null;
+
+//   const verifiedCount = [staffVerified, teamLeadVerified, ownerVerified].filter(
+//     Boolean,
+//   ).length;
+// const monthStartCycleString = getCurrentCycle(monthStart);
+//   return {
+//     currentCycle: formatDate(monthStartCycleString), // label based on requested month
+//     staffVerified,
+//     teamLeadVerified,
+//     ownerVerified,
+//     verifiedCount,
+//     isComplete: verifiedCount >= 2,
+//     highestVerifiedRole,
+//   };
+// };
+//     const enriched = data.map((item) => {
+//   // ✅ NEW — filter rentalDueEntries down to ONLY the requested month
+//   // (dueDate query param). The full history stays intact in the DB
+//   // (item.rentalDue / rentalDueHistory) — this just scopes what's
+//   // returned for THIS list call.
+//   const filteredRentalDueEntries = (item.rentalDue || []).filter((entry) => {
+//     if (!entry.dueDate) return false;
+//     const entryDate = new Date(entry.dueDate);
+//     return entryDate >= monthStart && entryDate <= monthEnd;
+//   });
+
+//   return {
+//     _id: item._id,
+//     mediaCode: item.mediaCode,
+//     mediaName: item.mediaName,
+//     mediaType: item.mediaType,
+//     city: item.city,
+//     state: item.state,
+//     location: item.location,
+//     rentalStatus: item.rentalStatus,
+//     totalSqFt: item.totalSqFt,
+//     netPayable: item.rentalPayment?.netPayable || 0,
+//     landOwners: item.landOwners,
+//     paymentFrequency: item.rentalPayment?.paymentFrequency,
+//     paymentFrequencyLabel:
+//       FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
+//     nextBillingDate: item.rentalPayment?.nextBillingDate,
+//     lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+//     dueStatus: item.rentalPayment?.status,
+//     dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+//     agreementPeriod: {
+//       startDate: item.agreement?.startDate,
+//       endDate: item.agreement?.endDate,
+//       agreementPDF: item.agreement?.agreementPDF,
+//     },
+//     agreementDocVerificationHistory: item.agreementDocVerification || [],
+//     verificationProgress: buildVerificationProgress(item, monthStart, monthEnd),
+//     verificationProgressHistory: item.verificationProgressHistory || [],
+//     rentalDueEntries: filteredRentalDueEntries, // ✅ now month-scoped, [] if none match
+//   };
+// });
+//     return res.status(200).json({
+//       success: true,
+//       value: {
+//         totalSites,
+//         dueThisMonth,
+//         dueAmountOpen,
+//         overDue: { siteCount: overDueSiteCount },
+//         approvedCount,
+//         pendingCount,
+//         // pendingApproval: {
+//         //   staff: pendingByRole.staff,
+//         //   teamLead: pendingByRole.teamLead,
+//         //   owner: pendingByRole.owner,
+//         //   total: pendingByRole.total,
+//         // },
+//       },
+//       data: enriched,
+//     });
+//   } catch (err) {
+//     return res
+//       .status(500)
+//       .json({ success: false, message: "Server error", error: err.message });
+//   }
+// };
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const {
@@ -1819,17 +2372,54 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     const totalSites = await Media.countDocuments({ status: 1 });
 
+    // ✅ FIXED — match on EITHER the live nextBillingDate OR any
+    // rentalDue entry's dueDate falling in the requested month. This
+    // way, a site whose cycle already advanced (after Owner approved)
+    // still counts toward the month it was actually due/approved in.
+    const monthOrCondition = {
+      $or: [
+        {
+          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+        },
+        { "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd } },
+      ],
+    };
+
     const dueThisMonthAgg = await Media.aggregate([
       { $match: { status: 1 } },
+      { $match: monthOrCondition },
       {
-        $match: {
-          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+        // Use the matching rentalDue entry's netPayable if the live
+        // nextBillingDate has already moved past this month; otherwise
+        // fall back to rentalPayment.netPayable.
+        $addFields: {
+          matchingEntry: {
+            $first: {
+              $filter: {
+                input: { $ifNull: ["$rentalDue", []] },
+                as: "rd",
+                cond: {
+                  $and: [
+                    { $gte: ["$$rd.dueDate", monthStart] },
+                    { $lte: ["$$rd.dueDate", monthEnd] },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
+          effectiveNetPayable: {
+            $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+          },
         },
       },
       {
         $group: {
           _id: null,
-          totalNetPayable: { $sum: "$rentalPayment.netPayable" },
+          totalNetPayable: { $sum: "$effectiveNetPayable" },
           count: { $sum: 1 },
         },
       },
@@ -1839,30 +2429,56 @@ exports.getRentalDueListWithStats = async (req, res) => {
       count: dueThisMonthAgg[0]?.count || 0,
     };
 
+    // ✅ dueAmountOpen — sites still open (status 2/3) for this month,
+    // using the same either/or month match
     const dueAmountOpenAgg = await Media.aggregate([
-      {
-        $match: {
-          status: 1,
-          "rentalPayment.status": { $in: [2, 3] },
-          "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
-        },
-      },
+      { $match: { status: 1, "rentalPayment.status": { $in: [2, 3] } } },
+      { $match: monthOrCondition },
       {
         $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
       },
     ]);
     const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
 
+    // ✅ overDueSiteCount — same either/or month match
     const overDueSiteCount = await Media.countDocuments({
       status: 1,
       "rentalPayment.status": 3,
-      "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+      ...monthOrCondition,
     });
 
+    // ✅ approvedCount — sites with a rentalDue entry FULLY APPROVED
+    // (status === 3) for THIS specific month, instead of relying on the
+    // live top-level rentalStatus + nextBillingDate (which moves once
+    // approved).
+    const approvedCount = await Media.countDocuments({
+      status: 1,
+      rentalDue: {
+        $elemMatch: {
+          status: 3,
+          dueDate: { $gte: monthStart, $lte: monthEnd },
+        },
+      },
+    });
+
+    const pendingCount = Math.max(
+      dueThisMonth.count - approvedCount - overDueSiteCount,
+      0,
+    );
+
+    // ✅ RE-ENABLED — Staff / Team Lead / Owner pending-approval
+    // breakdown, scoped to rentalDue entries whose dueDate falls in the
+    // requested month (not just "still pending" globally across all
+    // months).
     const approvalBreakdownAgg = await Media.aggregate([
       { $match: { status: 1 } },
       { $unwind: "$rentalDue" },
-      { $match: { "rentalDue.approvalStatus": { $in: [1, 2] } } },
+      {
+        $match: {
+          "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
+          "rentalDue.approvalStatus": { $in: [1, 2] },
+        },
+      },
       { $group: { _id: "$rentalDue.currentPendingRole", count: { $sum: 1 } } },
     ]);
     const pendingByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
@@ -1873,20 +2489,42 @@ exports.getRentalDueListWithStats = async (req, res) => {
       pendingByRole.total += count;
     });
 
-    const approvedCount = await Media.countDocuments({
-      status: 1,
-      rentalStatus: 3,
-      "rentalPayment.nextBillingDate": dateFilter,
+    // ✅ NEW — actual approval breakdown: how many entries were approved
+    // by EACH role this month (based on approvalSteps, status === 2 for
+    // that role's step), so you can see Staff-approved / Team-Lead-approved
+    // / Owner-approved counts for the month, not just "who's still pending".
+    const approvalCompletedBreakdownAgg = await Media.aggregate([
+      { $match: { status: 1 } },
+      { $unwind: "$rentalDue" },
+      {
+        $match: {
+          "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
+        },
+      },
+      { $unwind: "$rentalDue.approvalSteps" },
+      {
+        $match: {
+          "rentalDue.approvalSteps.status": 2, // 2 = Approved
+        },
+      },
+      {
+        $group: {
+          _id: "$rentalDue.approvalSteps.role",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    const approvedByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
+    approvalCompletedBreakdownAgg.forEach(({ _id, count }) => {
+      if (_id === 1) approvedByRole.staff = count;
+      if (_id === 2) approvedByRole.teamLead = count;
+      if (_id === 3) approvedByRole.owner = count;
+      approvedByRole.total += count;
     });
-
-    const pendingCount = Math.max(
-      dueThisMonth.count - approvedCount - overDueSiteCount,
-      0,
-    );
 
     const listMatch = {
       ...mediaMatch,
-      "rentalPayment.nextBillingDate": dateFilter,
+      $and: [monthOrCondition],
     };
 
     const listPipeline = [
@@ -1905,18 +2543,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
           rentalPayment: 1,
           agreement: 1,
           agreementDocVerification: 1,
+          verificationProgressHistory: 1,
           rentalDue: 1,
           updatedAt: 1,
-          lastUpdateDate: {
-            $max: [
-              "$updatedAt",
-              "$createdAt",
-              { $max: "$rentalDue.updatedAt" },
-              { $max: "$rentalDue.createdAt" },
-              { $max: "$agreementDocVerification.updatedAt" },
-              { $max: "$agreementDocVerification.createdAt" },
-            ],
-          },
         },
       },
       {
@@ -1942,28 +2571,35 @@ exports.getRentalDueListWithStats = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    const buildVerificationProgress = (item) => {
-      const currentCycle = getCurrentCycle(item.rentalPayment?.nextBillingDate);
+    const buildVerificationProgress = (item, monthStart, monthEnd) => {
+      const historyForMonth = (item.verificationProgressHistory || []).filter(
+        (v) => {
+          const cycleDate = new Date(v.cycle);
+          return cycleDate >= monthStart && cycleDate <= monthEnd;
+        },
+      );
 
-      if (!currentCycle) {
+      if (historyForMonth.length > 0) {
+        const latest = historyForMonth[historyForMonth.length - 1];
         return {
-          currentCycle: null,
-          staffVerified: false,
-          teamLeadVerified: false,
-          ownerVerified: false,
-          verifiedCount: 0,
-          isComplete: false,
-          highestVerifiedRole: null,
+          currentCycle: latest.currentCycleLabel,
+          staffVerified: latest.staffVerified,
+          teamLeadVerified: latest.teamLeadVerified,
+          ownerVerified: latest.ownerVerified,
+          verifiedCount: latest.verifiedCount,
+          isComplete: latest.isComplete,
+          highestVerifiedRole: latest.highestVerifiedRole,
         };
       }
 
       const cycleVerifications = (item.agreementDocVerification || []).filter(
-        (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+        (h) => {
+          if (!h.isVerified || !h.cycle) return false;
+          const cycleDate = new Date(h.cycle);
+          return cycleDate >= monthStart && cycleDate <= monthEnd;
+        },
       );
 
-      // ── These now reflect ONLY actual verification records — never
-      // auto-marked true just because quorum (2 of 3) was reached by
-      // other roles. ──
       const staffVerified = cycleVerifications.some(
         (h) => h.verifiedByRole === ROLE.STAFF,
       );
@@ -1988,48 +2624,62 @@ exports.getRentalDueListWithStats = async (req, res) => {
         ownerVerified,
       ].filter(Boolean).length;
 
-      // ── "isComplete" is the ONLY field that reflects the quorum rule —
-      // Staff + Team Lead verifying (2 of 3) is enough to close the cycle,
-      // Owner verification is then optional. But individual flags never lie
-      // about who actually verified. ──
+      const monthStartCycleString = getCurrentCycle(monthStart);
+
       return {
-        currentCycle: formatDate(currentCycle),
+        currentCycle: formatDate(monthStartCycleString),
         staffVerified,
         teamLeadVerified,
-        ownerVerified, // ✅ true ONLY if Owner actually verified this cycle
+        ownerVerified,
         verifiedCount,
         isComplete: verifiedCount >= 2,
         highestVerifiedRole,
       };
     };
-    const enriched = data.map((item) => ({
-      _id: item._id,
-      mediaCode: item.mediaCode,
-      mediaName: item.mediaName,
-      mediaType: item.mediaType,
-      city: item.city,
-      state: item.state,
-      location: item.location,
-      rentalStatus: item.rentalStatus,
-      totalSqFt: item.totalSqFt,
-      netPayable: item.rentalPayment?.netPayable || 0,
-      landOwners: item.landOwners,
-      paymentFrequency: item.rentalPayment?.paymentFrequency,
-      paymentFrequencyLabel:
-        FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
-      nextBillingDate: item.rentalPayment?.nextBillingDate,
-      lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
-      dueStatus: item.rentalPayment?.status,
-      dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
-      agreementPeriod: {
-        startDate: item.agreement?.startDate,
-        endDate: item.agreement?.endDate,
-        agreementPDF: item.agreement?.agreementPDF,
-      },
-      agreementDocVerificationHistory: item.agreementDocVerification || [],
-      verificationProgress: buildVerificationProgress(item),
-      rentalDueEntries: item.rentalDue || [],
-    }));
+
+    const enriched = data.map((item) => {
+      const filteredRentalDueEntries = (item.rentalDue || []).filter(
+        (entry) => {
+          if (!entry.dueDate) return false;
+          const entryDate = new Date(entry.dueDate);
+          return entryDate >= monthStart && entryDate <= monthEnd;
+        },
+      );
+
+      return {
+        _id: item._id,
+        mediaCode: item.mediaCode,
+        mediaName: item.mediaName,
+        mediaType: item.mediaType,
+        city: item.city,
+        state: item.state,
+        location: item.location,
+        rentalStatus: item.rentalStatus,
+        totalSqFt: item.totalSqFt,
+        netPayable: item.rentalPayment?.netPayable || 0,
+        landOwners: item.landOwners,
+        paymentFrequency: item.rentalPayment?.paymentFrequency,
+        paymentFrequencyLabel:
+          FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
+        nextBillingDate: item.rentalPayment?.nextBillingDate,
+        lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+        dueStatus: item.rentalPayment?.status,
+        dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+        agreementPeriod: {
+          startDate: item.agreement?.startDate,
+          endDate: item.agreement?.endDate,
+          agreementPDF: item.agreement?.agreementPDF,
+        },
+        agreementDocVerificationHistory: item.agreementDocVerification || [],
+        verificationProgress: buildVerificationProgress(
+          item,
+          monthStart,
+          monthEnd,
+        ),
+        verificationProgressHistory: item.verificationProgressHistory || [],
+        rentalDueEntries: filteredRentalDueEntries,
+      };
+    });
 
     return res.status(200).json({
       success: true,
@@ -2040,12 +2690,20 @@ exports.getRentalDueListWithStats = async (req, res) => {
         overDue: { siteCount: overDueSiteCount },
         approvedCount,
         pendingCount,
-        // pendingApproval: {
-        //   staff: pendingByRole.staff,
-        //   teamLead: pendingByRole.teamLead,
-        //   owner: pendingByRole.owner,
-        //   total: pendingByRole.total,
-        // },
+        // ✅ RE-ENABLED — who's still pending approval, this month
+        pendingApproval: {
+          staff: pendingByRole.staff,
+          teamLead: pendingByRole.teamLead,
+          owner: pendingByRole.owner,
+          total: pendingByRole.total,
+        },
+        // ✅ NEW — who ALREADY approved, this month
+        approvalBreakdown: {
+          staff: approvedByRole.staff,
+          teamLead: approvedByRole.teamLead,
+          owner: approvedByRole.owner,
+          total: approvedByRole.total,
+        },
       },
       data: enriched,
     });

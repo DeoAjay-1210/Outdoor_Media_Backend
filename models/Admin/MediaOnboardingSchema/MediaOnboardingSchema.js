@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const {
   rentalDueEntrySchema,
   rentalDueHistoryYearSchema,
+  verificationProgressSchema,
   agreementDocVerificationSchema,
 } = require("./RentalDueModel");
 const rentalAmountHistorySchema = new mongoose.Schema(
@@ -243,11 +244,11 @@ const MediaSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    fullAddress: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+    // fullAddress: {
+    //   type: String,
+    //   required: true,
+    //   trim: true,
+    // },
     width: {
       type: Number,
       required: true,
@@ -574,6 +575,7 @@ const MediaSchema = new mongoose.Schema(
     },
 
     rentalDueHistory: [rentalDueHistoryYearSchema],
+    verificationProgressHistory: [verificationProgressSchema],
   },
   { timestamps: true },
 );

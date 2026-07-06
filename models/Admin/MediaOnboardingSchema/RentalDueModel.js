@@ -87,7 +87,21 @@ const agreementDocVerifiedSchema = new mongoose.Schema(
   },
   { _id: false },
 );
-
+const verificationProgressSchema = new mongoose.Schema(
+  {
+    cycle: { type: Date, required: true },
+    currentCycleLabel: { type: String, trim: true }, // e.g. "July 12, 2026"
+    staffVerified: { type: Boolean, default: false },
+    teamLeadVerified: { type: Boolean, default: false },
+    ownerVerified: { type: Boolean, default: false },
+    verifiedCount: { type: Number, default: 0 },
+    isComplete: { type: Boolean, default: false },
+    highestVerifiedRole: { type: Number, enum: [1, 2, 3], default: null },
+    updatedAt: { type: Date, default: null },
+    updatedBy: { type: String, trim: true },
+  },
+  { _id: false },
+);
 const rentalDueEntrySchema = new mongoose.Schema(
   {
     // ── Billing Info ──────────────────────────────────────────
@@ -105,6 +119,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // ✅ NEW — snapshot of the base (pre-GST) amount actually billed to
     // the client this cycle.
     baseAmount: { type: Number, default: 0, min: 0 },
+    gstAddedToBalance: { type: Boolean, default: false }, // ✅ added
     paymentFrequency: {
       type: Number,
       enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
@@ -199,4 +214,5 @@ module.exports = {
   agreementDocVerifiedSchema,
   rentalDueEntrySchema,
   rentalDueHistoryYearSchema,
+  verificationProgressSchema,
 };

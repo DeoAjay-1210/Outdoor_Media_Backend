@@ -1611,7 +1611,7 @@ const mediaList = async (req, res) => {
           { state: searchRegex },
           { city: searchRegex },
           { location: searchRegex },
-          { fullAddress: searchRegex },
+          // { fullAddress: searchRegex },
 
           // Land Owner fields
           { "landOwners.name": searchRegex },
@@ -1749,10 +1749,9 @@ const getMediaById = async (req, res) => {
 const COLUMN_MAP = {
   State: "state",
   City: "city",
-  "Media Name": "mediaType", // e.g. Hoarding, Unipole, Wall Graphics
+  "Media Name": "mediaName", // e.g. Hoarding, Unipole, Wall Graphics
   "Media Code": "mediaCode",
-  " Full address": "fullAddress",
-  "Full address": "fullAddress",
+  "Media Type": "mediaType",
   Width: "width",
   Hight: "height", // note: typo in Excel kept as-is
   Height: "height",
@@ -1806,13 +1805,13 @@ const uploadExcel = async (req, res) => {
         }
       }
 
-      mapped.mediaName = mapped.mediaCode || `Media-${excelRow}`;
+      mapped.mediaName = mapped.mediaName || `Media-${excelRow}`;
 
       const missing = [];
       if (!mapped.mediaCode) missing.push("Media Code");
+      if (!mapped.mediaName) missing.push("Media Name");
       if (!mapped.state) missing.push("State");
       if (!mapped.city) missing.push("City");
-      if (!mapped.fullAddress) missing.push("Full address");
       if (!mapped.width) missing.push("Width");
       if (!mapped.height) missing.push("Height (Hight)");
       if (!mapped.mediaType) missing.push("Media Name (type)");

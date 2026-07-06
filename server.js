@@ -11,6 +11,7 @@ const authRoutes = require("./routes/Admin/UserRoutes/UserRoutes");
 const mediaRoutes = require("./routes/Admin/MediaOnboardingRoutes/MediaOnboardingRoutes");
 const ledgerRoutes = require("./routes/Admin/MediaOnboardingRoutes/LedgerRoutes");
 const RentalDue = require("./routes/Admin/MediaOnboardingRoutes/rentalDueRoutes");
+const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
 connectDB();
 
 const app = express();
@@ -23,6 +24,7 @@ app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
 app.use("/admin", ledgerRoutes);
 app.use("/admin", RentalDue);
+app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
   res.send("API Running");
