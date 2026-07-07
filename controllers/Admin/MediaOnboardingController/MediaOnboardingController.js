@@ -1666,7 +1666,7 @@ const mediaList = async (req, res) => {
     const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1 })
       .skip((pageNumbers - 1) * pageSize)
       .limit(pageSize)
       .lean();

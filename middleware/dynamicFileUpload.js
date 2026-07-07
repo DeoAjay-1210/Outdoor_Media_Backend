@@ -13,7 +13,7 @@ const CDN_BASE_URL =  process.env.DO_SPACES_CDN_BASE || "https://adinn-space.sgp
 const STORAGE_TYPE  = process.env.STORAGE_TYPE        || "local";
 const LOCAL_BASE_URL = process.env.LOCAL_BASE_URL     || "http://localhost:5000";
 const LOCAL_UPLOAD_PATH = process.env.LOCAL_UPLOAD_PATH || "uploads";
-const OUTDOORMEDIA_FOLDER = "Outdoor-Media";  // base folder for spaces
+const OUTDOORMEDIA_FOLDER = "Rental-OOH";  // base folder for spaces
 
 // ─────────────────────────────────────────────────────────────
 // MIME TYPE
