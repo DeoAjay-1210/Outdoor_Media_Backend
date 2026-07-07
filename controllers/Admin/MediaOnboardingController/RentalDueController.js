@@ -775,6 +775,7 @@ async function sendRentalDueApprovalMail(media, entry) {
           tdsAmount: rp.tdsAmount || 0,
           netPayable: rp.netPayable || 0,
           paymentFrequency: rp.paymentFrequency || 0,
+            customPaymentFrequency: rp.rentalPayment || 0,
           lastBillPaidDate: formatDMY(rp.lastBillPaidDate),
           nextBillingDate: formatDMY(rp.nextBillingDate),
           balanceGstAmount: rp.balanceGstAmount || 0,
@@ -2788,6 +2789,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         netPayable: item.rentalPayment?.netPayable || 0,
         landOwners: item.landOwners,
         paymentFrequency: item.rentalPayment?.paymentFrequency,
+        customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
         paymentFrequencyLabel:
           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
         nextBillingDate: item.rentalPayment?.nextBillingDate,
