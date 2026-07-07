@@ -180,7 +180,6 @@ const ledgerSchema = new mongoose.Schema(
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },
-  // { timestamps: true },
 );
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(

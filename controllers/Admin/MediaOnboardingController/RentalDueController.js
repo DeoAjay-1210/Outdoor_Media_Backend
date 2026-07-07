@@ -2674,6 +2674,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           agreement: 1,
           agreementDocVerification: 1,
           verificationProgressHistory: 1,
+          gstBalanceHistory: 1,
           rentalDue: 1,
           updatedAt: 1,
         },
@@ -2787,6 +2788,8 @@ exports.getRentalDueListWithStats = async (req, res) => {
         rentalStatus: item.rentalStatus,
         totalSqFt: item.totalSqFt,
         netPayable: item.rentalPayment?.netPayable || 0,
+        gstApplicable: item.rentalPayment?.gstApplicable || 0,
+        gstAmount: item.rentalPayment?.gstAmount || 0,
         landOwners: item.landOwners,
         paymentFrequency: item.rentalPayment?.paymentFrequency,
         customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
@@ -2808,6 +2811,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           monthEnd,
         ),
         verificationProgressHistory: item.verificationProgressHistory || [],
+        gstBalanceHistory: item.gstBalanceHistory || [],
         rentalDueEntries: filteredRentalDueEntries,
       };
     });
