@@ -120,27 +120,131 @@ const validateOwnerPaymentCategories = (
 // ─────────────────────────────────────────────────────────────
 // VALIDATE LAND OWNER SHARES
 // ─────────────────────────────────────────────────────────────
+// const validateLandOwnerShares = (
+//   landOwners,
+//   totalRentalAmount,
+//   tdsApplicable,
+//   tdsPercentage,
+//   gstApplicable,
+// ) => {
+//   const tdsAmount =
+//     tdsApplicable === 1 && tdsPercentage > 0
+//       ? Math.floor(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
+//       : 0;
+
+//   const amountAfterTds = Math.floor((totalRentalAmount - tdsAmount).toFixed(2));
+
+//   let gstAmount = 0;
+//   let totalWithGst = amountAfterTds;
+
+//   if (gstApplicable === 1) {
+//     const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
+//     gstAmount = Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
+//     totalWithGst = Math.floor((amountAfterTds + gstAmount).toFixed(2));
+//   }
+
+//   const netPayable = Math.floor(totalWithGst.toFixed(2));
+
+//   if (!landOwners || !landOwners.length) {
+//     return { valid: false, message: "At least one land owner is required" };
+//   }
+
+//   let totalComputedAmount = 0;
+//   let hasPercentageShare = false;
+//   let hasFixedShare = false;
+
+//   for (const owner of landOwners) {
+//     const typeShare = Number(owner.typeShare);
+
+//     if (!typeShare || (typeShare !== 1 && typeShare !== 2)) {
+//       return {
+//         valid: false,
+//         message: `Owner "${owner.name || "Unknown"}": typeShare must be 1 (percentage) or 2 (fixed amount).`,
+//       };
+//     }
+
+//     if (typeShare === 1) {
+//       hasPercentageShare = true;
+//       const sharePercentage = Number(owner.sharePercentage);
+
+//       if (
+//         isNaN(sharePercentage) ||
+//         sharePercentage < 0 ||
+//         sharePercentage > 100
+//       ) {
+//         return {
+//           valid: false,
+//           message: `Owner "${owner.name || "Unknown"}": sharePercentage must be between 0 and 100.`,
+//         };
+//       }
+
+//       totalComputedAmount += Math.floor(
+//         ((netPayable * sharePercentage) / 100).toFixed(2),
+//       );
+//     } else if (typeShare === 2) {
+//       hasFixedShare = true;
+//       const shareAmount = Number(owner.shareAmount);
+
+//       if (isNaN(shareAmount) || shareAmount < 0) {
+//         return {
+//           valid: false,
+//           message: `Owner "${owner.name || "Unknown"}": shareAmount must be >= 0.`,
+//         };
+//       }
+
+//       totalComputedAmount += Math.floor(shareAmount.toFixed(2));
+//     }
+//   }
+
+//   if (hasPercentageShare && !hasFixedShare) {
+//     let percentageSum = 0;
+//     for (const owner of landOwners) {
+//       if (Number(owner.typeShare) === 1) {
+//         percentageSum += Number(owner.sharePercentage || 0);
+//       }
+//     }
+
+//     if (Math.abs(percentageSum - 100) > 0.01) {
+//       return {
+//         valid: false,
+//         message: `Total percentage shares (${percentageSum.toFixed(2)}%) must equal 100%.`,
+//       };
+//     }
+//   }
+
+//   const diff = Math.abs(totalComputedAmount - netPayable);
+
+//   if (diff > 1) {
+//     return {
+//       valid: false,
+//       message: `Net payable amount (${netPayable.toFixed(2)}). Difference: ${diff.toFixed(2)}`,
+//     };
+//   }
+
+//   return {
+//     valid: true,
+//     netPayable,
+//     tdsAmount,
+//     amountAfterTds,
+//     gstAmount,
+//     totalComputedAmount,
+//   };
+// };
 const validateLandOwnerShares = (
   landOwners,
   totalRentalAmount,
-  tdsApplicable,
-  tdsPercentage,
-  gstApplicable,
+  gstApplicable, // ✅ tdsApplicable/tdsPercentage params REMOVED
 ) => {
-  const tdsAmount =
-    tdsApplicable === 1 && tdsPercentage > 0
-      ? Math.floor(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
-      : 0;
-
-  const amountAfterTds = Math.floor((totalRentalAmount - tdsAmount).toFixed(2));
-
+  // ✅ No TDS deduction here anymore — the pool owners split is just
+  // totalRentalAmount (+ GST if applicable). TDS is validated separately,
+  // per owner, further down.
   let gstAmount = 0;
-  let totalWithGst = amountAfterTds;
+  let totalWithGst = totalRentalAmount;
 
   if (gstApplicable === 1) {
     const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
     gstAmount = Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-    totalWithGst = Math.floor((amountAfterTds + gstAmount).toFixed(2));
+    totalWithGst = Math.floor((totalRentalAmount + gstAmount).toFixed(2));
   }
 
   const netPayable = Math.floor(totalWithGst.toFixed(2));
@@ -194,6 +298,18 @@ const validateLandOwnerShares = (
 
       totalComputedAmount += Math.floor(shareAmount.toFixed(2));
     }
+
+    // ✅ NEW — per-owner TDS validation
+    const tdsApplicable = Number(owner.tdsApplicable);
+    if (tdsApplicable === 1) {
+      const tdsPercentage = Number(owner.tdsPercentage);
+      if (isNaN(tdsPercentage) || tdsPercentage < 0 || tdsPercentage > 100) {
+        return {
+          valid: false,
+          message: `Owner "${owner.name || "Unknown"}": tdsPercentage must be between 0 and 100 when tdsApplicable is 1.`,
+        };
+      }
+    }
   }
 
   if (hasPercentageShare && !hasFixedShare) {
@@ -224,13 +340,10 @@ const validateLandOwnerShares = (
   return {
     valid: true,
     netPayable,
-    tdsAmount,
-    amountAfterTds,
     gstAmount,
     totalComputedAmount,
   };
 };
-
 // ─────────────────────────────────────────────────────────────
 // VALIDATE GST
 // ─────────────────────────────────────────────────────────────
@@ -866,10 +979,10 @@ const mediaOnboarding = async (req, res) => {
   mediaData.rentalPayment.customPaymentFrequency = Number(
     mediaData.rentalPayment.customPaymentFrequency,
   );
-      if (mediaData.rentalPayment.tdsApplicable !== undefined)
-        mediaData.rentalPayment.tdsApplicable = Number(
-          mediaData.rentalPayment.tdsApplicable,
-        );
+      // if (mediaData.rentalPayment.tdsApplicable !== undefined)
+      //   mediaData.rentalPayment.tdsApplicable = Number(
+      //     mediaData.rentalPayment.tdsApplicable,
+      //   );
       if (mediaData.rentalPayment.gstApplicable !== undefined)
         mediaData.rentalPayment.gstApplicable = Number(
           mediaData.rentalPayment.gstApplicable,
@@ -966,6 +1079,9 @@ const mediaOnboarding = async (req, res) => {
           onlineAmount: hasValue(owner.onlineAmount)
             ? Number(owner.onlineAmount)
             : 0,
+            tdsApplicable: hasValue(owner.tdsApplicable) ? Number(owner.tdsApplicable) : 0,
+    tdsPercentage: hasValue(owner.tdsPercentage) ? Number(owner.tdsPercentage) : 0,
+    tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : 0,
           gstApplicable: hasValue(owner.gstApplicable)
             ? Number(owner.gstApplicable)
             : 0,
@@ -1051,40 +1167,63 @@ const mediaOnboarding = async (req, res) => {
         return errorResponse(res, gstCheck.message, null, 400);
     }
 
-    if (
-      mediaData.landOwners?.length &&
-      mediaData.rentalPayment?.totalRentalAmount
-    ) {
-      const tdsApplicable = Number(mediaData.rentalPayment.tdsApplicable) || 0;
-      const envTdsPercent = Math.floor(process.env.TDS_PERCENTAGE || "0");
-      const tdsPercentage =
-        tdsApplicable === 1
-          ? envTdsPercent > 0
-            ? envTdsPercent
-            : Number(mediaData.rentalPayment.tdsPercentage || 0)
-          : 0;
-      const rentalGstApplicable =
-        Number(mediaData.rentalPayment.gstApplicable) || 0;
+    // if (
+    //   mediaData.landOwners?.length &&
+    //   mediaData.rentalPayment?.totalRentalAmount
+    // ) {
+    //   const tdsApplicable = Number(mediaData.rentalPayment.tdsApplicable) || 0;
+    //   const envTdsPercent = Math.floor(process.env.TDS_PERCENTAGE || "0");
+    //   const tdsPercentage =
+    //     tdsApplicable === 1
+    //       ? envTdsPercent > 0
+    //         ? envTdsPercent
+    //         : Number(mediaData.rentalPayment.tdsPercentage || 0)
+    //       : 0;
+    //   const rentalGstApplicable =
+    //     Number(mediaData.rentalPayment.gstApplicable) || 0;
 
-      const shareCheck = validateLandOwnerShares(
-        mediaData.landOwners,
-        Number(mediaData.rentalPayment.totalRentalAmount),
-        tdsApplicable,
-        tdsPercentage,
-        rentalGstApplicable,
-      );
-      if (!shareCheck.valid)
-        return errorResponse(res, shareCheck.message, null, 400);
+    //   const shareCheck = validateLandOwnerShares(
+    //     mediaData.landOwners,
+    //     Number(mediaData.rentalPayment.totalRentalAmount),
+    //     tdsApplicable,
+    //     tdsPercentage,
+    //     rentalGstApplicable,
+    //   );
+    //   if (!shareCheck.valid)
+    //     return errorResponse(res, shareCheck.message, null, 400);
 
-      const pmCatCheck = validateOwnerPaymentCategories(
-        mediaData.landOwners,
-        shareCheck.netPayable,
-        rentalGstApplicable,
-      );
-      if (!pmCatCheck.valid)
-        return errorResponse(res, pmCatCheck.message, null, 400);
-    }
+    //   const pmCatCheck = validateOwnerPaymentCategories(
+    //     mediaData.landOwners,
+    //     shareCheck.netPayable,
+    //     rentalGstApplicable,
+    //   );
+    //   if (!pmCatCheck.valid)
+    //     return errorResponse(res, pmCatCheck.message, null, 400);
+    // }
+if (
+  mediaData.landOwners?.length &&
+  mediaData.rentalPayment?.totalRentalAmount
+) {
+  const rentalGstApplicable = Number(mediaData.rentalPayment.gstApplicable) || 0;
 
+  // ✅ FIXED — no more tdsApplicable/tdsPercentage passed in; TDS is
+  // validated per-owner inside validateLandOwnerShares now.
+  const shareCheck = validateLandOwnerShares(
+    mediaData.landOwners,
+    Number(mediaData.rentalPayment.totalRentalAmount),
+    rentalGstApplicable,
+  );
+  if (!shareCheck.valid)
+    return errorResponse(res, shareCheck.message, null, 400);
+
+  const pmCatCheck = validateOwnerPaymentCategories(
+    mediaData.landOwners,
+    shareCheck.netPayable,
+    rentalGstApplicable,
+  );
+  if (!pmCatCheck.valid)
+    return errorResponse(res, pmCatCheck.message, null, 400);
+}
     if (mediaData.appraisal && mediaData.agreement) {
       const appraisalCheck = validateAppraisalFrequency(
         mediaData.agreement,
