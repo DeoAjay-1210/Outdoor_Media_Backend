@@ -53,7 +53,9 @@ const getFileCategory = (mimeType) => {
   if (mimeType.includes("word")  || mimeType.includes("document"))    return "word";
   return "other";
 };
+const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 // ─────────────────────────────────────────────────────────────
 // FACTORY — createUploader("folderName")
 // ─────────────────────────────────────────────────────────────
@@ -169,7 +171,7 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
       mimeType     : file.mimetype,
       size         : file.size,
       fileType     : getFileCategory(file.mimetype),
-      uploadedAt   : new Date(),
+      uploadedAt   : nowIST(),
     };
   };
 

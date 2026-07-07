@@ -12,13 +12,16 @@ const { upload, processFile } = createUploader("mediaImages", {
 // Only TWO routes
 router.post(
   "/media-onboarding",protect,
-  upload.fields([
-    { name: "agreementPDF", maxCount: 1 },
-    { name: "frontView", maxCount: 1 },
-    { name: "sideView", maxCount: 1 },
-    { name: "locationView", maxCount: 1 },
-    { name: "additionalImages", maxCount: 10 },
-  ]),
+  // upload.fields([
+  //   { name: "agreementPDF", maxCount: 1 },
+  //   { name: "frontView", maxCount: 1 },
+  //   { name: "sideView", maxCount: 1 },
+  //   { name: "locationView", maxCount: 1 },
+  //   { name: "additionalImages", maxCount: 10 },
+  //    { name: "bankPassbook", maxCount: 10 }, // All bank passbooks
+  //   { name: "cancelCheckLeaf", maxCount: 10 }, // All cancel check leaves
+  // ]),
+  upload.any(),
   (req, res, next) => {
     req.processFile = processFile; // 👈 pass to controller
     next();

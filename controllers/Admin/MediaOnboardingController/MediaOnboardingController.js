@@ -24,7 +24,7 @@ const processUploadedFile = (uploadedFile) => {
       mimeType: uploadedFile.mimetype,
       size: uploadedFile.size,
       fileType,
-      uploadedAt: new Date(),
+      uploadedAt: nowIST(),
     };
   }
   return null;
@@ -80,16 +80,16 @@ const validateOwnerPaymentCategories = (
 
         let ownerShare = 0;
         if (Number(owner.typeShare) === 1) {
-          ownerShare =  Math.floor(
+          ownerShare = Math.floor(
             ((netPayable * (Number(owner.sharePercentage) || 0)) / 100).toFixed(
               2,
             ),
           );
         } else {
-          ownerShare =  Math.floor((Number(owner.shareAmount) || 0).toFixed(2));
+          ownerShare = Math.floor((Number(owner.shareAmount) || 0).toFixed(2));
         }
 
-        const splitTotal =  Math.floor((cashAmt + onlineAmt).toFixed(2));
+        const splitTotal = Math.floor((cashAmt + onlineAmt).toFixed(2));
         if (Math.abs(splitTotal - ownerShare) > 0.01) {
           return {
             valid: false,
@@ -129,21 +129,21 @@ const validateLandOwnerShares = (
 ) => {
   const tdsAmount =
     tdsApplicable === 1 && tdsPercentage > 0
-      ?  Math.floor(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
+      ? Math.floor(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
       : 0;
 
-  const amountAfterTds =  Math.floor((totalRentalAmount - tdsAmount).toFixed(2));
+  const amountAfterTds = Math.floor((totalRentalAmount - tdsAmount).toFixed(2));
 
   let gstAmount = 0;
   let totalWithGst = amountAfterTds;
 
   if (gstApplicable === 1) {
-    const envGstPct =  Math.floor(process.env.GST_PERCENTAGE || "18");
-    gstAmount =  Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-    totalWithGst =  Math.floor((amountAfterTds + gstAmount).toFixed(2));
+    const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
+    gstAmount = Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
+    totalWithGst = Math.floor((amountAfterTds + gstAmount).toFixed(2));
   }
 
-  const netPayable =  Math.floor(totalWithGst.toFixed(2));
+  const netPayable = Math.floor(totalWithGst.toFixed(2));
 
   if (!landOwners || !landOwners.length) {
     return { valid: false, message: "At least one land owner is required" };
@@ -178,7 +178,7 @@ const validateLandOwnerShares = (
         };
       }
 
-      totalComputedAmount +=  Math.floor(
+      totalComputedAmount += Math.floor(
         ((netPayable * sharePercentage) / 100).toFixed(2),
       );
     } else if (typeShare === 2) {
@@ -192,7 +192,7 @@ const validateLandOwnerShares = (
         };
       }
 
-      totalComputedAmount +=  Math.floor(shareAmount.toFixed(2));
+      totalComputedAmount += Math.floor(shareAmount.toFixed(2));
     }
   }
 
@@ -304,7 +304,6 @@ const APPRAISAL_FREQUENCY_LABEL = {
   4: "Custom",
 };
 const APPRAISAL_FREQUENCY_MONTHS_MAP = { 1: 6, 2: 12, 3: 24 };
-
 
 const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
   const incomingAmount = Number(
@@ -427,10 +426,6 @@ const cascadeHistory = (history, baseRent) => {
   }
   return sorted;
 };
-
-
-
-
 
 const handleAppraisalLogic = async (
   mediaData,
@@ -836,7 +831,6 @@ const computeAgreementStatus = (startDate, endDate, reminderDays) => {
   return 1;
 };
 
-
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -868,6 +862,10 @@ const mediaOnboarding = async (req, res) => {
         mediaData.rentalPayment.paymentFrequency = Number(
           mediaData.rentalPayment.paymentFrequency,
         );
+        if (mediaData.rentalPayment.customPaymentFrequency !== undefined)
+  mediaData.rentalPayment.customPaymentFrequency = Number(
+    mediaData.rentalPayment.customPaymentFrequency,
+  );
       if (mediaData.rentalPayment.tdsApplicable !== undefined)
         mediaData.rentalPayment.tdsApplicable = Number(
           mediaData.rentalPayment.tdsApplicable,
@@ -878,35 +876,109 @@ const mediaOnboarding = async (req, res) => {
         );
     }
 
+    // if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+    //   const hasValue = (v) => v !== undefined && v !== null && v !== "";
+    //   mediaData.landOwners = mediaData.landOwners.map((owner) => ({
+    //     ...owner,
+    //     typeShare: hasValue(owner.typeShare)
+    //       ? Number(owner.typeShare)
+    //       : undefined,
+    //     sharePercentage: hasValue(owner.sharePercentage)
+    //       ? Number(owner.sharePercentage)
+    //       : undefined,
+    //     shareAmount: hasValue(owner.shareAmount)
+    //       ? Number(owner.shareAmount)
+    //       : undefined,
+    //     paymentCategory: hasValue(owner.paymentCategory)
+    //       ? Number(owner.paymentCategory)
+    //       : undefined,
+    //     onlineMode: hasValue(owner.onlineMode)
+    //       ? Number(owner.onlineMode)
+    //       : undefined,
+    //     cashAmount: hasValue(owner.cashAmount) ? Number(owner.cashAmount) : 0,
+    //     onlineAmount: hasValue(owner.onlineAmount)
+    //       ? Number(owner.onlineAmount)
+    //       : 0,
+    //     gstApplicable: hasValue(owner.gstApplicable)
+    //       ? Number(owner.gstApplicable)
+    //       : 0,
+    //   }));
+    // }
+    const getFileByFieldName = (fieldName) => {
+      if (!req.files) return null;
+      const file = req.files.find((f) => f.fieldname === fieldName);
+      return file || null;
+    };
+    // req.files is now a flat array of { fieldname, ... }
+    const files = req.files || [];
+
+    // matches "landOwners[3][bankPassbook]" -> index "3"
+    const parseLandOwnerFile = (fieldname) => {
+      const match = fieldname.match(
+        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage)\]$/,
+      );
+      return match ? { index: Number(match[1]), key: match[2] } : null;
+    };
+
+    const findOtherFile = (fieldName) =>
+      files.find((f) => f.fieldname === fieldName);
     if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
       const hasValue = (v) => v !== undefined && v !== null && v !== "";
-      mediaData.landOwners = mediaData.landOwners.map((owner) => ({
-        ...owner,
-        typeShare: hasValue(owner.typeShare)
-          ? Number(owner.typeShare)
-          : undefined,
-        sharePercentage: hasValue(owner.sharePercentage)
-          ? Number(owner.sharePercentage)
-          : undefined,
-        shareAmount: hasValue(owner.shareAmount)
-          ? Number(owner.shareAmount)
-          : undefined,
-        paymentCategory: hasValue(owner.paymentCategory)
-          ? Number(owner.paymentCategory)
-          : undefined,
-        onlineMode: hasValue(owner.onlineMode)
-          ? Number(owner.onlineMode)
-          : undefined,
-        cashAmount: hasValue(owner.cashAmount) ? Number(owner.cashAmount) : 0,
-        onlineAmount: hasValue(owner.onlineAmount)
-          ? Number(owner.onlineAmount)
-          : 0,
-        gstApplicable: hasValue(owner.gstApplicable)
-          ? Number(owner.gstApplicable)
-          : 0,
-      }));
-    }
+      const ownerFileMap = {};
+      files.forEach((f) => {
+        const parsed = parseLandOwnerFile(f.fieldname);
+        if (parsed) {
+          ownerFileMap[parsed.index] = ownerFileMap[parsed.index] || {};
+          ownerFileMap[parsed.index][parsed.key] = f;
+        }
+      });
+      mediaData.landOwners = mediaData.landOwners.map((owner, index) => {
+        const ownerFiles = ownerFileMap[index] || {};
 
+        if (ownerFiles.bankPassbook) {
+          owner.bankPassbook = req.processFile(ownerFiles.bankPassbook);
+        }
+        if (ownerFiles.cancelCheckLeaf) {
+          owner.cancelCheckLeaf = req.processFile(ownerFiles.cancelCheckLeaf);
+        }
+        if (ownerFiles.panCardImage) {
+          owner.panCardImage = req.processFile(ownerFiles.panCardImage);
+        }
+
+        return {
+          ...owner,
+          typeShare: hasValue(owner.typeShare)
+            ? Number(owner.typeShare)
+            : undefined,
+          sharePercentage: hasValue(owner.sharePercentage)
+            ? Number(owner.sharePercentage)
+            : undefined,
+          shareAmount: hasValue(owner.shareAmount)
+            ? Number(owner.shareAmount)
+            : undefined,
+          paymentCategory: hasValue(owner.paymentCategory)
+            ? Number(owner.paymentCategory)
+            : undefined,
+          onlineMode: hasValue(owner.onlineMode)
+            ? Number(owner.onlineMode)
+            : undefined,
+          cashAmount: hasValue(owner.cashAmount) ? Number(owner.cashAmount) : 0,
+          onlineAmount: hasValue(owner.onlineAmount)
+            ? Number(owner.onlineAmount)
+            : 0,
+          gstApplicable: hasValue(owner.gstApplicable)
+            ? Number(owner.gstApplicable)
+            : 0,
+          gstPercentage: hasValue(owner.gstPercentage)
+            ? Number(owner.gstPercentage)
+            : 0,
+          gstAmount: hasValue(owner.gstAmount) ? Number(owner.gstAmount) : 0,
+          totalAmountWithGst: hasValue(owner.totalAmountWithGst)
+            ? Number(owner.totalAmountWithGst)
+            : 0,
+        };
+      });
+    }
     if (mediaData.landOwners?.length === 1) {
       const owner = mediaData.landOwners[0];
       if (!owner.typeShare) {
@@ -984,7 +1056,7 @@ const mediaOnboarding = async (req, res) => {
       mediaData.rentalPayment?.totalRentalAmount
     ) {
       const tdsApplicable = Number(mediaData.rentalPayment.tdsApplicable) || 0;
-      const envTdsPercent =  Math.floor(process.env.TDS_PERCENTAGE || "0");
+      const envTdsPercent = Math.floor(process.env.TDS_PERCENTAGE || "0");
       const tdsPercentage =
         tdsApplicable === 1
           ? envTdsPercent > 0
@@ -1022,22 +1094,39 @@ const mediaOnboarding = async (req, res) => {
         return errorResponse(res, appraisalCheck.message, null, 400);
     }
 
-    const uploadedAgreementPDF = req.files?.agreementPDF?.[0];
+    // const uploadedAgreementPDF = req.files?.agreementPDF?.[0];
+    // if (uploadedAgreementPDF) {
+    //   if (!mediaData.agreement) mediaData.agreement = {};
+    //   mediaData.agreement.agreementPDF = req.processFile(uploadedAgreementPDF);
+    // }
+    // if (req.files?.frontView?.[0])
+    //   mediaData.frontView = req.processFile(req.files.frontView[0]);
+    // if (req.files?.sideView?.[0])
+    //   mediaData.sideView = req.processFile(req.files.sideView[0]);
+    // if (req.files?.locationView?.[0])
+    //   mediaData.locationView = req.processFile(req.files.locationView[0]);
+    // if (req.files?.additionalImages?.[0])
+    //   mediaData.additionalImages = req.processFile(
+    //     req.files.additionalImages[0],
+    //   );
+    const uploadedAgreementPDF = findOtherFile("agreementPDF");
     if (uploadedAgreementPDF) {
       if (!mediaData.agreement) mediaData.agreement = {};
       mediaData.agreement.agreementPDF = req.processFile(uploadedAgreementPDF);
     }
-    if (req.files?.frontView?.[0])
-      mediaData.frontView = req.processFile(req.files.frontView[0]);
-    if (req.files?.sideView?.[0])
-      mediaData.sideView = req.processFile(req.files.sideView[0]);
-    if (req.files?.locationView?.[0])
-      mediaData.locationView = req.processFile(req.files.locationView[0]);
-    if (req.files?.additionalImages?.[0])
-      mediaData.additionalImages = req.processFile(
-        req.files.additionalImages[0],
-      );
 
+    const frontViewFile = findOtherFile("frontView");
+    if (frontViewFile) mediaData.frontView = req.processFile(frontViewFile);
+
+    const sideViewFile = findOtherFile("sideView");
+    if (sideViewFile) mediaData.sideView = req.processFile(sideViewFile);
+
+    const locationViewFile = findOtherFile("locationView");
+    if (locationViewFile)
+      mediaData.locationView = req.processFile(locationViewFile);
+    const additionalImagesFile = findOtherFile("additionalImages");
+    if (additionalImagesFile)
+      mediaData.additionalImages = req.processFile(additionalImagesFile);
     let media;
     let isNew = false;
 
@@ -1129,8 +1218,6 @@ const mediaOnboarding = async (req, res) => {
   }
 };
 
-
-
 const resolveActiveAgreement = (historyArr) => {
   if (!historyArr || !historyArr.length) return null;
 
@@ -1160,7 +1247,7 @@ const resolveActiveAgreement = (historyArr) => {
 
   return null;
 };
-//agreement Save 
+//agreement Save
 
 const updateAgreement = async (req, res) => {
   try {
@@ -1169,7 +1256,12 @@ const updateAgreement = async (req, res) => {
     const userName = req.user?.userName || "Admin";
 
     if (!id) {
-      return errorResponse(res, "Media ID is required in request body", null, 400);
+      return errorResponse(
+        res,
+        "Media ID is required in request body",
+        null,
+        400,
+      );
     }
 
     const media = await MediaOnboarding.findById(id);
@@ -1178,7 +1270,10 @@ const updateAgreement = async (req, res) => {
     }
 
     let agreementData = req.body;
-    if (agreementData.agreement && typeof agreementData.agreement === "string") {
+    if (
+      agreementData.agreement &&
+      typeof agreementData.agreement === "string"
+    ) {
       try {
         agreementData = JSON.parse(agreementData.agreement);
       } catch (error) {
@@ -1197,7 +1292,12 @@ const updateAgreement = async (req, res) => {
         : {};
 
     if (!incoming.startDate || !incoming.endDate) {
-      return errorResponse(res, "startDate and endDate are required", null, 400);
+      return errorResponse(
+        res,
+        "startDate and endDate are required",
+        null,
+        400,
+      );
     }
 
     // ─────────────────────────────────────────────
@@ -1219,15 +1319,19 @@ const updateAgreement = async (req, res) => {
       incoming.paymentFrequency !== undefined
         ? Number(incoming.paymentFrequency)
         : media.agreement?.rentalPayment?.paymentFrequency || 1;
-
+const customPaymentFrequencyValue =
+  incoming.customPaymentFrequency !== undefined
+    ? Number(incoming.customPaymentFrequency)
+    : media.agreement?.rentalPayment?.customPaymentFrequency || undefined;
     const incomingTotalRentalAmount =
       incoming.totalRentalAmount !== undefined
         ? Number(incoming.totalRentalAmount)
         : media.agreement?.rentalPayment?.totalRentalAmount || 0;
 
     // ── Detect if totalRentalAmount changed so we can stamp updatedAt/updatedBy ──
-    const existingTotalRentalAmount =
-      Number(media.agreement?.rentalPayment?.totalRentalAmount ?? 0);
+    const existingTotalRentalAmount = Number(
+      media.agreement?.rentalPayment?.totalRentalAmount ?? 0,
+    );
 
     const rentalAmountChanged =
       incomingTotalRentalAmount !== existingTotalRentalAmount;
@@ -1257,6 +1361,7 @@ const updateAgreement = async (req, res) => {
       rentalPayment: {
         totalRentalAmount: incomingTotalRentalAmount,
         paymentFrequency: paymentFrequencyValue,
+         customPaymentFrequency: customPaymentFrequencyValue,
         // ← stamp who changed totalRentalAmount and when
         updatedBy: rentalPaymentUpdatedBy,
         updatedAt: rentalPaymentUpdatedAt,
@@ -1267,7 +1372,12 @@ const updateAgreement = async (req, res) => {
     // Validation
     // ─────────────────────────────────────────────
     if (newAgreement.startDate >= newAgreement.endDate) {
-      return errorResponse(res, "Start date must be before end date", null, 400);
+      return errorResponse(
+        res,
+        "Start date must be before end date",
+        null,
+        400,
+      );
     }
 
     const validReminderValues = [10, 30, 60, 90];
@@ -1289,8 +1399,12 @@ const updateAgreement = async (req, res) => {
       );
     }
 
-    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6];
-    if (!validPaymentFrequencies.includes(newAgreement.rentalPayment.paymentFrequency)) {
+    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6,7];
+    if (
+      !validPaymentFrequencies.includes(
+        newAgreement.rentalPayment.paymentFrequency,
+      )
+    ) {
       return errorResponse(
         res,
         `paymentFrequency must be one of: ${validPaymentFrequencies.join(", ")} (1=Monthly, 2=2M, 3=3M, 4=6M, 5=1Y, 6=2Y)`,
@@ -1298,7 +1412,18 @@ const updateAgreement = async (req, res) => {
         400,
       );
     }
-
+if (
+  newAgreement.rentalPayment.paymentFrequency === 7 &&
+  (!newAgreement.rentalPayment.customPaymentFrequency ||
+    newAgreement.rentalPayment.customPaymentFrequency < 1)
+) {
+  return errorResponse(
+    res,
+    "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 7",
+    null,
+    400,
+  );
+}
     // ─────────────────────────────────────────────
     // Helper: compare two dates by day only
     // ─────────────────────────────────────────────
@@ -1349,7 +1474,8 @@ const updateAgreement = async (req, res) => {
               }
             : undefined,
           rentalPayment: {
-            totalRentalAmount: currentAgreement.rentalPayment?.totalRentalAmount || 0,
+            totalRentalAmount:
+              currentAgreement.rentalPayment?.totalRentalAmount || 0,
             paymentFrequency: currentPaymentFrequency,
             // ← Carry forward the existing stamp when archiving the current agreement
             updatedBy: currentAgreement.rentalPayment?.updatedBy ?? userName,
@@ -1387,7 +1513,9 @@ const updateAgreement = async (req, res) => {
     // existing history entry (if updating an existing one).
     const existingHistoryEntryRentalAmount =
       entryIndex !== -1
-        ? Number(existingHistory[entryIndex]?.rentalPayment?.totalRentalAmount ?? 0)
+        ? Number(
+            existingHistory[entryIndex]?.rentalPayment?.totalRentalAmount ?? 0,
+          )
         : null;
 
     const historyEntryRentalAmountChanged =
@@ -1439,12 +1567,16 @@ const updateAgreement = async (req, res) => {
     if (shouldCreateNewEntry) {
       existingHistory.push(entryPayload);
     } else {
-      const existingRentalPayment = existingHistory[entryIndex]?.rentalPayment || {};
+      const existingRentalPayment =
+        existingHistory[entryIndex]?.rentalPayment || {};
       const paymentFreq =
         incoming.paymentFrequency !== undefined
           ? Number(incoming.paymentFrequency)
           : existingRentalPayment.paymentFrequency || 1;
-
+const customPaymentFreq =
+  incoming.customPaymentFrequency !== undefined
+    ? Number(incoming.customPaymentFrequency)
+    : existingRentalPayment.customPaymentFrequency || undefined;
       const updatedTotalRentalAmount =
         incoming.totalRentalAmount !== undefined
           ? Number(incoming.totalRentalAmount)
@@ -1452,7 +1584,8 @@ const updateAgreement = async (req, res) => {
 
       // Re-check change against the existing entry's amount.
       const entryAmountChanged =
-        updatedTotalRentalAmount !== Number(existingRentalPayment.totalRentalAmount ?? 0);
+        updatedTotalRentalAmount !==
+        Number(existingRentalPayment.totalRentalAmount ?? 0);
 
       existingHistory[entryIndex] = {
         ...existingHistory[entryIndex],
@@ -1460,6 +1593,7 @@ const updateAgreement = async (req, res) => {
         rentalPayment: {
           totalRentalAmount: updatedTotalRentalAmount,
           paymentFrequency: paymentFreq,
+          customPaymentFrequency: customPaymentFreq,
           // ← only refresh stamp when amount actually changed
           updatedBy: entryAmountChanged
             ? userName
@@ -1482,7 +1616,8 @@ const updateAgreement = async (req, res) => {
     media.agreementHistory = existingHistory;
 
     if (activeAgreement) {
-      const activePaymentFreq = activeAgreement.rentalPayment?.paymentFrequency || 1;
+      const activePaymentFreq =
+        activeAgreement.rentalPayment?.paymentFrequency || 1;
 
       media.agreement = {
         startDate: activeAgreement.startDate,
@@ -1498,8 +1633,11 @@ const updateAgreement = async (req, res) => {
         ),
         agreementPDF: activeAgreement.agreementPDF,
         rentalPayment: {
-          totalRentalAmount: activeAgreement.rentalPayment?.totalRentalAmount || 0,
+          totalRentalAmount:
+            activeAgreement.rentalPayment?.totalRentalAmount || 0,
           paymentFrequency: activePaymentFreq,
+           customPaymentFrequency:
+      activeAgreement.rentalPayment?.customPaymentFrequency,
           // ← carry the stamp from the active history entry into the live agreement
           updatedBy: activeAgreement.rentalPayment?.updatedBy ?? userName,
           updatedAt: activeAgreement.rentalPayment?.updatedAt ?? nowIST(),
@@ -1523,7 +1661,8 @@ const updateAgreement = async (req, res) => {
     // touched here — gstAmount/tdsAmount/netPayable/ownerPayments are left
     // alone since they're recalculated by a separate flow (e.g. appraisal).
     // ─────────────────────────────────────────────
-    const activeTotalRentalAmount = media.agreement?.rentalPayment?.totalRentalAmount ?? 0;
+    const activeTotalRentalAmount =
+      media.agreement?.rentalPayment?.totalRentalAmount ?? 0;
 
     if (!media.rentalPayment) {
       // No top-level rentalPayment block exists yet — initialize minimally.
@@ -1538,12 +1677,14 @@ const updateAgreement = async (req, res) => {
         ],
       };
     } else {
-      const existingTopLevelAmount = Number(media.rentalPayment.totalRentalAmount ?? 0);
+      const existingTopLevelAmount = Number(
+        media.rentalPayment.totalRentalAmount ?? 0,
+      );
 
       if (activeTotalRentalAmount !== existingTopLevelAmount) {
-        const rentalAmountHistory = (media.rentalPayment.rentalAmountHistory || []).map((h) =>
-          h.toObject ? h.toObject() : { ...h },
-        );
+        const rentalAmountHistory = (
+          media.rentalPayment.rentalAmountHistory || []
+        ).map((h) => (h.toObject ? h.toObject() : { ...h }));
 
         rentalAmountHistory.push({
           amount: activeTotalRentalAmount,
@@ -1575,7 +1716,12 @@ const updateAgreement = async (req, res) => {
     );
   } catch (error) {
     console.error("Error updating agreement:", error);
-    return errorResponse(res, error.message || "Failed to update agreement", null, 500);
+    return errorResponse(
+      res,
+      error.message || "Failed to update agreement",
+      null,
+      500,
+    );
   }
 };
 // Media List
@@ -1825,9 +1971,9 @@ const uploadExcel = async (req, res) => {
         continue;
       }
 
-      mapped.width =  Math.floor(mapped.width);
-      mapped.height =  Math.floor(mapped.height);
-      mapped.totalSqFt =  Math.floor((mapped.width * mapped.height).toFixed(2));
+      mapped.width = Math.floor(mapped.width);
+      mapped.height = Math.floor(mapped.height);
+      mapped.totalSqFt = Math.floor((mapped.width * mapped.height).toFixed(2));
       mapped.excelRowNumber = excelRow;
 
       // ── Assign unique mediaId from in-memory counter ──

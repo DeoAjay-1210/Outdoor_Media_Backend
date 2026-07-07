@@ -3,6 +3,7 @@ const {
   rentalDueEntrySchema,
   rentalDueHistoryYearSchema,
   verificationProgressSchema,
+  gstBalanceSchema,
   agreementDocVerificationSchema,
 } = require("./RentalDueModel");
 const rentalAmountHistorySchema = new mongoose.Schema(
@@ -144,8 +145,15 @@ const agreementHistorySchema = new mongoose.Schema({
     },
     paymentFrequency: {
       type: Number,
-      enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
-      default: 1,
+      enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+      required: true,
+    },
+    customPaymentFrequency: {
+      type: Number,
+      min: 1,
+      required: function () {
+        return this.paymentFrequency === 7;
+      },
     },
     // ← NEW: who changed totalRentalAmount in this agreement snapshot
     updatedBy: { type: String },
@@ -308,8 +316,15 @@ const MediaSchema = new mongoose.Schema(
       },
       paymentFrequency: {
         type: Number,
-        enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+        enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
         required: true,
+      },
+      customPaymentFrequency: {
+        type: Number,
+        min: 1,
+        required: function () {
+          return this.paymentFrequency === 7;
+        },
       },
       lastBillPaidDate: {
         type: Date,
@@ -385,6 +400,33 @@ const MediaSchema = new mongoose.Schema(
           type: Number,
           enum: [1, 2, 3], // 1=Bank Transfer  2=UPI  3=Cheque
         },
+        panCardImage: {
+          originalName: { type: String },
+          fileName: { type: String },
+          filePath: { type: String },
+          mimeType: { type: String },
+          size: { type: Number },
+          fileType: { type: String, enum: ["image"], default: "image" },
+          uploadedAt: { type: Date, default: null },
+        },
+        bankPassbook: {
+          originalName: { type: String },
+          fileName: { type: String },
+          filePath: { type: String },
+          mimeType: { type: String },
+          size: { type: Number },
+          fileType: { type: String, enum: ["image"], default: "image" },
+          uploadedAt: { type: Date, default: null },
+        },
+        cancelCheckLeaf: {
+          originalName: { type: String },
+          fileName: { type: String },
+          filePath: { type: String },
+          mimeType: { type: String },
+          size: { type: Number },
+          fileType: { type: String, enum: ["image"], default: "image" },
+          uploadedAt: { type: Date, default: null },
+        },
         onlineAmount: {
           type: Number,
           min: 0,
@@ -452,7 +494,7 @@ const MediaSchema = new mongoose.Schema(
         mimeType: { type: String },
         size: { type: Number },
         fileType: { type: String, enum: ["pdf"], default: "pdf" },
-        uploadedAt: { type: Date, default: Date.now },
+        uploadedAt: { type: Date, default: null },
       },
       updatedBy: {
         type: String,
@@ -466,8 +508,15 @@ const MediaSchema = new mongoose.Schema(
         },
         paymentFrequency: {
           type: Number,
-          enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
-          default: 1,
+          enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+          required: true,
+        },
+        customPaymentFrequency: {
+          type: Number,
+          min: 1,
+          required: function () {
+            return this.paymentFrequency === 7;
+          },
         },
         updatedBy: { type: String },
         updatedAt: { type: Date, default: null },
@@ -532,7 +581,7 @@ const MediaSchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
     },
     sideView: {
       originalName: { type: String },
@@ -541,7 +590,7 @@ const MediaSchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
     },
     locationView: {
       originalName: { type: String },
@@ -550,7 +599,7 @@ const MediaSchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
     },
     additionalImages: {
       originalName: { type: String },
@@ -559,7 +608,7 @@ const MediaSchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
     },
 
     ledger: [ledgerSchema],
@@ -576,6 +625,7 @@ const MediaSchema = new mongoose.Schema(
 
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
+    gstBalanceHistory: [gstBalanceSchema],
   },
   { timestamps: true },
 );
@@ -772,7 +822,11 @@ MediaSchema.pre("save", function () {
     this.rentalPayment.paymentFrequency
   ) {
     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
-    const monthsToAdd = frequencyMap[this.rentalPayment.paymentFrequency] || 1;
+    const monthsToAdd =
+      this.rentalPayment.paymentFrequency === 7
+        ? Number(this.rentalPayment.customPaymentFrequency) || 1
+        : frequencyMap[this.rentalPayment.paymentFrequency] || 1;
+
     const nextDate = new Date(this.rentalPayment.lastBillPaidDate);
     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
     this.rentalPayment.nextBillingDate = nextDate;

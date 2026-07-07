@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 
 // ─────────────────────────────────────────────────────────────
@@ -66,8 +65,8 @@ const agreementDocVerificationSchema = new mongoose.Schema(
       fileType: { type: String, enum: ["pdf"], default: "pdf" },
       uploadedAt: { type: Date, default: null },
     },
-     cycle: { type: Date, default: null },            // ✅ added — this was missing, causing the whole bug
-    cycleStartDate: { type: Date, default: null }, 
+    cycle: { type: Date, default: null }, // ✅ added — this was missing, causing the whole bug
+    cycleStartDate: { type: Date, default: null },
     updatedBy: { type: String, trim: true },
     updatedAt: { type: Date, default: null },
   },
@@ -83,7 +82,6 @@ const agreementDocVerifiedSchema = new mongoose.Schema(
     staff: { type: Boolean, default: false },
     teamLead: { type: Boolean, default: false },
     owner: { type: Boolean, default: false },
-    
   },
   { _id: false },
 );
@@ -109,7 +107,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     dueDate: { type: Date, required: true }, // actual due date
 
     netPayable: { type: Number, default: 0, min: 0 },
- withGst: { type: Number, enum: [1, 2], default: null }, // 1 withoutGST 2. withGST
+    withGst: { type: Number, enum: [1, 2], default: null }, // 1 withoutGST 2. withGST
 
     // ✅ NEW — snapshot of the GST amount for THIS cycle (only relevant
     // when withGst === 1). Stored on the entry itself so the historical
@@ -122,10 +120,17 @@ const rentalDueEntrySchema = new mongoose.Schema(
     gstAddedToBalance: { type: Boolean, default: false }, // ✅ added
     paymentFrequency: {
       type: Number,
-      enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+      enum: [1, 2, 3, 4, 5, 6,7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
     },
-ownerApprovalDate: { type: Date, default: null },
-// ✅ NEW — cycle-based mail status for this entry's approval mail
+      customPaymentFrequency: { // ✅ added — mirrors onboarding schema
+      type: Number,
+      min: 1,
+      required: function () {
+        return this.paymentFrequency === 7;
+      },
+    },
+    ownerApprovalDate: { type: Date, default: null },
+    // ✅ NEW — cycle-based mail status for this entry's approval mail
     mailSent: { type: Boolean, default: false },
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
@@ -158,7 +163,10 @@ ownerApprovalDate: { type: Date, default: null },
 
     // 1=Pending  2=PartiallyApproved  3=Approved  4=Overdue
     status: { type: Number, enum: [1, 2, 3, 4], default: 1 },
-
+    withGst: { type: Number, enum: [1, 2], default: 1 },
+    gstAmount: { type: Number, default: 0, min: 0 },
+    baseAmount: { type: Number, default: 0, min: 0 },
+    gstAddedToBalance: { type: Boolean, default: false },
     remarks: { type: String, trim: true },
     updatedBy: { type: String, trim: true },
     updatedAt: { type: Date, default: null },
@@ -194,25 +202,44 @@ const rentalDueHistoryYearSchema = new mongoose.Schema(
   { year: { type: String }, months: [rentalDueHistoryMonthSchema] },
   { _id: false },
 );
-
+// One record PER CYCLE where GST was applicable (withGst === 1).
+// Tracks whether that cycle's GST has been remitted to the government
+// yet. balanceGstAmount (on rentalPayment) becomes the SUM of unpaid
+// entries here, instead of a single ever-incrementing number.
+const gstBalanceSchema = new mongoose.Schema(
+  {
+    rentalDueId: { type: mongoose.Schema.Types.ObjectId, required: true }, // links back to the rentalDue entry
+    dueMonth: { type: String, trim: true }, // e.g. "July 2026"
+    cycle: { type: Date, required: true }, // the entry's dueDate
+    gstAmount: { type: Number, required: true, min: 0 },
+    isPaid: { type: Boolean, default: false }, // has this GST been remitted to govt?
+    paidAmount: { type: Number, default: 0 }, // supports partial payment if needed
+    paidAt: { type: Date, default: null },
+    paidBy: { type: String, trim: true },
+    createdAt: { type: Date, default: null },
+    createdBy: { type: String, trim: true },
+  },
+  { _id: true }, // needs its own _id so it can be targeted by the new API
+);
 // ─────────────────────────────────────────────────────────────
 // EXPORTS — attach these to your MediaSchema, e.g.:
 //
 //   agreementDocVerified: { type: agreementDocVerifiedSchema, default: () => ({}) },
 //   agreementDocVerificationHistory: [agreementDocVerificationSchema],
-  rentalDueEntries: [rentalDueEntrySchema],
-//   rentalStatus: { type: Number, enum: [0, 1, 2, 3], default: 0 },
-//   rentalDueHistory: [rentalDueHistoryYearSchema],
-// ─────────────────────────────────────────────────────────────
-module.exports = {
-  ROLE,
-  ROLE_LABEL,
-  ROLE_FLAG_KEY,
-  FLOW_CHAIN,
-  approvalStepSchema,
-  agreementDocVerificationSchema,
-  agreementDocVerifiedSchema,
-  rentalDueEntrySchema,
-  rentalDueHistoryYearSchema,
-  verificationProgressSchema,
-};
+rentalDueEntries: ([rentalDueEntrySchema],
+  //   rentalStatus: { type: Number, enum: [0, 1, 2, 3], default: 0 },
+  //   rentalDueHistory: [rentalDueHistoryYearSchema],
+  // ─────────────────────────────────────────────────────────────
+  (module.exports = {
+    ROLE,
+    ROLE_LABEL,
+    ROLE_FLAG_KEY,
+    FLOW_CHAIN,
+    approvalStepSchema,
+    agreementDocVerificationSchema,
+    agreementDocVerifiedSchema,
+    rentalDueEntrySchema,
+    rentalDueHistoryYearSchema,
+    verificationProgressSchema,
+    gstBalanceSchema,
+  }));

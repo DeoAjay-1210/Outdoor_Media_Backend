@@ -111,9 +111,14 @@ function markRoleVerified(media, entry, role, userName) {
 }
 
 function advanceRentalPaymentOnOwnerApproval(media) {
-  const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
+ const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
   const frequency = media.rentalPayment?.paymentFrequency;
-  const monthsToAdd = FREQUENCY_MONTHS_MAP[frequency] || 1;
+
+  const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+  const monthsToAdd =
+    frequency === 7
+      ? Number(media.rentalPayment?.customPaymentFrequency) || 1 // ✅ added
+      : frequencyMap[frequency] || 1;
 
   const baseDate = currentNextBillingDate
     ? new Date(currentNextBillingDate)
@@ -165,16 +170,16 @@ function computeGstSplit(media, withGst) {
 // call this at the moment the cycle is CLOSED (Owner's final approval),
 // not at creation, since that's when the billing amount is considered
 // finalized for the cycle.
-function addGstToBalanceIfApplicable(media, entry) {
-  if (entry.gstAddedToBalance) return; // already counted — never add twice
+// function addGstToBalanceIfApplicable(media, entry) {
+//   if (entry.gstAddedToBalance) return; // already counted — never add twice
 
-  if (entry?.withGst === 1 && entry.gstAmount > 0) {
-    media.rentalPayment.balanceGstAmount =
-      (media.rentalPayment.balanceGstAmount || 0) + entry.gstAmount;
-    media.markModified("rentalPayment");
-    entry.gstAddedToBalance = true; // ✅ mark so later approval steps don't re-add
-  }
-}
+//   if (entry?.withGst === 1 && entry.gstAmount > 0) {
+//     media.rentalPayment.balanceGstAmount =
+//       (media.rentalPayment.balanceGstAmount || 0) + entry.gstAmount;
+//     media.markModified("rentalPayment");
+//     entry.gstAddedToBalance = true; // ✅ mark so later approval steps don't re-add
+//   }
+// }
 // exports.saveRentalDue = async (req, res) => {
 //   try {
 //     const { userType, userId, userName } = req.user;
@@ -879,7 +884,108 @@ async function sendRentalDueApprovalMail(media, entry) {
 // Upserts a verification-progress SNAPSHOT for the given cycle — one
 // record per cycle, always overwritten in place as verification status
 // changes within that cycle (not appended repeatedly).
+// Pushes a per-cycle GST record into gstBalanceHistory (once, guarded by
+// gstAddedToBalance flag on the entry) and recomputes the aggregate
+// balanceGstAmount as the sum of all UNPAID entries.
+function addGstToBalanceIfApplicable(media, entry, userName) {
+  if (entry.gstAddedToBalance) return; // already recorded — never duplicate
 
+  if (entry?.withGst === 1 && entry.gstAmount > 0) {
+    if (!Array.isArray(media.gstBalanceHistory)) {
+      media.gstBalanceHistory = [];
+    }
+
+    media.gstBalanceHistory.push({
+      rentalDueId: entry._id,
+      dueMonth: entry.dueMonth,
+      cycle: entry.dueDate,
+      gstAmount: entry.gstAmount,
+      isPaid: false,
+      paidAmount: 0,
+      paidAt: null,
+      paidBy: "",
+      createdAt: nowIST(),
+      createdBy: userName,
+    });
+    media.markModified("gstBalanceHistory");
+
+    entry.gstAddedToBalance = true;
+
+    recomputeBalanceGstAmount(media);
+  }
+}
+
+// Recomputes the aggregate balanceGstAmount = sum of all UNPAID cycle
+// entries. Call this any time gstBalanceHistory changes.
+function recomputeBalanceGstAmount(media) {
+  const unpaidTotal = (media.gstBalanceHistory || []).reduce((sum, g) => {
+    if (g.isPaid) return sum;
+    const remaining = (g.gstAmount || 0) - (g.paidAmount || 0);
+    return sum + Math.max(remaining, 0);
+  }, 0);
+
+  media.rentalPayment.balanceGstAmount = unpaidTotal;
+  media.markModified("rentalPayment");
+}
+// Keeps gstBalanceHistory in sync when withGst is changed mid-approval
+// (by Team Lead or Owner, after Staff already created the entry).
+//   - 1 -> 2 (With GST -> Without GST): removes the existing unpaid
+//     gstBalanceHistory record for this entry (if one exists and isn't
+//     already paid), and resets gstAddedToBalance so a future flip
+//     back to withGst=1 can re-create it.
+//   - 2 -> 1 (Without GST -> With GST): creates a new gstBalanceHistory
+//     record for this entry, same as if it had been created with
+//     withGst=1 from the start.
+// Always recomputes balanceGstAmount afterward.
+function syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName) {
+  if (!Array.isArray(media.gstBalanceHistory)) {
+    media.gstBalanceHistory = [];
+  }
+
+  const existingRecord = media.gstBalanceHistory.find(
+    (g) => String(g.rentalDueId) === String(entry._id),
+  );
+
+  if (newWithGst === 2) {
+    // Switched OFF GST — remove the liability if it hasn't been paid yet.
+    if (existingRecord && !existingRecord.isPaid) {
+      media.gstBalanceHistory = media.gstBalanceHistory.filter(
+        (g) => String(g._id) !== String(existingRecord._id),
+      );
+      media.markModified("gstBalanceHistory");
+    }
+    // If it was already paid, we leave the paid record alone — it's a
+    // historical record of GST that was actually remitted; don't erase
+    // real payment history just because withGst flipped afterward.
+    entry.gstAddedToBalance = false;
+  } else if (newWithGst === 1) {
+    // Switched ON GST — create a fresh record if one doesn't already
+    // exist (or the old one was removed above in a previous flip).
+    if (!existingRecord) {
+      media.gstBalanceHistory.push({
+        rentalDueId: entry._id,
+        dueMonth: entry.dueMonth,
+        cycle: entry.dueDate,
+        gstAmount: entry.gstAmount,
+        isPaid: false,
+        paidAmount: 0,
+        paidAt: null,
+        paidBy: "",
+        createdAt: nowIST(),
+        createdBy: userName,
+      });
+      media.markModified("gstBalanceHistory");
+      entry.gstAddedToBalance = true;
+    } else if (!existingRecord.isPaid) {
+      // Record exists and isn't paid yet — keep its amount in sync with
+      // the entry's current gstAmount (in case gstAmount also changed).
+      existingRecord.gstAmount = entry.gstAmount;
+      media.markModified("gstBalanceHistory");
+    }
+  }
+
+  recomputeBalanceGstAmount(media);
+}
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
@@ -1049,26 +1155,40 @@ exports.saveRentalDue = async (req, res) => {
       // ✅ Applies to EVERY approving role (Staff/Team Lead/Owner), not just
       // Owner's final closure. Tracks/updates balanceGstAmount immediately
       // whenever withGst is 1, at any approval step.
-      if ([1, 2].includes(Number(withGst))) {
-        const newWithGst = Number(withGst);
-        const oldGstAmount = entry.gstAmount || 0;
+      // if ([1, 2].includes(Number(withGst))) {
+      //   const newWithGst = Number(withGst);
+      //   const oldGstAmount = entry.gstAmount || 0;
 
-        if (entry.withGst !== newWithGst) {
-          entry.withGst = newWithGst;
-          const recomputedSplit = computeGstSplit(media, newWithGst);
-          entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
-          entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
-          entry.netPayable = Number(recomputedSplit.netPayable) || 0;
-        }
+      //   if (entry.withGst !== newWithGst) {
+      //     entry.withGst = newWithGst;
+      //     const recomputedSplit = computeGstSplit(media, newWithGst);
+      //     entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
+      //     entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
+      //     entry.netPayable = Number(recomputedSplit.netPayable) || 0;
+      //   }
 
-        // Adjust balanceGstAmount to reflect the CURRENT gstAmount for this
-        // entry — remove the old contribution (if any), add the new one.
-        media.rentalPayment.balanceGstAmount =
-          (media.rentalPayment.balanceGstAmount || 0) -
-          (entry.withGst === newWithGst ? oldGstAmount : 0) +
-          (newWithGst === 1 ? entry.gstAmount : 0);
-        media.markModified("rentalPayment");
-      }
+      //   // Adjust balanceGstAmount to reflect the CURRENT gstAmount for this
+      //   // entry — remove the old contribution (if any), add the new one.
+      //   media.rentalPayment.balanceGstAmount =
+      //     (media.rentalPayment.balanceGstAmount || 0) -
+      //     (entry.withGst === newWithGst ? oldGstAmount : 0) +
+      //     (newWithGst === 1 ? entry.gstAmount : 0);
+      //   media.markModified("rentalPayment");
+      // }
+     if ([1, 2].includes(Number(withGst))) {
+  const newWithGst = Number(withGst);
+  if (entry.withGst !== newWithGst) {
+    entry.withGst = newWithGst;
+    const recomputedSplit = computeGstSplit(media, newWithGst);
+    entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
+    entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
+    entry.netPayable = Number(recomputedSplit.netPayable) || 0;
+
+    // ✅ NEW — keep gstBalanceHistory + balanceGstAmount in sync with
+    // this change, whether it's Team Lead or Owner making it.
+    syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
+  }
+}
       if (isOwnerOverride) {
         entry.approvalSteps.forEach((step) => {
           if (step.status !== 1) return;
@@ -1329,6 +1449,10 @@ exports.saveRentalDue = async (req, res) => {
       dueDate: dueDateObj,
       netPayable: Number(gstSplit.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
+      customPaymentFrequency:
+    media.rentalPayment?.paymentFrequency === 7
+      ? media.rentalPayment?.customPaymentFrequency || 1
+      : undefined, // ✅ added — only set when frequency is Custom
       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
       mailSent: false,
       gstAddedToBalance: false,
@@ -1344,6 +1468,11 @@ exports.saveRentalDue = async (req, res) => {
       withGst: resolvedWithGst,
       gstAmount: Number(gstSplit.gstAmount) || 0,
       baseAmount: Number(gstSplit.baseAmount) || 0,
+      netPayable: Number(gstSplit.netPayable) || 0,
+  withGst: resolvedWithGst,
+  gstAmount: Number(gstSplit.gstAmount) || 0,
+  baseAmount: Number(gstSplit.baseAmount) || 0,
+  gstAddedToBalance: false,
       updatedBy: userName,
       updatedAt: nowIST(),
     };
@@ -1352,7 +1481,7 @@ exports.saveRentalDue = async (req, res) => {
     media.rentalDueEntries.push(newEntry);
     const savedEntry =
       media.rentalDueEntries[media.rentalDueEntries.length - 1];
-    addGstToBalanceIfApplicable(media, savedEntry);
+    addGstToBalanceIfApplicable(media, savedEntry,userName);
     if (isOwnerOverride) {
       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
     } else if (isTeamLeadCreating) {
@@ -2706,6 +2835,118 @@ exports.getRentalDueListWithStats = async (req, res) => {
         },
       },
       data: enriched,
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
+  }
+};
+
+
+
+
+
+exports.GstAmountPaid = async (req, res) => {
+  try {
+    const { userName } = req.user;
+    const { mediaId, gstCycleIds } = req.body;
+
+    if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "A valid mediaId is required" });
+    }
+
+    if (!Array.isArray(gstCycleIds) || gstCycleIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "gstCycleIds must be a non-empty array of GST balance record IDs",
+      });
+    }
+
+    for (const id of gstCycleIds) {
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid gstCycleId: ${id}`,
+        });
+      }
+    }
+
+    const media = await Media.findById(mediaId);
+    if (!media) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Media not found" });
+    }
+
+    if (!Array.isArray(media.gstBalanceHistory)) {
+      return res.status(400).json({
+        success: false,
+        message: "No GST balance history found for this media",
+      });
+    }
+
+    const updatedRecords = [];
+    const notFoundIds = [];
+    const alreadyPaidIds = [];
+
+    for (const id of gstCycleIds) {
+      const record = media.gstBalanceHistory.find(
+        (g) =>  String(g._id) === String(id) ||
+      String(g.rentalDueId) === String(id),
+      );
+
+      if (!record) {
+        notFoundIds.push(id);
+        continue;
+      }
+
+      if (record.isPaid) {
+        alreadyPaidIds.push(id);
+        continue;
+      }
+
+      // ✅ FIXED — no paidAmount from request. Always pays off the
+      // record's OWN gstAmount in full.
+      record.isPaid = true;
+      record.paidAmount = record.gstAmount;
+      record.paidAt = nowIST();
+      record.paidBy = userName;
+
+      updatedRecords.push(record);
+    }
+
+    if (updatedRecords.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No matching unpaid GST records were found to update",
+        notFoundIds,
+        alreadyPaidIds,
+      });
+    }
+
+    media.markModified("gstBalanceHistory");
+
+    // Recompute balanceGstAmount as sum of remaining unpaid records
+    recomputeBalanceGstAmount(media);
+
+    media.updatedBy = userName;
+    media.updatedAt = nowIST();
+    await media.save();
+
+    return res.status(200).json({
+      success: true,
+      message: `${updatedRecords.length} GST cycle record(s) marked as paid`,
+      data: {
+        mediaId: media._id,
+        updatedRecords,
+        notFoundIds,
+        alreadyPaidIds,
+        balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
+        gstBalanceHistory: media.gstBalanceHistory,
+      },
     });
   } catch (err) {
     return res

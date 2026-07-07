@@ -7,7 +7,8 @@ const router = express.Router();
 const {
   getRentalDueListWithStats,
   verifyAgreementDoc,
-  saveRentalDue
+  saveRentalDue,
+  GstAmountPaid
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -47,6 +48,7 @@ router.post(
 );
 
 router.post("/verify-agreement", protect, verifyAgreementDoc);
+router.post("/gst-paid",protect, GstAmountPaid);
 
 
 
