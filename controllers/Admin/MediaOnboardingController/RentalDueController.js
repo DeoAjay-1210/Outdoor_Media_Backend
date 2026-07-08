@@ -2840,6 +2840,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         location: item.location,
         rentalStatus: item.rentalStatus,
         totalSqFt: item.totalSqFt,
+        totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
         netPayable: item.rentalPayment?.netPayable || 0,
         gstApplicable: item.rentalPayment?.gstApplicable || 0,
         gstAmount: item.rentalPayment?.gstAmount || 0,
