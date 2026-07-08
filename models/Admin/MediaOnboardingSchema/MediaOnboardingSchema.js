@@ -966,7 +966,7 @@ MediaSchema.pre("save", function () {
     if (ownerGstApplicable === 1 && paymentCategory !== 1) {
       let onlinePortionForGst = 0;
       if (paymentCategory === 2) {
-        onlinePortionForGst = ownerAmountAfterTds;
+        onlinePortionForGst =  Number(owner.shareAmount || 0);;
       } else if (paymentCategory === 3) {
         onlinePortionForGst = Number(owner.onlineAmount || 0);
       }

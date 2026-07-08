@@ -111,7 +111,7 @@ function markRoleVerified(media, entry, role, userName) {
 }
 
 function advanceRentalPaymentOnOwnerApproval(media) {
- const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
+  const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
   const frequency = media.rentalPayment?.paymentFrequency;
 
   const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
@@ -775,7 +775,7 @@ async function sendRentalDueApprovalMail(media, entry) {
           tdsAmount: rp.tdsAmount || 0,
           netPayable: rp.netPayable || 0,
           paymentFrequency: rp.paymentFrequency || 0,
-            customPaymentFrequency: rp.rentalPayment || 0,
+          customPaymentFrequency: rp.rentalPayment || 0,
           lastBillPaidDate: formatDMY(rp.lastBillPaidDate),
           nextBillingDate: formatDMY(rp.nextBillingDate),
           balanceGstAmount: rp.balanceGstAmount || 0,
@@ -907,12 +907,55 @@ function addGstToBalanceIfApplicable(media, entry, userName) {
       paidBy: "",
       createdAt: nowIST(),
       createdBy: userName,
+      source: "rental", // ✅ tagged
+      ownerId: null,
+      ownerName: "",
     });
     media.markModified("gstBalanceHistory");
 
     entry.gstAddedToBalance = true;
 
     recomputeBalanceGstAmount(media);
+  }
+}
+function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
+  if (entry.ownerGstAddedToBalance) return;
+  if (!Array.isArray(media.landOwners) || media.landOwners.length === 0) return;
+
+  if (!Array.isArray(media.gstBalanceHistory)) {
+    media.gstBalanceHistory = [];
+  }
+
+  let anyAdded = false;
+
+  media.landOwners.forEach((owner) => {
+    const ownerGstApplicable = Number(owner.gstApplicable || 0);
+    const ownerGstAmount = Number(owner.gstAmount || 0);
+
+    if (ownerGstApplicable === 1 && ownerGstAmount > 0) {
+      media.gstBalanceHistory.push({
+        rentalDueId: entry._id,
+        dueMonth: entry.dueMonth,
+        cycle: entry.dueDate,
+        gstAmount: ownerGstAmount,
+        isPaid: false,
+        paidAmount: 0,
+        paidAt: null,
+        paidBy: "",
+        createdAt: nowIST(),
+        createdBy: userName,
+        source: "owner", // ✅ tagged
+        ownerId: owner._id,
+        ownerName: owner.name,
+      });
+      anyAdded = true;
+    }
+  });
+
+  if (anyAdded) {
+    media.markModified("gstBalanceHistory");
+    entry.ownerGstAddedToBalance = true;
+    recomputeBalanceGstAmount(media); // ✅ same recompute function, now sums BOTH sources
   }
 }
 
@@ -1176,20 +1219,20 @@ exports.saveRentalDue = async (req, res) => {
       //     (newWithGst === 1 ? entry.gstAmount : 0);
       //   media.markModified("rentalPayment");
       // }
-     if ([1, 2].includes(Number(withGst))) {
-  const newWithGst = Number(withGst);
-  if (entry.withGst !== newWithGst) {
-    entry.withGst = newWithGst;
-    const recomputedSplit = computeGstSplit(media, newWithGst);
-    entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
-    entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
-    entry.netPayable = Number(recomputedSplit.netPayable) || 0;
+      if ([1, 2].includes(Number(withGst))) {
+        const newWithGst = Number(withGst);
+        if (entry.withGst !== newWithGst) {
+          entry.withGst = newWithGst;
+          const recomputedSplit = computeGstSplit(media, newWithGst);
+          entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
+          entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
+          entry.netPayable = Number(recomputedSplit.netPayable) || 0;
 
-    // ✅ NEW — keep gstBalanceHistory + balanceGstAmount in sync with
-    // this change, whether it's Team Lead or Owner making it.
-    syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
-  }
-}
+          // ✅ NEW — keep gstBalanceHistory + balanceGstAmount in sync with
+          // this change, whether it's Team Lead or Owner making it.
+          syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
+        }
+      }
       if (isOwnerOverride) {
         entry.approvalSteps.forEach((step) => {
           if (step.status !== 1) return;
@@ -1215,7 +1258,8 @@ exports.saveRentalDue = async (req, res) => {
         markRoleVerified(media, entry, ROLE.OWNER, userName);
 
         // ✅ close out GST for this cycle BEFORE billing date rolls forward
-        addGstToBalanceIfApplicable(media, entry);
+        addGstToBalanceIfApplicable(media, entry, userName);
+        addOwnerGstToBalanceIfApplicable(media, entry, userName);
 
         advanceRentalPaymentOnOwnerApproval(media);
 
@@ -1269,7 +1313,8 @@ exports.saveRentalDue = async (req, res) => {
           if (userType === ROLE.OWNER) {
             entry.ownerApprovalDate = nowIST();
             // addGstToBalanceIfApplicable(media, entry);
-
+            addGstToBalanceIfApplicable(media, entry, userName);
+            addOwnerGstToBalanceIfApplicable(media, entry, userName);
             advanceRentalPaymentOnOwnerApproval(media);
 
             if (Array.isArray(media.ledger) && media.ledger.length > 0) {
@@ -1451,9 +1496,9 @@ exports.saveRentalDue = async (req, res) => {
       netPayable: Number(gstSplit.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
       customPaymentFrequency:
-    media.rentalPayment?.paymentFrequency === 7
-      ? media.rentalPayment?.customPaymentFrequency || 1
-      : undefined, // ✅ added — only set when frequency is Custom
+        media.rentalPayment?.paymentFrequency === 7
+          ? media.rentalPayment?.customPaymentFrequency || 1
+          : undefined, // ✅ added — only set when frequency is Custom
       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
       mailSent: false,
       gstAddedToBalance: false,
@@ -1470,10 +1515,10 @@ exports.saveRentalDue = async (req, res) => {
       gstAmount: Number(gstSplit.gstAmount) || 0,
       baseAmount: Number(gstSplit.baseAmount) || 0,
       netPayable: Number(gstSplit.netPayable) || 0,
-  withGst: resolvedWithGst,
-  gstAmount: Number(gstSplit.gstAmount) || 0,
-  baseAmount: Number(gstSplit.baseAmount) || 0,
-  gstAddedToBalance: false,
+      withGst: resolvedWithGst,
+      gstAmount: Number(gstSplit.gstAmount) || 0,
+      baseAmount: Number(gstSplit.baseAmount) || 0,
+      gstAddedToBalance: false,
       updatedBy: userName,
       updatedAt: nowIST(),
     };
@@ -1482,7 +1527,8 @@ exports.saveRentalDue = async (req, res) => {
     media.rentalDueEntries.push(newEntry);
     const savedEntry =
       media.rentalDueEntries[media.rentalDueEntries.length - 1];
-    addGstToBalanceIfApplicable(media, savedEntry,userName);
+    // addGstToBalanceIfApplicable(media, savedEntry,userName);
+    // addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
     if (isOwnerOverride) {
       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
     } else if (isTeamLeadCreating) {
@@ -1492,7 +1538,8 @@ exports.saveRentalDue = async (req, res) => {
     if (isOwnerOverride) {
       // Owner created AND fully approved directly — cycle closes here too
       // addGstToBalanceIfApplicable(media, savedEntry);
-
+      addGstToBalanceIfApplicable(media, savedEntry, userName);
+      addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
       advanceRentalPaymentOnOwnerApproval(media);
 
       // ✅ reset ledger for the new cycle that just opened
@@ -2776,7 +2823,13 @@ exports.getRentalDueListWithStats = async (req, res) => {
           return entryDate >= monthStart && entryDate <= monthEnd;
         },
       );
-
+      const filteredAgreementDocVerificationHistory = (
+        item.agreementDocVerification || []
+      ).filter((h) => {
+        if (!h.cycle) return false;
+        const cycleDate = new Date(h.cycle);
+        return cycleDate >= monthStart && cycleDate <= monthEnd;
+      });
       return {
         _id: item._id,
         mediaCode: item.mediaCode,
@@ -2804,7 +2857,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
           endDate: item.agreement?.endDate,
           agreementPDF: item.agreement?.agreementPDF,
         },
-        agreementDocVerificationHistory: item.agreementDocVerification || [],
+        // agreementDocVerificationHistory: item.agreementDocVerification || [],
+        agreementDocVerificationHistory:
+          filteredAgreementDocVerificationHistory,
         verificationProgress: buildVerificationProgress(
           item,
           monthStart,
@@ -2849,10 +2904,6 @@ exports.getRentalDueListWithStats = async (req, res) => {
   }
 };
 
-
-
-
-
 exports.GstAmountPaid = async (req, res) => {
   try {
     const { userName } = req.user;
@@ -2867,7 +2918,8 @@ exports.GstAmountPaid = async (req, res) => {
     if (!Array.isArray(gstCycleIds) || gstCycleIds.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "gstCycleIds must be a non-empty array of GST balance record IDs",
+        message:
+          "gstCycleIds must be a non-empty array of GST balance record IDs",
       });
     }
 
@@ -2900,8 +2952,8 @@ exports.GstAmountPaid = async (req, res) => {
 
     for (const id of gstCycleIds) {
       const record = media.gstBalanceHistory.find(
-        (g) =>  String(g._id) === String(id) ||
-      String(g.rentalDueId) === String(id),
+        (g) =>
+          String(g._id) === String(id) || String(g.rentalDueId) === String(id),
       );
 
       if (!record) {

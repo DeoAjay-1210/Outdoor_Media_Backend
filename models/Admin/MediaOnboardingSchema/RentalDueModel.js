@@ -118,6 +118,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // the client this cycle.
     baseAmount: { type: Number, default: 0, min: 0 },
     gstAddedToBalance: { type: Boolean, default: false }, // ✅ added
+    ownerGstAddedToBalance: { type: Boolean, default: false },
     paymentFrequency: {
       type: Number,
       enum: [1, 2, 3, 4, 5, 6,7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
@@ -218,6 +219,18 @@ const gstBalanceSchema = new mongoose.Schema(
     paidBy: { type: String, trim: true },
     createdAt: { type: Date, default: null },
     createdBy: { type: String, trim: true },
+        // ✅ NEW — optional owner fields. null/undefined = rental-level GST
+    // record (existing behavior, unchanged). Populated = owner-level
+    // GST record (from landOwners[].gstAmount).
+    source: {
+      type: String,
+      enum: ["rental", "owner"],
+      default: "rental",
+    },
+    ownerId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    ownerName: { type: String, trim: true, default: "" },
+     utrNumber: { type: String, trim: true, default: "" },
+    date: { type: Date, default: null },
   },
   { _id: true }, // needs its own _id so it can be targeted by the new API
 );
