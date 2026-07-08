@@ -918,7 +918,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
       customPaymentFrequency:
-        incoming.rentalPayment?.customPaymentFrequency ?? 1,
+        incoming.rentalPayment?.customPaymentFrequency ?? null,
       // Step 4: include who changed the rental amount in the history snapshot too.
       updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
       updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
@@ -1624,7 +1624,7 @@ const updateAgreement = async (req, res) => {
               currentAgreement.rentalPayment?.totalRentalAmount || 0,
             paymentFrequency: currentPaymentFrequency,
             customPaymentFrequency:
-              currentAgreement.rentalPayment?.customPaymentFrequency ?? 1,
+              currentAgreement.rentalPayment?.customPaymentFrequency ?? null,
             // ← Carry forward the existing stamp when archiving the current agreement
             updatedBy: currentAgreement.rentalPayment?.updatedBy ?? userName,
             updatedAt: currentAgreement.rentalPayment?.updatedAt ?? nowIST(),
@@ -1702,7 +1702,7 @@ const updateAgreement = async (req, res) => {
         totalRentalAmount: newAgreement.rentalPayment.totalRentalAmount,
         paymentFrequency: newAgreement.rentalPayment.paymentFrequency,
         customPaymentFrequency:
-          newAgreement.rentalPayment?.customPaymentFrequency ?? 1,
+          newAgreement.rentalPayment?.customPaymentFrequency ?? null,
         // ← stamp on the history snapshot entry
         updatedBy: historyRentalUpdatedBy,
         updatedAt: historyRentalUpdatedAt,
