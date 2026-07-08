@@ -917,7 +917,8 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
     rentalPayment: {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
-      customPaymentFrequency: incoming.rentalPayment?.customPaymentFrequency ?? 1,
+      customPaymentFrequency:
+        incoming.rentalPayment?.customPaymentFrequency ?? 1,
       // Step 4: include who changed the rental amount in the history snapshot too.
       updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
       updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
@@ -1622,7 +1623,8 @@ const updateAgreement = async (req, res) => {
             totalRentalAmount:
               currentAgreement.rentalPayment?.totalRentalAmount || 0,
             paymentFrequency: currentPaymentFrequency,
-            customPaymentFrequency: currentAgreement.rentalPayment?.customPaymentFrequency ?? 1,
+            customPaymentFrequency:
+              currentAgreement.rentalPayment?.customPaymentFrequency ?? 1,
             // ← Carry forward the existing stamp when archiving the current agreement
             updatedBy: currentAgreement.rentalPayment?.updatedBy ?? userName,
             updatedAt: currentAgreement.rentalPayment?.updatedAt ?? nowIST(),
@@ -1699,7 +1701,8 @@ const updateAgreement = async (req, res) => {
       rentalPayment: {
         totalRentalAmount: newAgreement.rentalPayment.totalRentalAmount,
         paymentFrequency: newAgreement.rentalPayment.paymentFrequency,
-        customPaymentFrequency: newAgreement.rentalPayment?.customPaymentFrequency ?? 1,
+        customPaymentFrequency:
+          newAgreement.rentalPayment?.customPaymentFrequency ?? 1,
         // ← stamp on the history snapshot entry
         updatedBy: historyRentalUpdatedBy,
         updatedAt: historyRentalUpdatedAt,
@@ -1810,11 +1813,16 @@ const updateAgreement = async (req, res) => {
     // ─────────────────────────────────────────────
     const activeTotalRentalAmount =
       media.agreement?.rentalPayment?.totalRentalAmount ?? 0;
-
+    const activePaymentFrequency =
+      media.agreement?.rentalPayment?.paymentFrequency ?? 1;
+    const activeCustomPaymentFrequency =
+      media.agreement?.rentalPayment?.customPaymentFrequency;
     if (!media.rentalPayment) {
       // No top-level rentalPayment block exists yet — initialize minimally.
       media.rentalPayment = {
         totalRentalAmount: activeTotalRentalAmount,
+        paymentFrequency: activePaymentFrequency,
+        customPaymentFrequency: activeCustomPaymentFrequency,
         rentalAmountHistory: [
           {
             amount: activeTotalRentalAmount,
@@ -1844,6 +1852,8 @@ const updateAgreement = async (req, res) => {
         // NOTE: gstAmount, tdsAmount, netPayable, ownerPayments are intentionally
         // left untouched — they're recalculated elsewhere (e.g. appraisal flow).
       }
+      media.rentalPayment.paymentFrequency = activePaymentFrequency;
+      media.rentalPayment.customPaymentFrequency = activeCustomPaymentFrequency;
     }
 
     media.updatedAt = nowIST();
