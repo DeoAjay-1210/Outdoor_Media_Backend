@@ -517,10 +517,10 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
 
 const computeAppraisalAmount = (entry, previousRent) => {
   if (Number(entry.type) === 1) {
-    return Math.round((previousRent * Number(entry.percentage || 0)) / 100);
+    return Math.floor((previousRent * Number(entry.percentage || 0)) / 100);
   }
   if (Number(entry.type) === 2) {
-    return Math.round(Number(entry.fixedAmount || 0));
+    return Math.floor(Number(entry.fixedAmount || 0));
   }
   return 0;
 };
@@ -534,7 +534,7 @@ const cascadeHistory = (history, baseRent) => {
   for (const entry of sorted) {
     entry.previousRent = prev;
     entry.appraisalAmount = computeAppraisalAmount(entry, prev);
-    entry.newRent = Math.round(prev + entry.appraisalAmount);
+    entry.newRent = Math.floor(prev + entry.appraisalAmount);
     prev = entry.newRent;
   }
   return sorted;
@@ -664,7 +664,7 @@ const handleAppraisalLogic = async (
       }
 
       e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
-      e.newRent = Math.round(e.previousRent + e.appraisalAmount);
+      e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
 
       // Cascade forward through all subsequent future entries.
       let prev = e.newRent;
@@ -672,7 +672,7 @@ const handleAppraisalLogic = async (
         if (dayKey(history[i].appraisalDate) > today) {
           history[i].previousRent = prev;
           history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
-          history[i].newRent = Math.round(prev + history[i].appraisalAmount);
+          history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
           prev = history[i].newRent;
         }
       }
@@ -730,7 +730,7 @@ const handleAppraisalLogic = async (
         history[newIdx],
         baseForNewEntry,
       );
-      history[newIdx].newRent = Math.round(
+      history[newIdx].newRent = Math.floor(
         baseForNewEntry + history[newIdx].appraisalAmount,
       );
 
@@ -740,7 +740,7 @@ const handleAppraisalLogic = async (
         if (dayKey(history[i].appraisalDate) > today) {
           history[i].previousRent = prev;
           history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
-          history[i].newRent = Math.round(prev + history[i].appraisalAmount);
+          history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
           prev = history[i].newRent;
         }
       }
@@ -752,7 +752,7 @@ const handleAppraisalLogic = async (
   for (const entry of history) {
     if (dayKey(entry.appraisalDate) <= today) {
       entry.appraisalAmount = computeAppraisalAmount(entry, entry.previousRent);
-      entry.newRent = Math.round(entry.previousRent + entry.appraisalAmount);
+      entry.newRent = Math.floor(entry.previousRent + entry.appraisalAmount);
     }
   }
 
@@ -851,11 +851,11 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
     appraisal.percentage = displayEntry.percentage || 0;
     appraisal.fixedAmount = displayEntry.fixedAmount || 0;
     appraisal.appraisalAmount = Number(displayEntry.appraisalAmount || 0);
-    appraisal.totalAppraisalAmount = Math.round(
+    appraisal.totalAppraisalAmount = Math.floor(
       Number(displayEntry.newRent || 0),
     );
   } else {
-    appraisal.totalAppraisalAmount = Math.round(
+    appraisal.totalAppraisalAmount = Math.floor(
       Number(appraisal.currentRent || 0),
     );
   }
@@ -917,6 +917,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
     rentalPayment: {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
+      customPaymentFrequency: incoming.rentalPayment?.customPaymentFrequency ?? 1,
       // Step 4: include who changed the rental amount in the history snapshot too.
       updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
       updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
@@ -936,7 +937,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
 
 const computeAgreementStatus = (startDate, endDate, reminderDays) => {
   if (!startDate || !endDate) return 1;
-  const daysUntilExpiry = Math.round(
+  const daysUntilExpiry = Math.floor(
     (dayKey(endDate) - todayKey()) / (1000 * 60 * 60 * 24),
   );
   if (daysUntilExpiry < 0) return 3;
@@ -975,10 +976,10 @@ const mediaOnboarding = async (req, res) => {
         mediaData.rentalPayment.paymentFrequency = Number(
           mediaData.rentalPayment.paymentFrequency,
         );
-        if (mediaData.rentalPayment.customPaymentFrequency !== undefined)
-  mediaData.rentalPayment.customPaymentFrequency = Number(
-    mediaData.rentalPayment.customPaymentFrequency,
-  );
+      if (mediaData.rentalPayment.customPaymentFrequency !== undefined)
+        mediaData.rentalPayment.customPaymentFrequency = Number(
+          mediaData.rentalPayment.customPaymentFrequency,
+        );
       // if (mediaData.rentalPayment.tdsApplicable !== undefined)
       //   mediaData.rentalPayment.tdsApplicable = Number(
       //     mediaData.rentalPayment.tdsApplicable,
@@ -1079,9 +1080,13 @@ const mediaOnboarding = async (req, res) => {
           onlineAmount: hasValue(owner.onlineAmount)
             ? Number(owner.onlineAmount)
             : 0,
-            tdsApplicable: hasValue(owner.tdsApplicable) ? Number(owner.tdsApplicable) : 0,
-    tdsPercentage: hasValue(owner.tdsPercentage) ? Number(owner.tdsPercentage) : 0,
-    tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : 0,
+          tdsApplicable: hasValue(owner.tdsApplicable)
+            ? Number(owner.tdsApplicable)
+            : 0,
+          tdsPercentage: hasValue(owner.tdsPercentage)
+            ? Number(owner.tdsPercentage)
+            : 0,
+          tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : 0,
           gstApplicable: hasValue(owner.gstApplicable)
             ? Number(owner.gstApplicable)
             : 0,
@@ -1200,30 +1205,31 @@ const mediaOnboarding = async (req, res) => {
     //   if (!pmCatCheck.valid)
     //     return errorResponse(res, pmCatCheck.message, null, 400);
     // }
-if (
-  mediaData.landOwners?.length &&
-  mediaData.rentalPayment?.totalRentalAmount
-) {
-  const rentalGstApplicable = Number(mediaData.rentalPayment.gstApplicable) || 0;
+    if (
+      mediaData.landOwners?.length &&
+      mediaData.rentalPayment?.totalRentalAmount
+    ) {
+      const rentalGstApplicable =
+        Number(mediaData.rentalPayment.gstApplicable) || 0;
 
-  // ✅ FIXED — no more tdsApplicable/tdsPercentage passed in; TDS is
-  // validated per-owner inside validateLandOwnerShares now.
-  const shareCheck = validateLandOwnerShares(
-    mediaData.landOwners,
-    Number(mediaData.rentalPayment.totalRentalAmount),
-    rentalGstApplicable,
-  );
-  if (!shareCheck.valid)
-    return errorResponse(res, shareCheck.message, null, 400);
+      // ✅ FIXED — no more tdsApplicable/tdsPercentage passed in; TDS is
+      // validated per-owner inside validateLandOwnerShares now.
+      const shareCheck = validateLandOwnerShares(
+        mediaData.landOwners,
+        Number(mediaData.rentalPayment.totalRentalAmount),
+        rentalGstApplicable,
+      );
+      if (!shareCheck.valid)
+        return errorResponse(res, shareCheck.message, null, 400);
 
-  const pmCatCheck = validateOwnerPaymentCategories(
-    mediaData.landOwners,
-    shareCheck.netPayable,
-    rentalGstApplicable,
-  );
-  if (!pmCatCheck.valid)
-    return errorResponse(res, pmCatCheck.message, null, 400);
-}
+      const pmCatCheck = validateOwnerPaymentCategories(
+        mediaData.landOwners,
+        shareCheck.netPayable,
+        rentalGstApplicable,
+      );
+      if (!pmCatCheck.valid)
+        return errorResponse(res, pmCatCheck.message, null, 400);
+    }
     if (mediaData.appraisal && mediaData.agreement) {
       const appraisalCheck = validateAppraisalFrequency(
         mediaData.agreement,
@@ -1458,10 +1464,10 @@ const updateAgreement = async (req, res) => {
       incoming.paymentFrequency !== undefined
         ? Number(incoming.paymentFrequency)
         : media.agreement?.rentalPayment?.paymentFrequency || 1;
-const customPaymentFrequencyValue =
-  incoming.customPaymentFrequency !== undefined
-    ? Number(incoming.customPaymentFrequency)
-    : media.agreement?.rentalPayment?.customPaymentFrequency || undefined;
+    const customPaymentFrequencyValue =
+      incoming.customPaymentFrequency !== undefined
+        ? Number(incoming.customPaymentFrequency)
+        : media.agreement?.rentalPayment?.customPaymentFrequency || undefined;
     const incomingTotalRentalAmount =
       incoming.totalRentalAmount !== undefined
         ? Number(incoming.totalRentalAmount)
@@ -1500,7 +1506,7 @@ const customPaymentFrequencyValue =
       rentalPayment: {
         totalRentalAmount: incomingTotalRentalAmount,
         paymentFrequency: paymentFrequencyValue,
-         customPaymentFrequency: customPaymentFrequencyValue,
+        customPaymentFrequency: customPaymentFrequencyValue,
         // ← stamp who changed totalRentalAmount and when
         updatedBy: rentalPaymentUpdatedBy,
         updatedAt: rentalPaymentUpdatedAt,
@@ -1538,7 +1544,7 @@ const customPaymentFrequencyValue =
       );
     }
 
-    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6,7];
+    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6, 7];
     if (
       !validPaymentFrequencies.includes(
         newAgreement.rentalPayment.paymentFrequency,
@@ -1551,18 +1557,18 @@ const customPaymentFrequencyValue =
         400,
       );
     }
-if (
-  newAgreement.rentalPayment.paymentFrequency === 7 &&
-  (!newAgreement.rentalPayment.customPaymentFrequency ||
-    newAgreement.rentalPayment.customPaymentFrequency < 1)
-) {
-  return errorResponse(
-    res,
-    "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 7",
-    null,
-    400,
-  );
-}
+    if (
+      newAgreement.rentalPayment.paymentFrequency === 7 &&
+      (!newAgreement.rentalPayment.customPaymentFrequency ||
+        newAgreement.rentalPayment.customPaymentFrequency < 1)
+    ) {
+      return errorResponse(
+        res,
+        "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 7",
+        null,
+        400,
+      );
+    }
     // ─────────────────────────────────────────────
     // Helper: compare two dates by day only
     // ─────────────────────────────────────────────
@@ -1616,6 +1622,7 @@ if (
             totalRentalAmount:
               currentAgreement.rentalPayment?.totalRentalAmount || 0,
             paymentFrequency: currentPaymentFrequency,
+            customPaymentFrequency: currentAgreement.rentalPayment?.customPaymentFrequency ?? 1,
             // ← Carry forward the existing stamp when archiving the current agreement
             updatedBy: currentAgreement.rentalPayment?.updatedBy ?? userName,
             updatedAt: currentAgreement.rentalPayment?.updatedAt ?? nowIST(),
@@ -1692,6 +1699,7 @@ if (
       rentalPayment: {
         totalRentalAmount: newAgreement.rentalPayment.totalRentalAmount,
         paymentFrequency: newAgreement.rentalPayment.paymentFrequency,
+        customPaymentFrequency: newAgreement.rentalPayment?.customPaymentFrequency ?? 1,
         // ← stamp on the history snapshot entry
         updatedBy: historyRentalUpdatedBy,
         updatedAt: historyRentalUpdatedAt,
@@ -1712,10 +1720,10 @@ if (
         incoming.paymentFrequency !== undefined
           ? Number(incoming.paymentFrequency)
           : existingRentalPayment.paymentFrequency || 1;
-const customPaymentFreq =
-  incoming.customPaymentFrequency !== undefined
-    ? Number(incoming.customPaymentFrequency)
-    : existingRentalPayment.customPaymentFrequency || undefined;
+      const customPaymentFreq =
+        incoming.customPaymentFrequency !== undefined
+          ? Number(incoming.customPaymentFrequency)
+          : existingRentalPayment.customPaymentFrequency || undefined;
       const updatedTotalRentalAmount =
         incoming.totalRentalAmount !== undefined
           ? Number(incoming.totalRentalAmount)
@@ -1775,8 +1783,8 @@ const customPaymentFreq =
           totalRentalAmount:
             activeAgreement.rentalPayment?.totalRentalAmount || 0,
           paymentFrequency: activePaymentFreq,
-           customPaymentFrequency:
-      activeAgreement.rentalPayment?.customPaymentFrequency,
+          customPaymentFrequency:
+            activeAgreement.rentalPayment?.customPaymentFrequency,
           // ← carry the stamp from the active history entry into the live agreement
           updatedBy: activeAgreement.rentalPayment?.updatedBy ?? userName,
           updatedAt: activeAgreement.rentalPayment?.updatedAt ?? nowIST(),

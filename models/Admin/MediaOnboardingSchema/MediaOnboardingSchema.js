@@ -165,22 +165,25 @@ const agreementHistorySchema = new mongoose.Schema({
   uploadedAt: { type: Date, default: Date.now }, // timestamp when this snapshot was pushed
 });
 
-const ledgerSchema = new mongoose.Schema(
-  {
-    landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null }, // ✅ added
-    landOwnerName: { type: String, trim: true, default: "" }, // ✅ added
-    utrNumber: { type: String, trim: true },
-    date: { type: Date, default: Date.now },
-    status: {
-      type: Number,
-      enum: [0, 1], // 0=not Approve 1=Approve
-      default: 0,
-    },
-    cycle: { type: Date, default: null },
-    updatedBy: { type: String },
-    updatedAt: { type: Date, default: null },
+const ledgerSchema = new mongoose.Schema({
+  landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null }, // ✅ added
+  landOwnerName: { type: String, trim: true, default: "" }, // ✅ added
+  utrNumber: { type: String, trim: true },
+  date: { type: Date, default: Date.now },
+  status: {
+    type: Number,
+    enum: [0, 1], // 0=not Approve 1=Approve
+    default: 0,
   },
-);
+  withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
+   month: { 
+    type: String, 
+    trim: true 
+  },
+  cycle: { type: Date, default: null },
+  updatedBy: { type: String },
+  updatedAt: { type: Date, default: null },
+});
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
   {
@@ -191,6 +194,11 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     netPayable: { type: Number, trim: true },
     nextBillingDate: { type: Date },
     utrNumber: { type: String, trim: true },
+     withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
+   month: { 
+    type: String, 
+    trim: true 
+  },
     date: { type: Date },
     updatedAt: { type: Date, default: null },
     updatedBy: { type: String },
@@ -436,22 +444,22 @@ const MediaSchema = new mongoose.Schema(
           min: 0,
           default: 0,
         },
-tdsApplicable: {
-      type: Number,
-      enum: [0, 1],
-      default: 0,
-    },
-    tdsPercentage: {
-      type: Number,
-      min: 0,
-      max: 100,
-      default: 0,
-    },
-    tdsAmount: {
-      type: Number,
-      min: 0,
-      default: 0,
-    },
+        tdsApplicable: {
+          type: Number,
+          enum: [0, 1],
+          default: 0,
+        },
+        tdsPercentage: {
+          type: Number,
+          min: 0,
+          max: 100,
+          default: 0,
+        },
+        tdsAmount: {
+          type: Number,
+          min: 0,
+          default: 0,
+        },
         gstApplicable: {
           type: Number,
           enum: [0, 1], // 0 no  1 yes
@@ -477,11 +485,11 @@ tdsApplicable: {
           min: 0,
           default: 0,
         },
-         netPayableToOwner: {
-      type: Number,
-      min: 0,
-      default: 0,
-    },
+        netPayableToOwner: {
+          type: Number,
+          min: 0,
+          default: 0,
+        },
       },
     ],
 
@@ -836,10 +844,10 @@ MediaSchema.pre("save", function () {
   let totalRentalAmountWithGst = totalRentalAmount;
 
   if (rentalGstApplicable === 1) {
-    const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+    const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
     rp.gstPercentage = envGstPct;
-    gstAmount = parseFloat(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-    totalRentalAmountWithGst = parseFloat(
+    gstAmount = Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
+    totalRentalAmountWithGst = Math.floor(
       (totalRentalAmount + gstAmount).toFixed(2),
     );
   } else {
@@ -852,7 +860,7 @@ MediaSchema.pre("save", function () {
   rp.totalRentalAmountWithGst = totalRentalAmountWithGst;
 
   // ── STEP B: Net Payable (the pool split among owners — includes GST) ──
-  let netPayable = parseFloat(totalRentalAmountWithGst.toFixed(2));
+  let netPayable = Math.floor(totalRentalAmountWithGst.toFixed(2));
   rp.netPayable = netPayable;
 
   // ── STEP C: APPRAISAL OVERRIDE (unchanged) ──
@@ -890,19 +898,19 @@ MediaSchema.pre("save", function () {
 
   // ── STEP D: OWNER SHARE + TDS (per-owner) + GST CALCULATION ──
   const ownerSplitBaseAmount = netPayable; // includes GST — used for shareAmount
-  const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
-  const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
+  const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
+  const envTdsPercent = Math.floor(process.env.TDS_PERCENTAGE || "0");
 
   this.landOwners.forEach((owner) => {
     // ── Share amount (of netPayable, includes GST — UNCHANGED) ──
     if (Number(owner.typeShare) === 1) {
       const sharePercentage = Number(owner.sharePercentage || 0);
-      owner.shareAmount = parseFloat(
+      owner.shareAmount = Math.floor(
         ((ownerSplitBaseAmount * sharePercentage) / 100).toFixed(2),
       );
     } else if (Number(owner.typeShare) === 2) {
       owner.sharePercentage = undefined;
-      owner.shareAmount = parseFloat(Number(owner.shareAmount || 0).toFixed(2));
+      owner.shareAmount = Math.floor(Number(owner.shareAmount || 0).toFixed(2));
     }
 
     // ✅ FIXED — TDS base is this owner's share of totalRentalAmount
@@ -914,15 +922,16 @@ MediaSchema.pre("save", function () {
 
     if (Number(owner.typeShare) === 1) {
       const sharePercentage = Number(owner.sharePercentage || 0);
-      ownerTdsBaseAmount = parseFloat(
+      ownerTdsBaseAmount = Math.floor(
         ((totalRentalAmount * sharePercentage) / 100).toFixed(2),
       );
     } else if (Number(owner.typeShare) === 2) {
       // Fixed-amount owners: derive their proportional share of the
       // RENTAL-ONLY amount using the same ratio their shareAmount
       // represents out of the full (GST-inclusive) netPayable pool.
-      const ratio = netPayable > 0 ? Number(owner.shareAmount || 0) / netPayable : 0;
-      ownerTdsBaseAmount = parseFloat((totalRentalAmount * ratio).toFixed(2));
+      const ratio =
+        netPayable > 0 ? Number(owner.shareAmount || 0) / netPayable : 0;
+      ownerTdsBaseAmount = Math.floor((totalRentalAmount * ratio).toFixed(2));
     }
 
     const tdsApplicable = Number(owner.tdsApplicable || 0);
@@ -937,7 +946,7 @@ MediaSchema.pre("save", function () {
 
     const tdsAmount =
       tdsApplicable === 1 && tdsPercentage > 0
-        ? parseFloat(((ownerTdsBaseAmount * tdsPercentage) / 100).toFixed(2))
+        ? Math.floor(((ownerTdsBaseAmount * tdsPercentage) / 100).toFixed(2))
         : 0;
 
     owner.tdsAmount = tdsAmount;
@@ -945,7 +954,7 @@ MediaSchema.pre("save", function () {
     // Post-TDS amount — deduct TDS from the owner's FULL shareAmount
     // (GST-inclusive), since TDS is still withheld from what's actually
     // paid out, even though it's CALCULATED on the rental-only portion.
-    const ownerAmountAfterTds = parseFloat(
+    const ownerAmountAfterTds = Math.floor(
       (Number(owner.shareAmount || 0) - tdsAmount).toFixed(2),
     );
 
@@ -962,12 +971,12 @@ MediaSchema.pre("save", function () {
         onlinePortionForGst = Number(owner.onlineAmount || 0);
       }
 
-      const ownerGstAmount = parseFloat(
+      const ownerGstAmount = Math.floor(
         ((onlinePortionForGst * envGstPct) / 100).toFixed(2),
       );
       owner.gstPercentage = envGstPct;
       owner.gstAmount = ownerGstAmount;
-      owner.totalAmountWithGst = parseFloat(
+      owner.totalAmountWithGst = Math.floor(
         (ownerAmountAfterTds + ownerGstAmount).toFixed(2),
       );
     } else {

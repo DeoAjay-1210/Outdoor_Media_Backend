@@ -72,6 +72,7 @@ function advanceRentalPaymentOnOwnerApproval(media) {
     media.markModified("ledger");
   }
 }
+
 // exports.createLedgerEntry = async (req, res) => {
 //   try {
 //     const { mediaId, entries, utrNumber, date, landOwnerId } = req.body;
@@ -87,6 +88,13 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //     const media = await Media.findById(mediaId);
 //     if (!media) {
 //       return errorResponse(res, "Media not found for given mediaId", null, 404);
+//     }
+
+//     if (!Array.isArray(media.ledger)) {
+//       media.ledger = [];
+//     }
+//     if (!Array.isArray(media.ledgerHistory)) {
+//       media.ledgerHistory = [];
 //     }
 
 //     // ── Normalize input: support both the OLD single-entry format
@@ -143,6 +151,22 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //       }
 //     }
 
+//     // ── Tag every entry with the site's CURRENT billing cycle.
+//     // The reset itself no longer happens here — it happens proactively
+//     // in saveRentalDue at the moment the cycle actually rolls over
+//     // (advanceRentalPaymentOnOwnerApproval). This is just for reference
+//     // / consistency with the rest of the cycle-based system. ──
+//     const currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
+
+//     if (!currentCycle) {
+//       return errorResponse(
+//         res,
+//         "Unable to determine current billing cycle",
+//         null,
+//         400,
+//       );
+//     }
+
 //     const savedLedgerEntries = [];
 //     const historyBuckets = [];
 
@@ -161,6 +185,7 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //         utrNumber: item.utrNumber,
 //         date: entryDate,
 //         status: 1,
+//         cycle: currentCycle,
 //         updatedBy: req.user?.userName || "Admin",
 //         updatedAt: nowIST(),
 //       };
@@ -170,6 +195,7 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //       savedLedgerEntries.push(savedLedgerEntry);
 
 //       // 2. Auto-bucket into ledgerHistory: year -> month -> entries
+//       // (PERMANENT record — never reset)
 //       const { year, month } = getYearAndMonthName(entryDate);
 
 //       let yearBucket = media.ledgerHistory.find((y) => y.year === year);
@@ -210,6 +236,8 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //         mediaName: media.mediaName,
 //         ledgerEntries: savedLedgerEntries,      // array (1 or many)
 //         ledgerHistoryBuckets: historyBuckets,   // array (1 or many)
+//         currentCycle: formatDate(currentCycle),
+//         currentLedger: media.ledger,            // full current-cycle ledger state
 //       },
 //       201,
 //     );
@@ -225,7 +253,7 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 // };
 exports.createLedgerEntry = async (req, res) => {
   try {
-    const { mediaId, entries, utrNumber, date, landOwnerId } = req.body;
+    const { mediaId, entries, utrNumber, date, landOwnerId,withGst, month } = req.body;
 
     if (!mediaId) {
       return errorResponse(res, "mediaId is required", null, 400);
@@ -234,6 +262,27 @@ exports.createLedgerEntry = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(mediaId)) {
       return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
     }
+
+    // Validate top-level withGst
+    if (withGst === undefined || withGst === null) {
+      return errorResponse(
+        res,
+        "withGst is required at top level",
+        null,
+        400,
+      );
+    }
+
+    if (typeof withGst !== 'number' || withGst < 0) {
+      return errorResponse(
+        res,
+        "withGst must be a positive number",
+        null,
+        400,
+      );
+    }
+
+ 
 
     const media = await Media.findById(mediaId);
     if (!media) {
@@ -247,28 +296,19 @@ exports.createLedgerEntry = async (req, res) => {
       media.ledgerHistory = [];
     }
 
-    // ── Normalize input: support both the OLD single-entry format
-    //    and the NEW multi-entry (multiple landOwners) format ──
-    let entryList = [];
-
-    if (Array.isArray(entries) && entries.length > 0) {
-      entryList = entries;
-    } else if (utrNumber) {
-      // backward-compatible single entry
-      entryList = [{ utrNumber, date, landOwnerId }];
-    } else {
+    // ── Validate entries array ──
+    if (!Array.isArray(entries) || entries.length === 0) {
       return errorResponse(
         res,
-        "Either 'entries' (array of { utrNumber, date, landOwnerId }) or a top-level 'utrNumber' is required",
+        "entries array is required and must not be empty",
         null,
         400,
       );
     }
 
-    // ── Validate every entry: utrNumber required, landOwnerId (if given)
-    //    must exist in media.landOwners ──
-    for (let i = 0; i < entryList.length; i++) {
-      const item = entryList[i];
+    // ── Validate every entry ──
+    for (let i = 0; i < entries.length; i++) {
+      const item = entries[i];
 
       if (!item.utrNumber) {
         return errorResponse(
@@ -301,11 +341,7 @@ exports.createLedgerEntry = async (req, res) => {
       }
     }
 
-    // ── Tag every entry with the site's CURRENT billing cycle.
-    // The reset itself no longer happens here — it happens proactively
-    // in saveRentalDue at the moment the cycle actually rolls over
-    // (advanceRentalPaymentOnOwnerApproval). This is just for reference
-    // / consistency with the rest of the cycle-based system. ──
+    // ── Tag every entry with the site's CURRENT billing cycle ──
     const currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
 
     if (!currentCycle) {
@@ -321,7 +357,7 @@ exports.createLedgerEntry = async (req, res) => {
     const historyBuckets = [];
 
     // 1. Build + push a ledger entry AND its history bucket entry for EACH item
-    for (const item of entryList) {
+    for (const item of entries) {
       const entryDate = item.date ? new Date(item.date) : new Date();
 
       // Look up the matched land owner again (to pull name + auto-fill it)
@@ -338,6 +374,9 @@ exports.createLedgerEntry = async (req, res) => {
         cycle: currentCycle,
         updatedBy: req.user?.userName || "Admin",
         updatedAt: nowIST(),
+        // NEW FIELDS - from top-level payload
+        withGst: withGst,    // Applied to all entries
+        month: month         // Applied to all entries (e.g., "July 2026")
       };
 
       media.ledger.push(ledgerEntry);
@@ -345,8 +384,7 @@ exports.createLedgerEntry = async (req, res) => {
       savedLedgerEntries.push(savedLedgerEntry);
 
       // 2. Auto-bucket into ledgerHistory: year -> month -> entries
-      // (PERMANENT record — never reset)
-      const { year, month } = getYearAndMonthName(entryDate);
+      const { year, month: monthName } = getYearAndMonthName(entryDate);
 
       let yearBucket = media.ledgerHistory.find((y) => y.year === year);
       if (!yearBucket) {
@@ -354,9 +392,9 @@ exports.createLedgerEntry = async (req, res) => {
         yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
       }
 
-      let monthBucket = yearBucket.months.find((m) => m.month === month);
+      let monthBucket = yearBucket.months.find((m) => m.month === monthName);
       if (!monthBucket) {
-        yearBucket.months.push({ month, entries: [] });
+        yearBucket.months.push({ month: monthName, entries: [] });
         monthBucket = yearBucket.months[yearBucket.months.length - 1];
       }
 
@@ -371,9 +409,12 @@ exports.createLedgerEntry = async (req, res) => {
         date: savedLedgerEntry.date,
         updatedBy: req.user?.userName || "Admin",
         updatedAt: nowIST(),
+        // NEW FIELDS in history - from top-level payload
+        withGst: withGst,    // Applied to all entries
+        month: month         // Applied to all entries
       });
 
-      historyBuckets.push({ year, month });
+      historyBuckets.push({ year, month: monthName });
     }
 
     await media.save();
@@ -384,10 +425,10 @@ exports.createLedgerEntry = async (req, res) => {
       {
         mediaId: media._id,
         mediaName: media.mediaName,
-        ledgerEntries: savedLedgerEntries,      // array (1 or many)
-        ledgerHistoryBuckets: historyBuckets,   // array (1 or many)
+        ledgerEntries: savedLedgerEntries,
+        ledgerHistoryBuckets: historyBuckets,
         currentCycle: formatDate(currentCycle),
-        currentLedger: media.ledger,            // full current-cycle ledger state
+        currentLedger: media.ledger,
       },
       201,
     );
@@ -401,7 +442,6 @@ exports.createLedgerEntry = async (req, res) => {
     );
   }
 };
-
 exports.listMediaByLedger = async (req, res) => {
   try {
     const {
