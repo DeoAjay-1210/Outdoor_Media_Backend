@@ -2530,7 +2530,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
 
     if (status !== undefined && status !== null && status !== "") {
-      const statusMap = { active: 1, expirezone: 2, overdue: 3, expired: 3 };
+      const statusMap = { active: 1, expiresoon: 2, overdue: 3, expired: 3 };
       const parsed = parseInt(status, 10);
       const resolvedStatus = isNaN(parsed)
         ? statusMap[String(status).toLowerCase()]

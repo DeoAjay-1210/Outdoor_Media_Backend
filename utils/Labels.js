@@ -9,7 +9,7 @@ const FREQ_LABEL = {
 
 const STATUS_LABEL = {
   1: "Active",
-  2: "Expire Zone",
+  2: "Expire Soon",
   3: "Overdue",
 };
 

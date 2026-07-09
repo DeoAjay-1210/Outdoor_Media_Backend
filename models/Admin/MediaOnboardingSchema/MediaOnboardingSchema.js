@@ -124,7 +124,7 @@ const agreementHistorySchema = new mongoose.Schema({
   },
   status: {
     type: Number,
-    enum: [1, 2, 3], // 1=Active  2=Expire Zone  3=Expired
+    enum: [1, 2, 3], // 1=Active  2=Expire soon  3=Expired
     default: 1,
   },
   agreementPDF: {
@@ -176,9 +176,9 @@ const ledgerSchema = new mongoose.Schema({
     default: 0,
   },
   withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
-   month: { 
-    type: String, 
-    trim: true 
+  month: {
+    type: String,
+    trim: true,
   },
   cycle: { type: Date, default: null },
   updatedBy: { type: String },
@@ -194,11 +194,11 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     netPayable: { type: Number, trim: true },
     nextBillingDate: { type: Date },
     utrNumber: { type: String, trim: true },
-     withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
-   month: { 
-    type: String, 
-    trim: true 
-  },
+    withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
+    month: {
+      type: String,
+      trim: true,
+    },
     date: { type: Date },
     updatedAt: { type: Date, default: null },
     updatedBy: { type: String },
@@ -367,7 +367,7 @@ const MediaSchema = new mongoose.Schema(
       balanceGstAmount: { type: Number, default: 0, min: 0 },
       status: {
         type: Number,
-        enum: [1, 2, 3], // 1=Active 2=Expire Zone 3=Expired
+        enum: [1, 2, 3], // 1=Active 2=Expire soon 3=Expired
         default: 1,
       },
       // ownerPayments: [ownerPaymentSchema],
@@ -510,7 +510,7 @@ const MediaSchema = new mongoose.Schema(
       },
       status: {
         type: Number,
-        enum: [1, 2, 3], // 1=Active 2=Expire Zone 3=Expired
+        enum: [1, 2, 3], // 1=Active 2=Expire Soon 3=Expired
         default: 1,
       },
       reason: { type: String, trim: true },
@@ -966,7 +966,7 @@ MediaSchema.pre("save", function () {
     if (ownerGstApplicable === 1 && paymentCategory !== 1) {
       let onlinePortionForGst = 0;
       if (paymentCategory === 2) {
-        onlinePortionForGst =  Number(owner.shareAmount || 0);;
+        onlinePortionForGst = Number(owner.shareAmount || 0);
       } else if (paymentCategory === 3) {
         onlinePortionForGst = Number(owner.onlineAmount || 0);
       }

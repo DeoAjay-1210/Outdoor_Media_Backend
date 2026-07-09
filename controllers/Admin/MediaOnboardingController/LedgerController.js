@@ -252,17 +252,6 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //   }
 // };
 
-
-
-
-
-
-
-
-
-
-
-
 // exports.createLedgerEntry = async (req, res) => {
 //   try {
 //     const { mediaId, entries, utrNumber, date, landOwnerId,withGst, month } = req.body;
@@ -293,8 +282,6 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 //         400,
 //       );
 //     }
-
- 
 
 //     const media = await Media.findById(mediaId);
 //     if (!media) {
@@ -522,14 +509,19 @@ exports.createLedgerEntry = async (req, res) => {
       }
 
       // ✅ month now validated per entry
-      if (!item.month) {
-        return errorResponse(
-          res,
-          `entries[${i}].month is required`,
-          null,
-          400,
-        );
-      }
+        if (item.withGst !== 2) {
+    if (!item.month) {
+      return errorResponse(
+        res,
+        `entries[${i}].month is required when withGst is not 2`,
+        null,
+        400,
+      );
+    }
+  } else {
+    // If withGst is 2, month is not needed - set to null
+    item.month = null;
+  }
 
       if (item.landOwnerId) {
         if (!mongoose.Types.ObjectId.isValid(item.landOwnerId)) {
@@ -562,8 +554,7 @@ exports.createLedgerEntry = async (req, res) => {
         }
       }
     }
-     
-    
+
     // ── Tag every entry with the site's CURRENT billing cycle ──
     const currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
 
@@ -578,7 +569,7 @@ exports.createLedgerEntry = async (req, res) => {
 
     const savedLedgerEntries = [];
     const historyBuckets = [];
- const updatedGstBalanceRecords = [];
+    const updatedGstBalanceRecords = [];
     // 1. Build + push a ledger entry AND its history bucket entry for EACH item
     for (const item of entries) {
       const entryDate = item.date ? new Date(item.date) : new Date();
@@ -601,13 +592,13 @@ exports.createLedgerEntry = async (req, res) => {
         // shared top-level value applied to all entries.
         withGst: item.withGst,
         month: item.month,
-         rentalDueId: item.rentalDueId || null,
+        rentalDueId: item.rentalDueId || null,
       };
 
       media.ledger.push(ledgerEntry);
       const savedLedgerEntry = media.ledger[media.ledger.length - 1];
       savedLedgerEntries.push(savedLedgerEntry);
-if (item.rentalDueId) {
+      if (item.rentalDueId) {
         const matchingGstRecords = media.gstBalanceHistory.filter(
           (g) => String(g.rentalDueId) === String(item.rentalDueId),
         );
@@ -651,7 +642,7 @@ if (item.rentalDueId) {
         // ✅ FIXED — per-entry values here too
         withGst: item.withGst,
         month: item.month,
-         rentalDueId: item.rentalDueId || null,
+        rentalDueId: item.rentalDueId || null,
       });
 
       historyBuckets.push({ year, month: monthName });
@@ -714,7 +705,7 @@ if (item.rentalDueId) {
 //           400,
 //         );
 //       }
-       
+
 //       if (statusNum === 1) {
 //         filter["ledger"] = {
 //           $exists: true,
@@ -850,7 +841,7 @@ if (item.rentalDueId) {
 //             _id: due._id,
 //             ownerApprovalDate: due.ownerApprovalDate,
 //             dueMonth: due.dueMonth,
-            
+
 //           }));
 //       }
 
@@ -1023,7 +1014,9 @@ exports.listMediaByLedger = async (req, res) => {
       const inRequestedMonth = (date) => {
         if (!requestedMonthRange || !date) return true;
         const d = new Date(date);
-        return d >= requestedMonthRange.startDate && d <= requestedMonthRange.endDate;
+        return (
+          d >= requestedMonthRange.startDate && d <= requestedMonthRange.endDate
+        );
       };
 
       // Process ledger - get latest entry per landOwner, scoped to month
@@ -1059,8 +1052,12 @@ exports.listMediaByLedger = async (req, res) => {
         );
 
         const sortedDue = [...monthScopedDue].sort((a, b) => {
-          const dateA = a.ownerApprovalDate ? new Date(a.ownerApprovalDate) : new Date(0);
-          const dateB = b.ownerApprovalDate ? new Date(b.ownerApprovalDate) : new Date(0);
+          const dateA = a.ownerApprovalDate
+            ? new Date(a.ownerApprovalDate)
+            : new Date(0);
+          const dateB = b.ownerApprovalDate
+            ? new Date(b.ownerApprovalDate)
+            : new Date(0);
           return dateB - dateA;
         });
 
@@ -1085,8 +1082,8 @@ exports.listMediaByLedger = async (req, res) => {
       }
 
       // ✅ NEW — gstBalanceHistory scoped to requested month too
-     const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory) 
-        ? mediaObj.gstBalanceHistory 
+      const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
+        ? mediaObj.gstBalanceHistory
         : [];
 
       return {
@@ -1129,7 +1126,9 @@ exports.getLedgerHistory = async (req, res) => {
 
     // Use .lean() to get plain JSON objects
     const media = await Media.findById(mediaId)
-      .select("mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners")
+      .select(
+        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners",
+      )
       .lean();
 
     if (!media) {
