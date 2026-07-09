@@ -920,6 +920,7 @@ function addGstToBalanceIfApplicable(media, entry, userName) {
 }
 function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.ownerGstAddedToBalance) return;
+  if (entry.withGst !== 1) return;
   if (!Array.isArray(media.landOwners) || media.landOwners.length === 0) return;
 
   if (!Array.isArray(media.gstBalanceHistory)) {
@@ -1230,7 +1231,10 @@ exports.saveRentalDue = async (req, res) => {
 
           // ✅ NEW — keep gstBalanceHistory + balanceGstAmount in sync with
           // this change, whether it's Team Lead or Owner making it.
-          syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
+          if (userType === ROLE.OWNER) {
+      syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
+    }
+          // syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
         }
       }
       if (isOwnerOverride) {
