@@ -1036,36 +1036,18 @@ exports.listMediaByLedger = async (req, res) => {
         );
 
          // Process withGst: 2 entries (latest per owner)
+         // ✅ Sort by updatedAt descending and take only the 2 most recent
         const sortedGst2 = [...gst2Entries].sort(
           (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
         );
-        const seenOwnersGst2 = new Set();
-        for (const entry of sortedGst2) {
-          const ownerKey = entry.landOwnerId
-            ? String(entry.landOwnerId)
-            : `__no_owner_${entry._id}`;
+        latestLedger = sortedGst2.slice(0, 2); // Take only top 2
 
-          if (!seenOwnersGst2.has(ownerKey)) {
-            seenOwnersGst2.add(ownerKey);
-            latestLedger.push(entry);
-          }
-        }
-
-        // Process withGst: 1 entries (latest per owner)
+        // ✅ For withGst:1 entries, take only the 2 most recent as well
         const sortedGst1 = [...gst1Entries].sort(
           (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
         );
-        const seenOwnersGst1 = new Set();
-        for (const entry of sortedGst1) {
-          const ownerKey = entry.landOwnerId
-            ? String(entry.landOwnerId)
-            : `__no_owner_${entry._id}`;
-
-          if (!seenOwnersGst1.has(ownerKey)) {
-            seenOwnersGst1.add(ownerKey);
-            withGst1Ledger.push(entry);
-          }
-        }
+        withGst1Ledger = sortedGst1.slice(0, 2); // Take only top 2
+      
       }
 
       // Process rentalDue - scoped to requested month, sorted by
