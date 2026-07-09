@@ -480,14 +480,14 @@ exports.createLedgerEntry = async (req, res) => {
     for (let i = 0; i < entries.length; i++) {
       const item = entries[i];
 
-      if (!item.utrNumber) {
-        return errorResponse(
-          res,
-          `entries[${i}].utrNumber is required`,
-          null,
-          400,
-        );
-      }
+      // if (!item.utrNumber) {
+      //   return errorResponse(
+      //     res,
+      //     `entries[${i}].utrNumber is required`,
+      //     null,
+      //     400,
+      //   );
+      // }
 
       // ✅ withGst now validated per entry
       if (item.withGst === undefined || item.withGst === null) {
@@ -509,19 +509,19 @@ exports.createLedgerEntry = async (req, res) => {
       }
 
       // ✅ month now validated per entry
-        if (item.withGst !== 2) {
-    if (!item.month) {
-      return errorResponse(
-        res,
-        `entries[${i}].month is required when withGst is not 2`,
-        null,
-        400,
-      );
-    }
-  } else {
-    // If withGst is 2, month is not needed - set to null
-    item.month = null;
-  }
+      if (item.withGst !== 2) {
+        if (!item.month) {
+          return errorResponse(
+            res,
+            `entries[${i}].month is required when withGst is not 2`,
+            null,
+            400,
+          );
+        }
+      } else {
+        // If withGst is 2, month is not needed - set to null
+        item.month = null;
+      }
 
       if (item.landOwnerId) {
         if (!mongoose.Types.ObjectId.isValid(item.landOwnerId)) {
@@ -1021,24 +1021,49 @@ exports.listMediaByLedger = async (req, res) => {
 
       // Process ledger - get latest entry per landOwner, scoped to month
       let latestLedger = [];
+      let withGst1Ledger = [];
       if (Array.isArray(mediaObj.ledger) && mediaObj.ledger.length > 0) {
         const monthScopedLedger = mediaObj.ledger.filter((entry) =>
           inRequestedMonth(entry.date),
         );
 
-        const sortedLedger = [...monthScopedLedger].sort(
-          (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+        // Separate entries based on withGst value
+        const gst2Entries = monthScopedLedger.filter(
+          (entry) => entry.withGst === 2,
+        );
+        const gst1Entries = monthScopedLedger.filter(
+          (entry) => entry.withGst === 1,
         );
 
-        const seenOwners = new Set();
-        for (const entry of sortedLedger) {
+         // Process withGst: 2 entries (latest per owner)
+        const sortedGst2 = [...gst2Entries].sort(
+          (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+        );
+        const seenOwnersGst2 = new Set();
+        for (const entry of sortedGst2) {
           const ownerKey = entry.landOwnerId
             ? String(entry.landOwnerId)
             : `__no_owner_${entry._id}`;
 
-          if (!seenOwners.has(ownerKey)) {
-            seenOwners.add(ownerKey);
+          if (!seenOwnersGst2.has(ownerKey)) {
+            seenOwnersGst2.add(ownerKey);
             latestLedger.push(entry);
+          }
+        }
+
+        // Process withGst: 1 entries (latest per owner)
+        const sortedGst1 = [...gst1Entries].sort(
+          (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+        );
+        const seenOwnersGst1 = new Set();
+        for (const entry of sortedGst1) {
+          const ownerKey = entry.landOwnerId
+            ? String(entry.landOwnerId)
+            : `__no_owner_${entry._id}`;
+
+          if (!seenOwnersGst1.has(ownerKey)) {
+            seenOwnersGst1.add(ownerKey);
+            withGst1Ledger.push(entry);
           }
         }
       }
@@ -1085,11 +1110,19 @@ exports.listMediaByLedger = async (req, res) => {
       const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
         ? mediaObj.gstBalanceHistory
         : [];
-
+  let gstPayment = false;
+      if (fullGstBalanceHistory.length > 0) {
+        const hasEmptyUtr = fullGstBalanceHistory.some(
+          (entry) => !entry.utrNumber || entry.utrNumber.trim() === ""
+        );
+        gstPayment = hasEmptyUtr; // true if any entry has empty utrNumber, false otherwise
+      }
       return {
         ...mediaObj,
         ledger: latestLedger,
+        withGst1Ledger:withGst1Ledger,
         rentalDue: rentalDueWithApproval,
+         gstPayment: gstPayment,
         gstBalanceHistory: fullGstBalanceHistory, // All entries, not filtered by month
       };
     });
