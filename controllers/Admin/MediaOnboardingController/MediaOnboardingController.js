@@ -962,8 +962,10 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
     rentalPayment: {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
-      customPaymentFrequency:
-        incoming.rentalPayment?.customPaymentFrequency ?? null,
+       customPaymentFrequency:
+    Number(incoming.rentalPayment?.paymentFrequency) === 7
+      ? incoming.rentalPayment?.customPaymentFrequency ?? null
+      : null,
       // Step 4: include who changed the rental amount in the history snapshot too.
       updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
       updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
@@ -1347,15 +1349,28 @@ const mediaOnboarding = async (req, res) => {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      if (mediaData.rentalPayment && mediaData.agreement) {
-        mediaData.agreement.rentalPayment = {
-          totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-          paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
-          customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
-        };
-      }
+      // if (mediaData.rentalPayment && mediaData.agreement) {
+      //   mediaData.agreement.rentalPayment = {
+      //     totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+      //     paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
+      //     customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
+      //   };
+      // }
 
       // Step 4: handle agreement history with updatedBy/updatedAt on rentalPayment.
+      if (mediaData.rentalPayment && mediaData.agreement) {
+  const pf = mediaData.rentalPayment.paymentFrequency || 1;
+  mediaData.agreement.rentalPayment = {
+    totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+    paymentFrequency: pf,
+    // Only set customPaymentFrequency when frequency is actually Custom (7).
+    // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
+    // validator, since `required` only applies when paymentFrequency === 7.
+    ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+      ? { customPaymentFrequency: Number(mediaData.rentalPayment.customPaymentFrequency) }
+      : {}),
+  };
+}
       handleAgreementHistory(mediaData, media, userName);
 
       Object.keys(mediaData).forEach((key) => {
@@ -1387,15 +1402,28 @@ const mediaOnboarding = async (req, res) => {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      if (mediaData.rentalPayment && mediaData.agreement) {
-        mediaData.agreement.rentalPayment = {
-          totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-          paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
-          customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
-        };
-      }
+      // if (mediaData.rentalPayment && mediaData.agreement) {
+      //   mediaData.agreement.rentalPayment = {
+      //     totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+      //     paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
+      //     customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
+      //   };
+      // }
 
       // Step 4: push first agreement history snapshot.
+      if (mediaData.rentalPayment && mediaData.agreement) {
+  const pf = mediaData.rentalPayment.paymentFrequency || 1;
+  mediaData.agreement.rentalPayment = {
+    totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+    paymentFrequency: pf,
+    // Only set customPaymentFrequency when frequency is actually Custom (7).
+    // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
+    // validator, since `required` only applies when paymentFrequency === 7.
+    ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+      ? { customPaymentFrequency: Number(mediaData.rentalPayment.customPaymentFrequency) }
+      : {}),
+  };
+}
       handleAgreementHistory(mediaData, null, userName);
 
       media = new MediaOnboarding(mediaData);
