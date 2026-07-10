@@ -1067,6 +1067,157 @@ exports.listMediaByLedger = async (req, res) => {
 //     );
 //   }
 // };
+
+
+
+
+
+
+
+
+
+
+// exports.getLedgerHistory = async (req, res) => {
+//   try {
+//     const { mediaId, year, month } = req.query;
+
+//     if (!mongoose.Types.ObjectId.isValid(mediaId)) {
+//       return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
+//     }
+
+//     // Use .lean() to get plain JSON objects
+//     const media = await Media.findById(mediaId)
+//       .select(
+//         "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners gstBalanceHistory",
+//       )
+//       .lean();
+
+//     if (!media) {
+//       return errorResponse(res, "Media not found for given mediaId", null, 404);
+//     }
+
+//     let ledgerHistory = media.ledgerHistory || [];
+
+//     // Filter by Year
+//     if (year) {
+//       ledgerHistory = ledgerHistory.filter(
+//         (item) => item.year === String(year),
+//       );
+//     }
+
+//     // Filter by Month
+//     if (month) {
+//       const monthNames = [
+//         "January",
+//         "February",
+//         "March",
+//         "April",
+//         "May",
+//         "June",
+//         "July",
+//         "August",
+//         "September",
+//         "October",
+//         "November",
+//         "December",
+//       ];
+
+//       const monthName = monthNames[Number(month) - 1];
+
+//       ledgerHistory = ledgerHistory
+//         .map((item) => ({
+//           ...item,
+//           months: item.months.filter(
+//             (m) => m.month.toLowerCase() === monthName.toLowerCase(),
+//           ),
+//         }))
+//         .filter((item) => item.months.length > 0);
+//     }
+
+//     // ✅ Calculate gstPayment flag (same logic as list API)
+//     const fullGstBalanceHistory = Array.isArray(media.gstBalanceHistory)
+//       ? media.gstBalanceHistory
+//       : [];
+//     let gstPayment = false;
+//     if (fullGstBalanceHistory.length > 0) {
+//       const hasEmptyUtr = fullGstBalanceHistory.some(
+//         (entry) => !entry.utrNumber || entry.utrNumber.trim() === ""
+//       );
+//       gstPayment = hasEmptyUtr;
+//     }
+
+//     // Transform ledgerHistory to include mediaName and show ALL entries
+//     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
+//       ...yearEntry,
+//       months: yearEntry.months.map((monthEntry) => {
+//         // ✅ Get all entries, separated by withGst
+//         const allEntries = monthEntry.entries || [];
+        
+//         // Separate entries by withGst value
+//         const withGst2Entries = allEntries.filter(entry => entry.withGst === 2);
+//         const withGst1Entries = allEntries.filter(entry => entry.withGst === 1);
+
+//         // ✅ Sort entries by updatedAt (most recent first)
+//         const sortByUpdatedAt = (entries) => {
+//           return [...entries].sort(
+//             (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+//           );
+//         };
+
+//         return {
+//           month: monthEntry.month,
+//           // ✅ Show ALL withGst:2 entries (not just latest per owner)
+//           ledger: sortByUpdatedAt(withGst2Entries).map((entry) => ({
+//             ...entry,
+//             mediaName: media.mediaName,
+//           })),
+//           // ✅ Show ALL withGst:1 entries (GST entries)
+//           withGst1Ledger: sortByUpdatedAt(withGst1Entries).map((entry) => ({
+//             ...entry,
+//             mediaName: media.mediaName,
+//           })),
+//           // ✅ Keep all entries for historical/audit data
+//           allEntries: sortByUpdatedAt(allEntries).map((entry) => ({
+//             ...entry,
+//             mediaName: media.mediaName,
+//           })),
+//         };
+//       }),
+//     }));
+
+//     return successResponse(
+//       res,
+//       "Ledger history fetched successfully",
+//       {
+//         mediaId: media._id,
+//         mediaName: media.mediaName,
+//         mediaType: media.mediaType,
+//         mediaCode: media.mediaCode,
+//         city: media.city,
+//         rentalPayment: media.rentalPayment,
+//         landOwners: media.landOwners,
+//         currentRentalPayment: {
+//           paymentFrequency: media.rentalPayment.paymentFrequency,
+//           netPayable: media.rentalPayment.netPayable,
+//           nextBillingDate: media.rentalPayment.nextBillingDate,
+//         },
+//         ledgerHistory: transformedLedgerHistory,
+//          gstBalanceHistory: media.gstBalanceHistory,
+//       },
+//       200,
+//     );
+//   } catch (error) {
+//     console.error("getLedgerHistory error:", error);
+
+//     return errorResponse(
+//       res,
+//       "Something went wrong while fetching ledger history",
+//       { error: error.message },
+//       500,
+//     );
+//   }
+// };
+
 exports.getLedgerHistory = async (req, res) => {
   try {
     const { mediaId, year, month } = req.query;
@@ -1136,11 +1287,11 @@ exports.getLedgerHistory = async (req, res) => {
       gstPayment = hasEmptyUtr;
     }
 
-    // Transform ledgerHistory to include mediaName and show ALL entries
+    // Transform ledgerHistory to match list API structure
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
       ...yearEntry,
       months: yearEntry.months.map((monthEntry) => {
-        // ✅ Get all entries, separated by withGst
+        // ✅ Get all entries
         const allEntries = monthEntry.entries || [];
         
         // Separate entries by withGst value
@@ -1154,19 +1305,58 @@ exports.getLedgerHistory = async (req, res) => {
           );
         };
 
+        // ✅ Get latest 2 entries for withGst:2 (matching list API)
+        const sortedGst2 = sortByUpdatedAt(withGst2Entries);
+        const latestTwoGst2 = sortedGst2.slice(0, 2);
+
+        // ✅ Get latest 2 entries for withGst:1 (matching list API)
+        const sortedGst1 = sortByUpdatedAt(withGst1Entries);
+        const latestTwoGst1 = sortedGst1.slice(0, 2);
+
         return {
           month: monthEntry.month,
-          // ✅ Show ALL withGst:2 entries (not just latest per owner)
-          ledger: sortByUpdatedAt(withGst2Entries).map((entry) => ({
-            ...entry,
+          
+          // ✅ Only 2 most recent entries for withGst:2 (matches list API)
+          ledger: latestTwoGst2.map((entry) => ({
+            landOwnerId: entry.landOwnerId,
+            landOwnerName: entry.landOwnerName,
+            utrNumber: entry.utrNumber,
+            date: entry.date,
+            status: entry.status,
+            withGst: entry.withGst,
+            month: entry.month,
+            cycle: entry.cycle,
+            updatedBy: entry.updatedBy,
+            updatedAt: entry.updatedAt,
+            _id: entry._id,
+            // Additional fields from history
             mediaName: media.mediaName,
+            paymentFrequency: entry.paymentFrequency,
+            netPayable: entry.netPayable,
+            nextBillingDate: entry.nextBillingDate,
           })),
-          // ✅ Show ALL withGst:1 entries (GST entries)
-          withGst1Ledger: sortByUpdatedAt(withGst1Entries).map((entry) => ({
-            ...entry,
+          
+          // ✅ Only 2 most recent entries for withGst:1 (matches list API)
+          withGst1Ledger: latestTwoGst1.map((entry) => ({
+            landOwnerId: entry.landOwnerId,
+            landOwnerName: entry.landOwnerName,
+            utrNumber: entry.utrNumber,
+            date: entry.date,
+            status: entry.status,
+            withGst: entry.withGst,
+            month: entry.month,
+            cycle: entry.cycle,
+            updatedBy: entry.updatedBy,
+            updatedAt: entry.updatedAt,
+            _id: entry._id,
+            // Additional fields from history
             mediaName: media.mediaName,
+            paymentFrequency: entry.paymentFrequency,
+            netPayable: entry.netPayable,
+            nextBillingDate: entry.nextBillingDate,
           })),
-          // ✅ Keep all entries for historical/audit data
+          
+          // ✅ Keep all entries for historical/audit data (optional)
           allEntries: sortByUpdatedAt(allEntries).map((entry) => ({
             ...entry,
             mediaName: media.mediaName,
@@ -1192,7 +1382,8 @@ exports.getLedgerHistory = async (req, res) => {
           nextBillingDate: media.rentalPayment.nextBillingDate,
         },
         ledgerHistory: transformedLedgerHistory,
-         gstBalanceHistory: media.gstBalanceHistory,
+        gstBalanceHistory: media.gstBalanceHistory,
+        gstPayment: gstPayment,
       },
       200,
     );

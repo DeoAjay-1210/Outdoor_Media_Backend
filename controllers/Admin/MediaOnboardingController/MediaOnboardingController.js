@@ -723,11 +723,11 @@ const handleAppraisalLogic = async (
       }
     } else {
       // ── Brand-new date being added ──────────────────────────────────────
-      if (nextDay < today) {
-        throw new Error(
-          `Cannot add a new appraisal date (${dateString(nextDate)}) in the past.`,
-        );
-      }
+      // if (nextDay < today) {
+      //   throw new Error(
+      //     `Cannot add a new appraisal date (${dateString(nextDate)}) in the past.`,
+      //   );
+      // }
 
       history.push({
         appraisalDate: nextDate,
