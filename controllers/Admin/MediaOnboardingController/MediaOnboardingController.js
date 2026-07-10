@@ -1305,6 +1305,7 @@ const mediaOnboarding = async (req, res) => {
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
+          customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
         };
       }
 
@@ -1344,6 +1345,7 @@ const mediaOnboarding = async (req, res) => {
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
+          customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
         };
       }
 
