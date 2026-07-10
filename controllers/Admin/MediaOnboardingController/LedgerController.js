@@ -1171,8 +1171,6 @@ exports.getLedgerHistory = async (req, res) => {
             ...entry,
             mediaName: media.mediaName,
           })),
-          // ✅ Add gstPayment flag
-          gstPayment: gstPayment,
         };
       }),
     }));
@@ -1187,12 +1185,12 @@ exports.getLedgerHistory = async (req, res) => {
         mediaCode: media.mediaCode,
         city: media.city,
         rentalPayment: media.rentalPayment,
+        landOwners: media.landOwners,
         currentRentalPayment: {
           paymentFrequency: media.rentalPayment.paymentFrequency,
           netPayable: media.rentalPayment.netPayable,
           nextBillingDate: media.rentalPayment.nextBillingDate,
         },
-        gstPayment: gstPayment,
         ledgerHistory: transformedLedgerHistory,
       },
       200,
