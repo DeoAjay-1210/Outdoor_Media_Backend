@@ -630,7 +630,7 @@ const handleAppraisalLogic = async (
     if (!nextDate) {
       const firstDate = new Date(agreementStartDate);
       firstDate.setMonth(firstDate.getMonth() + months);
-        nextDate = toDateOnly(firstDate);
+      nextDate = toDateOnly(firstDate);
       appraisal.nextAppraisalDate = nextDate;
       // if (dayKey(firstDate) <= dayKey(agreementEndDate)) {
       //   nextDate = toDateOnly(firstDate);
@@ -962,10 +962,10 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
     rentalPayment: {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
-       customPaymentFrequency:
-    Number(incoming.rentalPayment?.paymentFrequency) === 7
-      ? incoming.rentalPayment?.customPaymentFrequency ?? null
-      : null,
+      customPaymentFrequency:
+        Number(incoming.rentalPayment?.paymentFrequency) === 7
+          ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
+          : null,
       // Step 4: include who changed the rental amount in the history snapshot too.
       updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
       updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
@@ -992,7 +992,58 @@ const computeAgreementStatus = (startDate, endDate, reminderDays) => {
   if (daysUntilExpiry <= reminderDays) return 2;
   return 1;
 };
+// This is for Appraisal Amout based TotalRentalAmount Calculation
+const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
+  const appraisal = mediaData.appraisal;
+  if (!appraisal || Number(appraisal.applicable) !== 1) return false;
+  if (!Array.isArray(appraisal.history) || !appraisal.history.length)
+    return false;
 
+  const today = todayKey();
+
+  // Latest entry whose appraisalDate has actually arrived (today or past).
+  const dueEntries = appraisal.history
+    .filter((h) => h.appraisalDate && dayKey(h.appraisalDate) <= today)
+    .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
+
+  if (!dueEntries.length) return false;
+
+  const latestDueEntry = dueEntries[0];
+  const appraisedRent = Number(latestDueEntry.newRent || 0);
+  if (!appraisedRent) return false;
+
+  const currentTotalRentalAmount = Number(
+    mediaData.rentalPayment?.totalRentalAmount ??
+      existingMedia?.rentalPayment?.totalRentalAmount ??
+      0,
+  );
+
+  // Already applied (or already matches) — nothing to do this time.
+  if (appraisedRent === currentTotalRentalAmount) return false;
+
+  if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
+  mediaData.rentalPayment.totalRentalAmount = appraisedRent;
+
+  // Track this exactly like a manual rent change, in the SAME history array.
+  let history = Array.isArray(mediaData.rentalPayment.rentalAmountHistory)
+    ? mediaData.rentalPayment.rentalAmountHistory
+    : existingMedia
+      ? JSON.parse(
+          JSON.stringify(
+            existingMedia.rentalPayment?.rentalAmountHistory ?? [],
+          ),
+        )
+      : [];
+
+  history.push({
+    amount: appraisedRent,
+    updatedBy: `${userName} (Appraisal applied - ${dateString(latestDueEntry.appraisalDate)})`,
+    updatedAt: nowIST(),
+  });
+
+  mediaData.rentalPayment.rentalAmountHistory = history;
+  return true;
+};
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -1173,7 +1224,8 @@ const mediaOnboarding = async (req, res) => {
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
-          customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
+          customPaymentFrequency:
+            mediaData.rentalPayment.customPaymentFrequency || 0,
         };
       }
       mediaData.agreement.updatedBy = userName;
@@ -1358,19 +1410,24 @@ const mediaOnboarding = async (req, res) => {
       // }
 
       // Step 4: handle agreement history with updatedBy/updatedAt on rentalPayment.
+      applyAppraisalRentIfDuent(mediaData, media, userName);
       if (mediaData.rentalPayment && mediaData.agreement) {
-  const pf = mediaData.rentalPayment.paymentFrequency || 1;
-  mediaData.agreement.rentalPayment = {
-    totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-    paymentFrequency: pf,
-    // Only set customPaymentFrequency when frequency is actually Custom (7).
-    // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
-    // validator, since `required` only applies when paymentFrequency === 7.
-    ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
-      ? { customPaymentFrequency: Number(mediaData.rentalPayment.customPaymentFrequency) }
-      : {}),
-  };
-}
+        const pf = mediaData.rentalPayment.paymentFrequency || 1;
+        mediaData.agreement.rentalPayment = {
+          totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+          paymentFrequency: pf,
+          // Only set customPaymentFrequency when frequency is actually Custom (7).
+          // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
+          // validator, since `required` only applies when paymentFrequency === 7.
+          ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+            ? {
+                customPaymentFrequency: Number(
+                  mediaData.rentalPayment.customPaymentFrequency,
+                ),
+              }
+            : {}),
+        };
+      }
       handleAgreementHistory(mediaData, media, userName);
 
       Object.keys(mediaData).forEach((key) => {
@@ -1402,28 +1459,26 @@ const mediaOnboarding = async (req, res) => {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      // if (mediaData.rentalPayment && mediaData.agreement) {
-      //   mediaData.agreement.rentalPayment = {
-      //     totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-      //     paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
-      //     customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
-      //   };
-      // }
-
+      
+      applyAppraisalRentIfDuent(mediaData, null, userName);
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
-  const pf = mediaData.rentalPayment.paymentFrequency || 1;
-  mediaData.agreement.rentalPayment = {
-    totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-    paymentFrequency: pf,
-    // Only set customPaymentFrequency when frequency is actually Custom (7).
-    // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
-    // validator, since `required` only applies when paymentFrequency === 7.
-    ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
-      ? { customPaymentFrequency: Number(mediaData.rentalPayment.customPaymentFrequency) }
-      : {}),
-  };
-}
+        const pf = mediaData.rentalPayment.paymentFrequency || 1;
+        mediaData.agreement.rentalPayment = {
+          totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+          paymentFrequency: pf,
+          // Only set customPaymentFrequency when frequency is actually Custom (7).
+          // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
+          // validator, since `required` only applies when paymentFrequency === 7.
+          ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+            ? {
+                customPaymentFrequency: Number(
+                  mediaData.rentalPayment.customPaymentFrequency,
+                ),
+              }
+            : {}),
+        };
+      }
       handleAgreementHistory(mediaData, null, userName);
 
       media = new MediaOnboarding(mediaData);
@@ -1919,7 +1974,8 @@ const updateAgreement = async (req, res) => {
 
         rentalAmountHistory.push({
           amount: activeTotalRentalAmount,
-          updatedBy: userName,
+          // updatedBy: userName,
+          updatedBy: `${userName} (Agreement Update)`,
           updatedAt: nowIST(),
         });
 
@@ -1993,15 +2049,15 @@ const mediaList = async (req, res) => {
           // { fullAddress: searchRegex },
 
           // Land Owner fields
-          { "landOwners.name": searchRegex },
-          { "landOwners.phone": searchRegex },
-          { "landOwners.panNumber": searchRegex },
-          { "landOwners.bankName": searchRegex },
-          { "landOwners.accountNumber": searchRegex },
-          { "landOwners.ifsc": searchRegex },
+          // { "landOwners.name": searchRegex },
+          // { "landOwners.phone": searchRegex },
+          // { "landOwners.panNumber": searchRegex },
+          // { "landOwners.bankName": searchRegex },
+          // { "landOwners.accountNumber": searchRegex },
+          // { "landOwners.ifsc": searchRegex },
 
-          // GST
-          { "rentalPayment.gstNumber": searchRegex },
+          // // GST
+          // { "rentalPayment.gstNumber": searchRegex },
         ],
       };
     }

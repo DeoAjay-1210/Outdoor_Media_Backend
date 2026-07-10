@@ -1192,6 +1192,7 @@ exports.getLedgerHistory = async (req, res) => {
           nextBillingDate: media.rentalPayment.nextBillingDate,
         },
         ledgerHistory: transformedLedgerHistory,
+         gstBalanceHistory: media.gstBalanceHistory,
       },
       200,
     );
