@@ -463,6 +463,57 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
   return { currentBaseRent: incomingAmount, rentActuallyChanged };
 };
 
+// const validateAppraisalFrequency = (agreement, appraisal) => {
+//   if (Number(appraisal?.applicable) !== 1) return { valid: true };
+
+//   const startDate = agreement?.startDate ? new Date(agreement.startDate) : null;
+//   const endDate = agreement?.endDate ? new Date(agreement.endDate) : null;
+//   const frequency = Number(appraisal?.frequency);
+
+//   if (!startDate || !endDate) {
+//     return {
+//       valid: false,
+//       message:
+//         "agreement.startDate and agreement.endDate are required when appraisal.applicable is 1",
+//     };
+//   }
+
+//   if (![1, 2, 3, 4].includes(frequency)) {
+//     return {
+//       valid: false,
+//       message:
+//         "appraisal.frequency must be 1 (6 Months), 2 (Yearly), 3 (2 Years), or 4 (Custom)",
+//     };
+//   }
+
+//   let months;
+//   if (frequency === 4) {
+//     months = Number(appraisal?.customFrequencyMonths);
+//     if (!months || months < 1 || !Number.isInteger(months)) {
+//       return {
+//         valid: false,
+//         message:
+//           "appraisal.customFrequencyMonths is required and must be a positive integer when frequency is 4 (Custom)",
+//       };
+//     }
+//   } else {
+//     months = APPRAISAL_FREQUENCY_MONTHS[frequency];
+//   }
+
+//   const candidateDate = new Date(startDate);
+//   candidateDate.setMonth(candidateDate.getMonth() + months);
+
+//   if (dayKey(candidateDate) >= dayKey(endDate)) {
+//     const label = APPRAISAL_FREQUENCY_LABEL[frequency];
+//     const freqDisplay = frequency === 4 ? `Custom (${months} months)` : label;
+//     return {
+//       valid: false,
+//       message: `Appraisal frequency "${freqDisplay}" is not applicable. The next appraisal (${dateString(candidateDate)}) would fall on or after the agreement end date (${dateString(endDate)}).`,
+//     };
+//   }
+
+//   return { valid: true };
+// };
 const validateAppraisalFrequency = (agreement, appraisal) => {
   if (Number(appraisal?.applicable) !== 1) return { valid: true };
 
@@ -500,21 +551,13 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
     months = APPRAISAL_FREQUENCY_MONTHS[frequency];
   }
 
+  // candidateDate is still computed in case you want to use/display it,
+  // but it no longer blocks validation even if it falls on/after endDate.
   const candidateDate = new Date(startDate);
   candidateDate.setMonth(candidateDate.getMonth() + months);
 
-  if (dayKey(candidateDate) >= dayKey(endDate)) {
-    const label = APPRAISAL_FREQUENCY_LABEL[frequency];
-    const freqDisplay = frequency === 4 ? `Custom (${months} months)` : label;
-    return {
-      valid: false,
-      message: `Appraisal frequency "${freqDisplay}" is not applicable. The next appraisal (${dateString(candidateDate)}) would fall on or after the agreement end date (${dateString(endDate)}).`,
-    };
-  }
-
   return { valid: true };
 };
-
 const computeAppraisalAmount = (entry, previousRent) => {
   if (Number(entry.type) === 1) {
     return Math.floor((previousRent * Number(entry.percentage || 0)) / 100);
@@ -575,11 +618,11 @@ const handleAppraisalLogic = async (
   if (appraisal.nextAppraisalDate) {
     nextDate = toDateOnly(appraisal.nextAppraisalDate);
     appraisal.nextAppraisalDate = nextDate;
-    if (dayKey(nextDate) > dayKey(agreementEndDate)) {
-      throw new Error(
-        "Next appraisal date cannot be greater than agreement end date",
-      );
-    }
+    // if (dayKey(nextDate) > dayKey(agreementEndDate)) {
+    //   throw new Error(
+    //     "Next appraisal date cannot be greater than agreement end date",
+    //   );
+    // }
   }
 
   // ── CREATE flow ───────────────────────────────────────────────────────────
@@ -587,10 +630,12 @@ const handleAppraisalLogic = async (
     if (!nextDate) {
       const firstDate = new Date(agreementStartDate);
       firstDate.setMonth(firstDate.getMonth() + months);
-      if (dayKey(firstDate) <= dayKey(agreementEndDate)) {
         nextDate = toDateOnly(firstDate);
-        appraisal.nextAppraisalDate = nextDate;
-      }
+      appraisal.nextAppraisalDate = nextDate;
+      // if (dayKey(firstDate) <= dayKey(agreementEndDate)) {
+      //   nextDate = toDateOnly(firstDate);
+      //   appraisal.nextAppraisalDate = nextDate;
+      // }
     }
 
     appraisal.history = [];
