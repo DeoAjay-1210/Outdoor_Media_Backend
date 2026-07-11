@@ -1681,6 +1681,13 @@ const mediaOnboarding = async (req, res) => {
 
     const findOtherFile = (fieldName) =>
       files.find((f) => f.fieldname === fieldName);
+      const OWNER_FILE_FIELDS = ["bankPassbook", "cancelCheckLeaf", "panCardImage"];
+    const FILE_OBJECT_FIELDS = [
+      "frontView",
+      "sideView",
+      "locationView",
+      "additionalImages",
+    ];
     if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
       const hasValue = (v) => v !== undefined && v !== null && v !== "";
       const ownerFileMap = {};
@@ -1703,16 +1710,16 @@ const mediaOnboarding = async (req, res) => {
         if (ownerFiles.panCardImage) {
           owner.panCardImage = req.processFile(ownerFiles.panCardImage);
         }
-        const OWNER_FILE_FIELDS = [
-          "bankPassbook",
-          "cancelCheckLeaf",
-          "panCardImage",
-        ];
-        OWNER_FILE_FIELDS.forEach((field) => {
-          if (owner[field] !== undefined && typeof owner[field] === "string") {
-            delete owner[field];
-          }
-        });
+        // const OWNER_FILE_FIELDS = [
+        //   "bankPassbook",
+        //   "cancelCheckLeaf",
+        //   "panCardImage",
+        // ];
+        // OWNER_FILE_FIELDS.forEach((field) => {
+        //   if (owner[field] !== undefined && typeof owner[field] === "string") {
+        //     delete owner[field];
+        //   }
+        // });
         return {
           ...owner,
           typeShare: hasValue(owner.typeShare)
@@ -1928,12 +1935,12 @@ const mediaOnboarding = async (req, res) => {
     const additionalImagesFile = findOtherFile("additionalImages");
     if (additionalImagesFile)
       mediaData.additionalImages = req.processFile(additionalImagesFile);
-    const FILE_OBJECT_FIELDS = [
-      "frontView",
-      "sideView",
-      "locationView",
-      "additionalImages",
-    ];
+    // const FILE_OBJECT_FIELDS = [
+    //   "frontView",
+    //   "sideView",
+    //   "locationView",
+    //   "additionalImages",
+    // ];
     FILE_OBJECT_FIELDS.forEach((field) => {
       if (
         mediaData[field] !== undefined &&
@@ -1945,12 +1952,12 @@ const mediaOnboarding = async (req, res) => {
 
     // Same problem can occur for agreement.agreementPDF since `agreement` is
     // replaced wholesale — guard it too.
-    if (
-      mediaData.agreement &&
-      typeof mediaData.agreement.agreementPDF === "string"
-    ) {
-      delete mediaData.agreement.agreementPDF;
-    }
+    // if (
+    //   mediaData.agreement &&
+    //   typeof mediaData.agreement.agreementPDF === "string"
+    // ) {
+    //   delete mediaData.agreement.agreementPDF;
+    // }
     let media;
     let isNew = false;
 
@@ -1961,7 +1968,24 @@ const mediaOnboarding = async (req, res) => {
         return errorResponse(res, "Media not found with this ID", null, 404);
 
       delete mediaData.id;
+if (
+        mediaData.agreement &&
+        typeof mediaData.agreement.agreementPDF === "string"
+      ) {
+        mediaData.agreement.agreementPDF =
+          media.agreement?.agreementPDF || undefined;
+      }
 
+      if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        mediaData.landOwners.forEach((owner, idx) => {
+          const existingOwner = media.landOwners?.[idx];
+          OWNER_FILE_FIELDS.forEach((field) => {
+            if (typeof owner[field] === "string") {
+              owner[field] = existingOwner ? existingOwner[field] : undefined;
+            }
+          });
+        });
+      }
       // Step 1 & 2: track totalRentalAmount change; get the effective base rent.
       const { currentBaseRent, rentActuallyChanged } =
         handleRentalAmountHistory(mediaData, media, userName);
@@ -2021,7 +2045,19 @@ const mediaOnboarding = async (req, res) => {
     } else {
       // ── CREATE ──────────────────────────────────────────────────────────
       isNew = true;
-
+  if (
+        mediaData.agreement &&
+        typeof mediaData.agreement.agreementPDF === "string"
+      ) {
+        delete mediaData.agreement.agreementPDF;
+      }
+      if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        mediaData.landOwners.forEach((owner) => {
+          OWNER_FILE_FIELDS.forEach((field) => {
+            if (typeof owner[field] === "string") delete owner[field];
+          });
+        });
+      }
       // Step 1 & 2: record first-ever totalRentalAmount.
       const { currentBaseRent, rentActuallyChanged } =
         handleRentalAmountHistory(mediaData, null, userName);
