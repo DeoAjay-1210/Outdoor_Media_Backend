@@ -1590,6 +1590,7 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
 
   return true;
 };
+
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -1919,6 +1920,21 @@ const mediaOnboarding = async (req, res) => {
     const additionalImagesFile = findOtherFile("additionalImages");
     if (additionalImagesFile)
       mediaData.additionalImages = req.processFile(additionalImagesFile);
+    const FILE_OBJECT_FIELDS = ["frontView", "sideView", "locationView", "additionalImages"];
+    FILE_OBJECT_FIELDS.forEach((field) => {
+      if (mediaData[field] !== undefined && typeof mediaData[field] === "string") {
+        delete mediaData[field];
+      }
+    });
+
+    // Same problem can occur for agreement.agreementPDF since `agreement` is
+    // replaced wholesale — guard it too.
+    if (
+      mediaData.agreement &&
+      typeof mediaData.agreement.agreementPDF === "string"
+    ) {
+      delete mediaData.agreement.agreementPDF;
+    }
     let media;
     let isNew = false;
 

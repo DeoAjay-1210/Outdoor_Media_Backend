@@ -1232,8 +1232,8 @@ exports.saveRentalDue = async (req, res) => {
           // ✅ NEW — keep gstBalanceHistory + balanceGstAmount in sync with
           // this change, whether it's Team Lead or Owner making it.
           if (userType === ROLE.OWNER) {
-      syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
-    }
+            syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
+          }
           // syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
         }
       }
@@ -2898,6 +2898,12 @@ exports.getRentalDueListWithStats = async (req, res) => {
           teamLead: approvedByRole.teamLead,
           owner: approvedByRole.owner,
           total: approvedByRole.total,
+        },
+        pagination: {
+          count: pageSize, // items per page
+          pageNumber: pageNumbers, // current page
+          totalCount: total, // total items
+          totalPages: Math.ceil(total / pageSize), // total pages
         },
       },
       data: enriched,
