@@ -737,7 +737,7 @@ const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
 //     const existingIdx = history.findIndex(
 //       (h) => dayKey(h.appraisalDate) === nextDay,
 //     );
-// let appliedEntry = null; 
+// let appliedEntry = null;
 //     if (existingIdx !== -1) {
 //       // ── Update metadata on an existing entry (type/percentage/fixedAmount/frequency).
 //       history[existingIdx] = {
@@ -1393,7 +1393,6 @@ const getFrequencyMonths = (frequency, customMonths) => {
     return Number(customMonths || 0) || 1;
   }
   return APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12;
-  
 };
 const buildNextAppraisalEntry = (appliedEntry, userName) => {
   const monthsToAdd = getFrequencyMonths(
@@ -1513,7 +1512,7 @@ const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
 
   if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
   mediaData.rentalPayment.totalRentalAmount = appraisedRent;
-const landOwnersForScale = Array.isArray(mediaData.landOwners)
+  const landOwnersForScale = Array.isArray(mediaData.landOwners)
     ? mediaData.landOwners
     : existingMedia?.landOwners
       ? JSON.parse(JSON.stringify(existingMedia.landOwners))
@@ -1704,7 +1703,16 @@ const mediaOnboarding = async (req, res) => {
         if (ownerFiles.panCardImage) {
           owner.panCardImage = req.processFile(ownerFiles.panCardImage);
         }
-
+        const OWNER_FILE_FIELDS = [
+          "bankPassbook",
+          "cancelCheckLeaf",
+          "panCardImage",
+        ];
+        OWNER_FILE_FIELDS.forEach((field) => {
+          if (owner[field] !== undefined && typeof owner[field] === "string") {
+            delete owner[field];
+          }
+        });
         return {
           ...owner,
           typeShare: hasValue(owner.typeShare)
@@ -1920,9 +1928,17 @@ const mediaOnboarding = async (req, res) => {
     const additionalImagesFile = findOtherFile("additionalImages");
     if (additionalImagesFile)
       mediaData.additionalImages = req.processFile(additionalImagesFile);
-    const FILE_OBJECT_FIELDS = ["frontView", "sideView", "locationView", "additionalImages"];
+    const FILE_OBJECT_FIELDS = [
+      "frontView",
+      "sideView",
+      "locationView",
+      "additionalImages",
+    ];
     FILE_OBJECT_FIELDS.forEach((field) => {
-      if (mediaData[field] !== undefined && typeof mediaData[field] === "string") {
+      if (
+        mediaData[field] !== undefined &&
+        typeof mediaData[field] === "string"
+      ) {
         delete mediaData[field];
       }
     });
@@ -2023,7 +2039,6 @@ const mediaOnboarding = async (req, res) => {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      
       applyAppraisalRentIfDuent(mediaData, null, userName);
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
