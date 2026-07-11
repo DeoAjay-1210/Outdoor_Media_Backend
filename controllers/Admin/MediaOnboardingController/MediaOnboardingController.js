@@ -1681,7 +1681,11 @@ const mediaOnboarding = async (req, res) => {
 
     const findOtherFile = (fieldName) =>
       files.find((f) => f.fieldname === fieldName);
-      const OWNER_FILE_FIELDS = ["bankPassbook", "cancelCheckLeaf", "panCardImage"];
+    const OWNER_FILE_FIELDS = [
+      "bankPassbook",
+      "cancelCheckLeaf",
+      "panCardImage",
+    ];
     const FILE_OBJECT_FIELDS = [
       "frontView",
       "sideView",
@@ -1968,14 +1972,23 @@ const mediaOnboarding = async (req, res) => {
         return errorResponse(res, "Media not found with this ID", null, 404);
 
       delete mediaData.id;
-if (
-        mediaData.agreement &&
-        typeof mediaData.agreement.agreementPDF === "string"
-      ) {
-        mediaData.agreement.agreementPDF =
-          media.agreement?.agreementPDF || undefined;
-      }
+      // if (
+      //   mediaData.agreement &&
+      //   typeof mediaData.agreement.agreementPDF === "string"
+      // ) {
+      //   mediaData.agreement.agreementPDF =
+      //     media.agreement?.agreementPDF || undefined;
+      // }
+if (mediaData.agreement) {
+    const pdf = mediaData.agreement.agreementPDF;
+    const isValidFileObject =
+      pdf && typeof pdf === "object" && (pdf.fileName || pdf.filePath);
 
+    if (!isValidFileObject) {
+      mediaData.agreement.agreementPDF =
+        media.agreement?.agreementPDF || undefined;
+    }
+  }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
         mediaData.landOwners.forEach((owner, idx) => {
           const existingOwner = media.landOwners?.[idx];
@@ -2045,7 +2058,7 @@ if (
     } else {
       // ── CREATE ──────────────────────────────────────────────────────────
       isNew = true;
-  if (
+      if (
         mediaData.agreement &&
         typeof mediaData.agreement.agreementPDF === "string"
       ) {
@@ -2629,6 +2642,136 @@ const updateAgreement = async (req, res) => {
   }
 };
 // Media List
+// const mediaList = async (req, res) => {
+//   try {
+//     const {
+//       pageNumber = 1,
+//       count = 10,
+//       mediaType,
+//       agreementStatus,
+//       city,
+//       status,
+//       search,
+//     } = req.body;
+
+//     const pageNumbers = parseInt(pageNumber) || 1;
+//     const pageSize = parseInt(count) || 10;
+
+//     // ===============================
+//     // SEARCH FILTER
+//     // ===============================
+
+//     let searchFilter = {};
+
+//     if (search && search.trim() !== "") {
+//       const searchRegex = new RegExp(search.trim(), "i");
+//       searchFilter = {
+//         $or: [
+//           { mediaId: searchRegex },
+//           { mediaCode: searchRegex },
+//           { mediaName: searchRegex },
+//           { mediaType: searchRegex },
+//           { state: searchRegex },
+//           { city: searchRegex },
+//           { location: searchRegex },
+//           // { fullAddress: searchRegex },
+
+//           // Land Owner fields
+//           // { "landOwners.name": searchRegex },
+//           // { "landOwners.phone": searchRegex },
+//           // { "landOwners.panNumber": searchRegex },
+//           // { "landOwners.bankName": searchRegex },
+//           // { "landOwners.accountNumber": searchRegex },
+//           // { "landOwners.ifsc": searchRegex },
+
+//           // // GST
+//           // { "rentalPayment.gstNumber": searchRegex },
+//         ],
+//       };
+//     }
+
+//     // ===============================
+//     // COMBINED FILTER
+//     // ===============================
+
+//     const filter = {};
+//     if (city) filter.city = Array.isArray(city) ? { $in: city } : city;
+//     if (mediaType) {
+//       filter.mediaType = Array.isArray(mediaType)
+//         ? { $in: mediaType }
+//         : mediaType;
+//     }
+//     if (status) {
+//       filter.status = Array.isArray(status) ? { $in: status } : status;
+//     }
+//     if (
+//       agreementStatus !== undefined &&
+//       agreementStatus !== null &&
+//       agreementStatus !== ""
+//     ) {
+//       filter["agreement.status"] = Number(agreementStatus);
+//     }
+//     // Merge search + dropdown filters
+//     const combinedFilter =
+//       Object.keys(searchFilter).length > 0
+//         ? {
+//             $and: [
+//               searchFilter,
+//               ...(Object.keys(filter).length > 0 ? [filter] : []),
+//             ],
+//           }
+//         : filter;
+
+//     // ===============================
+//     // QUERY
+//     // ===============================
+
+//     const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
+
+//     const mediaListData = await MediaOnboarding.find(combinedFilter)
+//       .sort({ updatedAt: -1 })
+//       .skip((pageNumbers - 1) * pageSize)
+//       .limit(pageSize)
+//       .lean();
+
+//     // ===============================
+//     // FILTER OPTIONS (always from full collection)
+//     // ===============================
+
+//     const allData = await MediaOnboarding.find(
+//       {},
+//       "city mediaType status",
+//     ).lean();
+
+//     const cityFilter = [...new Set(allData.map((item) => item.city))].filter(
+//       Boolean,
+//     );
+//     const mediaTypeFilter = [
+//       ...new Set(allData.map((item) => item.mediaType)),
+//     ].filter(Boolean);
+//     // const statusFilter = [
+//     //   ...new Set(allData.map((item) => item.status)),
+//     // ].filter(Boolean);
+
+//     return successResponse(
+//       res,
+//       "Media list fetched successfully",
+//       {
+//         pageNumber: pageNumbers,
+//         count: pageSize,
+//         totalCount,
+//         totalPages: Math.ceil(totalCount / pageSize),
+//         cityFilter,
+//         mediaTypeFilter,
+//         // statusFilter,
+//         mediaList: mediaListData,
+//       },
+//       200,
+//     );
+//   } catch (error) {
+//     return errorResponse(res, error.message, null, 400);
+//   }
+// };
 const mediaList = async (req, res) => {
   try {
     const {
@@ -2661,18 +2804,6 @@ const mediaList = async (req, res) => {
           { state: searchRegex },
           { city: searchRegex },
           { location: searchRegex },
-          // { fullAddress: searchRegex },
-
-          // Land Owner fields
-          // { "landOwners.name": searchRegex },
-          // { "landOwners.phone": searchRegex },
-          // { "landOwners.panNumber": searchRegex },
-          // { "landOwners.bankName": searchRegex },
-          // { "landOwners.accountNumber": searchRegex },
-          // { "landOwners.ifsc": searchRegex },
-
-          // // GST
-          // { "rentalPayment.gstNumber": searchRegex },
         ],
       };
     }
@@ -2722,6 +2853,41 @@ const mediaList = async (req, res) => {
       .lean();
 
     // ===============================
+    // AGGREGATION FOR STATISTICS
+    // ===============================
+
+    // Get active count - using numeric status value (adjust based on your schema)
+    // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
+    const activeCount = await MediaOnboarding.countDocuments({
+      status: 1, // Change this to match your active status number
+    });
+
+    // Get agreement expired count (agreement.status = 3)
+    const agreementExpiredCount = await MediaOnboarding.countDocuments({
+      "agreement.status": 3,
+    });
+
+    // Get total rental amounts from all documents
+    const rentalAggregation = await MediaOnboarding.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalRentalAmount: {
+            $sum: "$rentalPayment.totalRentalAmount",
+          },
+          totalNetPayable: {
+            $sum: "$rentalPayment.netPayable",
+          },
+        },
+      },
+    ]);
+
+    const totalRentalAmount =
+      rentalAggregation.length > 0 ? rentalAggregation[0].totalRentalAmount : 0;
+    const totalNetPayable =
+      rentalAggregation.length > 0 ? rentalAggregation[0].totalNetPayable : 0;
+
+    // ===============================
     // FILTER OPTIONS (always from full collection)
     // ===============================
 
@@ -2736,9 +2902,6 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
-    // const statusFilter = [
-    //   ...new Set(allData.map((item) => item.status)),
-    // ].filter(Boolean);
 
     return successResponse(
       res,
@@ -2750,8 +2913,12 @@ const mediaList = async (req, res) => {
         totalPages: Math.ceil(totalCount / pageSize),
         cityFilter,
         mediaTypeFilter,
-        // statusFilter,
         mediaList: mediaListData,
+        // New keys added:
+        activeCount,
+        agreementExpiredCount,
+        totalRentalAmount,
+        totalNetPayable,
       },
       200,
     );
