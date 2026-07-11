@@ -199,6 +199,8 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    rentalDueId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    cycle: { type: Date, default: null },
     date: { type: Date },
     updatedAt: { type: Date, default: null },
     updatedBy: { type: String },
