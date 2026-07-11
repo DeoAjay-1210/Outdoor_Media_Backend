@@ -582,7 +582,52 @@ const cascadeHistory = (history, baseRent) => {
   }
   return sorted;
 };
+// Proportionally rescales each land owner's cashAmount/onlineAmount (and
+// shareAmount for fixed-type owners) when totalRentalAmount changes due
+// to an auto-applied appraisal. Percentage-type (typeShare=1) owners'
+// shareAmount already recomputes correctly in the pre-save hook (it's
+// derived live from netPayable), so it's untouched here — but cash/online
+// SPLIT figures are raw absolute numbers on EVERY owner regardless of
+// typeShare, and those never auto-scale on their own.
+const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
+  if (!Array.isArray(landOwners) || !landOwners.length) return;
+  if (!oldAmount || oldAmount <= 0) return;
 
+  const ratio = newAmount / oldAmount;
+  if (!isFinite(ratio) || ratio <= 0) return;
+
+  landOwners.forEach((owner) => {
+    const cat = Number(owner.paymentCategory);
+
+    if (cat === 1) {
+      // Cash only
+      owner.cashAmount = Math.floor(
+        (Number(owner.cashAmount || 0) * ratio).toFixed(2),
+      );
+    } else if (cat === 2) {
+      // Online only
+      owner.onlineAmount = Math.floor(
+        (Number(owner.onlineAmount || 0) * ratio).toFixed(2),
+      );
+    } else if (cat === 3) {
+      // Cash + Online split
+      owner.cashAmount = Math.floor(
+        (Number(owner.cashAmount || 0) * ratio).toFixed(2),
+      );
+      owner.onlineAmount = Math.floor(
+        (Number(owner.onlineAmount || 0) * ratio).toFixed(2),
+      );
+    }
+
+    // Fixed-amount owners: rescale shareAmount too, since it doesn't
+    // auto-derive from netPayable like percentage-type does.
+    if (Number(owner.typeShare) === 2) {
+      owner.shareAmount = Math.floor(
+        (Number(owner.shareAmount || 0) * ratio).toFixed(2),
+      );
+    }
+  });
+};
 const handleAppraisalLogic = async (
   mediaData,
   existingMedia,
@@ -654,7 +699,24 @@ const handleAppraisalLogic = async (
         updatedAt: nowIST(),
       });
       appraisal.history = cascadeHistory(appraisal.history, netPayable);
+        appraisal.history = autoScheduleFutureAppraisalEntries(
+        appraisal.history,
+        userName,
+      );
     }
+const today = todayKey();
+    const futureEntry = appraisal.history.find(
+      (h) => dayKey(h.appraisalDate) > today,
+    );
+    const todayEntry = appraisal.history
+      .filter((h) => dayKey(h.appraisalDate) === today)
+      .pop();
+
+    appraisal.nextAppraisalDate = todayEntry
+      ? new Date(todayEntry.appraisalDate)
+      : futureEntry
+        ? new Date(futureEntry.appraisalDate)
+        : null;
 
     mediaData.appraisal = appraisal;
     return mediaData;
@@ -807,18 +869,69 @@ const handleAppraisalLogic = async (
   const futureDates = history.filter((h) => dayKey(h.appraisalDate) > today);
   const todayEntries = history.filter((h) => dayKey(h.appraisalDate) === today);
 
-  if (todayEntries.length > 0) {
-    appraisal.nextAppraisalDate = new Date(
-      todayEntries[todayEntries.length - 1].appraisalDate,
-    );
-  } else if (futureDates.length > 0) {
-    appraisal.nextAppraisalDate = new Date(futureDates[0].appraisalDate);
-  } else {
-    appraisal.nextAppraisalDate = null;
-  }
+  // if (todayEntries.length > 0) {
+  //   appraisal.nextAppraisalDate = new Date(
+  //     todayEntries[todayEntries.length - 1].appraisalDate,
+  //   );
+  // } else if (futureDates.length > 0) {
+  //   appraisal.nextAppraisalDate = new Date(futureDates[0].appraisalDate);
+  // } else {
+  //   appraisal.nextAppraisalDate = null;
+  // }
 
   // ── Determine current frequency based on today's date ──────────────────
   // Find the most recent history entry that is on or before today
+  if (todayEntries.length === 0 && futureDates.length === 0 && history.length > 0) {
+  const lastEntry = [...history].sort(
+    (a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate),
+  )[0];
+
+  const monthsToAdd = getFrequencyMonths(
+    lastEntry.frequency,
+    lastEntry.customFrequencyMonths,
+  );
+
+  const autoNextDate = new Date(lastEntry.appraisalDate);
+  autoNextDate.setMonth(autoNextDate.getMonth() + monthsToAdd);
+  const autoNextDateOnly = toDateOnly(autoNextDate);
+
+  const autoEntry = {
+    appraisalDate: autoNextDateOnly,
+    type: lastEntry.type,
+    percentage: lastEntry.percentage || 0,
+    fixedAmount: lastEntry.fixedAmount || 0,
+    frequency: lastEntry.frequency,
+    customFrequencyMonths: lastEntry.customFrequencyMonths || 0,
+    previousRent: lastEntry.newRent || 0,
+    appraisalAmount: 0,
+    newRent: 0,
+    updatedBy: userName,
+    updatedAt: nowIST(),
+  };
+
+  autoEntry.appraisalAmount = computeAppraisalAmount(
+    autoEntry,
+    autoEntry.previousRent,
+  );
+  autoEntry.newRent = Math.floor(
+    autoEntry.previousRent + autoEntry.appraisalAmount,
+  );
+
+  history.push(autoEntry);
+  history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
+
+  futureDates = history.filter((h) => dayKey(h.appraisalDate) > today);
+}
+
+if (todayEntries.length > 0) {
+  appraisal.nextAppraisalDate = new Date(
+    todayEntries[todayEntries.length - 1].appraisalDate,
+  );
+} else if (futureDates.length > 0) {
+  appraisal.nextAppraisalDate = new Date(futureDates[0].appraisalDate);
+} else {
+  appraisal.nextAppraisalDate = null;
+}
   const currentEntry = history
     .filter((h) => dayKey(h.appraisalDate) <= today)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
@@ -992,6 +1105,65 @@ const computeAgreementStatus = (startDate, endDate, reminderDays) => {
   if (daysUntilExpiry <= reminderDays) return 2;
   return 1;
 };
+const getFrequencyMonths = (frequency, customMonths) => {
+  if (Number(frequency) === 4) {
+    return Number(customMonths || 0) || 1;
+  }
+  return APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12;
+};
+const autoScheduleFutureAppraisalEntries = (history, userName) => {
+  if (!Array.isArray(history) || !history.length) return history;
+
+  const today = todayKey();
+  let safety = 0;
+
+  while (safety < 60) {
+    safety++;
+
+    const sorted = [...history].sort(
+      (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
+    );
+    const lastEntry = sorted[sorted.length - 1];
+
+    if (dayKey(lastEntry.appraisalDate) > today) break; // already future — stop
+
+    const monthsToAdd = getFrequencyMonths(
+      lastEntry.frequency,
+      lastEntry.customFrequencyMonths,
+    );
+
+    const nextDate = new Date(lastEntry.appraisalDate);
+    nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
+    const nextDateOnly = toDateOnly(nextDate);
+
+    const autoEntry = {
+      appraisalDate: nextDateOnly,
+      type: lastEntry.type,
+      percentage: lastEntry.percentage || 0,
+      fixedAmount: lastEntry.fixedAmount || 0,
+      frequency: lastEntry.frequency,
+      customFrequencyMonths: lastEntry.customFrequencyMonths || 0,
+      previousRent: lastEntry.newRent || 0,
+      appraisalAmount: 0,
+      newRent: 0,
+      updatedBy: userName,
+      updatedAt: nowIST(),
+    };
+
+    autoEntry.appraisalAmount = computeAppraisalAmount(
+      autoEntry,
+      autoEntry.previousRent,
+    );
+    autoEntry.newRent = Math.floor(
+      autoEntry.previousRent + autoEntry.appraisalAmount,
+    );
+
+    history.push(autoEntry);
+  }
+
+  history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
+  return history;
+};
 // This is for Appraisal Amout based TotalRentalAmount Calculation
 const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
   const appraisal = mediaData.appraisal;
@@ -1023,7 +1195,20 @@ const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
 
   if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
   mediaData.rentalPayment.totalRentalAmount = appraisedRent;
+const landOwnersForScale = Array.isArray(mediaData.landOwners)
+    ? mediaData.landOwners
+    : existingMedia?.landOwners
+      ? JSON.parse(JSON.stringify(existingMedia.landOwners))
+      : [];
 
+  if (currentTotalRentalAmount > 0) {
+    scaleLandOwnersForRentChange(
+      landOwnersForScale,
+      currentTotalRentalAmount,
+      appraisedRent,
+    );
+    mediaData.landOwners = landOwnersForScale;
+  }
   // Track this exactly like a manual rent change, in the SAME history array.
   let history = Array.isArray(mediaData.rentalPayment.rentalAmountHistory)
     ? mediaData.rentalPayment.rentalAmountHistory
