@@ -1037,28 +1037,90 @@ MediaSchema.pre("save", function () {
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 3 — Next Billing Date
 // ─────────────────────────────────────────────────────────────
+// MediaSchema.pre("save", function () {
+//   const isNewDoc = this.isNew;
+//   const billingDateProvided = this.rentalPayment.nextBillingDate != null;
+
+//   if (isNewDoc && billingDateProvided) return;
+
+//   if (
+//     this.rentalPayment.lastBillPaidDate &&
+//     this.rentalPayment.paymentFrequency
+//   ) {
+//     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+//     const monthsToAdd =
+//       this.rentalPayment.paymentFrequency === 7
+//         ? Number(this.rentalPayment.customPaymentFrequency) || 1
+//         : frequencyMap[this.rentalPayment.paymentFrequency] || 1;
+
+//     const nextDate = new Date(this.rentalPayment.lastBillPaidDate);
+//     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
+//     this.rentalPayment.nextBillingDate = nextDate;
+//   }
+// });
+// ─────────────────────────────────────────────────────────────
+// PRE-SAVE 3 — Next Billing Date
+// ─────────────────────────────────────────────────────────────
+// MediaSchema.pre("save", function () {
+//   const rp = this.rentalPayment;
+//   if (!rp) return;
+
+//   const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+//   const getMonthsToAdd = () =>
+//     rp.paymentFrequency === 7
+//       ? Number(rp.customPaymentFrequency) || 1
+//       : frequencyMap[rp.paymentFrequency] || 1;
+
+//   // ── CREATE: only set an initial nextBillingDate if one wasn't provided ──
+//   if (this.isNew) {
+//     const billingDateProvided = rp.nextBillingDate != null;
+//     if (!billingDateProvided && rp.lastBillPaidDate && rp.paymentFrequency) {
+//       const nextDate = new Date(rp.lastBillPaidDate);
+//       nextDate.setMonth(nextDate.getMonth() + getMonthsToAdd());
+//       rp.nextBillingDate = nextDate;
+//     }
+//     return;
+//   }
+
+//   // ── UPDATE: only shift the billing cycle when rentalStatus is being
+//   //    set to 3 (Owner Approve). Any other update — edits, staff/team-lead
+//   //    approval, unrelated field changes — leaves lastBillPaidDate and
+//   //    nextBillingDate completely untouched.
+//   const isOwnerApproval =
+//     this.isModified("rentalStatus") && Number(this.rentalStatus) === 3;
+
+//   if (isOwnerApproval && rp.nextBillingDate && rp.paymentFrequency) {
+//     // The cycle that was just approved becomes the new "last paid" date.
+//     rp.lastBillPaidDate = new Date(rp.nextBillingDate);
+
+//     // Roll the next billing date forward by one cycle from there.
+//     const nextDate = new Date(rp.lastBillPaidDate);
+//     nextDate.setMonth(nextDate.getMonth() + getMonthsToAdd());
+//     rp.nextBillingDate = nextDate;
+//   }
+// });
+// ─────────────────────────────────────────────────────────────
 MediaSchema.pre("save", function () {
-  const isNewDoc = this.isNew;
-  const billingDateProvided = this.rentalPayment.nextBillingDate != null;
-
-  if (isNewDoc && billingDateProvided) return;
-
-  if (
-    this.rentalPayment.lastBillPaidDate &&
-    this.rentalPayment.paymentFrequency
-  ) {
+  if (!this.isNew) return;
+ 
+  const rp = this.rentalPayment;
+  if (!rp) return;
+ 
+  const billingDateProvided = rp.nextBillingDate != null;
+  if (billingDateProvided) return;
+ 
+  if (rp.lastBillPaidDate && rp.paymentFrequency) {
     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
     const monthsToAdd =
-      this.rentalPayment.paymentFrequency === 7
-        ? Number(this.rentalPayment.customPaymentFrequency) || 1
-        : frequencyMap[this.rentalPayment.paymentFrequency] || 1;
-
-    const nextDate = new Date(this.rentalPayment.lastBillPaidDate);
+      rp.paymentFrequency === 7
+        ? Number(rp.customPaymentFrequency) || 1
+        : frequencyMap[rp.paymentFrequency] || 1;
+ 
+    const nextDate = new Date(rp.lastBillPaidDate);
     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
-    this.rentalPayment.nextBillingDate = nextDate;
+    rp.nextBillingDate = nextDate;
   }
 });
-
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 4 — Agreement Status
 // ─────────────────────────────────────────────────────────────
