@@ -1921,7 +1921,7 @@ const mediaOnboarding = async (req, res) => {
     //   mediaData.additionalImages = req.processFile(
     //     req.files.additionalImages[0],
     //   );
-    const uploadedAgreementPDF = findOtherFile("agreementPDF");
+     const uploadedAgreementPDF = findOtherFile("agreement[agreementPDF]");
     if (uploadedAgreementPDF) {
       if (!mediaData.agreement) mediaData.agreement = {};
       mediaData.agreement.agreementPDF = req.processFile(uploadedAgreementPDF);
@@ -1980,15 +1980,52 @@ const mediaOnboarding = async (req, res) => {
       //     media.agreement?.agreementPDF || undefined;
       // }
 if (mediaData.agreement) {
-    const pdf = mediaData.agreement.agreementPDF;
-    const isValidFileObject =
-      pdf && typeof pdf === "object" && (pdf.fileName || pdf.filePath);
+        const pdf = mediaData.agreement.agreementPDF;
 
-    if (!isValidFileObject) {
-      mediaData.agreement.agreementPDF =
-        media.agreement?.agreementPDF || undefined;
-    }
-  }
+        // Case 1: already a proper file object (fresh upload via
+        // findOtherFile/processFile earlier, or the frontend echoed
+        // back the previously-saved object) — keep as-is.
+        const isValidFileObject =
+          pdf && typeof pdf === "object" && (pdf.fileName || pdf.filePath);
+
+        // Case 2: frontend sent a URL string instead of a binary
+        // upload (e.g. re-selecting the already-uploaded doc).
+        const isUrlString =
+          typeof pdf === "string" && /^https?:\/\/.+/i.test(pdf.trim());
+
+        if (isValidFileObject) {
+          // keep as-is
+        } else if (isUrlString) {
+          const trimmedUrl = pdf.trim();
+          const urlFileName = trimmedUrl.split("/").pop() || "agreement.pdf";
+
+          mediaData.agreement.agreementPDF = {
+            originalName: urlFileName,
+            fileName: urlFileName,
+            filePath: trimmedUrl,
+            mimeType: "application/pdf",
+            size: media.agreement?.agreementPDF?.size || 0,
+            fileType: "pdf",
+            uploadedAt:
+              media.agreement?.agreementPDF?.filePath === trimmedUrl
+                ? media.agreement?.agreementPDF?.uploadedAt || nowIST()
+                : nowIST(),
+          };
+        } else if (media.agreement?.agreementPDF) {
+          // Case 3: nothing new sent, but an existing DB value exists
+          // — preserve it.
+          mediaData.agreement.agreementPDF = media.agreement.agreementPDF;
+        } else {
+          // Case 4: nothing new sent AND no existing DB value either.
+          // DELETE the key entirely instead of assigning `undefined`
+          // to it — assigning explicit `undefined` as a key value
+          // causes Mongoose to attempt casting it against the
+          // agreementPDF sub-schema on save, throwing a CastError.
+          // Deleting leaves the key simply absent, which Mongoose
+          // handles cleanly.
+          delete mediaData.agreement.agreementPDF;
+        }
+      }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
         mediaData.landOwners.forEach((owner, idx) => {
           const existingOwner = media.landOwners?.[idx];
