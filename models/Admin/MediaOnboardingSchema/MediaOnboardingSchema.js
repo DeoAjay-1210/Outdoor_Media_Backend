@@ -1102,22 +1102,50 @@ MediaSchema.pre("save", function () {
 //   }
 // });
 // ─────────────────────────────────────────────────────────────
-MediaSchema.pre("save", function () {
-  if (!this.isNew) return;
+// MediaSchema.pre("save", function () {
+//   if (!this.isNew) return;
  
+//   const rp = this.rentalPayment;
+//   if (!rp) return;
+ 
+//   const billingDateProvided = rp.nextBillingDate != null;
+//   if (billingDateProvided) return;
+ 
+//   if (rp.lastBillPaidDate && rp.paymentFrequency) {
+//     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+//     const monthsToAdd =
+//       rp.paymentFrequency === 7
+//         ? Number(rp.customPaymentFrequency) || 1
+//         : frequencyMap[rp.paymentFrequency] || 1;
+ 
+//     const nextDate = new Date(rp.lastBillPaidDate);
+//     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
+//     rp.nextBillingDate = nextDate;
+//   }
+// });
+MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
   if (!rp) return;
- 
+
+  // ✅ FIXED — removed `if (!this.isNew) return;`. The old version only
+  // ever calculated nextBillingDate on CREATE, never on UPDATE — so
+  // entering lastBillPaidDate for the first time via an update request
+  // silently never generated nextBillingDate.
+
+  // Still respect an explicitly-provided nextBillingDate on CREATE (so
+  // we don't override a value the frontend deliberately sent for a
+  // brand-new document).
+  const isNewDoc = this.isNew;
   const billingDateProvided = rp.nextBillingDate != null;
-  if (billingDateProvided) return;
- 
+  if (isNewDoc && billingDateProvided) return;
+
   if (rp.lastBillPaidDate && rp.paymentFrequency) {
     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
     const monthsToAdd =
-      rp.paymentFrequency === 7
+      Number(rp.paymentFrequency) === 7
         ? Number(rp.customPaymentFrequency) || 1
-        : frequencyMap[rp.paymentFrequency] || 1;
- 
+        : frequencyMap[Number(rp.paymentFrequency)] || 1;
+
     const nextDate = new Date(rp.lastBillPaidDate);
     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
     rp.nextBillingDate = nextDate;

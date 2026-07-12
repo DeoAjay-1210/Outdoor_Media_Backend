@@ -2083,16 +2083,6 @@ const mediaOnboarding = async (req, res) => {
         };
       }
       handleAgreementHistory(mediaData, media, userName);
-    if (mediaData.rentalPayment) {
-        const existingRentalPayment = media.rentalPayment
-          ? JSON.parse(JSON.stringify(media.rentalPayment))
-          : {};
-
-        mediaData.rentalPayment = {
-          ...existingRentalPayment,
-          ...mediaData.rentalPayment,
-        };
-      }
 
       Object.keys(mediaData).forEach((key) => {
         if (!["_id", "__v", "createdAt", "mediaId"].includes(key)) {
