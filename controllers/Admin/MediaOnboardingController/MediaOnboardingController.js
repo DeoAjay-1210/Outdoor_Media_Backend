@@ -1450,13 +1450,7 @@ const mediaOnboarding = async (req, res) => {
         return errorResponse(res, "Media not found with this ID", null, 404);
 
       delete mediaData.id;
-      // if (
-      //   mediaData.agreement &&
-      //   typeof mediaData.agreement.agreementPDF === "string"
-      // ) {
-      //   mediaData.agreement.agreementPDF =
-      //     media.agreement?.agreementPDF || undefined;
-      // }
+     
       if (mediaData.agreement) {
         const pdf = mediaData.agreement.agreementPDF;
 
