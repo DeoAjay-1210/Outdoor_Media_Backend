@@ -477,17 +477,26 @@ const handleAppraisalLogic = async (
 
   // ── CREATE flow ───────────────────────────────────────────────────────────
   if (isNew) {
-    if (!nextDate) {
+        const manualLastAppraisalDate = appraisal.lastAppraisalDate
+      ? toDateOnly(appraisal.lastAppraisalDate)
+      : null;
+
+    if (!nextDate && !manualLastAppraisalDate) {
       const firstDate = new Date(agreementStartDate);
       firstDate.setMonth(firstDate.getMonth() + months);
       nextDate = toDateOnly(firstDate);
       appraisal.nextAppraisalDate = nextDate;
     }
 
+    // lastAppraisalDate (manual) wins as the anchor — it's a real cycle
+    // that already happened, so we catch up from there instead of from
+    // a freshly-computed "first" date.
+    const seedDate = manualLastAppraisalDate || nextDate;
+
     appraisal.history = [];
-    if (nextDate) {
+    if (seedDate) {
       appraisal.history.push({
-        appraisalDate: nextDate,
+        appraisalDate: seedDate,
         type: appraisal.type,
         percentage: appraisal.percentage || 0,
         fixedAmount: Number(appraisal.fixedAmount || 0),
@@ -501,20 +510,57 @@ const handleAppraisalLogic = async (
       });
       appraisal.history = cascadeHistory(appraisal.history, netPayable);
 
-      // ✅ If the submitted first date is already due, auto-schedule the
-      // single next cycle (one step forward from that date).
-      const appliedEntry = appraisal.history[appraisal.history.length - 1];
-      if (dayKey(appliedEntry.appraisalDate) <= todayKey()) {
-        const nextGeneratedEntry = buildNextAppraisalEntry(
-          appliedEntry,
-          userName,
-        );
-        appraisal.history.push(nextGeneratedEntry);
-      }
+      // ✅ Catch up ALL missed cycles (not just one), whether frequency is
+      // 6mo/12mo/24mo/custom — stops as soon as a generated date is > today.
+      appraisal.history = autoScheduleFutureAppraisalEntries(
+        appraisal.history,
+        userName,
+      );
+
+      const lastEntry = appraisal.history[appraisal.history.length - 1];
+      if (lastEntry) appraisal.nextAppraisalDate = new Date(lastEntry.appraisalDate);
     }
 
     mediaData.appraisal = appraisal;
     return mediaData;
+    // if (!nextDate) {
+    //   const firstDate = new Date(agreementStartDate);
+    //   firstDate.setMonth(firstDate.getMonth() + months);
+    //   nextDate = toDateOnly(firstDate);
+    //   appraisal.nextAppraisalDate = nextDate;
+    // }
+
+    // appraisal.history = [];
+    // if (nextDate) {
+    //   appraisal.history.push({
+    //     appraisalDate: nextDate,
+    //     type: appraisal.type,
+    //     percentage: appraisal.percentage || 0,
+    //     fixedAmount: Number(appraisal.fixedAmount || 0),
+    //     frequency: Number(appraisal.frequency),
+    //     customFrequencyMonths: Number(appraisal.customFrequencyMonths || 0),
+    //     previousRent: netPayable,
+    //     appraisalAmount: 0,
+    //     newRent: 0,
+    //     updatedBy: userName,
+    //     updatedAt: nowIST(),
+    //   });
+    //   appraisal.history = cascadeHistory(appraisal.history, netPayable);
+
+    //   // ✅ If the submitted first date is already due, auto-schedule the
+    //   // single next cycle (one step forward from that date).
+    //   const appliedEntry = appraisal.history[appraisal.history.length - 1];
+    //   if (dayKey(appliedEntry.appraisalDate) <= todayKey()) {
+    //     const nextGeneratedEntry = buildNextAppraisalEntry(
+    //       appliedEntry,
+    //       userName,
+    //     );
+    //     appraisal.history.push(nextGeneratedEntry);
+    //   }
+    // }
+
+    // mediaData.appraisal = appraisal;
+    // return mediaData;
   }
 
   // ── UPDATE flow ───────────────────────────────────────────────────────────
@@ -649,20 +695,31 @@ const handleAppraisalLogic = async (
     // ✅ If the submitted date is due (today or past) AND nothing already
     // exists in history AFTER it, auto-schedule the single next cycle:
     // appliedEntry.appraisalDate + frequency months.
-    if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
+    // if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
+    //   const hasLaterEntry = history.some(
+    //     (h) => dayKey(h.appraisalDate) > dayKey(appliedEntry.appraisalDate),
+    //   );
+
+    //   if (!hasLaterEntry) {
+    //     const nextGeneratedEntry = buildNextAppraisalEntry(
+    //       appliedEntry,
+    //       userName,
+    //     );
+    //     history.push(nextGeneratedEntry);
+    //     history.sort(
+    //       (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
+    //     );
+    //   }
+    // }
+      if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
       const hasLaterEntry = history.some(
         (h) => dayKey(h.appraisalDate) > dayKey(appliedEntry.appraisalDate),
       );
 
       if (!hasLaterEntry) {
-        const nextGeneratedEntry = buildNextAppraisalEntry(
-          appliedEntry,
-          userName,
-        );
-        history.push(nextGeneratedEntry);
-        history.sort(
-          (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
-        );
+        // ✅ Catch up every missed cycle since the last known entry, not
+        // just the next one — e.g. a record untouched for 2 years.
+        history = autoScheduleFutureAppraisalEntries(history, userName);
       }
     }
   }
@@ -782,90 +839,7 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   return appraisal;
 };
 
-const handleAgreementHistory = (mediaData, existingMedia, userName) => {
-  if (!mediaData.agreement) return;
 
-  const incoming = mediaData.agreement;
-  const existing = existingMedia?.agreement;
-
-  const isNew = !existingMedia;
-
-  // Detect whether totalRentalAmount inside agreement.rentalPayment changed.
-  const incomingRentAmt = Number(
-    incoming.rentalPayment?.totalRentalAmount ?? 0,
-  );
-  const existingRentAmt = Number(
-    existing?.rentalPayment?.totalRentalAmount ?? 0,
-  );
-  const agreementRentChanged = isNew || incomingRentAmt !== existingRentAmt;
-
-  // Step 4: stamp updatedAt/updatedBy on agreement.rentalPayment when amount changes.
-  if (agreementRentChanged) {
-    if (!incoming.rentalPayment) incoming.rentalPayment = {};
-    incoming.rentalPayment.updatedBy = userName;
-    incoming.rentalPayment.updatedAt = nowIST();
-  } else if (existing?.rentalPayment?.updatedAt) {
-    // Carry forward the existing stamp if nothing changed.
-    if (!incoming.rentalPayment) incoming.rentalPayment = {};
-    incoming.rentalPayment.updatedBy =
-      incoming.rentalPayment.updatedBy ?? existing.rentalPayment.updatedBy;
-    incoming.rentalPayment.updatedAt =
-      incoming.rentalPayment.updatedAt ?? existing.rentalPayment.updatedAt;
-  }
-
-  // Decide whether to push an agreement history snapshot.
-  const startChanged =
-    isNew ||
-    !existing?.startDate ||
-    dayKey(incoming.startDate) !== dayKey(existing.startDate);
-  const endChanged =
-    isNew ||
-    !existing?.endDate ||
-    dayKey(incoming.endDate) !== dayKey(existing.endDate);
-
-  if (!isNew && !startChanged && !endChanged) return;
-
-  const snapshot = {
-    startDate: incoming.startDate,
-    endDate: incoming.endDate,
-    reminderBeforeExpiry: incoming.reminderBeforeExpiry,
-    advanceRent: incoming.advanceRent ?? 0,
-    status: incoming.status ?? 1,
-    agreementPDF: incoming.agreementPDF,
-    reason: incoming.reason,
-    rentalPayment: {
-      totalRentalAmount: incomingRentAmt,
-      paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
-      customPaymentFrequency:
-        Number(incoming.rentalPayment?.paymentFrequency) === 7
-          ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
-          : null,
-      // Step 4: include who changed the rental amount in the history snapshot too.
-      updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
-      updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
-    },
-    updatedBy: userName,
-    uploadedAt: nowIST(),
-  };
-
-  if (!mediaData.agreementHistory) {
-    mediaData.agreementHistory = existingMedia?.agreementHistory
-      ? JSON.parse(JSON.stringify(existingMedia.agreementHistory))
-      : [];
-  }
-
-  mediaData.agreementHistory.push(snapshot);
-};
-
-const computeAgreementStatus = (startDate, endDate, reminderDays) => {
-  if (!startDate || !endDate) return 1;
-  const daysUntilExpiry = Math.floor(
-    (dayKey(endDate) - todayKey()) / (1000 * 60 * 60 * 24),
-  );
-  if (daysUntilExpiry < 0) return 3;
-  if (daysUntilExpiry <= reminderDays) return 2;
-  return 1;
-};
 const getFrequencyMonths = (frequency, customMonths) => {
   if (Number(frequency) === 4) {
     return Number(customMonths || 0) || 1;
@@ -1066,6 +1040,90 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
   mediaData.rentalPayment.nextBillingDate = newNextBillingDate;
 
   return true;
+};
+const handleAgreementHistory = (mediaData, existingMedia, userName) => {
+  if (!mediaData.agreement) return;
+
+  const incoming = mediaData.agreement;
+  const existing = existingMedia?.agreement;
+
+  const isNew = !existingMedia;
+
+  // Detect whether totalRentalAmount inside agreement.rentalPayment changed.
+  const incomingRentAmt = Number(
+    incoming.rentalPayment?.totalRentalAmount ?? 0,
+  );
+  const existingRentAmt = Number(
+    existing?.rentalPayment?.totalRentalAmount ?? 0,
+  );
+  const agreementRentChanged = isNew || incomingRentAmt !== existingRentAmt;
+
+  // Step 4: stamp updatedAt/updatedBy on agreement.rentalPayment when amount changes.
+  if (agreementRentChanged) {
+    if (!incoming.rentalPayment) incoming.rentalPayment = {};
+    incoming.rentalPayment.updatedBy = userName;
+    incoming.rentalPayment.updatedAt = nowIST();
+  } else if (existing?.rentalPayment?.updatedAt) {
+    // Carry forward the existing stamp if nothing changed.
+    if (!incoming.rentalPayment) incoming.rentalPayment = {};
+    incoming.rentalPayment.updatedBy =
+      incoming.rentalPayment.updatedBy ?? existing.rentalPayment.updatedBy;
+    incoming.rentalPayment.updatedAt =
+      incoming.rentalPayment.updatedAt ?? existing.rentalPayment.updatedAt;
+  }
+
+  // Decide whether to push an agreement history snapshot.
+  const startChanged =
+    isNew ||
+    !existing?.startDate ||
+    dayKey(incoming.startDate) !== dayKey(existing.startDate);
+  const endChanged =
+    isNew ||
+    !existing?.endDate ||
+    dayKey(incoming.endDate) !== dayKey(existing.endDate);
+
+  if (!isNew && !startChanged && !endChanged) return;
+
+  const snapshot = {
+    startDate: incoming.startDate,
+    endDate: incoming.endDate,
+    reminderBeforeExpiry: incoming.reminderBeforeExpiry,
+    advanceRent: incoming.advanceRent ?? 0,
+    status: incoming.status ?? 1,
+    agreementPDF: incoming.agreementPDF,
+    reason: incoming.reason,
+    rentalPayment: {
+      totalRentalAmount: incomingRentAmt,
+      paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
+      customPaymentFrequency:
+        Number(incoming.rentalPayment?.paymentFrequency) === 7
+          ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
+          : null,
+      // Step 4: include who changed the rental amount in the history snapshot too.
+      updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
+      updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
+    },
+    updatedBy: userName,
+    uploadedAt: nowIST(),
+  };
+
+  if (!mediaData.agreementHistory) {
+    mediaData.agreementHistory = existingMedia?.agreementHistory
+      ? JSON.parse(JSON.stringify(existingMedia.agreementHistory))
+      : [];
+  }
+
+  mediaData.agreementHistory.push(snapshot);
+};
+
+const computeAgreementStatus = (startDate, endDate, reminderDays) => {
+  if (!startDate || !endDate) return 1;
+  const daysUntilExpiry = Math.floor(
+    (dayKey(endDate) - todayKey()) / (1000 * 60 * 60 * 24),
+  );
+  if (daysUntilExpiry < 0) return 3;
+  if (daysUntilExpiry <= reminderDays) return 2;
+  return 1;
 };
 const detectInitialGstApplicableFlag = (mediaData) => {
   const rentalGstApplicable =
@@ -1312,6 +1370,11 @@ const mediaOnboarding = async (req, res) => {
           mediaData.appraisal.nextAppraisalDate,
         );
       }
+       if (mediaData.appraisal.lastAppraisalDate) {
+    mediaData.appraisal.lastAppraisalDate = toDateOnly(
+      mediaData.appraisal.lastAppraisalDate,
+    );
+  }
     }
 
     if (mediaData.width) mediaData.width = Number(mediaData.width);
