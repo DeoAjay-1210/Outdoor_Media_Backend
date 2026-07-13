@@ -1031,10 +1031,57 @@ function syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName) {
 
   recomputeBalanceGstAmount(media);
 }
+function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag) {
+  if (userType !== ROLE.OWNER) return;
+  if (![0,1, 2].includes(Number(gstApplicableFlag))) return; // still only accepts 1 or 2 from the request — 0 is never explicitly sent, it's just the untouched default
+  media.gstApplicableFlag = Number(gstApplicableFlag);
+}
+const resolveGstApplicable = (item) => {
+  const flag = Number(item.gstApplicableFlag) || 0; // ✅ default 0, not 2
+
+  if (flag === 0) {
+    // Not decided yet — Owner hasn't set the flag on any approval.
+    return {
+      gstApplicableFlag: 0,
+      source: null,
+      gstApplicable: 0,
+      message: "GST source not yet determined — Owner has not set gstApplicableFlag",
+    };
+  }
+
+  if (flag === 1) {
+    return {
+      gstApplicableFlag: flag,
+      source: "rentalPayment",
+      gstApplicable: Number(item.rentalPayment?.gstApplicable) || 0,
+      gstPercentage: item.rentalPayment?.gstPercentage || 0,
+      gstAmount: item.rentalPayment?.gstAmount || 0,
+    };
+  }
+
+  // flag === 2
+  const gstOwners = (item.landOwners || []).filter(
+    (o) => Number(o.gstApplicable) === 1,
+  );
+
+  return {
+    gstApplicableFlag: flag,
+    source: "landOwners",
+    gstApplicable: gstOwners.length > 0 ? 1 : 0,
+    owners: gstOwners.map((o) => ({
+      ownerId: o._id,
+      ownerName: o.name,
+      gstApplicable: Number(o.gstApplicable) || 0,
+      gstPercentage: o.gstPercentage || 0,
+      gstAmount: o.gstAmount || 0,
+    })),
+  };
+};
+
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
-    const { mediaId, campaignName, withGst } = req.body;
+    const { mediaId, campaignName, withGst,gstApplicableFlag  } = req.body;
 
     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
       return res
@@ -1260,7 +1307,7 @@ exports.saveRentalDue = async (req, res) => {
         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
 
         markRoleVerified(media, entry, ROLE.OWNER, userName);
-
+applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag); 
         // ✅ close out GST for this cycle BEFORE billing date rolls forward
         addGstToBalanceIfApplicable(media, entry, userName);
         addOwnerGstToBalanceIfApplicable(media, entry, userName);
@@ -1316,6 +1363,7 @@ exports.saveRentalDue = async (req, res) => {
 
           if (userType === ROLE.OWNER) {
             entry.ownerApprovalDate = nowIST();
+            applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
             // addGstToBalanceIfApplicable(media, entry);
             addGstToBalanceIfApplicable(media, entry, userName);
             addOwnerGstToBalanceIfApplicable(media, entry, userName);
@@ -1540,6 +1588,7 @@ exports.saveRentalDue = async (req, res) => {
     }
 
     if (isOwnerOverride) {
+      applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
       // Owner created AND fully approved directly — cycle closes here too
       // addGstToBalanceIfApplicable(media, savedEntry);
       addGstToBalanceIfApplicable(media, savedEntry, userName);
@@ -2722,6 +2771,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           totalSqFt: 1,
           location: 1,
           rentalPayment: 1,
+          gstApplicableFlag: 1, 
           agreement: 1,
           agreementDocVerification: 1,
           verificationProgressHistory: 1,
@@ -2857,6 +2907,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
         dueStatus: item.rentalPayment?.status,
         dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+         gstApplicableDisplay: resolveGstApplicable(item),
         agreementPeriod: {
           startDate: item.agreement?.startDate,
           endDate: item.agreement?.endDate,

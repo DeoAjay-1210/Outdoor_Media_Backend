@@ -1067,7 +1067,16 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
 
   return true;
 };
+const detectInitialGstApplicableFlag = (mediaData) => {
+  const rentalGstApplicable =
+    Number(mediaData.rentalPayment?.gstApplicable) === 1;
 
+  const anyOwnerGstApplicable = Array.isArray(mediaData.landOwners)
+    ? mediaData.landOwners.some((o) => Number(o.gstApplicable) === 1)
+    : false;
+
+  return rentalGstApplicable || anyOwnerGstApplicable ? 2 : 0;
+};
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -1598,6 +1607,7 @@ const mediaOnboarding = async (req, res) => {
       }
 
       applyAppraisalRentIfDuent(mediaData, null, userName);
+      mediaData.gstApplicableFlag = detectInitialGstApplicableFlag(mediaData);
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
         const pf = mediaData.rentalPayment.paymentFrequency || 1;
