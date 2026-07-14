@@ -117,7 +117,6 @@ const validateOwnerPaymentCategories = (
   return { valid: true };
 };
 
-
 const validateLandOwnerShares = (
   landOwners,
   totalRentalAmount,
@@ -250,7 +249,6 @@ const validateGst = (rentalPayment) => {
   return { valid: true };
 };
 
-
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -328,7 +326,6 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
   mediaData.rentalPayment.rentalAmountHistory = history;
   return { currentBaseRent: incomingAmount, rentActuallyChanged };
 };
-
 
 const validateAppraisalFrequency = (agreement, appraisal) => {
   if (Number(appraisal?.applicable) !== 1) return { valid: true };
@@ -477,7 +474,7 @@ const handleAppraisalLogic = async (
 
   // ── CREATE flow ───────────────────────────────────────────────────────────
   if (isNew) {
-        const manualLastAppraisalDate = appraisal.lastAppraisalDate
+    const manualLastAppraisalDate = appraisal.lastAppraisalDate
       ? toDateOnly(appraisal.lastAppraisalDate)
       : null;
 
@@ -518,7 +515,8 @@ const handleAppraisalLogic = async (
       );
 
       const lastEntry = appraisal.history[appraisal.history.length - 1];
-      if (lastEntry) appraisal.nextAppraisalDate = new Date(lastEntry.appraisalDate);
+      if (lastEntry)
+        appraisal.nextAppraisalDate = new Date(lastEntry.appraisalDate);
     }
 
     mediaData.appraisal = appraisal;
@@ -711,7 +709,7 @@ const handleAppraisalLogic = async (
     //     );
     //   }
     // }
-      if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
+    if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
       const hasLaterEntry = history.some(
         (h) => dayKey(h.appraisalDate) > dayKey(appliedEntry.appraisalDate),
       );
@@ -838,7 +836,6 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
 
   return appraisal;
 };
-
 
 const getFrequencyMonths = (frequency, customMonths) => {
   if (Number(frequency) === 4) {
@@ -1370,11 +1367,11 @@ const mediaOnboarding = async (req, res) => {
           mediaData.appraisal.nextAppraisalDate,
         );
       }
-       if (mediaData.appraisal.lastAppraisalDate) {
-    mediaData.appraisal.lastAppraisalDate = toDateOnly(
-      mediaData.appraisal.lastAppraisalDate,
-    );
-  }
+      if (mediaData.appraisal.lastAppraisalDate) {
+        mediaData.appraisal.lastAppraisalDate = toDateOnly(
+          mediaData.appraisal.lastAppraisalDate,
+        );
+      }
     }
 
     if (mediaData.width) mediaData.width = Number(mediaData.width);
@@ -1382,6 +1379,45 @@ const mediaOnboarding = async (req, res) => {
     if (mediaData.status) mediaData.status = Number(mediaData.status);
     if (mediaData.numberOfLandOwners)
       mediaData.numberOfLandOwners = Number(mediaData.numberOfLandOwners);
+    let existingMediaForValidation = null;
+    if (id) {
+      existingMediaForValidation = await MediaOnboarding.findById(id);
+      if (!existingMediaForValidation) {
+        return errorResponse(res, "Media not found with this ID", null, 404);
+      }
+    }
+
+    // ✅ NEW — auto-rescale landOwners proportionally BEFORE validation,
+    // whenever totalRentalAmount changed on update. This fixes the bug
+    // where a rent-amount edit (manual OR via appraisal) combined with
+    // STALE landOwner split figures (still matching the OLD amount)
+    // was correctly rejected by validateLandOwnerShares/
+    // validateOwnerPaymentCategories — since nothing rescaled the
+    // owners' cashAmount/onlineAmount/fixed shareAmount until AFTER
+    // validation already ran (inside applyAppraisalRentIfDuent, which
+    // only fires for appraisal-triggered changes, and only runs post-
+    // validation). Now this happens up front, for ANY totalRentalAmount
+    // change (manual or appraisal-triggered), so validation always sees
+    // figures that are already proportionally consistent.
+    if (
+      existingMediaForValidation &&
+      mediaData.rentalPayment?.totalRentalAmount !== undefined &&
+      Array.isArray(mediaData.landOwners) &&
+      mediaData.landOwners.length > 0
+    ) {
+      const oldAmount = Number(
+        existingMediaForValidation.rentalPayment?.totalRentalAmount || 0,
+      );
+      const newAmount = Number(mediaData.rentalPayment.totalRentalAmount);
+
+      if (oldAmount > 0 && oldAmount !== newAmount) {
+        scaleLandOwnersForRentChange(
+          mediaData.landOwners,
+          oldAmount,
+          newAmount,
+        );
+      }
+    }
 
     if (mediaData.rentalPayment) {
       const gstCheck = validateGst(mediaData.rentalPayment);
@@ -1517,12 +1553,12 @@ const mediaOnboarding = async (req, res) => {
 
     if (id) {
       // ── UPDATE ──────────────────────────────────────────────────────────
-      media = await MediaOnboarding.findById(id);
-      if (!media)
-        return errorResponse(res, "Media not found with this ID", null, 404);
-
+      // media = await MediaOnboarding.findById(id);
+      // if (!media)
+      //   return errorResponse(res, "Media not found with this ID", null, 404);
+      media = existingMediaForValidation;
       delete mediaData.id;
-     
+
       if (mediaData.agreement) {
         const pdf = mediaData.agreement.agreementPDF;
 
@@ -1583,7 +1619,7 @@ const mediaOnboarding = async (req, res) => {
       // Step 1 & 2: track totalRentalAmount change; get the effective base rent.
       const { currentBaseRent, rentActuallyChanged } =
         handleRentalAmountHistory(mediaData, media, userName);
-
+      mediaData.gstApplicableFlag = detectInitialGstApplicableFlag(mediaData);
       // Step 3: pass both so appraisal logic knows whether to rebase future entries.
       await handleAppraisalLogic(
         mediaData,
