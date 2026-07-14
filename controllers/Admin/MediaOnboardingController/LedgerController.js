@@ -71,7 +71,11 @@ function advanceRentalPaymentOnOwnerApproval(media) {
     media.ledger = [];
     media.markModified("ledger");
   }
-}
+}const normalizeDate = (d) => {
+  if (!d) return "";
+  const dt = new Date(d);
+  return Number.isNaN(dt.getTime()) ? String(d) : dt.toISOString().slice(0, 10);
+};
 exports.createLedgerEntry = async (req, res) => {
   try {
     const { mediaId, entries } = req.body;
@@ -197,7 +201,19 @@ exports.createLedgerEntry = async (req, res) => {
         400,
       );
     }
+   const dedupeIncomingEntries = (rawEntries) => {
+      const map = new Map();
+      rawEntries.forEach((item) => {
+        const key =
+          item.withGst === 2
+            ? `2_${String(item.landOwnerId || "")}_${String(item.utrNumber || "")}_${normalizeDate(item.date)}`
+            : `1_${String(item.landOwnerId || "")}_${String(item.rentalDueId || "")}_${String(item.utrNumber || "")}_${normalizeDate(item.date)}`;
+        map.set(key, item);
+      });
+      return Array.from(map.values());
+    };
 
+    const dedupedEntries = dedupeIncomingEntries(entries);
     const savedLedgerEntries = [];
     const historyBuckets = [];
     const updatedGstBalanceRecords = [];
@@ -278,7 +294,7 @@ exports.createLedgerEntry = async (req, res) => {
 
     //   historyBuckets.push({ year, month: monthName });
     // }
-    for (const item of entries) {
+    for (const item of dedupedEntries) {
       const entryDate = item.date ? new Date(item.date) : new Date();
 
       const matchedOwner = item.landOwnerId
@@ -311,11 +327,10 @@ exports.createLedgerEntry = async (req, res) => {
 
         if (!sameOwner) return false;
 
-        if (item.withGst === 2) return true;
-
         return (
-          String(entry.rentalDueId || "") ===
-          String(ledgerEntryData.rentalDueId || "")
+          String(entry.utrNumber || "") ===
+            String(ledgerEntryData.utrNumber || "") &&
+          normalizeDate(entry.date) === normalizeDate(ledgerEntryData.date)
         );
       });
 
@@ -408,6 +423,508 @@ exports.createLedgerEntry = async (req, res) => {
     );
   }
 };
+
+exports.listMediaByLedger = async (req, res) => {
+  try {
+    const {
+      pageNumber = 1,
+      count = 10,
+      search,
+      status,
+      dateRange,
+      currentMonth,
+    } = req.body;
+
+    const pageNumbers = parseInt(pageNumber) || 1;
+    const pageSize = parseInt(count) || 10;
+
+    const filter = {};
+    filter.rentalStatus = 3;
+    if (search) {
+      filter.mediaName = { $regex: search, $options: "i" };
+    }
+
+    if (status !== undefined && status !== null && status !== "") {
+      const statusNum = Number(status);
+      if (![0, 1].includes(statusNum)) {
+        return errorResponse(
+          res,
+          "status must be one of 0 (Not approve), 1 (Approve)",
+          null,
+          400,
+        );
+      }
+
+      if (statusNum === 1) {
+        filter["ledger"] = {
+          $exists: true,
+          $not: { $size: 0 },
+          $elemMatch: { status: 1 },
+        };
+      } else if (statusNum === 0) {
+        filter.$or = [
+          { ledger: { $exists: false } },
+          { ledger: { $size: 0 } },
+          { "ledger.status": 0 },
+        ];
+      }
+    }
+
+    const validateMonthYear = (monthYear) => {
+      const regex = /^(0[1-9]|1[0-2])-([0-9]{4})$/;
+      return regex.test(monthYear);
+    };
+
+    const getMonthDateRange = (monthYear) => {
+      const [month, year] = monthYear.split("-").map(Number);
+      const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
+      const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+      return { startDate, endDate };
+    };
+
+    let requestedMonthRange = null;
+
+    const applyDateFilter = (monthYear, filterObj) => {
+      if (!validateMonthYear(monthYear)) {
+        throw new Error("Invalid format. Use MM-YYYY format (e.g., 07-2026)");
+      }
+      const { startDate, endDate } = getMonthDateRange(monthYear);
+      requestedMonthRange = { startDate, endDate };
+
+      filterObj.$and = [
+        ...(filterObj.$and || []),
+        {
+          $or: [
+            {
+              "rentalPayment.lastBillPaidDate": {
+                $gte: startDate,
+                $lte: endDate,
+              },
+            },
+            {
+              "rentalDue.dueDate": {
+                $gte: startDate,
+                $lte: endDate,
+              },
+            },
+            {
+              ledgerHistory: {
+                $elemMatch: {
+                  year: String(startDate.getUTCFullYear()),
+                  months: {
+                    $elemMatch: {
+                      month: [
+                        "January", "February", "March", "April", "May", "June",
+                        "July", "August", "September", "October", "November", "December",
+                      ][startDate.getUTCMonth()],
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ];
+      return filterObj;
+    };
+
+    if (dateRange) {
+      try {
+        applyDateFilter(dateRange, filter);
+      } catch (error) {
+        return errorResponse(res, error.message, null, 400);
+      }
+    }
+
+    if (currentMonth) {
+      try {
+        applyDateFilter(currentMonth, filter);
+      } catch (error) {
+        return errorResponse(res, error.message, null, 400);
+      }
+    }
+
+    const skip = (pageNumbers - 1) * pageSize;
+
+    const [results, totalCount] = await Promise.all([
+      Media.find(filter)
+        .select(
+          "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory landOwners ledger ledgerHistory rentalDue createdAt updatedAt",
+        )
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(pageSize),
+      Media.countDocuments(filter),
+    ]);
+
+    const mediaListData = results.map((media) => {
+      const mediaObj = media.toObject();
+
+      const inRequestedMonth = (date) => {
+        if (!requestedMonthRange || !date) return true;
+        const d = new Date(date);
+        return (
+          d >= requestedMonthRange.startDate && d <= requestedMonthRange.endDate
+        );
+      };
+
+      const dedupeLedgerEntries = (entries, useRentalDueId) => {
+        const sorted = [...entries].sort(
+          (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+        );
+        const seen = new Set();
+        const deduped = [];
+
+         for (const entry of sorted) {
+          const key = useRentalDueId
+            ? `${String(entry.landOwnerId || "")}_${String(entry.rentalDueId || "")}_${String(entry.utrNumber || "")}_${normalizeDate(entry.date)}`
+            : `${String(entry.landOwnerId || "")}_${String(entry.utrNumber || "")}_${normalizeDate(entry.date)}`;
+
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(entry);
+          }
+        }
+        return deduped;
+      };
+
+      // ── ALWAYS sourced from ledgerHistory whenever a month filter is
+      // applied — this correctly covers the current/live month too,
+      // since createLedgerEntry writes every entry into ledgerHistory
+      // immediately, regardless of billing-cycle state. No live-vs-
+      // history branching is needed for "is this month current or past."
+      let sourceEntries;
+
+      if (requestedMonthRange) {
+        const monthNames = [
+          "January", "February", "March", "April", "May", "June",
+          "July", "August", "September", "October", "November", "December",
+        ];
+        const requestedMonthName =
+          monthNames[requestedMonthRange.startDate.getUTCMonth()];
+        const requestedYear = String(
+          requestedMonthRange.startDate.getUTCFullYear(),
+        );
+
+        const yearBucket = (mediaObj.ledgerHistory || []).find(
+          (y) => y.year === requestedYear,
+        );
+        const monthBucket = yearBucket?.months.find(
+          (m) => m.month === requestedMonthName,
+        );
+
+        sourceEntries = monthBucket?.entries || [];
+      } else {
+        sourceEntries = mediaObj.ledger || [];
+      }
+
+      let latestLedger = [];
+      let withGst1Ledger = [];
+
+      if (sourceEntries.length > 0) {
+        const monthScopedLedger = requestedMonthRange
+          ? sourceEntries
+          : sourceEntries.filter((entry) => inRequestedMonth(entry.date));
+
+        const gst2Entries = monthScopedLedger.filter(
+          (entry) => entry.withGst === 2,
+        );
+        const gst1Entries = monthScopedLedger.filter(
+          (entry) => entry.withGst === 1,
+        );
+
+        // For GST2: deduplicate using multiple fields to keep unique entries
+        const dedupedGst2 = dedupeLedgerEntries(gst2Entries, false);
+        latestLedger = dedupedGst2.slice(0, 2);
+
+        // For GST1: deduplicate by rentalDueId
+        const dedupedGst1 = dedupeLedgerEntries(gst1Entries, true);
+        withGst1Ledger = dedupedGst1.slice(0, 2);
+      }
+
+      let rentalDueWithApproval = [];
+      if (Array.isArray(mediaObj.rentalDue) && mediaObj.rentalDue.length > 0) {
+        const monthScopedDue = mediaObj.rentalDue.filter((due) =>
+          inRequestedMonth(due.dueDate),
+        );
+
+        const sortedDue = [...monthScopedDue].sort((a, b) => {
+          const dateA = a.ownerApprovalDate
+            ? new Date(a.ownerApprovalDate)
+            : new Date(0);
+          const dateB = b.ownerApprovalDate
+            ? new Date(b.ownerApprovalDate)
+            : new Date(0);
+          return dateB - dateA;
+        });
+
+        rentalDueWithApproval = sortedDue
+          .filter((due) => due.ownerApprovalDate)
+          .map((due) => ({
+            _id: due._id,
+            ownerApprovalDate: due.ownerApprovalDate,
+            dueMonth: due.dueMonth,
+            dueDate: due.dueDate,
+            netPayable: due.netPayable,
+            approvalStatus: due.approvalStatus,
+            withGst: due.withGst,
+            gstAmount: due.gstAmount,
+            baseAmount: due.baseAmount,
+            paymentFrequency: due.paymentFrequency,
+            campaignName: due.campaignName,
+            status: due.status,
+            updatedAt: due.updatedAt,
+            createdAt: due.createdAt,
+          }));
+      }
+
+      const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
+        ? mediaObj.gstBalanceHistory
+        : [];
+      let gstPayment = false;
+      if (fullGstBalanceHistory.length > 0) {
+        const hasEmptyUtr = fullGstBalanceHistory.some(
+          (entry) => !entry.utrNumber || entry.utrNumber.trim() === "",
+        );
+        gstPayment = hasEmptyUtr;
+      }
+
+      const { ledgerHistory, ...restOfMediaObj } = mediaObj;
+
+      return {
+        ...restOfMediaObj,
+        ledger: latestLedger,
+        withGst1Ledger: withGst1Ledger,
+        rentalDue: rentalDueWithApproval,
+        gstPayment: gstPayment,
+        gstBalanceHistory: fullGstBalanceHistory,
+      };
+    });
+
+    return successResponse(
+      res,
+      "Media list fetched successfully",
+      {
+        pageNumber: pageNumbers,
+        count: pageSize,
+        totalCount,
+        totalPages: Math.ceil(totalCount / pageSize),
+        mediaList: mediaListData,
+      },
+      200,
+    );
+  } catch (error) {
+    console.error("listMediaByLedger error:", error);
+    return errorResponse(
+      res,
+      "Something went wrong while fetching media list",
+      { error: error.message },
+      500,
+    );
+  }
+};
+
+exports.getLedgerHistory = async (req, res) => {
+  try {
+    const { mediaId, year, month } = req.query;
+
+    if (!mongoose.Types.ObjectId.isValid(mediaId)) {
+      return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
+    }
+
+    // Use .lean() to get plain JSON objects
+    const media = await Media.findById(mediaId)
+      .select(
+        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners gstBalanceHistory",
+      )
+      .lean();
+
+    if (!media) {
+      return errorResponse(res, "Media not found for given mediaId", null, 404);
+    }
+
+    let ledgerHistory = media.ledgerHistory || [];
+
+    // Filter by Year
+    if (year) {
+      ledgerHistory = ledgerHistory.filter(
+        (item) => item.year === String(year),
+      );
+    }
+
+    // Filter by Month
+    if (month) {
+      const monthNames = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+      ];
+
+      const monthName = monthNames[Number(month) - 1];
+
+      ledgerHistory = ledgerHistory
+        .map((item) => ({
+          ...item,
+          months: item.months.filter(
+            (m) => m.month.toLowerCase() === monthName.toLowerCase(),
+          ),
+        }))
+        .filter((item) => item.months.length > 0);
+    }
+
+    // ✅ Calculate gstPayment flag (same logic as list API)
+    const fullGstBalanceHistory = Array.isArray(media.gstBalanceHistory)
+      ? media.gstBalanceHistory
+      : [];
+    let gstPayment = false;
+    if (fullGstBalanceHistory.length > 0) {
+      const hasEmptyUtr = fullGstBalanceHistory.some(
+        (entry) => !entry.utrNumber || entry.utrNumber.trim() === ""
+      );
+      gstPayment = hasEmptyUtr;
+    }
+
+    const dedupeByRentalDueId = (entries, type = 'all') => {
+      const sorted = [...entries].sort(
+        (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+      );
+      const seen = new Set();
+      const deduped = [];
+
+      for (const entry of sorted) {
+        let key;
+        if (type === 'gst1') {
+          key = `${entry.rentalDueId ? `rd_${String(entry.rentalDueId)}` : `owner_${String(entry.landOwnerId || "")}`}_${String(entry.utrNumber || "")}_${normalizeDate(entry.date)}`;
+        } else if (type === 'gst2') {
+          key = `owner_${String(entry.landOwnerId || "")}_${String(entry.utrNumber || "")}_${normalizeDate(entry.date)}`;
+        } else {
+          key = entry.rentalDueId
+            ? `rd_${String(entry.rentalDueId)}`
+            : `owner_${String(entry.landOwnerId || "")}`;
+        }
+
+        if (!seen.has(key)) {
+          seen.add(key);
+          deduped.push(entry);
+        }
+      }
+      return deduped;
+    };
+
+    const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
+      ...yearEntry,
+      months: yearEntry.months.map((monthEntry) => {
+        const allEntries = monthEntry.entries || [];
+
+        const withGst2Entries = allEntries.filter((entry) => entry.withGst === 2);
+        const withGst1Entries = allEntries.filter((entry) => entry.withGst === 1);
+
+        const sortByUpdatedAt = (entries) =>
+          [...entries].sort(
+            (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+          );
+
+        // For GST2: deduplicate using multiple fields
+        const dedupedGst2 = dedupeByRentalDueId(withGst2Entries, 'gst2');
+        const latestTwoGst2 = dedupedGst2.slice(0, 2);
+
+        // For GST1: deduplicate by rentalDueId
+        const dedupedGst1 = dedupeByRentalDueId(withGst1Entries, 'gst1');
+        const latestTwoGst1 = dedupedGst1.slice(0, 2);
+
+        return {
+          month: monthEntry.month,
+
+          ledger: latestTwoGst2.map((entry) => ({
+            landOwnerId: entry.landOwnerId,
+            landOwnerName: entry.landOwnerName,
+            utrNumber: entry.utrNumber,
+            date: entry.date,
+            status: entry.status,
+            withGst: entry.withGst,
+            month: entry.month,
+            cycle: entry.cycle,
+            rentalDueId: entry.rentalDueId,
+            updatedBy: entry.updatedBy,
+            updatedAt: entry.updatedAt,
+            _id: entry._id,
+            mediaName: media.mediaName,
+            paymentFrequency: entry.paymentFrequency,
+            netPayable: entry.netPayable,
+            nextBillingDate: entry.nextBillingDate,
+          })),
+
+          withGst1Ledger: latestTwoGst1.map((entry) => ({
+            landOwnerId: entry.landOwnerId,
+            landOwnerName: entry.landOwnerName,
+            utrNumber: entry.utrNumber,
+            date: entry.date,
+            status: entry.status,
+            withGst: entry.withGst,
+            month: entry.month,
+            cycle: entry.cycle,
+            rentalDueId: entry.rentalDueId,
+            updatedBy: entry.updatedBy,
+            updatedAt: entry.updatedAt,
+            _id: entry._id,
+            mediaName: media.mediaName,
+            paymentFrequency: entry.paymentFrequency,
+            netPayable: entry.netPayable,
+            nextBillingDate: entry.nextBillingDate,
+          })),
+
+          // ✅ UNCHANGED — full permanent history, never deduped
+          allEntries: sortByUpdatedAt(allEntries).map((entry) => ({
+            ...entry,
+            mediaName: media.mediaName,
+          })),
+        };
+      }),
+    }));
+
+    return successResponse(
+      res,
+      "Ledger history fetched successfully",
+      {
+        mediaId: media._id,
+        mediaName: media.mediaName,
+        mediaType: media.mediaType,
+        mediaCode: media.mediaCode,
+        city: media.city,
+        rentalPayment: media.rentalPayment,
+        landOwners: media.landOwners,
+        currentRentalPayment: {
+          paymentFrequency: media.rentalPayment.paymentFrequency,
+          netPayable: media.rentalPayment.netPayable,
+          nextBillingDate: media.rentalPayment.nextBillingDate,
+        },
+        ledgerHistory: transformedLedgerHistory,
+        gstBalanceHistory: media.gstBalanceHistory,
+        gstPayment: gstPayment,
+      },
+      200,
+    );
+  } catch (error) {
+    console.error("getLedgerHistory error:", error);
+
+    return errorResponse(
+      res,
+      "Something went wrong while fetching ledger history",
+      { error: error.message },
+      500,
+    );
+  }
+};
+
 // exports.listMediaByLedger = async (req, res) => {
 //   try {
 //     const {
@@ -709,517 +1226,7 @@ exports.createLedgerEntry = async (req, res) => {
 //     );
 //   }
 // };
-exports.listMediaByLedger = async (req, res) => {
-  try {
-    const {
-      pageNumber = 1,
-      count = 10,
-      search,
-      status,
-      dateRange,
-      currentMonth,
-    } = req.body;
 
-    const pageNumbers = parseInt(pageNumber) || 1;
-    const pageSize = parseInt(count) || 10;
-
-    const filter = {};
-    filter.rentalStatus = 3;
-    if (search) {
-      filter.mediaName = { $regex: search, $options: "i" };
-    }
-
-    if (status !== undefined && status !== null && status !== "") {
-      const statusNum = Number(status);
-      if (![0, 1].includes(statusNum)) {
-        return errorResponse(
-          res,
-          "status must be one of 0 (Not approve), 1 (Approve)",
-          null,
-          400,
-        );
-      }
-
-      if (statusNum === 1) {
-        filter["ledger"] = {
-          $exists: true,
-          $not: { $size: 0 },
-          $elemMatch: { status: 1 },
-        };
-      } else if (statusNum === 0) {
-        filter.$or = [
-          { ledger: { $exists: false } },
-          { ledger: { $size: 0 } },
-          { "ledger.status": 0 },
-        ];
-      }
-    }
-
-    const validateMonthYear = (monthYear) => {
-      const regex = /^(0[1-9]|1[0-2])-([0-9]{4})$/;
-      return regex.test(monthYear);
-    };
-
-    const getMonthDateRange = (monthYear) => {
-      const [month, year] = monthYear.split("-").map(Number);
-      const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-      const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
-      return { startDate, endDate };
-    };
-
-    let requestedMonthRange = null;
-
-    const applyDateFilter = (monthYear, filterObj) => {
-      if (!validateMonthYear(monthYear)) {
-        throw new Error("Invalid format. Use MM-YYYY format (e.g., 07-2026)");
-      }
-      const { startDate, endDate } = getMonthDateRange(monthYear);
-      requestedMonthRange = { startDate, endDate };
-
-      filterObj.$and = [
-        ...(filterObj.$and || []),
-        {
-          $or: [
-            {
-              "rentalPayment.lastBillPaidDate": {
-                $gte: startDate,
-                $lte: endDate,
-              },
-            },
-            {
-              "rentalDue.dueDate": {
-                $gte: startDate,
-                $lte: endDate,
-              },
-            },
-            {
-              ledgerHistory: {
-                $elemMatch: {
-                  year: String(startDate.getUTCFullYear()),
-                  months: {
-                    $elemMatch: {
-                      month: [
-                        "January", "February", "March", "April", "May", "June",
-                        "July", "August", "September", "October", "November", "December",
-                      ][startDate.getUTCMonth()],
-                    },
-                  },
-                },
-              },
-            },
-          ],
-        },
-      ];
-      return filterObj;
-    };
-
-    if (dateRange) {
-      try {
-        applyDateFilter(dateRange, filter);
-      } catch (error) {
-        return errorResponse(res, error.message, null, 400);
-      }
-    }
-
-    if (currentMonth) {
-      try {
-        applyDateFilter(currentMonth, filter);
-      } catch (error) {
-        return errorResponse(res, error.message, null, 400);
-      }
-    }
-
-    const skip = (pageNumbers - 1) * pageSize;
-
-    const [results, totalCount] = await Promise.all([
-      Media.find(filter)
-        .select(
-          "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory landOwners ledger ledgerHistory rentalDue createdAt updatedAt",
-        )
-        .sort({ updatedAt: -1 })
-        .skip(skip)
-        .limit(pageSize),
-      Media.countDocuments(filter),
-    ]);
-
-    const mediaListData = results.map((media) => {
-      const mediaObj = media.toObject();
-
-      const inRequestedMonth = (date) => {
-        if (!requestedMonthRange || !date) return true;
-        const d = new Date(date);
-        return (
-          d >= requestedMonthRange.startDate && d <= requestedMonthRange.endDate
-        );
-      };
-
-      const dedupeLedgerEntries = (entries, useRentalDueId) => {
-        const sorted = [...entries].sort(
-          (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-        );
-        const seen = new Set();
-        const deduped = [];
-
-        for (const entry of sorted) {
-          let key;
-          if (useRentalDueId) {
-            // For GST1: dedupe by landOwnerId + rentalDueId
-            key = `${String(entry.landOwnerId || "")}_${String(entry.rentalDueId || "")}`;
-          } else {
-            // For GST2: use multiple fields to keep entries unique
-            // This will keep entries with different utrNumber, date, etc.
-            key = `${String(entry.landOwnerId || "")}_${String(entry.utrNumber || "")}_${String(entry.date || "")}_${String(entry.month || "")}`;
-          }
-
-          if (!seen.has(key)) {
-            seen.add(key);
-            deduped.push(entry);
-          }
-        }
-        return deduped;
-      };
-
-      // ── ALWAYS sourced from ledgerHistory whenever a month filter is
-      // applied — this correctly covers the current/live month too,
-      // since createLedgerEntry writes every entry into ledgerHistory
-      // immediately, regardless of billing-cycle state. No live-vs-
-      // history branching is needed for "is this month current or past."
-      let sourceEntries;
-
-      if (requestedMonthRange) {
-        const monthNames = [
-          "January", "February", "March", "April", "May", "June",
-          "July", "August", "September", "October", "November", "December",
-        ];
-        const requestedMonthName =
-          monthNames[requestedMonthRange.startDate.getUTCMonth()];
-        const requestedYear = String(
-          requestedMonthRange.startDate.getUTCFullYear(),
-        );
-
-        const yearBucket = (mediaObj.ledgerHistory || []).find(
-          (y) => y.year === requestedYear,
-        );
-        const monthBucket = yearBucket?.months.find(
-          (m) => m.month === requestedMonthName,
-        );
-
-        sourceEntries = monthBucket?.entries || [];
-      } else {
-        sourceEntries = mediaObj.ledger || [];
-      }
-
-      let latestLedger = [];
-      let withGst1Ledger = [];
-
-      if (sourceEntries.length > 0) {
-        const monthScopedLedger = requestedMonthRange
-          ? sourceEntries
-          : sourceEntries.filter((entry) => inRequestedMonth(entry.date));
-
-        const gst2Entries = monthScopedLedger.filter(
-          (entry) => entry.withGst === 2,
-        );
-        const gst1Entries = monthScopedLedger.filter(
-          (entry) => entry.withGst === 1,
-        );
-
-        // For GST2: deduplicate using multiple fields to keep unique entries
-        const dedupedGst2 = dedupeLedgerEntries(gst2Entries, false);
-        latestLedger = dedupedGst2.slice(0, 2);
-
-        // For GST1: deduplicate by rentalDueId
-        const dedupedGst1 = dedupeLedgerEntries(gst1Entries, true);
-        withGst1Ledger = dedupedGst1.slice(0, 2);
-      }
-
-      let rentalDueWithApproval = [];
-      if (Array.isArray(mediaObj.rentalDue) && mediaObj.rentalDue.length > 0) {
-        const monthScopedDue = mediaObj.rentalDue.filter((due) =>
-          inRequestedMonth(due.dueDate),
-        );
-
-        const sortedDue = [...monthScopedDue].sort((a, b) => {
-          const dateA = a.ownerApprovalDate
-            ? new Date(a.ownerApprovalDate)
-            : new Date(0);
-          const dateB = b.ownerApprovalDate
-            ? new Date(b.ownerApprovalDate)
-            : new Date(0);
-          return dateB - dateA;
-        });
-
-        rentalDueWithApproval = sortedDue
-          .filter((due) => due.ownerApprovalDate)
-          .map((due) => ({
-            _id: due._id,
-            ownerApprovalDate: due.ownerApprovalDate,
-            dueMonth: due.dueMonth,
-            dueDate: due.dueDate,
-            netPayable: due.netPayable,
-            approvalStatus: due.approvalStatus,
-            withGst: due.withGst,
-            gstAmount: due.gstAmount,
-            baseAmount: due.baseAmount,
-            paymentFrequency: due.paymentFrequency,
-            campaignName: due.campaignName,
-            status: due.status,
-            updatedAt: due.updatedAt,
-            createdAt: due.createdAt,
-          }));
-      }
-
-      const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
-        ? mediaObj.gstBalanceHistory
-        : [];
-      let gstPayment = false;
-      if (fullGstBalanceHistory.length > 0) {
-        const hasEmptyUtr = fullGstBalanceHistory.some(
-          (entry) => !entry.utrNumber || entry.utrNumber.trim() === "",
-        );
-        gstPayment = hasEmptyUtr;
-      }
-
-      const { ledgerHistory, ...restOfMediaObj } = mediaObj;
-
-      return {
-        ...restOfMediaObj,
-        ledger: latestLedger,
-        withGst1Ledger: withGst1Ledger,
-        rentalDue: rentalDueWithApproval,
-        gstPayment: gstPayment,
-        gstBalanceHistory: fullGstBalanceHistory,
-      };
-    });
-
-    return successResponse(
-      res,
-      "Media list fetched successfully",
-      {
-        pageNumber: pageNumbers,
-        count: pageSize,
-        totalCount,
-        totalPages: Math.ceil(totalCount / pageSize),
-        mediaList: mediaListData,
-      },
-      200,
-    );
-  } catch (error) {
-    console.error("listMediaByLedger error:", error);
-    return errorResponse(
-      res,
-      "Something went wrong while fetching media list",
-      { error: error.message },
-      500,
-    );
-  }
-};
-
-exports.getLedgerHistory = async (req, res) => {
-  try {
-    const { mediaId, year, month } = req.query;
-
-    if (!mongoose.Types.ObjectId.isValid(mediaId)) {
-      return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
-    }
-
-    // Use .lean() to get plain JSON objects
-    const media = await Media.findById(mediaId)
-      .select(
-        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners gstBalanceHistory",
-      )
-      .lean();
-
-    if (!media) {
-      return errorResponse(res, "Media not found for given mediaId", null, 404);
-    }
-
-    let ledgerHistory = media.ledgerHistory || [];
-
-    // Filter by Year
-    if (year) {
-      ledgerHistory = ledgerHistory.filter(
-        (item) => item.year === String(year),
-      );
-    }
-
-    // Filter by Month
-    if (month) {
-      const monthNames = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-      ];
-
-      const monthName = monthNames[Number(month) - 1];
-
-      ledgerHistory = ledgerHistory
-        .map((item) => ({
-          ...item,
-          months: item.months.filter(
-            (m) => m.month.toLowerCase() === monthName.toLowerCase(),
-          ),
-        }))
-        .filter((item) => item.months.length > 0);
-    }
-
-    // ✅ Calculate gstPayment flag (same logic as list API)
-    const fullGstBalanceHistory = Array.isArray(media.gstBalanceHistory)
-      ? media.gstBalanceHistory
-      : [];
-    let gstPayment = false;
-    if (fullGstBalanceHistory.length > 0) {
-      const hasEmptyUtr = fullGstBalanceHistory.some(
-        (entry) => !entry.utrNumber || entry.utrNumber.trim() === ""
-      );
-      gstPayment = hasEmptyUtr;
-    }
-
-    const dedupeByRentalDueId = (entries, type = 'all') => {
-      const sorted = [...entries].sort(
-        (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-      );
-      const seen = new Set();
-      const deduped = [];
-
-      for (const entry of sorted) {
-        let key;
-        if (type === 'gst1') {
-          // For GST1: dedupe by rentalDueId or landOwnerId
-          key = entry.rentalDueId
-            ? `rd_${String(entry.rentalDueId)}`
-            : `owner_${String(entry.landOwnerId || "")}`;
-        } else if (type === 'gst2') {
-          // For GST2: use multiple fields for uniqueness
-          key = `${String(entry.landOwnerId || "")}_${String(entry.utrNumber || "")}_${String(entry.date || "")}_${String(entry.month || "")}`;
-        } else {
-          // Default behavior
-          key = entry.rentalDueId
-            ? `rd_${String(entry.rentalDueId)}`
-            : `owner_${String(entry.landOwnerId || "")}`;
-        }
-
-        if (!seen.has(key)) {
-          seen.add(key);
-          deduped.push(entry);
-        }
-      }
-      return deduped;
-    };
-
-    const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
-      ...yearEntry,
-      months: yearEntry.months.map((monthEntry) => {
-        const allEntries = monthEntry.entries || [];
-
-        const withGst2Entries = allEntries.filter((entry) => entry.withGst === 2);
-        const withGst1Entries = allEntries.filter((entry) => entry.withGst === 1);
-
-        const sortByUpdatedAt = (entries) =>
-          [...entries].sort(
-            (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-          );
-
-        // For GST2: deduplicate using multiple fields
-        const dedupedGst2 = dedupeByRentalDueId(withGst2Entries, 'gst2');
-        const latestTwoGst2 = dedupedGst2.slice(0, 2);
-
-        // For GST1: deduplicate by rentalDueId
-        const dedupedGst1 = dedupeByRentalDueId(withGst1Entries, 'gst1');
-        const latestTwoGst1 = dedupedGst1.slice(0, 2);
-
-        return {
-          month: monthEntry.month,
-
-          ledger: latestTwoGst2.map((entry) => ({
-            landOwnerId: entry.landOwnerId,
-            landOwnerName: entry.landOwnerName,
-            utrNumber: entry.utrNumber,
-            date: entry.date,
-            status: entry.status,
-            withGst: entry.withGst,
-            month: entry.month,
-            cycle: entry.cycle,
-            rentalDueId: entry.rentalDueId,
-            updatedBy: entry.updatedBy,
-            updatedAt: entry.updatedAt,
-            _id: entry._id,
-            mediaName: media.mediaName,
-            paymentFrequency: entry.paymentFrequency,
-            netPayable: entry.netPayable,
-            nextBillingDate: entry.nextBillingDate,
-          })),
-
-          withGst1Ledger: latestTwoGst1.map((entry) => ({
-            landOwnerId: entry.landOwnerId,
-            landOwnerName: entry.landOwnerName,
-            utrNumber: entry.utrNumber,
-            date: entry.date,
-            status: entry.status,
-            withGst: entry.withGst,
-            month: entry.month,
-            cycle: entry.cycle,
-            rentalDueId: entry.rentalDueId,
-            updatedBy: entry.updatedBy,
-            updatedAt: entry.updatedAt,
-            _id: entry._id,
-            mediaName: media.mediaName,
-            paymentFrequency: entry.paymentFrequency,
-            netPayable: entry.netPayable,
-            nextBillingDate: entry.nextBillingDate,
-          })),
-
-          // ✅ UNCHANGED — full permanent history, never deduped
-          allEntries: sortByUpdatedAt(allEntries).map((entry) => ({
-            ...entry,
-            mediaName: media.mediaName,
-          })),
-        };
-      }),
-    }));
-
-    return successResponse(
-      res,
-      "Ledger history fetched successfully",
-      {
-        mediaId: media._id,
-        mediaName: media.mediaName,
-        mediaType: media.mediaType,
-        mediaCode: media.mediaCode,
-        city: media.city,
-        rentalPayment: media.rentalPayment,
-        landOwners: media.landOwners,
-        currentRentalPayment: {
-          paymentFrequency: media.rentalPayment.paymentFrequency,
-          netPayable: media.rentalPayment.netPayable,
-          nextBillingDate: media.rentalPayment.nextBillingDate,
-        },
-        ledgerHistory: transformedLedgerHistory,
-        gstBalanceHistory: media.gstBalanceHistory,
-        gstPayment: gstPayment,
-      },
-      200,
-    );
-  } catch (error) {
-    console.error("getLedgerHistory error:", error);
-
-    return errorResponse(
-      res,
-      "Something went wrong while fetching ledger history",
-      { error: error.message },
-      500,
-    );
-  }
-};
 // exports.getLedgerHistory = async (req, res) => {
 //   try {
 //     const { mediaId, year, month } = req.query;
