@@ -1122,6 +1122,7 @@ const computeAgreementStatus = (startDate, endDate, reminderDays) => {
   if (daysUntilExpiry <= reminderDays) return 2;
   return 1;
 };
+// This is for rental GST & Landowner Based GST Applicable New Flag Added Function
 const detectInitialGstApplicableFlag = (mediaData) => {
   const rentalGstApplicable =
     Number(mediaData.rentalPayment?.gstApplicable) === 1;
@@ -1132,6 +1133,7 @@ const detectInitialGstApplicableFlag = (mediaData) => {
 
   return rentalGstApplicable || anyOwnerGstApplicable ? 2 : 0;
 };
+// This is for Media Onboarding Save
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -1770,8 +1772,8 @@ const resolveActiveAgreement = (historyArr) => {
 
   return null;
 };
-//agreement Save
 
+//agreement Save
 const updateAgreement = async (req, res) => {
   try {
     // const { id } = req.body;

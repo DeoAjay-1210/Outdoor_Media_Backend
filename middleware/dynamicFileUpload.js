@@ -89,7 +89,7 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
   const localStorageEngine = multer.diskStorage({
     destination: (req, file, cb) => {
       // ✅ Use custom folder if field is in fieldFolderMap, else use default
-      const resolvedFolder = fieldFolderMap[file.fieldname] || folderName;
+      const resolvedFolder = fieldFolderMap[file.fieldname] || (file.fieldname.includes("agreementPDF") ? "agreementPDF" : folderName);;
       const resolvedPath = path.join(process.cwd(), LOCAL_UPLOAD_PATH, resolvedFolder);
 
       if (!fs.existsSync(resolvedPath)) {
@@ -117,7 +117,7 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
     },
     key: (req, file, cb) => {
       // ✅ Use custom spaces prefix if field is in fieldFolderMap, else use default
-      const resolvedFolder = fieldFolderMap[file.fieldname] || folderName;
+      const resolvedFolder = fieldFolderMap[file.fieldname] || (file.fieldname.includes("agreementPDF") ? "agreementPDF" : folderName);;
       const resolvedPrefix = `${OUTDOORMEDIA_FOLDER}/${resolvedFolder}`;
 
       const sanitized = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");

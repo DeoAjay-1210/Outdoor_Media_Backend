@@ -1,17 +1,30 @@
 // routes/mediaRoutes.js
 const express = require("express");
-const multer   = require("multer");
+const multer = require("multer");
 const router = express.Router();
-const {mediaOnboarding,mediaList,uploadExcel,updateAgreement,getMediaById} = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
+const {
+  mediaOnboarding,
+  mediaList,
+  uploadExcel,
+  updateAgreement,
+  getMediaById,
+} = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
 // Create uploader for media images
 const { upload, processFile } = createUploader("mediaImages", {
-  agreementPDF: "agreementPDF",
+  "agreement[agreementPDF]": "agreementPDF",
+  frontView: "mediaImages", // Save in mediaImages folder
+  sideView: "mediaImages",
+  locationView: "mediaImages",
+  additionalImages: "mediaImages",
+  bankPassbook: "mediaImages",
+  cancelCheckLeaf: "mediaImages",
 });
 // Only TWO routes
 router.post(
-  "/media-onboarding",protect,
+  "/media-onboarding",
+  protect,
   // upload.fields([
   //   { name: "agreementPDF", maxCount: 1 },
   //   { name: "frontView", maxCount: 1 },
@@ -29,20 +42,26 @@ router.post(
   mediaOnboarding,
 );
 
-router.post("/media-list",protect, mediaList);
+router.post("/media-list", protect, mediaList);
 // router.post("/update-agreement",protect, updateAgreement);
-router.post('/update-agreement',protect, upload.fields([{ name: 'agreementPDF' }]), (req, res, next) => {
+router.post(
+  "/update-agreement",
+  protect,
+  upload.fields([{ name: "agreementPDF" }]),
+  (req, res, next) => {
     req.processFile = processFile;
     next();
-  }, updateAgreement);
-router.get("/media-details",protect, getMediaById);
+  },
+  updateAgreement,
+);
+router.get("/media-details", protect, getMediaById);
 const uploads = multer({
   storage: multer.memoryStorage(),
-  limits : { fileSize: 10 * 1024 * 1024 }, // 10 MB max
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
   fileFilter: (_req, file, cb) => {
     const allowed = [
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
-      "application/vnd.ms-excel",                                           // .xls
+      "application/vnd.ms-excel", // .xls
     ];
     if (allowed.includes(file.mimetype)) {
       cb(null, true);
@@ -51,13 +70,18 @@ const uploads = multer({
     }
   },
 });
-router.post("/media-excel-upload",protect, uploads.single("file"), uploadExcel);
+router.post(
+  "/media-excel-upload",
+  protect,
+  uploads.single("file"),
+  uploadExcel,
+);
 router.get("/profile", protect, async (req, res) => {
   console.log(req.user.userName);
 
   res.json({
     success: true,
-    userName: req.user.userName
+    userName: req.user.userName,
   });
 });
 module.exports = router;
