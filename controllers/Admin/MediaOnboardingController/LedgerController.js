@@ -2734,7 +2734,7 @@ exports.listMediaByLedger = async (req, res) => {
 
     if (status !== undefined && status !== null && status !== "") {
       const statusNum = Number(status);
-      if (![0, 1].includes(statusNum)) {
+      if (![0, 1,2,3].includes(statusNum)) {
         return errorResponse(
           res,
           "status must be one of 0 (Not approve), 1 (Approve)",
@@ -2755,7 +2755,22 @@ exports.listMediaByLedger = async (req, res) => {
           { ledger: { $size: 0 } },
           { "ledger.status": 0 },
         ];
-      }
+      }else if (statusNum === 2) {
+    // GST not paid: at least one gstBalanceHistory entry with isPaid: false
+    filter["gstBalanceHistory"] = {
+      $exists: true,
+      $not: { $size: 0 },
+      $elemMatch: { isPaid: false },
+    };
+  } else if (statusNum === 3) {
+    // GST paid: at least one gstBalanceHistory entry with isPaid: true
+    filter["gstBalanceHistory"] = {
+      $exists: true,
+      $not: { $size: 0 },
+      $elemMatch: { isPaid: true },
+    };
+  }
+      
     }
 
     const validateMonthYear = (monthYear) => {
@@ -3094,7 +3109,7 @@ exports.getLedgerHistory = async (req, res) => {
     // Use .lean() to get plain JSON objects
     const media = await Media.findById(mediaId)
       .select(
-        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners gstBalanceHistory",
+        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners agreement gstBalanceHistory",
       )
       .lean();
 
@@ -3273,6 +3288,7 @@ exports.getLedgerHistory = async (req, res) => {
         city: media.city,
         rentalPayment: media.rentalPayment,
         landOwners: media.landOwners,
+        agreement:media.agreement,
         currentRentalPayment: {
           paymentFrequency: media.rentalPayment.paymentFrequency,
           netPayable: media.rentalPayment.netPayable,

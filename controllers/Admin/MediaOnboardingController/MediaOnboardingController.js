@@ -899,7 +899,8 @@ const handleAppraisalLogic = async (
     .filter((h) => h.appraisalDate)
     .map((h) => ({ ...h }))
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
-
+const hasAnyExistingAppraisalHistory = history.length > 0;
+  const seedBaseRent = hasAnyExistingAppraisalHistory ? oldRent : netPayable;
   const today = todayKey();
 
   let isNewFutureEntry = false;
@@ -940,7 +941,7 @@ const handleAppraisalLogic = async (
       type: appraisal.type,
       percentage: appraisal.percentage,
       fixedAmount: appraisal.fixedAmount,
-      baseRent: oldRent,
+      baseRent: seedBaseRent,
       userName,
     });
   } else if (nextDate) {
@@ -1037,7 +1038,7 @@ const handleAppraisalLogic = async (
         } else if (rentActuallyChanged && nextDay > today) {
           baseForNewEntry = netPayable;
         } else {
-          baseForNewEntry = oldRent;
+          baseForNewEntry = seedBaseRent;
         }
 
         history[newIdx].previousRent = baseForNewEntry;
@@ -1068,7 +1069,7 @@ const handleAppraisalLogic = async (
           fixedAmount: Number(appraisal.fixedAmount || 0),
           frequency: Number(appraisal.frequency),
           customFrequencyMonths: Number(appraisal.customFrequencyMonths || 0),
-          previousRent: oldRent,
+          previousRent: seedBaseRent,
           appraisalAmount: 0,
           newRent: 0,
           updatedBy: userName,
