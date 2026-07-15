@@ -183,8 +183,8 @@ const ledgerSchema = new mongoose.Schema({
   cycle: { type: Date, default: null },
   updatedBy: { type: String },
   updatedAt: { type: Date, default: null },
-    rentalDueId: { type: mongoose.Schema.Types.ObjectId, default: null },
- 
+  rentalDueId: { type: mongoose.Schema.Types.ObjectId, default: null },
+
   // ✅ ADDED — the fixed ledger slot (0/1/2) a withGst===2 entry
   // occupies in `media.ledger`. Only meaningful for withGst===2;
   // left null for withGst===1 entries (which live in
@@ -215,7 +215,6 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     // getLedgerHistory / listMediaByLedger can reliably dedupe
     // withGst===2 entries by slot when reading past months.
     index: { type: Number, default: null },
-
   },
   { _id: false },
 );
@@ -653,7 +652,7 @@ const MediaSchema = new mongoose.Schema(
     },
 
     ledger: [ledgerSchema],
-withGst1Ledger: [ledgerSchema],
+    withGst1Ledger: [ledgerSchema],
     ledgerHistory: [ledgerHistoryYearSchema],
 
     agreementDocVerification: [agreementDocVerificationSchema],
@@ -663,11 +662,11 @@ withGst1Ledger: [ledgerSchema],
       enum: [0, 1, 2, 3], // 0=null 1=staff Approve 2= Team Lead Approve 3=Owner Approve
       default: 0,
     },
-gstApplicableFlag: {
-  type: Number,
-  enum: [0, 1, 2], // 0 = not set yet (default) | 1 = rentalPayment.gstApplicable is authoritative | 2 = landOwners[].gstApplicable is authoritative
-  default: 0,
-},
+    gstApplicableFlag: {
+      type: Number,
+      enum: [0, 1, 2], // 0 = not set yet (default) | 1 = rentalPayment.gstApplicable is authoritative | 2 = landOwners[].gstApplicable is authoritative
+      default: 0,
+    },
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],
@@ -1120,20 +1119,20 @@ MediaSchema.pre("save", function () {
 // ─────────────────────────────────────────────────────────────
 // MediaSchema.pre("save", function () {
 //   if (!this.isNew) return;
- 
+
 //   const rp = this.rentalPayment;
 //   if (!rp) return;
- 
+
 //   const billingDateProvided = rp.nextBillingDate != null;
 //   if (billingDateProvided) return;
- 
+
 //   if (rp.lastBillPaidDate && rp.paymentFrequency) {
 //     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
 //     const monthsToAdd =
 //       rp.paymentFrequency === 7
 //         ? Number(rp.customPaymentFrequency) || 1
 //         : frequencyMap[rp.paymentFrequency] || 1;
- 
+
 //     const nextDate = new Date(rp.lastBillPaidDate);
 //     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
 //     rp.nextBillingDate = nextDate;
