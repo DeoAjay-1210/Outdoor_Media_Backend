@@ -8,7 +8,9 @@ const {
   getRentalDueListWithStats,
   verifyAgreementDoc,
   saveRentalDue,
-  GstAmountPaid
+  GstAmountPaid,
+  revertAgreementDocVerification,
+  revertRentalApproval
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -49,6 +51,8 @@ router.post(
 
 router.post("/verify-agreement", protect, verifyAgreementDoc);
 router.post("/gst-paid",protect, GstAmountPaid);
+router.post("/revert-Agreement",protect, revertAgreementDocVerification);
+router.post("/revert-Approval",protect, revertRentalApproval);
 
 
 

@@ -2062,3 +2062,340 @@ exports.GstAmountPaid = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
+
+
+
+
+
+// revert Process
+// ═══════════════════════════════════════════════════════════════
+// REVERT DOC VERIFICATION — deletes the latest verification record
+// for the given role, plus its verificationProgressHistory snapshot.
+// POST body: { mediaId, role }   role: 1=Staff, 2=TeamLead, 3=Owner
+// ═══════════════════════════════════════════════════════════════
+exports.revertAgreementDocVerification = async (req, res) => {
+  try {
+    const { mediaId, role } = req.body;
+    const userType = Number(role);
+
+    if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "A valid mediaId is required" });
+    }
+    if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
+      return res.status(400).json({
+        success: false,
+        message: "role must be 1 (Staff), 2 (Team Lead) or 3 (Owner)",
+      });
+    }
+
+    const media = await Media.findById(mediaId);
+    if (!media) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Media not found" });
+    }
+
+    if (!Array.isArray(media.agreementDocVerification) || !media.agreementDocVerification.length) {
+      return res.status(400).json({
+        success: false,
+        message: "No verification records found to revert",
+      });
+    }
+
+    // Find the latest verification record for this role
+    const match = media.agreementDocVerification
+      .map((rec, i) => ({ rec, i }))
+      .filter(({ rec }) => rec.verifiedByRole === userType && rec.isVerified)
+      .sort((a, b) => new Date(b.rec.verifiedAt) - new Date(a.rec.verifiedAt))[0];
+
+    if (!match) {
+      return res.status(400).json({
+        success: false,
+        message: `No verification record found for ${ROLE_LABEL[userType]} to revert`,
+      });
+    }
+
+    // ── VALIDATION: don't allow reverting a role if a higher-ranked
+    //    role has already verified this same cycle (mirrors the rank
+    //    block used when verifying) ──
+    const ROLE_RANK_LOCAL = { [ROLE.STAFF]: 1, [ROLE.TEAM_LEAD]: 2, [ROLE.OWNER]: 3 };
+    const cycle = match.rec.cycle;
+    const isSameCycle = (a, b) => {
+      if (!a || !b) return false;
+      return new Date(a).getTime() === new Date(b).getTime();
+    };
+    const higherBlocker = media.agreementDocVerification.find(
+      (h) =>
+        h.isVerified &&
+        isSameCycle(h.cycle, cycle) &&
+        ROLE_RANK_LOCAL[h.verifiedByRole] > ROLE_RANK_LOCAL[userType],
+    );
+    if (higherBlocker) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot revert ${ROLE_LABEL[userType]} — ${ROLE_LABEL[higherBlocker.verifiedByRole]} has already verified this cycle. Revert ${ROLE_LABEL[higherBlocker.verifiedByRole]} first.`,
+      });
+    }
+
+    // ── Delete the verification record ──
+    media.agreementDocVerification.splice(match.i, 1);
+    media.markModified("agreementDocVerification");
+
+    // ── Pop the matching progress snapshot (appended in same order
+    //    as verifications happen, so the last snapshot corresponds
+    //    to the latest verification action) ──
+    if (
+      Array.isArray(media.verificationProgressHistory) &&
+      media.verificationProgressHistory.length
+    ) {
+      media.verificationProgressHistory.pop();
+      media.markModified("verificationProgressHistory");
+    }
+
+    // ── Reset the live flag for this role ──
+    const flagKey = ROLE_FLAG_KEY[userType];
+    if (flagKey && media.agreementDocVerified) {
+      media.agreementDocVerified[flagKey] = false;
+      media.markModified("agreementDocVerified");
+    }
+
+    // ── Also remove the matching entry-linked history record, if any ──
+    if (Array.isArray(media.agreementDocVerificationHistory)) {
+      const pendingEntry = Array.isArray(media.rentalDueEntries)
+        ? [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3) ||
+          media.rentalDueEntries[media.rentalDueEntries.length - 1]
+        : null;
+
+      if (pendingEntry) {
+        const histMatch = media.agreementDocVerificationHistory
+          .map((h, i) => ({ h, i }))
+          .filter(
+            ({ h }) =>
+              h.verifiedByRole === userType &&
+              String(h.rentalDueId) === String(pendingEntry._id),
+          )
+          .sort((a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt))[0];
+
+        if (histMatch) {
+          media.agreementDocVerificationHistory.splice(histMatch.i, 1);
+          media.markModified("agreementDocVerificationHistory");
+        }
+      }
+    }
+
+    media.updatedAt = nowIST();
+    await media.save();
+
+    return res.status(200).json({
+      success: true,
+      message: `${ROLE_LABEL[userType]} document verification reverted successfully`,
+      data: {
+        mediaId: media._id,
+        role: userType,
+        roleLabel: ROLE_LABEL[userType],
+        agreementDocVerified: media.agreementDocVerified,
+        agreementDocVerification: media.agreementDocVerification,
+        verificationProgressHistory: media.verificationProgressHistory,
+        agreementDocVerificationHistory: media.agreementDocVerificationHistory,
+      },
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
+  }
+};
+
+
+// ═══════════════════════════════════════════════════════════════
+// REVERT APPROVAL — undoes a role's approval step for the active
+// (most recent) rental-due cycle on a media doc.
+// POST body: { mediaId, role }   role: 1=Staff, 2=TeamLead, 3=Owner
+// ═══════════════════════════════════════════════════════════════
+exports.revertRentalApproval = async (req, res) => {
+  try {
+    const { mediaId, role } = req.body;
+    const userType = Number(role);
+
+    if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "A valid mediaId is required" });
+    }
+    if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
+      return res.status(400).json({
+        success: false,
+        message: "role must be 1 (Staff), 2 (Team Lead) or 3 (Owner)",
+      });
+    }
+
+    const media = await Media.findById(mediaId);
+    if (!media) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Media not found" });
+    }
+
+    // ✅ FIX — actual schema field is `rentalDue`, not `rentalDueEntries`.
+    // Fall back to rentalDueEntries only if rentalDue truly isn't there,
+    // for backward compatibility with any doc saved oddly.
+    const entriesField = Array.isArray(media.rentalDue)
+      ? "rentalDue"
+      : Array.isArray(media.rentalDueEntries)
+        ? "rentalDueEntries"
+        : null;
+
+    if (!entriesField || !media[entriesField].length) {
+      return res.status(400).json({
+        success: false,
+        message: "No rental due entries found to revert",
+      });
+    }
+
+    const entries = media[entriesField];
+    const entry = entries[entries.length - 1];
+    let reverted = false;
+
+    // ── STAFF ──
+    if (userType === ROLE.STAFF) {
+      const laterStepsUntouched = entry.approvalSteps
+        ?.filter((s) => s.role !== ROLE.STAFF)
+        .every((s) => s.status === 1);
+
+      if (!laterStepsUntouched) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Cannot revert Staff approval — Team Lead/Owner has already acted on this entry",
+        });
+      }
+      if (media.rentalStatus !== 1) {
+        return res.status(400).json({
+          success: false,
+          message: "Staff approval hasn't happened yet for this cycle",
+        });
+      }
+
+      media.rentalStatus = 0;
+      reverted = true;
+
+      media[entriesField] = entries.slice(0, -1); // pop last entry
+      media.markModified(entriesField);
+
+      const yearLabel = getYearLabel(entry.dueDate);
+      const monthLabel = getMonthLabel(entry.dueDate);
+      const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+      const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+      if (monthBucket) {
+        monthBucket.entries = monthBucket.entries.filter(
+          (e) => String(e.rentalDueId) !== String(entry._id),
+        );
+        media.markModified("rentalDueHistory");
+      }
+    }
+
+    // ── TEAM LEAD ──
+    else if (userType === ROLE.TEAM_LEAD) {
+      if (media.rentalStatus !== 2) {
+        return res.status(400).json({
+          success: false,
+          message: "Team Lead approval hasn't happened yet for this cycle",
+        });
+      }
+
+      media.rentalStatus = 1;
+      reverted = true;
+
+      entry.approvalStatus = 1;
+      entry.currentPendingRole = ROLE.TEAM_LEAD;
+      entry.status = 1;
+      entry.agreementDocVerified = false;
+
+      const tlStep = entry.approvalSteps?.find((s) => s.role === ROLE.TEAM_LEAD);
+      if (tlStep) {
+        tlStep.userId = null;
+        tlStep.userName = "";
+        tlStep.approvedAt = null;
+        tlStep.status = 1;
+        tlStep.docVerified = false;
+      }
+      media.markModified(entriesField);
+    }
+
+    // ── OWNER ──
+    else if (userType === ROLE.OWNER) {
+      if (media.rentalStatus !== 3) {
+        return res.status(400).json({
+          success: false,
+          message: "Owner approval hasn't happened yet for this cycle",
+        });
+      }
+
+      media.rentalStatus = 2;
+      reverted = true;
+
+      entry.approvalStatus = 2;
+      entry.currentPendingRole = ROLE.OWNER;
+      entry.status = 2;
+      entry.agreementDocVerified = false;
+      entry.ownerApprovalDate = null;
+
+      const ownerStep = entry.approvalSteps?.find((s) => s.role === ROLE.OWNER);
+      if (ownerStep) {
+        ownerStep.userId = null;
+        ownerStep.userName = "";
+        ownerStep.approvedAt = null;
+        ownerStep.status = 1;
+        ownerStep.docVerified = false;
+      }
+      media.markModified(entriesField);
+
+      const prevEntry = entries.length > 1 ? entries[entries.length - 2] : null;
+      media.rentalPayment.nextBillingDate = entry.dueDate;
+      media.rentalPayment.lastBillPaidDate = prevEntry ? prevEntry.dueDate : null;
+      media.markModified("rentalPayment");
+
+      media.agreementDocVerified = { staff: true, teamLead: true, owner: false };
+      media.markModified("agreementDocVerified");
+    }
+
+    if (userType !== ROLE.STAFF) {
+      const yearLabel = getYearLabel(entry.dueDate);
+      const monthLabel = getMonthLabel(entry.dueDate);
+      const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+      const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+      const historyRecord = monthBucket?.entries.find(
+        (e) => String(e.rentalDueId) === String(entry._id),
+      );
+      if (historyRecord) {
+        historyRecord.approvalStatus = entry.approvalStatus;
+        historyRecord.updatedAt = nowIST();
+        media.markModified("rentalDueHistory");
+      }
+    }
+
+    media.updatedAt = nowIST();
+    await media.save();
+
+    return res.status(200).json({
+      success: true,
+      message: `${ROLE_LABEL[userType]} approval reverted successfully`,
+      data: {
+        mediaId: media._id,
+        role: userType,
+        roleLabel: ROLE_LABEL[userType],
+        reverted,
+        rentalStatus: media.rentalStatus,
+        rentalDueEntry: userType === ROLE.STAFF ? null : entry,
+        rentalPayment: media.rentalPayment,
+        agreementDocVerified: media.agreementDocVerified,
+      },
+    });
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Server error", error: err.message });
+  }
+};
