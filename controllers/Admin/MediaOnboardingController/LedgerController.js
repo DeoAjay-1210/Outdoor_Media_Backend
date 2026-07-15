@@ -2353,7 +2353,7 @@ const MONTH_NAMES = [
 // `media.withGst1Ledger` (withGst===1) has NO fixed slot cap — it's
 // upserted by rentalDueId instead, so it can grow to however many
 // distinct rentalDueIds exist.
-const MAX_LEDGER_SLOTS = 3;
+const MAX_LEDGER_SLOTS = 4;
 
 function getYearAndMonthName(date) {
   const d = new Date(date);
