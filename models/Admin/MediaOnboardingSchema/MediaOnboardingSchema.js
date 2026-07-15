@@ -183,6 +183,13 @@ const ledgerSchema = new mongoose.Schema({
   cycle: { type: Date, default: null },
   updatedBy: { type: String },
   updatedAt: { type: Date, default: null },
+    rentalDueId: { type: mongoose.Schema.Types.ObjectId, default: null },
+ 
+  // ✅ ADDED — the fixed ledger slot (0/1/2) a withGst===2 entry
+  // occupies in `media.ledger`. Only meaningful for withGst===2;
+  // left null for withGst===1 entries (which live in
+  // `media.withGst1Ledger` instead, identified by rentalDueId).
+  index: { type: Number, default: null },
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -204,6 +211,11 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     date: { type: Date },
     updatedAt: { type: Date, default: null },
     updatedBy: { type: String },
+    // ✅ ADDED — same reasoning as ledgerSchema.index above. Needed so
+    // getLedgerHistory / listMediaByLedger can reliably dedupe
+    // withGst===2 entries by slot when reading past months.
+    index: { type: Number, default: null },
+
   },
   { _id: false },
 );
@@ -641,7 +653,7 @@ const MediaSchema = new mongoose.Schema(
     },
 
     ledger: [ledgerSchema],
-
+withGst1Ledger: [ledgerSchema],
     ledgerHistory: [ledgerHistoryYearSchema],
 
     agreementDocVerification: [agreementDocVerificationSchema],
