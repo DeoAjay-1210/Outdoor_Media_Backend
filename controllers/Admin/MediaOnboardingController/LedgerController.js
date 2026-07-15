@@ -3050,9 +3050,18 @@ let overallGstPendingAmount = 0;
         : [];
      let gstPendingAmount = 0;
       if (fullGstBalanceHistory.length > 0) {
-        fullGstBalanceHistory.forEach((entry) => {
-          if (entry.isPaid === false && entry.paidAmount) {
-            const amount = Number(entry.paidAmount) || 0;
+        fullGstBalanceHistory.forEach((entry,index) => {
+         const isPaid = entry.isPaid;
+          const isPaidFalse = isPaid === false || isPaid === 'false' || isPaid === 0 || isPaid === '0';
+          
+          if (isPaidFalse) {
+            // Get the amount - could be paidAmount, amount, or gstAmount
+            const amount = Number(entry.paidAmount) || 
+                          Number(entry.amount) || 
+                          Number(entry.gstAmount) || 
+                          0;
+            
+            // console.log(`Adding amount: ${amount}`);
             gstPendingAmount += amount;
           }
         });
