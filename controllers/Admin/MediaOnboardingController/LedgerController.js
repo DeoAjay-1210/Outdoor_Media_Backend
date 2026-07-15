@@ -3231,22 +3231,88 @@ exports.getLedgerHistory = async (req, res) => {
             : `pos_${pos}`;
 
     // Helper function to get GST balance for a specific landOwnerId and month
-    const getGstBalanceDetails = (landOwnerId, month) => {
-      if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
+        const getGstBalanceDetails = (landOwnerId, month, rentalDueId, entryDate) => {
+      try {
+        if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
+          return { isPaid: false, gstAmount: 0 };
+        }
+
+        if (!landOwnerId) {
+          return { isPaid: false, gstAmount: 0 };
+        }
+
+        // Try multiple matching strategies
+        let gstEntry = null;
+
+        // Strategy 1: Match by landOwnerId and month (primary)
+        gstEntry = fullGstBalanceHistory.find(
+          (entry) => 
+            entry && 
+            String(entry.landOwnerId) === String(landOwnerId) && 
+            entry.month === month
+        );
+
+        // Strategy 2: If not found, try matching by rentalDueId
+        if (!gstEntry && rentalDueId) {
+          gstEntry = fullGstBalanceHistory.find(
+            (entry) => 
+              entry && 
+              entry.rentalDueId && 
+              String(entry.rentalDueId) === String(rentalDueId)
+          );
+        }
+
+        // Strategy 3: If still not found, try matching by landOwnerId and date range
+        if (!gstEntry && entryDate) {
+          const entryDateObj = new Date(entryDate);
+          const entryMonth = entryDateObj.getMonth();
+          const entryYear = entryDateObj.getFullYear();
+          
+          gstEntry = fullGstBalanceHistory.find(
+            (entry) => 
+              entry && 
+              entry.date && 
+              String(entry.landOwnerId) === String(landOwnerId) &&
+              new Date(entry.date).getMonth() === entryMonth &&
+              new Date(entry.date).getFullYear() === entryYear
+          );
+        }
+
+        // Strategy 4: Last resort - match by month only (if there's only one entry for that month)
+        if (!gstEntry) {
+          const monthMatches = fullGstBalanceHistory.filter(
+            (entry) => entry && entry.month === month
+          );
+          
+          if (monthMatches.length === 1) {
+            gstEntry = monthMatches[0];
+          }
+        }
+
+        // Log for debugging
+        if (gstEntry) {
+          console.log(`✅ Found GST entry for landOwner ${landOwnerId}, month ${month}:`, {
+            gstAmount: gstEntry.gstAmount,
+            isPaid: gstEntry.isPaid
+          });
+        } else {
+          console.log(`❌ No GST entry found for landOwner ${landOwnerId}, month ${month}`);
+          console.log('Available GST entries:', fullGstBalanceHistory.map(e => ({
+            landOwnerId: e.landOwnerId,
+            month: e.month,
+            gstAmount: e.gstAmount,
+            isPaid: e.isPaid
+          })));
+        }
+
+        return {
+          isPaid: gstEntry ? (gstEntry.isPaid || false) : false,
+          gstAmount: gstEntry ? (gstEntry.gstAmount || 0) : 0
+        };
+      } catch (gstError) {
+        console.error("Error getting GST balance details:", gstError);
         return { isPaid: false, gstAmount: 0 };
       }
-
-      // Find the GST balance entry for this landOwner and month
-      const gstEntry = fullGstBalanceHistory.find(
-        (entry) => 
-          String(entry.landOwnerId) === String(landOwnerId) && 
-          entry.month === month
-      );
-
-      return {
-        isPaid: gstEntry ? gstEntry.isPaid || false : false,
-        gstAmount: gstEntry ? gstEntry.gstAmount || 0 : 0
-      };
     };
 
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
@@ -3289,9 +3355,14 @@ exports.getLedgerHistory = async (req, res) => {
             nextBillingDate: entry.nextBillingDate,
           })),
 
-          withGst1Ledger: latestGst1.map((entry) => {
-            // Get GST balance details for this entry
-            const gstDetails = getGstBalanceDetails(entry.landOwnerId, entry.month);
+           withGst1Ledger: latestGst1.map((entry) => {
+            // 🔥 Pass more parameters for better matching
+            const gstDetails = getGstBalanceDetails(
+              entry.landOwnerId, 
+              entry.month || monthEntry.month,
+              entry.rentalDueId,
+              entry.date || entry.createdAt
+            );
             
             return {
               landOwnerId: entry.landOwnerId,
@@ -3300,7 +3371,7 @@ exports.getLedgerHistory = async (req, res) => {
               date: entry.date,
               status: entry.status,
               withGst: entry.withGst,
-              month: entry.month,
+              month: entry.month || monthEntry.month,
               cycle: entry.cycle,
               rentalDueId: entry.rentalDueId,
               index: entry.index,
@@ -3311,7 +3382,7 @@ exports.getLedgerHistory = async (req, res) => {
               paymentFrequency: entry.paymentFrequency,
               netPayable: entry.netPayable,
               nextBillingDate: entry.nextBillingDate,
-              // ✅ Added GST balance details
+              // 🔥 GST balance details with correct values
               isPaid: gstDetails.isPaid,
               gstAmount: gstDetails.gstAmount
             };
