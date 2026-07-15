@@ -2863,7 +2863,7 @@ exports.listMediaByLedger = async (req, res) => {
         .limit(pageSize),
       Media.countDocuments(filter),
     ]);
-
+let overallGstPendingAmount = 0;
     const mediaListData = results.map((media) => {
       const mediaObj = media.toObject();
 
@@ -3048,6 +3048,18 @@ exports.listMediaByLedger = async (req, res) => {
       const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
         ? mediaObj.gstBalanceHistory
         : [];
+     let gstPendingAmount = 0;
+      if (fullGstBalanceHistory.length > 0) {
+        fullGstBalanceHistory.forEach((entry) => {
+          if (entry.isPaid === false && entry.paidAmount) {
+            const amount = Number(entry.paidAmount) || 0;
+            gstPendingAmount += amount;
+          }
+        });
+      }
+      
+      // Add to overall total
+      overallGstPendingAmount += gstPendingAmount;
       let gstPayment = false;
       if (fullGstBalanceHistory.length > 0) {
         const hasEmptyUtr = fullGstBalanceHistory.some(
@@ -3070,6 +3082,7 @@ exports.listMediaByLedger = async (req, res) => {
         rentalDue: rentalDueWithApproval,
         gstPayment: gstPayment,
         gstBalanceHistory: fullGstBalanceHistory,
+        gstPendingAmount: gstPendingAmount, 
       };
     });
 
@@ -3081,6 +3094,7 @@ exports.listMediaByLedger = async (req, res) => {
         count: pageSize,
         totalCount,
         totalPages: Math.ceil(totalCount / pageSize),
+         overallGstPendingAmount: overallGstPendingAmount, 
         mediaList: mediaListData,
       },
       200,
