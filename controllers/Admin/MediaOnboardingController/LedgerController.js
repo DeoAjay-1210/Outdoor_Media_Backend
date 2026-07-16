@@ -397,7 +397,6 @@
 
 //     await media.save();
 
-
 //     return successResponse(
 //       res,
 //       "Ledger entry created successfully",
@@ -1416,7 +1415,6 @@
 // //   }
 // // };
 
-
 // const mongoose = require("mongoose");
 // const { successResponse, errorResponse } = require("../../../utils/response");
 // const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
@@ -2105,8 +2103,6 @@
 //   }
 // };
 
-
-
 // exports.getLedgerHistory = async (req, res) => {
 //   try {
 //     const { mediaId, year, month } = req.query;
@@ -2307,22 +2303,6 @@
 //     );
 //   }
 // };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
@@ -2607,7 +2587,9 @@ exports.createLedgerEntry = async (req, res) => {
         // landOwnerId + same month.
         const existingIndex = media.withGst1Ledger.findIndex((existing) => {
           if (item.rentalDueId) {
-            return String(existing.rentalDueId || "") === String(item.rentalDueId);
+            return (
+              String(existing.rentalDueId || "") === String(item.rentalDueId)
+            );
           }
           return (
             String(existing.landOwnerId || "") ===
@@ -2734,7 +2716,7 @@ exports.listMediaByLedger = async (req, res) => {
 
     if (status !== undefined && status !== null && status !== "") {
       const statusNum = Number(status);
-      if (![0, 1,2,3].includes(statusNum)) {
+      if (![0, 1, 2, 3].includes(statusNum)) {
         return errorResponse(
           res,
           "status must be one of 0 (Not approve), 1 (Approve)",
@@ -2755,22 +2737,26 @@ exports.listMediaByLedger = async (req, res) => {
           { ledger: { $size: 0 } },
           { "ledger.status": 0 },
         ];
-      }else if (statusNum === 2) {
-    // GST not paid: at least one gstBalanceHistory entry with isPaid: false
+      } else if (statusNum === 2) {
+        // GST not paid: at least one gstBalanceHistory entry with isPaid: false
+        filter["gstBalanceHistory"] = {
+          $exists: true,
+          $not: { $size: 0 },
+          $elemMatch: { isPaid: false },
+        };
+      } else if (statusNum === 3) {
+    // All GST entries should have isPaid: true and utrNumber not empty
     filter["gstBalanceHistory"] = {
-      $exists: true,
-      $not: { $size: 0 },
-      $elemMatch: { isPaid: false },
+        $exists: true,
+        $not: { $size: 0 },
+        $all: [
+            { $elemMatch: { isPaid: true, utrNumber: { $ne: "" } } }
+        ]
     };
-  } else if (statusNum === 3) {
-    // GST paid: at least one gstBalanceHistory entry with isPaid: true
-    filter["gstBalanceHistory"] = {
-      $exists: true,
-      $not: { $size: 0 },
-      $elemMatch: { isPaid: true },
-    };
-  }
-      
+    // Additional check: no entry with isPaid: false or empty utrNumber
+    filter["gstBalanceHistory.isPaid"] = { $ne: false };
+    filter["gstBalanceHistory.utrNumber"] = { $ne: "" };
+}
     }
 
     const validateMonthYear = (monthYear) => {
@@ -2821,8 +2807,18 @@ exports.listMediaByLedger = async (req, res) => {
                   months: {
                     $elemMatch: {
                       month: [
-                        "January", "February", "March", "April", "May", "June",
-                        "July", "August", "September", "October", "November", "December",
+                        "January",
+                        "February",
+                        "March",
+                        "April",
+                        "May",
+                        "June",
+                        "July",
+                        "August",
+                        "September",
+                        "October",
+                        "November",
+                        "December",
                       ][startDate.getUTCMonth()],
                     },
                   },
@@ -2863,7 +2859,7 @@ exports.listMediaByLedger = async (req, res) => {
         .limit(pageSize),
       Media.countDocuments(filter),
     ]);
-let overallGstPendingAmount = 0;
+    let overallGstPendingAmount = 0;
     const mediaListData = results.map((media) => {
       const mediaObj = media.toObject();
 
@@ -2892,7 +2888,8 @@ let overallGstPendingAmount = 0;
       const now = new Date();
       const isCurrentCalendarMonth =
         requestedMonthRange &&
-        requestedMonthRange.startDate.getUTCFullYear() === now.getUTCFullYear() &&
+        requestedMonthRange.startDate.getUTCFullYear() ===
+          now.getUTCFullYear() &&
         requestedMonthRange.startDate.getUTCMonth() === now.getUTCMonth();
 
       let gst2SourceEntries;
@@ -2901,8 +2898,18 @@ let overallGstPendingAmount = 0;
 
       if (requestedMonthRange) {
         const monthNames = [
-          "January", "February", "March", "April", "May", "June",
-          "July", "August", "September", "October", "November", "December",
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December",
         ];
         const requestedMonthName =
           monthNames[requestedMonthRange.startDate.getUTCMonth()];
@@ -2979,7 +2986,8 @@ let overallGstPendingAmount = 0;
       let latestLedger = [];
       let withGst1Ledger = [];
 
-      const sourcedFromLiveLedger = !requestedMonthRange || isCurrentCalendarMonth;
+      const sourcedFromLiveLedger =
+        !requestedMonthRange || isCurrentCalendarMonth;
 
       if (gst2SourceEntries.length > 0) {
         const monthScoped = requestedMonthRange
@@ -3048,25 +3056,30 @@ let overallGstPendingAmount = 0;
       const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
         ? mediaObj.gstBalanceHistory
         : [];
-     let gstPendingAmount = 0;
+      let gstPendingAmount = 0;
       if (fullGstBalanceHistory.length > 0) {
-        fullGstBalanceHistory.forEach((entry,index) => {
-         const isPaid = entry.isPaid;
-          const isPaidFalse = isPaid === false || isPaid === 'false' || isPaid === 0 || isPaid === '0';
-          
+        fullGstBalanceHistory.forEach((entry, index) => {
+          const isPaid = entry.isPaid;
+          const isPaidFalse =
+            isPaid === false ||
+            isPaid === "false" ||
+            isPaid === 0 ||
+            isPaid === "0";
+
           if (isPaidFalse) {
             // Get the amount - could be paidAmount, amount, or gstAmount
-            const amount = Number(entry.paidAmount) || 
-                          Number(entry.amount) || 
-                          Number(entry.gstAmount) || 
-                          0;
-            
+            const amount =
+              Number(entry.paidAmount) ||
+              Number(entry.amount) ||
+              Number(entry.gstAmount) ||
+              0;
+
             // console.log(`Adding amount: ${amount}`);
             gstPendingAmount += amount;
           }
         });
       }
-      
+
       // Add to overall total
       overallGstPendingAmount += gstPendingAmount;
       let gstPayment = false;
@@ -3087,11 +3100,13 @@ let overallGstPendingAmount = 0;
         // month (every re-save included) — only populated when
         // dateRange/currentMonth is passed. `ledger`/`withGst1Ledger`
         // above stay as the "current state" summary.
-        monthHistoryEntries: requestedMonthRange ? monthHistoryEntries : undefined,
+        monthHistoryEntries: requestedMonthRange
+          ? monthHistoryEntries
+          : undefined,
         rentalDue: rentalDueWithApproval,
         gstPayment: gstPayment,
         gstBalanceHistory: fullGstBalanceHistory,
-        gstPendingAmount: gstPendingAmount, 
+        gstPendingAmount: gstPendingAmount,
       };
     });
 
@@ -3103,7 +3118,7 @@ let overallGstPendingAmount = 0;
         count: pageSize,
         totalCount,
         totalPages: Math.ceil(totalCount / pageSize),
-         overallGstPendingAmount: overallGstPendingAmount, 
+        overallGstPendingAmount: overallGstPendingAmount,
         mediaList: mediaListData,
       },
       200,
@@ -3118,7 +3133,6 @@ let overallGstPendingAmount = 0;
     );
   }
 };
-
 
 exports.getLedgerHistory = async (req, res) => {
   try {
@@ -3184,7 +3198,7 @@ exports.getLedgerHistory = async (req, res) => {
     let gstPayment = false;
     if (fullGstBalanceHistory.length > 0) {
       const hasEmptyUtr = fullGstBalanceHistory.some(
-        (entry) => !entry.utrNumber || entry.utrNumber.trim() === ""
+        (entry) => !entry.utrNumber || entry.utrNumber.trim() === "",
       );
       gstPayment = hasEmptyUtr;
     }
@@ -3231,7 +3245,12 @@ exports.getLedgerHistory = async (req, res) => {
             : `pos_${pos}`;
 
     // Helper function to get GST balance for a specific landOwnerId and month
-        const getGstBalanceDetails = (landOwnerId, month, rentalDueId, entryDate) => {
+    const getGstBalanceDetails = (
+      landOwnerId,
+      month,
+      rentalDueId,
+      entryDate,
+    ) => {
       try {
         if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
           return { isPaid: false, gstAmount: 0 };
@@ -3246,19 +3265,19 @@ exports.getLedgerHistory = async (req, res) => {
 
         // Strategy 1: Match by landOwnerId and month (primary)
         gstEntry = fullGstBalanceHistory.find(
-          (entry) => 
-            entry && 
-            String(entry.landOwnerId) === String(landOwnerId) && 
-            entry.month === month
+          (entry) =>
+            entry &&
+            String(entry.landOwnerId) === String(landOwnerId) &&
+            entry.month === month,
         );
 
         // Strategy 2: If not found, try matching by rentalDueId
         if (!gstEntry && rentalDueId) {
           gstEntry = fullGstBalanceHistory.find(
-            (entry) => 
-              entry && 
-              entry.rentalDueId && 
-              String(entry.rentalDueId) === String(rentalDueId)
+            (entry) =>
+              entry &&
+              entry.rentalDueId &&
+              String(entry.rentalDueId) === String(rentalDueId),
           );
         }
 
@@ -3267,23 +3286,23 @@ exports.getLedgerHistory = async (req, res) => {
           const entryDateObj = new Date(entryDate);
           const entryMonth = entryDateObj.getMonth();
           const entryYear = entryDateObj.getFullYear();
-          
+
           gstEntry = fullGstBalanceHistory.find(
-            (entry) => 
-              entry && 
-              entry.date && 
+            (entry) =>
+              entry &&
+              entry.date &&
               String(entry.landOwnerId) === String(landOwnerId) &&
               new Date(entry.date).getMonth() === entryMonth &&
-              new Date(entry.date).getFullYear() === entryYear
+              new Date(entry.date).getFullYear() === entryYear,
           );
         }
 
         // Strategy 4: Last resort - match by month only (if there's only one entry for that month)
         if (!gstEntry) {
           const monthMatches = fullGstBalanceHistory.filter(
-            (entry) => entry && entry.month === month
+            (entry) => entry && entry.month === month,
           );
-          
+
           if (monthMatches.length === 1) {
             gstEntry = monthMatches[0];
           }
@@ -3291,30 +3310,38 @@ exports.getLedgerHistory = async (req, res) => {
 
         // Log for debugging
         if (gstEntry) {
-          console.log(`✅ Found GST entry for landOwner ${landOwnerId}, month ${month}:`, {
-            gstAmount: gstEntry.gstAmount,
-            isPaid: gstEntry.isPaid
-          });
+          console.log(
+            `✅ Found GST entry for landOwner ${landOwnerId}, month ${month}:`,
+            {
+              gstAmount: gstEntry.gstAmount,
+              isPaid: gstEntry.isPaid,
+            },
+          );
         } else {
-          console.log(`❌ No GST entry found for landOwner ${landOwnerId}, month ${month}`);
-          console.log('Available GST entries:', fullGstBalanceHistory.map(e => ({
-            landOwnerId: e.landOwnerId,
-            month: e.month,
-            gstAmount: e.gstAmount,
-            isPaid: e.isPaid
-          })));
+          console.log(
+            `❌ No GST entry found for landOwner ${landOwnerId}, month ${month}`,
+          );
+          console.log(
+            "Available GST entries:",
+            fullGstBalanceHistory.map((e) => ({
+              landOwnerId: e.landOwnerId,
+              month: e.month,
+              gstAmount: e.gstAmount,
+              isPaid: e.isPaid,
+            })),
+          );
         }
 
         return {
-          isPaid: gstEntry ? (gstEntry.isPaid || false) : false,
-          gstAmount: gstEntry ? (gstEntry.gstAmount || 0) : 0
+          isPaid: gstEntry ? gstEntry.isPaid || false : false,
+          gstAmount: gstEntry ? gstEntry.gstAmount || 0 : 0,
         };
       } catch (gstError) {
         console.error("Error getting GST balance details:", gstError);
         return { isPaid: false, gstAmount: 0 };
       }
     };
-   const getGstBalanceHistoryForMonth = (month) => {
+    const getGstBalanceHistoryForMonth = (month) => {
       if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
         return [];
       }
@@ -3322,7 +3349,10 @@ exports.getLedgerHistory = async (req, res) => {
       // Filter GST balance history by month
       return fullGstBalanceHistory.filter((entry) => {
         if (!entry || !entry.dueMonth) return false;
-        return entry.dueMonth && entry.dueMonth.toLowerCase().includes(month.toLowerCase());
+        return (
+          entry.dueMonth &&
+          entry.dueMonth.toLowerCase().includes(month.toLowerCase())
+        );
       });
     };
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
@@ -3330,8 +3360,12 @@ exports.getLedgerHistory = async (req, res) => {
       months: yearEntry.months.map((monthEntry) => {
         const allEntries = monthEntry.entries || [];
 
-        const withGst2Entries = allEntries.filter((entry) => entry.withGst === 2);
-        const withGst1Entries = allEntries.filter((entry) => entry.withGst === 1);
+        const withGst2Entries = allEntries.filter(
+          (entry) => entry.withGst === 2,
+        );
+        const withGst1Entries = allEntries.filter(
+          (entry) => entry.withGst === 1,
+        );
 
         const sortByUpdatedAt = (entries) =>
           [...entries].sort(
@@ -3341,7 +3375,9 @@ exports.getLedgerHistory = async (req, res) => {
         // gst2: latest entry per ledger slot. gst1: latest entry per rentalDueId.
         const latestGst2 = dedupeByKey(withGst2Entries, gst2Key);
         const latestGst1 = dedupeByKey(withGst1Entries, gst1Key);
-const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month);
+        const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(
+          monthEntry.month,
+        );
         return {
           month: monthEntry.month,
 
@@ -3365,15 +3401,15 @@ const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month)
             nextBillingDate: entry.nextBillingDate,
           })),
 
-           withGst1Ledger: latestGst1.map((entry) => {
+          withGst1Ledger: latestGst1.map((entry) => {
             // 🔥 Pass more parameters for better matching
             const gstDetails = getGstBalanceDetails(
-              entry.landOwnerId, 
+              entry.landOwnerId,
               entry.month || monthEntry.month,
               entry.rentalDueId,
-              entry.date || entry.createdAt
+              entry.date || entry.createdAt,
             );
-            
+
             return {
               landOwnerId: entry.landOwnerId,
               landOwnerName: entry.landOwnerName,
@@ -3394,7 +3430,7 @@ const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month)
               nextBillingDate: entry.nextBillingDate,
               // 🔥 GST balance details with correct values
               isPaid: gstDetails.isPaid,
-              gstAmount: gstDetails.gstAmount
+              gstAmount: gstDetails.gstAmount,
             };
           }),
 
@@ -3403,7 +3439,7 @@ const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month)
             ...entry,
             mediaName: media.mediaName,
           })),
-          gstBalanceHistory: gstBalanceHistoryForMonth
+          gstBalanceHistory: gstBalanceHistoryForMonth,
         };
       }),
     }));
@@ -3419,7 +3455,7 @@ const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month)
         city: media.city,
         rentalPayment: media.rentalPayment,
         landOwners: media.landOwners,
-        agreement:media.agreement,
+        agreement: media.agreement,
         currentRentalPayment: {
           paymentFrequency: media.rentalPayment.paymentFrequency,
           netPayable: media.rentalPayment.netPayable,
