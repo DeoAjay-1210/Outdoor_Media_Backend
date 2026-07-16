@@ -364,6 +364,7 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
     months = APPRAISAL_FREQUENCY_MONTHS[frequency];
   }
 
+  
   // candidateDate is still computed in case you want to use/display it,
   // but it no longer blocks validation even if it falls on/after endDate.
   const candidateDate = new Date(startDate);
