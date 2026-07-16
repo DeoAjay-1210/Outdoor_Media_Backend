@@ -10,7 +10,7 @@ const FREQ_LABEL = {
 const STATUS_LABEL = {
   1: "Active",
   2: "Expire Soon",
-  3: "Overdue",
+  3: "Pay Overdue",
 };
 
 module.exports = { FREQ_LABEL, STATUS_LABEL };

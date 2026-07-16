@@ -3314,7 +3314,17 @@ exports.getLedgerHistory = async (req, res) => {
         return { isPaid: false, gstAmount: 0 };
       }
     };
+   const getGstBalanceHistoryForMonth = (month) => {
+      if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
+        return [];
+      }
 
+      // Filter GST balance history by month
+      return fullGstBalanceHistory.filter((entry) => {
+        if (!entry || !entry.dueMonth) return false;
+        return entry.dueMonth && entry.dueMonth.toLowerCase().includes(month.toLowerCase());
+      });
+    };
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
       ...yearEntry,
       months: yearEntry.months.map((monthEntry) => {
@@ -3331,7 +3341,7 @@ exports.getLedgerHistory = async (req, res) => {
         // gst2: latest entry per ledger slot. gst1: latest entry per rentalDueId.
         const latestGst2 = dedupeByKey(withGst2Entries, gst2Key);
         const latestGst1 = dedupeByKey(withGst1Entries, gst1Key);
-
+const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month);
         return {
           month: monthEntry.month,
 
@@ -3393,6 +3403,7 @@ exports.getLedgerHistory = async (req, res) => {
             ...entry,
             mediaName: media.mediaName,
           })),
+          gstBalanceHistory: gstBalanceHistoryForMonth
         };
       }),
     }));
@@ -3415,7 +3426,7 @@ exports.getLedgerHistory = async (req, res) => {
           nextBillingDate: media.rentalPayment.nextBillingDate,
         },
         ledgerHistory: transformedLedgerHistory,
-        gstBalanceHistory: media.gstBalanceHistory,
+        // gstBalanceHistory: media.gstBalanceHistory,
         gstPayment: gstPayment,
       },
       200,
