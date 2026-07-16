@@ -1745,14 +1745,15 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
 //   return appraisal;
 // };
 const getFrequencyMonths = (frequency, customMonths) => {
-  const EXTRA_BUFFER_MONTHS = 1; // every frequency gets +1 month added
+  // const EXTRA_BUFFER_MONTHS = 1; // every frequency gets +1 month added
 
   if (Number(frequency) === 4) {
-    return (Number(customMonths || 0) || 1) + EXTRA_BUFFER_MONTHS;
+    return (Number(customMonths || 0) || 1)
+    //  + EXTRA_BUFFER_MONTHS;
   }
   return (
-    (APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12) +
-    EXTRA_BUFFER_MONTHS
+    (APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12) 
+    // + EXTRA_BUFFER_MONTHS
   );
 };
 const autoScheduleFutureAppraisalEntries = (history, userName) => {
