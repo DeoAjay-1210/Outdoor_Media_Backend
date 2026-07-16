@@ -2650,6 +2650,7 @@ exports.createLedgerEntry = async (req, res) => {
         paymentFrequency: media.rentalPayment.paymentFrequency,
         netPayable: media.rentalPayment.netPayable,
         nextBillingDate: media.rentalPayment.nextBillingDate,
+          lastBillPaidDate: media.rentalPayment.lastBillPaidDate,
         utrNumber: savedLedgerEntry.utrNumber,
         date: savedLedgerEntry.date,
         updatedBy: req.user?.userName || "Admin",
@@ -2885,13 +2886,26 @@ exports.listMediaByLedger = async (req, res) => {
       // Either way, the FULL list of everything saved during the
       // requested month (including every re-save) is also returned
       // separately as `monthHistoryEntries`, so nothing is lost.
-      const now = new Date();
-      const isCurrentCalendarMonth =
+      // const now = new Date();
+        const siteLiveCycleDate =
+        mediaObj.rentalPayment?.nextBillingDate ||
+        mediaObj.rentalPayment?.lastBillPaidDate;
+      // const isCurrentCalendarMonth =
+      //   requestedMonthRange &&
+      //   requestedMonthRange.startDate.getUTCFullYear() ===
+      //     now.getUTCFullYear() &&
+      //   requestedMonthRange.startDate.getUTCMonth() === now.getUTCMonth();
+  const isSiteCurrentLiveCycleMonth =
         requestedMonthRange &&
-        requestedMonthRange.startDate.getUTCFullYear() ===
-          now.getUTCFullYear() &&
-        requestedMonthRange.startDate.getUTCMonth() === now.getUTCMonth();
-
+        siteLiveCycleDate &&
+        (() => {
+          const d = new Date(siteLiveCycleDate);
+          return (
+            d.getUTCFullYear() ===
+              requestedMonthRange.startDate.getUTCFullYear() &&
+            d.getUTCMonth() === requestedMonthRange.startDate.getUTCMonth()
+          );
+        })();
       let gst2SourceEntries;
       let gst1SourceEntries;
       let monthHistoryEntries = [];
@@ -2918,17 +2932,34 @@ exports.listMediaByLedger = async (req, res) => {
         );
 
         const yearBucket = (mediaObj.ledgerHistory || []).find(
-          (y) => y.year === requestedYear,
+           (y) => String(y.year).trim() === requestedYear,
         );
         const monthBucket = yearBucket?.months.find(
-          (m) => m.month === requestedMonthName,
+         (m) =>
+            String(m.month).trim().toLowerCase() ===
+            requestedMonthName.toLowerCase(),
         );
 
         monthHistoryEntries = [...(monthBucket?.entries || [])].sort(
           (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
         );
 
-        if (isCurrentCalendarMonth) {
+      //   if (isCurrentCalendarMonth) {
+      //     gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
+      //     gst1SourceEntries = mediaObj.withGst1Ledger || [];
+      //   } else {
+      //     const allMonthEntries = monthBucket?.entries || [];
+      //     gst2SourceEntries = allMonthEntries.filter((e) => e.withGst === 2);
+      //     gst1SourceEntries = allMonthEntries.filter((e) => e.withGst === 1);
+      //   }
+      // } else {
+      //   // Live arrays. `ledger` is a fixed max-3-slot array (indexes
+      //   // 0/1/2), possibly sparse — filter out empty/null slots.
+      //   // `withGst1Ledger` is already unique per rentalDueId by design.
+      //   gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
+      //   gst1SourceEntries = mediaObj.withGst1Ledger || [];
+      // }
+   if (isSiteCurrentLiveCycleMonth) {
           gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
           gst1SourceEntries = mediaObj.withGst1Ledger || [];
         } else {
@@ -2937,13 +2968,9 @@ exports.listMediaByLedger = async (req, res) => {
           gst1SourceEntries = allMonthEntries.filter((e) => e.withGst === 1);
         }
       } else {
-        // Live arrays. `ledger` is a fixed max-3-slot array (indexes
-        // 0/1/2), possibly sparse — filter out empty/null slots.
-        // `withGst1Ledger` is already unique per rentalDueId by design.
         gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
         gst1SourceEntries = mediaObj.withGst1Ledger || [];
       }
-
       // Best-effort dedupe for the PAST-month/ledgerHistory case only.
       // gst2 entries are keyed by `index` (ledger slot). gst1 entries
       // are keyed by `rentalDueId` (falls back to landOwnerId+month).
@@ -2987,7 +3014,7 @@ exports.listMediaByLedger = async (req, res) => {
       let withGst1Ledger = [];
 
       const sourcedFromLiveLedger =
-        !requestedMonthRange || isCurrentCalendarMonth;
+        !requestedMonthRange || isSiteCurrentLiveCycleMonth;
 
       if (gst2SourceEntries.length > 0) {
         const monthScoped = requestedMonthRange
@@ -3398,6 +3425,7 @@ exports.getLedgerHistory = async (req, res) => {
             mediaName: media.mediaName,
             paymentFrequency: entry.paymentFrequency,
             netPayable: entry.netPayable,
+            lastBillPaidDate: entry.lastBillPaidDate,
             nextBillingDate: entry.nextBillingDate,
           })),
 
@@ -3427,6 +3455,7 @@ exports.getLedgerHistory = async (req, res) => {
               mediaName: media.mediaName,
               paymentFrequency: entry.paymentFrequency,
               netPayable: entry.netPayable,
+               lastBillPaidDate: entry.lastBillPaidDate,
               nextBillingDate: entry.nextBillingDate,
               // 🔥 GST balance details with correct values
               isPaid: gstDetails.isPaid,
@@ -3459,6 +3488,7 @@ exports.getLedgerHistory = async (req, res) => {
         currentRentalPayment: {
           paymentFrequency: media.rentalPayment.paymentFrequency,
           netPayable: media.rentalPayment.netPayable,
+           lastBillPaidDate: media.rentalPayment.lastBillPaidDate,
           nextBillingDate: media.rentalPayment.nextBillingDate,
         },
         ledgerHistory: transformedLedgerHistory,

@@ -769,6 +769,37 @@ const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
 //   mediaData.appraisal = appraisal;
 //   return mediaData;
 // };
+// const buildAppraisalScheduleFromAnchor = ({
+//   anchorDate,
+//   frequency,
+//   customFrequencyMonths,
+//   type,
+//   percentage,
+//   fixedAmount,
+//   baseRent,
+//   userName,
+// }) => {
+//   let history = [
+//     {
+//       appraisalDate: toDateOnly(anchorDate),
+//       type,
+//       percentage: percentage || 0,
+//       fixedAmount: Number(fixedAmount || 0),
+//       frequency: Number(frequency),
+//       customFrequencyMonths: Number(customFrequencyMonths || 0),
+//       previousRent: Number(baseRent || 0),
+//       appraisalAmount: 0,
+//       newRent: 0,
+//       updatedBy: userName,
+//       updatedAt: nowIST(),
+//     },
+//   ];
+
+//   history = cascadeHistory(history, Number(baseRent || 0));
+//   history = autoScheduleFutureAppraisalEntries(history, userName);
+
+//   return history;
+// };
 const buildAppraisalScheduleFromAnchor = ({
   anchorDate,
   frequency,
@@ -789,18 +820,21 @@ const buildAppraisalScheduleFromAnchor = ({
       customFrequencyMonths: Number(customFrequencyMonths || 0),
       previousRent: Number(baseRent || 0),
       appraisalAmount: 0,
-      newRent: 0,
+      newRent: Number(baseRent || 0), // ✅ was 0 — anchor entry must stay FLAT, not bumped
       updatedBy: userName,
       updatedAt: nowIST(),
     },
   ];
 
-  history = cascadeHistory(history, Number(baseRent || 0));
+  // ❌ removed: history = cascadeHistory(history, Number(baseRent || 0));
+  // cascadeHistory() applies the appraisal % to every entry including
+  // the anchor itself — that's what was bumping 50K→60K ON 01.06.2025
+  // instead of only on the next appraisal date.
+
   history = autoScheduleFutureAppraisalEntries(history, userName);
 
   return history;
 };
-
 const handleAppraisalLogic = async (
   mediaData,
   existingMedia,
@@ -863,16 +897,32 @@ const handleAppraisalLogic = async (
         frequency: Number(appraisal.frequency),
         customFrequencyMonths: Number(appraisal.customFrequencyMonths || 0),
         previousRent: netPayable,
-        appraisalAmount: 0,
-        newRent: 0,
+        appraisalAmount: 0,      // ✅ seed/anchor entry never bumps itself
+        newRent: netPayable,     // ✅ flat — same as previousRent
         updatedBy: userName,
         updatedAt: nowIST(),
       });
-      appraisal.history = cascadeHistory(appraisal.history, netPayable);
+
+      // ❌ REMOVED: appraisal.history = cascadeHistory(appraisal.history, netPayable);
+      // cascadeHistory() applies the % increase to the seed entry itself —
+      // that's exactly what was turning 50K → 55K ON the seed/lastAppraisalDate,
+      // instead of only on the NEXT appraisal date.
+
       appraisal.history = autoScheduleFutureAppraisalEntries(
         appraisal.history,
         userName,
       );
+
+      // ✅ safety net — force the seed entry back to flat no matter what
+      // autoScheduleFutureAppraisalEntries does internally to index 0
+      if (
+        appraisal.history[0] &&
+        dayKey(appraisal.history[0].appraisalDate) === dayKey(seedDate)
+      ) {
+        appraisal.history[0].previousRent = netPayable;
+        appraisal.history[0].appraisalAmount = 0;
+        appraisal.history[0].newRent = netPayable;
+      }
 
       const lastEntry = appraisal.history[appraisal.history.length - 1];
       if (lastEntry)
@@ -1103,7 +1153,10 @@ const hasAnyExistingAppraisalHistory = history.length > 0;
   }
 
   history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
-
+ if (history.length > 0) {
+    history[0].appraisalAmount = 0;
+    history[0].newRent = history[0].previousRent;
+  }
   const futureDates = history.filter((h) => dayKey(h.appraisalDate) > today);
   const todayEntries = history.filter((h) => dayKey(h.appraisalDate) === today);
 
@@ -3164,7 +3217,6 @@ const updateAgreement = async (req, res) => {
     );
   }
 };
-// Media List
 // const mediaList = async (req, res) => {
 //   try {
 //     const {
@@ -3197,18 +3249,6 @@ const updateAgreement = async (req, res) => {
 //           { state: searchRegex },
 //           { city: searchRegex },
 //           { location: searchRegex },
-//           // { fullAddress: searchRegex },
-
-//           // Land Owner fields
-//           // { "landOwners.name": searchRegex },
-//           // { "landOwners.phone": searchRegex },
-//           // { "landOwners.panNumber": searchRegex },
-//           // { "landOwners.bankName": searchRegex },
-//           // { "landOwners.accountNumber": searchRegex },
-//           // { "landOwners.ifsc": searchRegex },
-
-//           // // GST
-//           // { "rentalPayment.gstNumber": searchRegex },
 //         ],
 //       };
 //     }
@@ -3258,6 +3298,41 @@ const updateAgreement = async (req, res) => {
 //       .lean();
 
 //     // ===============================
+//     // AGGREGATION FOR STATISTICS
+//     // ===============================
+
+//     // Get active count - using numeric status value (adjust based on your schema)
+//     // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
+//     const activeCount = await MediaOnboarding.countDocuments({
+//       status: 1, // Change this to match your active status number
+//     });
+
+//     // Get agreement expired count (agreement.status = 3)
+//     const agreementExpiredCount = await MediaOnboarding.countDocuments({
+//       "agreement.status": 3,
+//     });
+
+//     // Get total rental amounts from all documents
+//     const rentalAggregation = await MediaOnboarding.aggregate([
+//       {
+//         $group: {
+//           _id: null,
+//           totalRentalAmount: {
+//             $sum: "$rentalPayment.totalRentalAmount",
+//           },
+//           totalNetPayable: {
+//             $sum: "$rentalPayment.netPayable",
+//           },
+//         },
+//       },
+//     ]);
+
+//     const totalRentalAmount =
+//       rentalAggregation.length > 0 ? rentalAggregation[0].totalRentalAmount : 0;
+//     const totalNetPayable =
+//       rentalAggregation.length > 0 ? rentalAggregation[0].totalNetPayable : 0;
+
+//     // ===============================
 //     // FILTER OPTIONS (always from full collection)
 //     // ===============================
 
@@ -3272,9 +3347,6 @@ const updateAgreement = async (req, res) => {
 //     const mediaTypeFilter = [
 //       ...new Set(allData.map((item) => item.mediaType)),
 //     ].filter(Boolean);
-//     // const statusFilter = [
-//     //   ...new Set(allData.map((item) => item.status)),
-//     // ].filter(Boolean);
 
 //     return successResponse(
 //       res,
@@ -3286,8 +3358,12 @@ const updateAgreement = async (req, res) => {
 //         totalPages: Math.ceil(totalCount / pageSize),
 //         cityFilter,
 //         mediaTypeFilter,
-//         // statusFilter,
 //         mediaList: mediaListData,
+//         // New keys added:
+//         activeCount,
+//         agreementExpiredCount,
+//         totalRentalAmount,
+//         totalNetPayable,
 //       },
 //       200,
 //     );
@@ -3295,6 +3371,7 @@ const updateAgreement = async (req, res) => {
 //     return errorResponse(res, error.message, null, 400);
 //   }
 // };
+// Particular Get
 const mediaList = async (req, res) => {
   try {
     const {
@@ -3342,9 +3419,37 @@ const mediaList = async (req, res) => {
         ? { $in: mediaType }
         : mediaType;
     }
-    if (status) {
-      filter.status = Array.isArray(status) ? { $in: status } : status;
+
+    // ── STATUS FILTER ──────────────────────────────────────────
+    // 1 / 2 / 3  -> plain `status` field (unchanged legacy behavior)
+    // 4          -> virtual status, maps to agreement.status === 2
+    // 5          -> virtual status, maps to agreement.status === 3
+    if (status !== undefined && status !== null && status !== "") {
+      const statusArray = Array.isArray(status) ? status : [status];
+      const statusNums = statusArray.map(Number);
+
+      const regularStatuses = statusNums.filter((s) => s !== 4 && s !== 5);
+      const orConditions = [];
+
+      if (regularStatuses.length > 0) {
+        orConditions.push({ status: { $in: regularStatuses } });
+      }
+      if (statusNums.includes(4)) {
+        orConditions.push({ "agreement.status": 2 });
+      }
+      if (statusNums.includes(5)) {
+        orConditions.push({ "agreement.status": 3 });
+      }
+
+      if (orConditions.length === 1) {
+        // only one condition type selected — apply directly, no $or needed
+        Object.assign(filter, orConditions[0]);
+      } else if (orConditions.length > 1) {
+        // mixed selection (e.g. status = [1, 4]) — match either
+        filter.$or = orConditions;
+      }
     }
+
     if (
       agreementStatus !== undefined &&
       agreementStatus !== null &&
@@ -3352,6 +3457,7 @@ const mediaList = async (req, res) => {
     ) {
       filter["agreement.status"] = Number(agreementStatus);
     }
+
     // Merge search + dropdown filters
     const combinedFilter =
       Object.keys(searchFilter).length > 0
@@ -3449,7 +3555,6 @@ const mediaList = async (req, res) => {
     return errorResponse(res, error.message, null, 400);
   }
 };
-// Particular Get
 const getMediaById = async (req, res) => {
   try {
     const { mediaId } = req.query; // Using query parameter

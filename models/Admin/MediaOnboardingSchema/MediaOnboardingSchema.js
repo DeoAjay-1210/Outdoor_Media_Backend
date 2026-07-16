@@ -200,6 +200,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     paymentFrequency: { type: Number, trim: true },
     netPayable: { type: Number, trim: true },
     nextBillingDate: { type: Date },
+    lastBillPaidDate: { type: Date },
     utrNumber: { type: String, trim: true },
     withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
     month: {
@@ -503,6 +504,7 @@ const MediaSchema = new mongoose.Schema(
           min: 0,
           default: 0,
         },
+         netPayable: { type: Number, min: 0, default: 0 },
       },
     ],
 
@@ -684,57 +686,37 @@ MediaSchema.pre("save", function () {
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 2 — Rental Payment Calculations + Owner Shares
 // ─────────────────────────────────────────────────────────────
+
 // MediaSchema.pre("save", function () {
 //   const rp = this.rentalPayment;
 //   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
 //   const rentalGstApplicable = Number(rp.gstApplicable || 0);
 
-//   // ── STEP A: TDS ───────────────────────────────────────────
-//   const tdsApplicable = Number(rp.tdsApplicable || 0);
-//   const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
-//   const tdsPercentage =
-//     tdsApplicable === 1
-//       ? envTdsPercent > 0
-//         ? envTdsPercent
-//         : Number(rp.tdsPercentage || 0)
-//       : 0;
-
-//   rp.tdsPercentage = tdsPercentage;
-
-//   const tdsAmount =
-//     tdsApplicable === 1 && tdsPercentage > 0
-//       ? parseFloat(((totalRentalAmount * tdsPercentage) / 100).toFixed(2))
-//       : 0;
-
-//   rp.tdsAmount = tdsAmount;
-
-//   const amountAfterTds = parseFloat((totalRentalAmount - tdsAmount).toFixed(2));
-
-//   // ── STEP B: GST (rental-level) ───────────────────────────
+//   // ── STEP A: GST (rental-level) ──
 //   let gstAmount = 0;
 //   let totalRentalAmountWithGst = totalRentalAmount;
 
 //   if (rentalGstApplicable === 1) {
-//     const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+//     const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
 //     rp.gstPercentage = envGstPct;
-//     gstAmount = parseFloat(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-//     totalRentalAmountWithGst = parseFloat(
-//       (amountAfterTds + gstAmount).toFixed(2),
+//     gstAmount = Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
+//     totalRentalAmountWithGst = Math.floor(
+//       (totalRentalAmount + gstAmount).toFixed(2),
 //     );
 //   } else {
 //     rp.gstPercentage = 0;
 //     gstAmount = 0;
-//     totalRentalAmountWithGst = amountAfterTds;
+//     totalRentalAmountWithGst = totalRentalAmount;
 //   }
 
 //   rp.gstAmount = gstAmount;
 //   rp.totalRentalAmountWithGst = totalRentalAmountWithGst;
 
-//   // ── STEP C: Net Payable ──────────────────────────────────
-//   let netPayable = parseFloat(totalRentalAmountWithGst.toFixed(2));
+//   // ── STEP B: Net Payable (the pool split among owners — includes GST) ──
+//   let netPayable = Math.floor(totalRentalAmountWithGst.toFixed(2));
 //   rp.netPayable = netPayable;
 
-//   // ── STEP D: APPRAISAL OVERRIDE ───────────────────────────
+//   // ── STEP C: APPRAISAL OVERRIDE (unchanged) ──
 //   if (Number(this.appraisal?.applicable) === 1) {
 //     const nextAppraisalDate = this.appraisal?.nextAppraisalDate
 //       ? new Date(this.appraisal.nextAppraisalDate)
@@ -767,21 +749,69 @@ MediaSchema.pre("save", function () {
 
 //   if (!this.landOwners || !this.landOwners.length) return;
 
-//   // ── STEP E: OWNER SHARE CALCULATION ──────────────────────
-//   const ownerSplitBaseAmount = netPayable;
-//   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+//   // ── STEP D: OWNER SHARE + TDS (per-owner) + GST CALCULATION ──
+//   const ownerSplitBaseAmount = netPayable; // includes GST — used for shareAmount
+//   const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
+//   const envTdsPercent = Math.floor(process.env.TDS_PERCENTAGE || "0");
 
 //   this.landOwners.forEach((owner) => {
+//     // ── Share amount (of netPayable, includes GST — UNCHANGED) ──
 //     if (Number(owner.typeShare) === 1) {
 //       const sharePercentage = Number(owner.sharePercentage || 0);
-//       owner.shareAmount = parseFloat(
+//       owner.shareAmount = Math.floor(
 //         ((ownerSplitBaseAmount * sharePercentage) / 100).toFixed(2),
 //       );
 //     } else if (Number(owner.typeShare) === 2) {
 //       owner.sharePercentage = undefined;
-//       owner.shareAmount = parseFloat(Number(owner.shareAmount || 0).toFixed(2));
+//       owner.shareAmount = Math.floor(Number(owner.shareAmount || 0).toFixed(2));
 //     }
 
+//     // ✅ FIXED — TDS base is this owner's share of totalRentalAmount
+//     // (the PURE rental figure, WITHOUT GST), never netPayable/shareAmount
+//     // (which include GST). Computed using the SAME proportion (percentage
+//     // or fixed-amount ratio) that determined shareAmount, just applied
+//     // against totalRentalAmount instead of netPayable.
+//     let ownerTdsBaseAmount = 0;
+
+//     if (Number(owner.typeShare) === 1) {
+//       const sharePercentage = Number(owner.sharePercentage || 0);
+//       ownerTdsBaseAmount = Math.floor(
+//         ((totalRentalAmount * sharePercentage) / 100).toFixed(2),
+//       );
+//     } else if (Number(owner.typeShare) === 2) {
+//       // Fixed-amount owners: derive their proportional share of the
+//       // RENTAL-ONLY amount using the same ratio their shareAmount
+//       // represents out of the full (GST-inclusive) netPayable pool.
+//       const ratio =
+//         netPayable > 0 ? Number(owner.shareAmount || 0) / netPayable : 0;
+//       ownerTdsBaseAmount = Math.floor((totalRentalAmount * ratio).toFixed(2));
+//     }
+
+//     const tdsApplicable = Number(owner.tdsApplicable || 0);
+//     const tdsPercentage =
+//       tdsApplicable === 1
+//         ? envTdsPercent > 0
+//           ? envTdsPercent
+//           : Number(owner.tdsPercentage || 0)
+//         : 0;
+
+//     owner.tdsPercentage = tdsPercentage;
+
+//     const tdsAmount =
+//       tdsApplicable === 1 && tdsPercentage > 0
+//         ? Math.floor(((ownerTdsBaseAmount * tdsPercentage) / 100).toFixed(2))
+//         : 0;
+
+//     owner.tdsAmount = tdsAmount;
+
+//     // Post-TDS amount — deduct TDS from the owner's FULL shareAmount
+//     // (GST-inclusive), since TDS is still withheld from what's actually
+//     // paid out, even though it's CALCULATED on the rental-only portion.
+//     const ownerAmountAfterTds = Math.floor(
+//       (Number(owner.shareAmount || 0) - tdsAmount).toFixed(2),
+//     );
+
+//     // ── Owner-level GST (unchanged logic) ──
 //     const ownerGstApplicable =
 //       rentalGstApplicable === 0 ? Number(owner.gstApplicable || 0) : 0;
 //     const paymentCategory = Number(owner.paymentCategory || 1);
@@ -794,22 +824,24 @@ MediaSchema.pre("save", function () {
 //         onlinePortionForGst = Number(owner.onlineAmount || 0);
 //       }
 
-//       const ownerGstAmount = parseFloat(
+//       const ownerGstAmount = Math.floor(
 //         ((onlinePortionForGst * envGstPct) / 100).toFixed(2),
 //       );
 //       owner.gstPercentage = envGstPct;
 //       owner.gstAmount = ownerGstAmount;
-//       owner.totalAmountWithGst = parseFloat(
-//         (Number(owner.shareAmount || 0) + ownerGstAmount).toFixed(2),
+//       owner.totalAmountWithGst = Math.floor(
+//         (ownerAmountAfterTds + ownerGstAmount).toFixed(2),
 //       );
 //     } else {
 //       owner.gstPercentage = 0;
 //       owner.gstAmount = 0;
-//       owner.totalAmountWithGst = Number(owner.shareAmount || 0);
+//       owner.totalAmountWithGst = ownerAmountAfterTds;
 //     }
+
+//     owner.netPayableToOwner = owner.totalAmountWithGst;
 //   });
 
-//   // ── STEP F: OWNER PAYMENTS ───────────────────────────────
+//   // ── STEP E: OWNER PAYMENTS (unchanged) ──
 //   rp.ownerPayments = this.landOwners.map((owner) => {
 //     const ownerAmount = Number(owner.shareAmount || 0);
 //     const paymentCategory = Number(owner.paymentCategory || 1);
@@ -825,6 +857,9 @@ MediaSchema.pre("save", function () {
 //           : null,
 //       amount: ownerAmount,
 //       paymentCategory,
+//       tdsApplicable: Number(owner.tdsApplicable || 0),
+//       tdsPercentage: Number(owner.tdsPercentage || 0),
+//       tdsAmount: Number(owner.tdsAmount || 0),
 //       gstApplicable: ownerGstApplicable,
 //       gstPercentage:
 //         ownerGstApplicable === 1 ? Number(owner.gstPercentage || 0) : 0,
@@ -833,6 +868,7 @@ MediaSchema.pre("save", function () {
 //         ownerGstApplicable === 1
 //           ? Number(owner.totalAmountWithGst || ownerAmount)
 //           : ownerAmount,
+//       netPayableToOwner: Number(owner.netPayableToOwner || 0),
 //     };
 
 //     if (paymentCategory === 1) {
@@ -861,12 +897,10 @@ MediaSchema.pre("save", function () {
   let totalRentalAmountWithGst = totalRentalAmount;
 
   if (rentalGstApplicable === 1) {
-    const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
+    const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
     rp.gstPercentage = envGstPct;
-    gstAmount = Math.floor(((totalRentalAmount * envGstPct) / 100).toFixed(2));
-    totalRentalAmountWithGst = Math.floor(
-      (totalRentalAmount + gstAmount).toFixed(2),
-    );
+    gstAmount = Math.round((totalRentalAmount * envGstPct) / 100);
+    totalRentalAmountWithGst = totalRentalAmount + gstAmount;
   } else {
     rp.gstPercentage = 0;
     gstAmount = 0;
@@ -876,11 +910,11 @@ MediaSchema.pre("save", function () {
   rp.gstAmount = gstAmount;
   rp.totalRentalAmountWithGst = totalRentalAmountWithGst;
 
-  // ── STEP B: Net Payable (the pool split among owners — includes GST) ──
-  let netPayable = Math.floor(totalRentalAmountWithGst.toFixed(2));
-  rp.netPayable = netPayable;
+  // ── STEP B: Net Payable pool (GST-inclusive) — used ONLY as the
+  // SPLIT BASE for owner shares, not the final displayed value. ──
+  let netPayable = Math.round(totalRentalAmountWithGst);
 
-  // ── STEP C: APPRAISAL OVERRIDE (unchanged) ──
+  // ── STEP C: APPRAISAL OVERRIDE ──
   if (Number(this.appraisal?.applicable) === 1) {
     const nextAppraisalDate = this.appraisal?.nextAppraisalDate
       ? new Date(this.appraisal.nextAppraisalDate)
@@ -905,50 +939,31 @@ MediaSchema.pre("save", function () {
 
         if (historyEntry && Number(historyEntry.newRent) > 0) {
           netPayable = Number(historyEntry.newRent);
-          rp.netPayable = netPayable;
         }
       }
     }
   }
 
-  if (!this.landOwners || !this.landOwners.length) return;
+  if (!this.landOwners || !this.landOwners.length) {
+    // No owners — nothing to split, netPayable is simply the pool itself.
+    rp.netPayable = netPayable;
+    return;
+  }
 
-  // ── STEP D: OWNER SHARE + TDS (per-owner) + GST CALCULATION ──
-  const ownerSplitBaseAmount = netPayable; // includes GST — used for shareAmount
-  const envGstPct = Math.floor(process.env.GST_PERCENTAGE || "18");
-  const envTdsPercent = Math.floor(process.env.TDS_PERCENTAGE || "0");
+  // ── STEP D: OWNER SHARE + TDS (on netPayable, GST-inclusive) + OWNER GST ──
+  const ownerSplitBaseAmount = netPayable;
+  const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+  const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
 
   this.landOwners.forEach((owner) => {
-    // ── Share amount (of netPayable, includes GST — UNCHANGED) ──
     if (Number(owner.typeShare) === 1) {
       const sharePercentage = Number(owner.sharePercentage || 0);
-      owner.shareAmount = Math.floor(
-        ((ownerSplitBaseAmount * sharePercentage) / 100).toFixed(2),
+      owner.shareAmount = Math.round(
+        (ownerSplitBaseAmount * sharePercentage) / 100,
       );
     } else if (Number(owner.typeShare) === 2) {
       owner.sharePercentage = undefined;
-      owner.shareAmount = Math.floor(Number(owner.shareAmount || 0).toFixed(2));
-    }
-
-    // ✅ FIXED — TDS base is this owner's share of totalRentalAmount
-    // (the PURE rental figure, WITHOUT GST), never netPayable/shareAmount
-    // (which include GST). Computed using the SAME proportion (percentage
-    // or fixed-amount ratio) that determined shareAmount, just applied
-    // against totalRentalAmount instead of netPayable.
-    let ownerTdsBaseAmount = 0;
-
-    if (Number(owner.typeShare) === 1) {
-      const sharePercentage = Number(owner.sharePercentage || 0);
-      ownerTdsBaseAmount = Math.floor(
-        ((totalRentalAmount * sharePercentage) / 100).toFixed(2),
-      );
-    } else if (Number(owner.typeShare) === 2) {
-      // Fixed-amount owners: derive their proportional share of the
-      // RENTAL-ONLY amount using the same ratio their shareAmount
-      // represents out of the full (GST-inclusive) netPayable pool.
-      const ratio =
-        netPayable > 0 ? Number(owner.shareAmount || 0) / netPayable : 0;
-      ownerTdsBaseAmount = Math.floor((totalRentalAmount * ratio).toFixed(2));
+      owner.shareAmount = Math.round(Number(owner.shareAmount || 0));
     }
 
     const tdsApplicable = Number(owner.tdsApplicable || 0);
@@ -963,19 +978,15 @@ MediaSchema.pre("save", function () {
 
     const tdsAmount =
       tdsApplicable === 1 && tdsPercentage > 0
-        ? Math.floor(((ownerTdsBaseAmount * tdsPercentage) / 100).toFixed(2))
+        ? Math.round((Number(owner.shareAmount || 0) * tdsPercentage) / 100)
         : 0;
 
     owner.tdsAmount = tdsAmount;
 
-    // Post-TDS amount — deduct TDS from the owner's FULL shareAmount
-    // (GST-inclusive), since TDS is still withheld from what's actually
-    // paid out, even though it's CALCULATED on the rental-only portion.
-    const ownerAmountAfterTds = Math.floor(
-      (Number(owner.shareAmount || 0) - tdsAmount).toFixed(2),
+    const ownerAmountAfterTds = Math.round(
+      Number(owner.shareAmount || 0) - tdsAmount,
     );
 
-    // ── Owner-level GST (unchanged logic) ──
     const ownerGstApplicable =
       rentalGstApplicable === 0 ? Number(owner.gstApplicable || 0) : 0;
     const paymentCategory = Number(owner.paymentCategory || 1);
@@ -988,13 +999,13 @@ MediaSchema.pre("save", function () {
         onlinePortionForGst = Number(owner.onlineAmount || 0);
       }
 
-      const ownerGstAmount = Math.floor(
-        ((onlinePortionForGst * envGstPct) / 100).toFixed(2),
+      const ownerGstAmount = Math.round(
+        (onlinePortionForGst * envGstPct) / 100,
       );
       owner.gstPercentage = envGstPct;
       owner.gstAmount = ownerGstAmount;
-      owner.totalAmountWithGst = Math.floor(
-        (ownerAmountAfterTds + ownerGstAmount).toFixed(2),
+      owner.totalAmountWithGst = Math.round(
+        ownerAmountAfterTds + ownerGstAmount,
       );
     } else {
       owner.gstPercentage = 0;
@@ -1003,9 +1014,18 @@ MediaSchema.pre("save", function () {
     }
 
     owner.netPayableToOwner = owner.totalAmountWithGst;
+    owner.netPayable = owner.totalAmountWithGst;
   });
 
-  // ── STEP E: OWNER PAYMENTS (unchanged) ──
+  // ✅ NEW — rentalPayment.netPayable is now the SUM of what all owners
+  // actually receive (post-TDS, post-owner-GST), not the raw
+  // pre-deduction pool.
+  rp.netPayable = this.landOwners.reduce(
+    (sum, owner) => sum + Number(owner.netPayableToOwner || 0),
+    0,
+  );
+
+  // ── STEP E: OWNER PAYMENTS SNAPSHOT ──
   rp.ownerPayments = this.landOwners.map((owner) => {
     const ownerAmount = Number(owner.shareAmount || 0);
     const paymentCategory = Number(owner.paymentCategory || 1);
@@ -1033,6 +1053,7 @@ MediaSchema.pre("save", function () {
           ? Number(owner.totalAmountWithGst || ownerAmount)
           : ownerAmount,
       netPayableToOwner: Number(owner.netPayableToOwner || 0),
+      netPayable: Number(owner.netPayableToOwner || 0),
     };
 
     if (paymentCategory === 1) {
@@ -1054,90 +1075,7 @@ MediaSchema.pre("save", function () {
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 3 — Next Billing Date
 // ─────────────────────────────────────────────────────────────
-// MediaSchema.pre("save", function () {
-//   const isNewDoc = this.isNew;
-//   const billingDateProvided = this.rentalPayment.nextBillingDate != null;
 
-//   if (isNewDoc && billingDateProvided) return;
-
-//   if (
-//     this.rentalPayment.lastBillPaidDate &&
-//     this.rentalPayment.paymentFrequency
-//   ) {
-//     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
-//     const monthsToAdd =
-//       this.rentalPayment.paymentFrequency === 7
-//         ? Number(this.rentalPayment.customPaymentFrequency) || 1
-//         : frequencyMap[this.rentalPayment.paymentFrequency] || 1;
-
-//     const nextDate = new Date(this.rentalPayment.lastBillPaidDate);
-//     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
-//     this.rentalPayment.nextBillingDate = nextDate;
-//   }
-// });
-// ─────────────────────────────────────────────────────────────
-// PRE-SAVE 3 — Next Billing Date
-// ─────────────────────────────────────────────────────────────
-// MediaSchema.pre("save", function () {
-//   const rp = this.rentalPayment;
-//   if (!rp) return;
-
-//   const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
-//   const getMonthsToAdd = () =>
-//     rp.paymentFrequency === 7
-//       ? Number(rp.customPaymentFrequency) || 1
-//       : frequencyMap[rp.paymentFrequency] || 1;
-
-//   // ── CREATE: only set an initial nextBillingDate if one wasn't provided ──
-//   if (this.isNew) {
-//     const billingDateProvided = rp.nextBillingDate != null;
-//     if (!billingDateProvided && rp.lastBillPaidDate && rp.paymentFrequency) {
-//       const nextDate = new Date(rp.lastBillPaidDate);
-//       nextDate.setMonth(nextDate.getMonth() + getMonthsToAdd());
-//       rp.nextBillingDate = nextDate;
-//     }
-//     return;
-//   }
-
-//   // ── UPDATE: only shift the billing cycle when rentalStatus is being
-//   //    set to 3 (Owner Approve). Any other update — edits, staff/team-lead
-//   //    approval, unrelated field changes — leaves lastBillPaidDate and
-//   //    nextBillingDate completely untouched.
-//   const isOwnerApproval =
-//     this.isModified("rentalStatus") && Number(this.rentalStatus) === 3;
-
-//   if (isOwnerApproval && rp.nextBillingDate && rp.paymentFrequency) {
-//     // The cycle that was just approved becomes the new "last paid" date.
-//     rp.lastBillPaidDate = new Date(rp.nextBillingDate);
-
-//     // Roll the next billing date forward by one cycle from there.
-//     const nextDate = new Date(rp.lastBillPaidDate);
-//     nextDate.setMonth(nextDate.getMonth() + getMonthsToAdd());
-//     rp.nextBillingDate = nextDate;
-//   }
-// });
-// ─────────────────────────────────────────────────────────────
-// MediaSchema.pre("save", function () {
-//   if (!this.isNew) return;
-
-//   const rp = this.rentalPayment;
-//   if (!rp) return;
-
-//   const billingDateProvided = rp.nextBillingDate != null;
-//   if (billingDateProvided) return;
-
-//   if (rp.lastBillPaidDate && rp.paymentFrequency) {
-//     const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
-//     const monthsToAdd =
-//       rp.paymentFrequency === 7
-//         ? Number(rp.customPaymentFrequency) || 1
-//         : frequencyMap[rp.paymentFrequency] || 1;
-
-//     const nextDate = new Date(rp.lastBillPaidDate);
-//     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
-//     rp.nextBillingDate = nextDate;
-//   }
-// });
 MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
   if (!rp) return;

@@ -1579,9 +1579,9 @@ exports.saveRentalDue = async (req, res) => {
     const allApproved = !nextPendingStep;
 
     // ✅ resolve withGst mode for this entry (default to 1 / With GST)
-    const resolvedWithGst = [1, 2].includes(Number(withGst))
+    const resolvedWithGst = [0,1, 2].includes(Number(withGst))
       ? Number(withGst)
-      : 1;
+      : 0;
     const gstSplit = computeGstSplit(media, resolvedWithGst);
 
     const newEntry = {
