@@ -13,4 +13,5 @@ const STATUS_LABEL = {
   3: "Pay Overdue",
 };
 
+
 module.exports = { FREQ_LABEL, STATUS_LABEL };
