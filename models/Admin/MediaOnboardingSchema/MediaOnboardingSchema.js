@@ -891,219 +891,102 @@ MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
   const rentalGstApplicable = Number(rp.gstApplicable || 0);
-
-  // ── STEP A: GST (rental-level) ──
-  let gstAmount = 0;
-  let totalRentalAmountWithGst = totalRentalAmount;
-
-  if (rentalGstApplicable === 1) {
-    const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
-    rp.gstPercentage = envGstPct;
-    gstAmount = Math.round((totalRentalAmount * envGstPct) / 100);
-    totalRentalAmountWithGst = totalRentalAmount + gstAmount;
-  } else {
-    rp.gstPercentage = 0;
-    gstAmount = 0;
-    totalRentalAmountWithGst = totalRentalAmount;
-  }
-
-  rp.gstAmount = gstAmount;
-  rp.totalRentalAmountWithGst = totalRentalAmountWithGst;
-
-  // ── STEP B: Net Payable pool (GST-inclusive) — used ONLY as the
-  // SPLIT BASE for owner shares, not the final displayed value. ──
-  let netPayable = Math.round(totalRentalAmountWithGst);
-
-  // ── STEP C: APPRAISAL OVERRIDE ──
-  if (Number(this.appraisal?.applicable) === 1) {
-    const nextAppraisalDate = this.appraisal?.nextAppraisalDate
-      ? new Date(this.appraisal.nextAppraisalDate)
-      : null;
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (nextAppraisalDate) {
-      const appraisalDay = new Date(nextAppraisalDate);
-      appraisalDay.setHours(0, 0, 0, 0);
-
-      if (appraisalDay <= today) {
-        const historyEntry = Array.isArray(this.appraisal.history)
-          ? this.appraisal.history.find(
-              (item) =>
-                item.appraisalDate &&
-                new Date(item.appraisalDate).setHours(0, 0, 0, 0) ===
-                  appraisalDay.getTime(),
-            )
-          : null;
-
-        if (historyEntry && Number(historyEntry.newRent) > 0) {
-          netPayable = Number(historyEntry.newRent);
-        }
-      }
-    }
-  }
-
-  if (!this.landOwners || !this.landOwners.length) {
-    // No owners — nothing to split, netPayable is simply the pool itself.
-    rp.netPayable = netPayable;
-    return;
-  }
-
-  // ── STEP D: OWNER SHARE + TDS (on netPayable, GST-inclusive) + OWNER GST ──
-  const ownerSplitBaseAmount = netPayable;
   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
   const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
 
-//   this.landOwners.forEach((owner) => {
-//   // ── STEP 1: Owner's share of the BASE totalRentalAmount ──
-//   let ownerBaseShare = 0;
-
-//   if (Number(owner.typeShare) === 1) {
-//     const sharePercentage = Number(owner.sharePercentage || 0);
-//     ownerBaseShare = Math.round((totalRentalAmount * sharePercentage) / 100);
-//   } else if (Number(owner.typeShare) === 2) {
-//     const ratio =
-//       netPayable > 0 ? Number(owner.shareAmount || 0) / netPayable : 0;
-//     ownerBaseShare = Math.round(totalRentalAmount * ratio);
-//   }
-
-//   // ── STEP 2: TDS — computed on the owner's FULL base share ──
-//   const tdsApplicable = Number(owner.tdsApplicable || 0);
-//   const tdsPercentage =
-//     tdsApplicable === 1
-//       ? envTdsPercent > 0
-//         ? envTdsPercent
-//         : Number(owner.tdsPercentage || 0)
-//       : 0;
-
-//   owner.tdsPercentage = tdsPercentage;
-
-//   const tdsAmount =
-//     tdsApplicable === 1 && tdsPercentage > 0
-//       ? Math.round((ownerBaseShare * tdsPercentage) / 100)
-//       : 0;
-
-//   owner.tdsAmount = tdsAmount;
-
-//   // ── STEP 3: GST — base depends on paymentCategory ──
-//   const paymentCategory = Number(owner.paymentCategory || 1);
-//   const ownerGstApplicable =
-//     rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0);
-//   const ownerGstPct =
-//     rentalGstApplicable === 1
-//       ? envGstPct
-//       : Number(owner.gstPercentage || 0) || envGstPct;
-
-//   let gstBaseAmount = 0;
-
-//   if (paymentCategory === 1) {
-//     // Cash only — no GST at all (matches earlier rule: GST doesn't
-//     // apply to pure cash payments)
-//     gstBaseAmount = 0;
-//   } else if (paymentCategory === 2) {
-//     // Online only — GST on the FULL base share
-//     gstBaseAmount = ownerBaseShare;
-//   } else if (paymentCategory === 3) {
-//     // ✅ Cash + Online split — GST ONLY on the online portion, not the
-//     // combined cash+online total. e.g. cash 30K + online 20K -> GST
-//     // calculated only on 20K, not on 50K.
-//     gstBaseAmount = Number(owner.onlineAmount || 0);
-//   }
-
-//   const ownerGstAmount =
-//     ownerGstApplicable === 1 && gstBaseAmount > 0
-//       ? Math.round((gstBaseAmount * ownerGstPct) / 100)
-//       : 0;
-
-//   owner.gstPercentage = ownerGstApplicable === 1 && gstBaseAmount > 0 ? ownerGstPct : 0;
-//   owner.gstAmount = ownerGstAmount;
-
-//   // ── STEP 4: Final shareAmount = base − TDS + GST ──
-//   owner.shareAmount = ownerBaseShare - tdsAmount + ownerGstAmount;
-//   owner.totalAmountWithGst = owner.shareAmount;
-//   owner.netPayableToOwner = owner.shareAmount;
-//   owner.netPayable = owner.shareAmount;
-// });
-
-  // ✅ NEW — rentalPayment.netPayable is now the SUM of what all owners
-  // actually receive (post-TDS, post-owner-GST), not the raw
-  // pre-deduction pool.
-  // rp.netPayable = this.landOwners.reduce(
-  //   (sum, owner) => sum + Number(owner.netPayableToOwner || 0),
-  //   0,
-  // );
-this.landOwners.forEach((owner) => {
-  // ── shareAmount NEVER recalculated — exactly what frontend sent ──
-  const ownerShareFromFrontend = Number(owner.shareAmount || 0);
-  owner.shareAmount = ownerShareFromFrontend;
-
-  // ── TDS — calculated on THIS owner's OWN shareAmount, stored as its
-  // own field. Never subtracted from shareAmount itself. ──
-  const tdsApplicable = Number(owner.tdsApplicable || 0);
-  const tdsPercentage =
-    tdsApplicable === 1
-      ? envTdsPercent > 0
-        ? envTdsPercent
-        : Number(owner.tdsPercentage || 0)
-      : 0;
-
-  owner.tdsPercentage = tdsPercentage;
-
-  const tdsAmount =
-    tdsApplicable === 1 && tdsPercentage > 0
-      ? Math.round((ownerShareFromFrontend * tdsPercentage) / 100)
-      : 0;
-
-  owner.tdsAmount = tdsAmount; // ✅ stored per owner, never touches shareAmount
-
-  // ── GST (unchanged logic from before, still informational) ──
-  const paymentCategory = Number(owner.paymentCategory || 1);
-  const ownerGstApplicable =
-    rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0);
-  const ownerGstPct =
+  rp.gstPercentage = rentalGstApplicable === 1 ? envGstPct : 0;
+  rp.gstAmount =
     rentalGstApplicable === 1
-      ? envGstPct
-      : Number(owner.gstPercentage || 0) || envGstPct;
+      ? Math.round((totalRentalAmount * envGstPct) / 100)
+      : 0;
+  rp.totalRentalAmountWithGst = totalRentalAmount + rp.gstAmount;
 
-  let gstBaseAmount = 0;
-  if (paymentCategory === 1) {
-    gstBaseAmount = 0;
-  } else if (paymentCategory === 2) {
-    gstBaseAmount = ownerShareFromFrontend;
-  } else if (paymentCategory === 3) {
-    gstBaseAmount = Number(owner.onlineAmount || 0);
+  if (!this.landOwners || !this.landOwners.length) {
+    rp.netPayable = totalRentalAmount;
+    return;
   }
 
-  const ownerGstAmount =
-    ownerGstApplicable === 1 && gstBaseAmount > 0
-      ? Math.round((gstBaseAmount * ownerGstPct) / 100)
-      : 0;
+  this.landOwners.forEach((owner) => {
+    // ── shareAmount: respect frontend value; fall back to
+    // sharePercentage-derived amount ONLY if not sent at all ──
+    const ownerShareFromFrontend = Number(owner.shareAmount || 0);
+    let resolvedShareAmount = ownerShareFromFrontend;
+    if (!resolvedShareAmount && Number(owner.typeShare) === 1) {
+      const sharePercentage = Number(owner.sharePercentage || 0);
+      resolvedShareAmount = Math.round(
+        (totalRentalAmount * sharePercentage) / 100,
+      );
+    }
+    owner.shareAmount = resolvedShareAmount;
 
-  owner.gstPercentage =
-    ownerGstApplicable === 1 && gstBaseAmount > 0 ? ownerGstPct : 0;
-  owner.gstAmount = ownerGstAmount;
+    // ── TDS — on this owner's own shareAmount ──
+    const tdsApplicable = Number(owner.tdsApplicable || 0);
+    const tdsPercentage =
+      tdsApplicable === 1
+        ? envTdsPercent > 0
+          ? envTdsPercent
+          : Number(owner.tdsPercentage || 0)
+        : 0;
+    owner.tdsPercentage = tdsPercentage;
 
-  owner.totalAmountWithGst = ownerShareFromFrontend + ownerGstAmount;
-  owner.netPayableToOwner = owner.totalAmountWithGst;
-  owner.netPayable = owner.totalAmountWithGst;
-});
+    const tdsAmount =
+      tdsApplicable === 1 && tdsPercentage > 0
+        ? Math.round((resolvedShareAmount * tdsPercentage) / 100)
+        : 0;
+    owner.tdsAmount = tdsAmount;
 
-// ✅ NEW — netPayable (overall pool) = totalRentalAmount MINUS the
-// SUM of every owner's tdsAmount. This is where TDS actually reduces
-// a number — the overall pool, never the individual shareAmount.
-const totalTdsAcrossOwners = this.landOwners.reduce(
-  (sum, owner) => sum + Number(owner.tdsAmount || 0),
-  0,
-);
+    // ── GST base depends on WHICH GST source is active ──
+    let gstBaseAmount = 0;
 
-rp.netPayable = totalRentalAmount - totalTdsAcrossOwners;
-  // ── STEP E: OWNER PAYMENTS SNAPSHOT ──
+    if (rentalGstApplicable === 1) {
+      gstBaseAmount = resolvedShareAmount;
+    } else {
+      const paymentCategory = Number(owner.paymentCategory || 1);
+      if (paymentCategory === 1) {
+        gstBaseAmount = 0;
+      } else if (paymentCategory === 2) {
+        gstBaseAmount = resolvedShareAmount;
+      } else if (paymentCategory === 3) {
+        gstBaseAmount = Number(owner.onlineAmount || 0);
+      }
+    }
+
+    const ownerGstApplicable =
+      rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0);
+    const ownerGstPct =
+      rentalGstApplicable === 1
+        ? envGstPct
+        : Number(owner.gstPercentage || 0) || envGstPct;
+
+    const ownerGstAmount =
+      ownerGstApplicable === 1 && gstBaseAmount > 0
+        ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+        : 0;
+
+    owner.gstPercentage =
+      ownerGstApplicable === 1 && gstBaseAmount > 0 ? ownerGstPct : 0;
+    owner.gstAmount = ownerGstAmount;
+
+    owner.totalAmountWithGst = resolvedShareAmount + ownerGstAmount;
+    owner.netPayableToOwner = owner.totalAmountWithGst;
+    owner.netPayable = owner.totalAmountWithGst;
+  });
+
+  const totalTdsAcrossOwners = this.landOwners.reduce(
+    (sum, owner) => sum + Number(owner.tdsAmount || 0),
+    0,
+  );
+  const totalGstAcrossOwners = this.landOwners.reduce(
+    (sum, owner) => sum + Number(owner.gstAmount || 0),
+    0,
+  );
+
+  rp.netPayable =
+    totalRentalAmount - totalTdsAcrossOwners + totalGstAcrossOwners;
+
   rp.ownerPayments = this.landOwners.map((owner) => {
     const ownerAmount = Number(owner.shareAmount || 0);
     const paymentCategory = Number(owner.paymentCategory || 1);
-    const ownerGstApplicable =
-      rentalGstApplicable === 0 ? Number(owner.gstApplicable || 0) : 0;
 
     const payment = {
       ownerId: owner._id,
@@ -1117,14 +1000,11 @@ rp.netPayable = totalRentalAmount - totalTdsAcrossOwners;
       tdsApplicable: Number(owner.tdsApplicable || 0),
       tdsPercentage: Number(owner.tdsPercentage || 0),
       tdsAmount: Number(owner.tdsAmount || 0),
-      gstApplicable: ownerGstApplicable,
-      gstPercentage:
-        ownerGstApplicable === 1 ? Number(owner.gstPercentage || 0) : 0,
-      gstAmount: ownerGstApplicable === 1 ? Number(owner.gstAmount || 0) : 0,
-      totalAmountWithGst:
-        ownerGstApplicable === 1
-          ? Number(owner.totalAmountWithGst || ownerAmount)
-          : ownerAmount,
+      gstApplicable:
+        rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0),
+      gstPercentage: Number(owner.gstPercentage || 0),
+      gstAmount: Number(owner.gstAmount || 0),
+      totalAmountWithGst: Number(owner.totalAmountWithGst || ownerAmount),
       netPayableToOwner: Number(owner.netPayableToOwner || 0),
       netPayable: Number(owner.netPayableToOwner || 0),
     };
@@ -1145,6 +1025,264 @@ rp.netPayable = totalRentalAmount - totalTdsAcrossOwners;
     return payment;
   });
 });
+// MediaSchema.pre("save", function () {
+//   const rp = this.rentalPayment;
+//   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
+//   const rentalGstApplicable = Number(rp.gstApplicable || 0);
+
+//   // ── STEP A: GST (rental-level) ──
+//   let gstAmount = 0;
+//   let totalRentalAmountWithGst = totalRentalAmount;
+
+//   if (rentalGstApplicable === 1) {
+//     const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+//     rp.gstPercentage = envGstPct;
+//     gstAmount = Math.round((totalRentalAmount * envGstPct) / 100);
+//     totalRentalAmountWithGst = totalRentalAmount + gstAmount;
+//   } else {
+//     rp.gstPercentage = 0;
+//     gstAmount = 0;
+//     totalRentalAmountWithGst = totalRentalAmount;
+//   }
+
+//   rp.gstAmount = gstAmount;
+//   rp.totalRentalAmountWithGst = totalRentalAmountWithGst;
+
+//   // ── STEP B: Net Payable pool (GST-inclusive) — used ONLY as the
+//   // SPLIT BASE for owner shares, not the final displayed value. ──
+//   let netPayable = Math.round(totalRentalAmountWithGst);
+
+//   // ── STEP C: APPRAISAL OVERRIDE ──
+//   if (Number(this.appraisal?.applicable) === 1) {
+//     const nextAppraisalDate = this.appraisal?.nextAppraisalDate
+//       ? new Date(this.appraisal.nextAppraisalDate)
+//       : null;
+
+//     const today = new Date();
+//     today.setHours(0, 0, 0, 0);
+
+//     if (nextAppraisalDate) {
+//       const appraisalDay = new Date(nextAppraisalDate);
+//       appraisalDay.setHours(0, 0, 0, 0);
+
+//       if (appraisalDay <= today) {
+//         const historyEntry = Array.isArray(this.appraisal.history)
+//           ? this.appraisal.history.find(
+//               (item) =>
+//                 item.appraisalDate &&
+//                 new Date(item.appraisalDate).setHours(0, 0, 0, 0) ===
+//                   appraisalDay.getTime(),
+//             )
+//           : null;
+
+//         if (historyEntry && Number(historyEntry.newRent) > 0) {
+//           netPayable = Number(historyEntry.newRent);
+//         }
+//       }
+//     }
+//   }
+
+//   if (!this.landOwners || !this.landOwners.length) {
+//     // No owners — nothing to split, netPayable is simply the pool itself.
+//     rp.netPayable = netPayable;
+//     return;
+//   }
+
+//   // ── STEP D: OWNER SHARE + TDS (on netPayable, GST-inclusive) + OWNER GST ──
+//   const ownerSplitBaseAmount = netPayable;
+//   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+//   const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
+
+// //   this.landOwners.forEach((owner) => {
+// //   // ── STEP 1: Owner's share of the BASE totalRentalAmount ──
+// //   let ownerBaseShare = 0;
+
+// //   if (Number(owner.typeShare) === 1) {
+// //     const sharePercentage = Number(owner.sharePercentage || 0);
+// //     ownerBaseShare = Math.round((totalRentalAmount * sharePercentage) / 100);
+// //   } else if (Number(owner.typeShare) === 2) {
+// //     const ratio =
+// //       netPayable > 0 ? Number(owner.shareAmount || 0) / netPayable : 0;
+// //     ownerBaseShare = Math.round(totalRentalAmount * ratio);
+// //   }
+
+// //   // ── STEP 2: TDS — computed on the owner's FULL base share ──
+// //   const tdsApplicable = Number(owner.tdsApplicable || 0);
+// //   const tdsPercentage =
+// //     tdsApplicable === 1
+// //       ? envTdsPercent > 0
+// //         ? envTdsPercent
+// //         : Number(owner.tdsPercentage || 0)
+// //       : 0;
+
+// //   owner.tdsPercentage = tdsPercentage;
+
+// //   const tdsAmount =
+// //     tdsApplicable === 1 && tdsPercentage > 0
+// //       ? Math.round((ownerBaseShare * tdsPercentage) / 100)
+// //       : 0;
+
+// //   owner.tdsAmount = tdsAmount;
+
+// //   // ── STEP 3: GST — base depends on paymentCategory ──
+// //   const paymentCategory = Number(owner.paymentCategory || 1);
+// //   const ownerGstApplicable =
+// //     rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0);
+// //   const ownerGstPct =
+// //     rentalGstApplicable === 1
+// //       ? envGstPct
+// //       : Number(owner.gstPercentage || 0) || envGstPct;
+
+// //   let gstBaseAmount = 0;
+
+// //   if (paymentCategory === 1) {
+// //     // Cash only — no GST at all (matches earlier rule: GST doesn't
+// //     // apply to pure cash payments)
+// //     gstBaseAmount = 0;
+// //   } else if (paymentCategory === 2) {
+// //     // Online only — GST on the FULL base share
+// //     gstBaseAmount = ownerBaseShare;
+// //   } else if (paymentCategory === 3) {
+// //     // ✅ Cash + Online split — GST ONLY on the online portion, not the
+// //     // combined cash+online total. e.g. cash 30K + online 20K -> GST
+// //     // calculated only on 20K, not on 50K.
+// //     gstBaseAmount = Number(owner.onlineAmount || 0);
+// //   }
+
+// //   const ownerGstAmount =
+// //     ownerGstApplicable === 1 && gstBaseAmount > 0
+// //       ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+// //       : 0;
+
+// //   owner.gstPercentage = ownerGstApplicable === 1 && gstBaseAmount > 0 ? ownerGstPct : 0;
+// //   owner.gstAmount = ownerGstAmount;
+
+// //   // ── STEP 4: Final shareAmount = base − TDS + GST ──
+// //   owner.shareAmount = ownerBaseShare - tdsAmount + ownerGstAmount;
+// //   owner.totalAmountWithGst = owner.shareAmount;
+// //   owner.netPayableToOwner = owner.shareAmount;
+// //   owner.netPayable = owner.shareAmount;
+// // });
+
+//   // ✅ NEW — rentalPayment.netPayable is now the SUM of what all owners
+//   // actually receive (post-TDS, post-owner-GST), not the raw
+//   // pre-deduction pool.
+//   // rp.netPayable = this.landOwners.reduce(
+//   //   (sum, owner) => sum + Number(owner.netPayableToOwner || 0),
+//   //   0,
+//   // );
+// this.landOwners.forEach((owner) => {
+//   // ── shareAmount NEVER recalculated — exactly what frontend sent ──
+//   const ownerShareFromFrontend = Number(owner.shareAmount || 0);
+//   owner.shareAmount = ownerShareFromFrontend;
+
+//   // ── TDS — calculated on THIS owner's OWN shareAmount, stored as its
+//   // own field. Never subtracted from shareAmount itself. ──
+//   const tdsApplicable = Number(owner.tdsApplicable || 0);
+//   const tdsPercentage =
+//     tdsApplicable === 1
+//       ? envTdsPercent > 0
+//         ? envTdsPercent
+//         : Number(owner.tdsPercentage || 0)
+//       : 0;
+
+//   owner.tdsPercentage = tdsPercentage;
+
+//   const tdsAmount =
+//     tdsApplicable === 1 && tdsPercentage > 0
+//       ? Math.round((ownerShareFromFrontend * tdsPercentage) / 100)
+//       : 0;
+
+//   owner.tdsAmount = tdsAmount; // ✅ stored per owner, never touches shareAmount
+
+//   // ── GST (unchanged logic from before, still informational) ──
+//   const paymentCategory = Number(owner.paymentCategory || 1);
+//   const ownerGstApplicable =
+//     rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0);
+//   const ownerGstPct =
+//     rentalGstApplicable === 1
+//       ? envGstPct
+//       : Number(owner.gstPercentage || 0) || envGstPct;
+
+//   let gstBaseAmount = 0;
+//   if (paymentCategory === 1) {
+//     gstBaseAmount = 0;
+//   } else if (paymentCategory === 2) {
+//     gstBaseAmount = ownerShareFromFrontend;
+//   } else if (paymentCategory === 3) {
+//     gstBaseAmount = Number(owner.onlineAmount || 0);
+//   }
+
+//   const ownerGstAmount =
+//     ownerGstApplicable === 1 && gstBaseAmount > 0
+//       ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+//       : 0;
+
+//   owner.gstPercentage =
+//     ownerGstApplicable === 1 && gstBaseAmount > 0 ? ownerGstPct : 0;
+//   owner.gstAmount = ownerGstAmount;
+
+//   owner.totalAmountWithGst = ownerShareFromFrontend + ownerGstAmount;
+//   owner.netPayableToOwner = owner.totalAmountWithGst;
+//   owner.netPayable = owner.totalAmountWithGst;
+// });
+
+// // ✅ NEW — netPayable (overall pool) = totalRentalAmount MINUS the
+// // SUM of every owner's tdsAmount. This is where TDS actually reduces
+// // a number — the overall pool, never the individual shareAmount.
+// const totalTdsAcrossOwners = this.landOwners.reduce(
+//   (sum, owner) => sum + Number(owner.tdsAmount || 0),
+//   0,
+// );
+
+// rp.netPayable = totalRentalAmount - totalTdsAcrossOwners;
+//   // ── STEP E: OWNER PAYMENTS SNAPSHOT ──
+//   rp.ownerPayments = this.landOwners.map((owner) => {
+//     const ownerAmount = Number(owner.shareAmount || 0);
+//     const paymentCategory = Number(owner.paymentCategory || 1);
+//     const ownerGstApplicable =
+//       rentalGstApplicable === 0 ? Number(owner.gstApplicable || 0) : 0;
+
+//     const payment = {
+//       ownerId: owner._id,
+//       ownerName: owner.name,
+//       percentage:
+//         Number(owner.typeShare) === 1
+//           ? Number(owner.sharePercentage || 0)
+//           : null,
+//       amount: ownerAmount,
+//       paymentCategory,
+//       tdsApplicable: Number(owner.tdsApplicable || 0),
+//       tdsPercentage: Number(owner.tdsPercentage || 0),
+//       tdsAmount: Number(owner.tdsAmount || 0),
+//       gstApplicable: ownerGstApplicable,
+//       gstPercentage:
+//         ownerGstApplicable === 1 ? Number(owner.gstPercentage || 0) : 0,
+//       gstAmount: ownerGstApplicable === 1 ? Number(owner.gstAmount || 0) : 0,
+//       totalAmountWithGst:
+//         ownerGstApplicable === 1
+//           ? Number(owner.totalAmountWithGst || ownerAmount)
+//           : ownerAmount,
+//       netPayableToOwner: Number(owner.netPayableToOwner || 0),
+//       netPayable: Number(owner.netPayableToOwner || 0),
+//     };
+
+//     if (paymentCategory === 1) {
+//       payment.cashAmount = ownerAmount;
+//       payment.onlineAmount = 0;
+//     } else if (paymentCategory === 2) {
+//       payment.onlineMode = owner.onlineMode;
+//       payment.cashAmount = 0;
+//       payment.onlineAmount = ownerAmount;
+//     } else if (paymentCategory === 3) {
+//       payment.onlineMode = owner.onlineMode;
+//       payment.cashAmount = Number(owner.cashAmount || 0);
+//       payment.onlineAmount = Number(owner.onlineAmount || 0);
+//     }
+
+//     return payment;
+//   });
+// });
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 3 — Next Billing Date
 // ─────────────────────────────────────────────────────────────
