@@ -168,6 +168,7 @@ const agreementHistorySchema = new mongoose.Schema({
 const ledgerSchema = new mongoose.Schema({
   landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null }, // ✅ added
   landOwnerName: { type: String, trim: true, default: "" }, // ✅ added
+  paymentMode: { type: String, enum: ["Cash", "Online"], default: null }, // ✅ NEW
   utrNumber: { type: String, trim: true },
   date: { type: Date, default: Date.now },
   status: {
@@ -202,6 +203,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     nextBillingDate: { type: Date },
     lastBillPaidDate: { type: Date },
     utrNumber: { type: String, trim: true },
+    paymentMode: { type: String, enum: ["Cash", "Online"], default: null },
     withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
     month: {
       type: String,
@@ -234,6 +236,25 @@ const ledgerHistoryYearSchema = new mongoose.Schema(
     months: [ledgerHistoryMonthSchema],
   },
   { _id: false },
+);
+// ✅ NEW — TDS balance history, same shape as gstBalanceHistory
+const tdsBalanceSchema = new mongoose.Schema(
+  {
+    dueMonth: { type: String, trim: true },
+    cycle: { type: Date, default: null },
+    tdsAmount: { type: Number, default: 0, min: 0 },
+    isPaid: { type: Boolean, default: false },
+    paidAmount: { type: Number, default: 0 },
+    paidAt: { type: Date, default: null },
+    paidBy: { type: String, trim: true },
+    createdAt: { type: Date, default: null },
+    createdBy: { type: String, trim: true },
+    landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    landOwnerName: { type: String, trim: true, default: "" },
+    utrNumber: { type: String, trim: true, default: "" },
+    date: { type: Date, default: null },
+  },
+  { _id: true },
 );
 // ─────────────────────────────────────────────────────────────
 // MAIN SCHEMA
@@ -504,7 +525,7 @@ const MediaSchema = new mongoose.Schema(
           min: 0,
           default: 0,
         },
-         netPayable: { type: Number, min: 0, default: 0 },
+        netPayable: { type: Number, min: 0, default: 0 },
       },
     ],
 
@@ -656,6 +677,7 @@ const MediaSchema = new mongoose.Schema(
     ledger: [ledgerSchema],
     withGst1Ledger: [ledgerSchema],
     ledgerHistory: [ledgerHistoryYearSchema],
+    tdsBalanceHistory: [tdsBalanceSchema],
 
     agreementDocVerification: [agreementDocVerificationSchema],
     rentalDue: [rentalDueEntrySchema],

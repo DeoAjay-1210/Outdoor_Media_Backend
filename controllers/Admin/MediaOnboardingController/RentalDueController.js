@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
@@ -166,8 +165,6 @@ function computeGstSplit(media, withGst) {
   };
 }
 
-
-
 async function sendRentalDueApprovalMail(media, entry) {
   try {
     const toMail = process.env.T0_EMail;
@@ -198,6 +195,9 @@ async function sendRentalDueApprovalMail(media, entry) {
       gstApplicable: owner.gstApplicable || 0,
       gstPercentage: owner.gstPercentage || 0,
       gstAmount: owner.gstAmount || 0,
+      tdsApplicable: owner.tdsApplicable || 0,
+      tdsPercentage: owner.tdsPercentage || 0,
+      tdsAmount: owner.tdsAmount || 0,
       totalAmountWithGst: owner.totalAmountWithGst || 0,
     }));
 
@@ -227,9 +227,9 @@ async function sendRentalDueApprovalMail(media, entry) {
           gstPercentage: rp.gstPercentage || 0,
           gstAmount: rp.gstAmount || 0,
           totalRentalAmountWithGst: rp.totalRentalAmountWithGst || 0,
-          tdsApplicable: rp.tdsApplicable || 0,
-          tdsPercentage: rp.tdsPercentage || 0,
-          tdsAmount: rp.tdsAmount || 0,
+          // tdsApplicable: rp.tdsApplicable || 0,
+          // tdsPercentage: rp.tdsPercentage || 0,
+          // tdsAmount: rp.tdsAmount || 0,
           netPayable: rp.netPayable || 0,
           paymentFrequency: rp.paymentFrequency || 0,
           customPaymentFrequency: rp.rentalPayment || 0,
@@ -277,10 +277,10 @@ async function sendRentalDueApprovalMail(media, entry) {
       },
     };
 
-    // console.log(
-    //   "📧 RENTAL DUE MAIL PAYLOAD:",
-    //   JSON.stringify(mailPayload, null, 2),
-    // );
+    console.log(
+      "📧 RENTAL DUE MAIL PAYLOAD:",
+      JSON.stringify(mailPayload, null, 2),
+    );
     if (mailMode !== "production") {
       console.log(
         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`,
@@ -477,7 +477,7 @@ function syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName) {
 }
 function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag) {
   if (userType !== ROLE.OWNER) return;
-  if (![0,1, 2].includes(Number(gstApplicableFlag))) return; // still only accepts 1 or 2 from the request — 0 is never explicitly sent, it's just the untouched default
+  if (![0, 1, 2].includes(Number(gstApplicableFlag))) return; // still only accepts 1 or 2 from the request — 0 is never explicitly sent, it's just the untouched default
   media.gstApplicableFlag = Number(gstApplicableFlag);
 }
 const resolveGstApplicable = (item) => {
@@ -489,7 +489,8 @@ const resolveGstApplicable = (item) => {
       gstApplicableFlag: 0,
       source: null,
       gstApplicable: 0,
-      message: "GST source not yet determined — Owner has not set gstApplicableFlag",
+      message:
+        "GST source not yet determined — Owner has not set gstApplicableFlag",
     };
   }
 
@@ -751,7 +752,7 @@ const resolveGstApplicable = (item) => {
 //         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
 
 //         markRoleVerified(media, entry, ROLE.OWNER, userName);
-// applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag); 
+// applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
 //         // ✅ close out GST for this cycle BEFORE billing date rolls forward
 //         addGstToBalanceIfApplicable(media, entry, userName);
 //         addOwnerGstToBalanceIfApplicable(media, entry, userName);
@@ -1137,7 +1138,7 @@ const resolveGstApplicable = (item) => {
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
-    const { mediaId, campaignName, withGst,gstApplicableFlag  } = req.body;
+    const { mediaId, campaignName, withGst, gstApplicableFlag } = req.body;
 
     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
       return res
@@ -1579,7 +1580,7 @@ exports.saveRentalDue = async (req, res) => {
     const allApproved = !nextPendingStep;
 
     // ✅ resolve withGst mode for this entry (default to 1 / With GST)
-    const resolvedWithGst = [0,1, 2].includes(Number(withGst))
+    const resolvedWithGst = [0, 1, 2].includes(Number(withGst))
       ? Number(withGst)
       : 0;
     const gstSplit = computeGstSplit(media, resolvedWithGst);
@@ -2116,7 +2117,6 @@ function formatDate(cycleIdentifier) {
   return cycleIdentifier;
 }
 
-
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const {
@@ -2350,7 +2350,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           totalSqFt: 1,
           location: 1,
           rentalPayment: 1,
-          gstApplicableFlag: 1, 
+          gstApplicableFlag: 1,
           agreement: 1,
           agreementDocVerification: 1,
           verificationProgressHistory: 1,
@@ -2487,7 +2487,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
         dueStatus: item.rentalPayment?.status,
         dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
-         gstApplicableDisplay: resolveGstApplicable(item),
+        gstApplicableDisplay: resolveGstApplicable(item),
         agreementPeriod: {
           startDate: item.agreement?.startDate,
           endDate: item.agreement?.endDate,
@@ -2655,10 +2655,6 @@ exports.GstAmountPaid = async (req, res) => {
   }
 };
 
-
-
-
-
 // revert Process
 // ═══════════════════════════════════════════════════════════════
 // REVERT DOC VERIFICATION — deletes the latest verification record
@@ -2689,7 +2685,10 @@ exports.revertAgreementDocVerification = async (req, res) => {
         .json({ success: false, message: "Media not found" });
     }
 
-    if (!Array.isArray(media.agreementDocVerification) || !media.agreementDocVerification.length) {
+    if (
+      !Array.isArray(media.agreementDocVerification) ||
+      !media.agreementDocVerification.length
+    ) {
       return res.status(400).json({
         success: false,
         message: "No verification records found to revert",
@@ -2700,7 +2699,9 @@ exports.revertAgreementDocVerification = async (req, res) => {
     const match = media.agreementDocVerification
       .map((rec, i) => ({ rec, i }))
       .filter(({ rec }) => rec.verifiedByRole === userType && rec.isVerified)
-      .sort((a, b) => new Date(b.rec.verifiedAt) - new Date(a.rec.verifiedAt))[0];
+      .sort(
+        (a, b) => new Date(b.rec.verifiedAt) - new Date(a.rec.verifiedAt),
+      )[0];
 
     if (!match) {
       return res.status(400).json({
@@ -2712,7 +2713,11 @@ exports.revertAgreementDocVerification = async (req, res) => {
     // ── VALIDATION: don't allow reverting a role if a higher-ranked
     //    role has already verified this same cycle (mirrors the rank
     //    block used when verifying) ──
-    const ROLE_RANK_LOCAL = { [ROLE.STAFF]: 1, [ROLE.TEAM_LEAD]: 2, [ROLE.OWNER]: 3 };
+    const ROLE_RANK_LOCAL = {
+      [ROLE.STAFF]: 1,
+      [ROLE.TEAM_LEAD]: 2,
+      [ROLE.OWNER]: 3,
+    };
     const cycle = match.rec.cycle;
     const isSameCycle = (a, b) => {
       if (!a || !b) return false;
@@ -2756,7 +2761,9 @@ exports.revertAgreementDocVerification = async (req, res) => {
     // ── Also remove the matching entry-linked history record, if any ──
     if (Array.isArray(media.agreementDocVerificationHistory)) {
       const pendingEntry = Array.isArray(media.rentalDueEntries)
-        ? [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3) ||
+        ? [...media.rentalDueEntries]
+            .reverse()
+            .find((e) => e.approvalStatus !== 3) ||
           media.rentalDueEntries[media.rentalDueEntries.length - 1]
         : null;
 
@@ -2768,7 +2775,9 @@ exports.revertAgreementDocVerification = async (req, res) => {
               h.verifiedByRole === userType &&
               String(h.rentalDueId) === String(pendingEntry._id),
           )
-          .sort((a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt))[0];
+          .sort(
+            (a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt),
+          )[0];
 
         if (histMatch) {
           media.agreementDocVerificationHistory.splice(histMatch.i, 1);
@@ -2799,7 +2808,6 @@ exports.revertAgreementDocVerification = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
-
 
 // ═══════════════════════════════════════════════════════════════
 // REVERT APPROVAL — undoes a role's approval step for the active
@@ -2878,8 +2886,12 @@ exports.revertRentalApproval = async (req, res) => {
 
       const yearLabel = getYearLabel(entry.dueDate);
       const monthLabel = getMonthLabel(entry.dueDate);
-      const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-      const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+      const yearBucket = media.rentalDueHistory.find(
+        (y) => y.year === yearLabel,
+      );
+      const monthBucket = yearBucket?.months.find(
+        (m) => m.month === monthLabel,
+      );
       if (monthBucket) {
         monthBucket.entries = monthBucket.entries.filter(
           (e) => String(e.rentalDueId) !== String(entry._id),
@@ -2905,7 +2917,9 @@ exports.revertRentalApproval = async (req, res) => {
       entry.status = 1;
       entry.agreementDocVerified = false;
 
-      const tlStep = entry.approvalSteps?.find((s) => s.role === ROLE.TEAM_LEAD);
+      const tlStep = entry.approvalSteps?.find(
+        (s) => s.role === ROLE.TEAM_LEAD,
+      );
       if (tlStep) {
         tlStep.userId = null;
         tlStep.userName = "";
@@ -2946,18 +2960,28 @@ exports.revertRentalApproval = async (req, res) => {
 
       const prevEntry = entries.length > 1 ? entries[entries.length - 2] : null;
       media.rentalPayment.nextBillingDate = entry.dueDate;
-      media.rentalPayment.lastBillPaidDate = prevEntry ? prevEntry.dueDate : null;
+      media.rentalPayment.lastBillPaidDate = prevEntry
+        ? prevEntry.dueDate
+        : null;
       media.markModified("rentalPayment");
 
-      media.agreementDocVerified = { staff: true, teamLead: true, owner: false };
+      media.agreementDocVerified = {
+        staff: true,
+        teamLead: true,
+        owner: false,
+      };
       media.markModified("agreementDocVerified");
     }
 
     if (userType !== ROLE.STAFF) {
       const yearLabel = getYearLabel(entry.dueDate);
       const monthLabel = getMonthLabel(entry.dueDate);
-      const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-      const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+      const yearBucket = media.rentalDueHistory.find(
+        (y) => y.year === yearLabel,
+      );
+      const monthBucket = yearBucket?.months.find(
+        (m) => m.month === monthLabel,
+      );
       const historyRecord = monthBucket?.entries.find(
         (e) => String(e.rentalDueId) === String(entry._id),
       );
