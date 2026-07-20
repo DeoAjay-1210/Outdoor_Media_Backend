@@ -1081,16 +1081,22 @@ exports.listMediaByLedger = async (req, res) => {
     }
 
     const skip = (pageNumbers - 1) * pageSize;
-
-    const [results, totalCount] = await Promise.all([
-      Media.find(filter)
-        .select(
-          "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
-        )
-        .sort({ updatedAt: -1 })
-        .skip(skip)
-        .limit(pageSize),
-      Media.countDocuments(filter),
+const needsFullFetchForTdsFilter = tdsStatusFilter !== null;
+   const [results, totalCount] = await Promise.all([
+      needsFullFetchForTdsFilter
+        ? Media.find(filter)
+            .select(
+              "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
+            )
+            .sort({ updatedAt: -1 })
+        : Media.find(filter)
+            .select(
+              "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
+            )
+            .sort({ updatedAt: -1 })
+            .skip(skip)
+            .limit(pageSize),
+      Media.countDocuments(filter), // still the RAW db count, used only as a fallback
     ]);
 
     let overallGstPendingAmount = 0;
@@ -1432,15 +1438,19 @@ exports.listMediaByLedger = async (req, res) => {
     finalMediaListData = finalMediaListData.map(
       ({ tdsStatusFlags, ...rest }) => rest,
     );
-
+    let effectiveTotalCount = totalCount;
+  if (needsFullFetchForTdsFilter) {
+      effectiveTotalCount = finalMediaListData.length;
+      finalMediaListData = finalMediaListData.slice(skip, skip + pageSize);
+    }
     return successResponse(
       res,
       "Media list fetched successfully",
       {
         pageNumber: pageNumbers,
         count: pageSize,
-        totalCount,
-        totalPages: Math.ceil(totalCount / pageSize),
+         totalCount: effectiveTotalCount,
+        totalPages: Math.ceil(effectiveTotalCount  / pageSize),
         overallGstPendingAmount: overallGstPendingAmount,
         mediaList: finalMediaListData,
       },
@@ -1466,7 +1476,7 @@ exports.getLedgerHistory = async (req, res) => {
 
     const media = await Media.findById(mediaId)
       .select(
-        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners agreement gstBalanceHistory tdsBalanceHistory",
+        "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners agreement  gstBalanceHistory tdsBalanceHistory rentalDue",
       )
       .lean();
 
@@ -1832,7 +1842,12 @@ exports.getLedgerHistory = async (req, res) => {
         },
       ];
     }
-
+ const rentalDueEntries = Array.isArray(media.rentalDue)
+      ? [...new Set(media.rentalDue.map((entry) => entry.withGst))].map(
+          (withGst) => ({ withGst }),
+        )
+      : [];
+ 
     return successResponse(
       res,
       "Ledger history fetched successfully",
@@ -1852,6 +1867,7 @@ exports.getLedgerHistory = async (req, res) => {
           nextBillingDate: media.rentalPayment.nextBillingDate,
         },
         ledgerHistory: transformedLedgerHistory,
+        rentalDueEntries
         // gstPayment: gstPayment,
         // tdsPayment: tdsPayment,
       },
