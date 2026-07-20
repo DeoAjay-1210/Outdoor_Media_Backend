@@ -72,7 +72,6 @@ function advanceRentalPaymentOnOwnerApproval(media) {
   }
 }
 
-
 exports.createLedgerEntry = async (req, res) => {
   try {
     const { mediaId, entries } = req.body;
@@ -923,7 +922,6 @@ exports.listMediaByLedger = async (req, res) => {
   }
 };
 
-
 // exports.getLedgerHistory = async (req, res) => {
 //   try {
 //     const { mediaId, year, month } = req.query;
@@ -1158,7 +1156,7 @@ exports.listMediaByLedger = async (req, res) => {
 //       if (!fullTdsBalanceHistory || fullTdsBalanceHistory.length === 0) {
 //         return [];
 //       }
- 
+
 //       return fullTdsBalanceHistory.filter((entry) => {
 //         if (!entry || !entry.dueMonth) return false;
 //         return (
@@ -1332,8 +1330,18 @@ exports.getLedgerHistory = async (req, res) => {
     // Filter by Month
     if (month) {
       const monthNames = [
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
       ];
 
       const monthName = monthNames[Number(month) - 1];
@@ -1367,7 +1375,9 @@ exports.getLedgerHistory = async (req, res) => {
     if (fullTdsBalanceHistory.length > 0) {
       const hasUnpaidTds = fullTdsBalanceHistory.some(
         (entry) =>
-          entry.isPaid === false || !entry.utrNumber || entry.utrNumber.trim() === "",
+          entry.isPaid === false ||
+          !entry.utrNumber ||
+          entry.utrNumber.trim() === "",
       );
       tdsPayment = hasUnpaidTds;
     }
@@ -1406,7 +1416,12 @@ exports.getLedgerHistory = async (req, res) => {
             ? `id_${String(entry._id)}`
             : `pos_${pos}`;
 
-    const getGstBalanceDetails = (landOwnerId, month, rentalDueId, entryDate) => {
+    const getGstBalanceDetails = (
+      landOwnerId,
+      month,
+      rentalDueId,
+      entryDate,
+    ) => {
       try {
         if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
           return { isPaid: false, gstAmount: 0 };
@@ -1525,8 +1540,12 @@ exports.getLedgerHistory = async (req, res) => {
       months: yearEntry.months.map((monthEntry) => {
         const allEntries = monthEntry.entries || [];
 
-        const withGst2Entries = allEntries.filter((entry) => entry.withGst === 2);
-        const withGst1Entries = allEntries.filter((entry) => entry.withGst === 1);
+        const withGst2Entries = allEntries.filter(
+          (entry) => entry.withGst === 2,
+        );
+        const withGst1Entries = allEntries.filter(
+          (entry) => entry.withGst === 1,
+        );
 
         const sortByUpdatedAt = (entries) =>
           [...entries].sort(
@@ -1535,7 +1554,9 @@ exports.getLedgerHistory = async (req, res) => {
 
         const latestGst2 = dedupeByKey(withGst2Entries, gst2Key);
         const latestGst1 = dedupeByKey(withGst1Entries, gst1Key);
-        const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(monthEntry.month);
+        const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(
+          monthEntry.month,
+        );
 
         // ✅ pass yearEntry.year so virtual TDS entries get a proper dueMonth
         const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(
