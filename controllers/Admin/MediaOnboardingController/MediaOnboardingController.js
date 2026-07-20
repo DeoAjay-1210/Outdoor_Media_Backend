@@ -438,41 +438,7 @@ const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
 };
 
 
-// const buildAppraisalScheduleFromAnchor = ({
-//   anchorDate,
-//   frequency,
-//   customFrequencyMonths,
-//   type,
-//   percentage,
-//   fixedAmount,
-//   baseRent,
-//   userName,
-// }) => {
-//   let history = [
-//     {
-//       appraisalDate: toDateOnly(anchorDate),
-//       type,
-//       percentage: percentage || 0,
-//       fixedAmount: Number(fixedAmount || 0),
-//       frequency: Number(frequency),
-//       customFrequencyMonths: Number(customFrequencyMonths || 0),
-//       previousRent: Number(baseRent || 0),
-//       appraisalAmount: 0,
-//       newRent: Number(baseRent || 0), // ✅ was 0 — anchor entry must stay FLAT, not bumped
-//       updatedBy: userName,
-//       updatedAt: nowIST(),
-//     },
-//   ];
 
-//   // ❌ removed: history = cascadeHistory(history, Number(baseRent || 0));
-//   // cascadeHistory() applies the appraisal % to every entry including
-//   // the anchor itself — that's what was bumping 50K→60K ON 01.06.2025
-//   // instead of only on the next appraisal date.
-
-//   history = autoScheduleFutureAppraisalEntries(history, userName);
-
-//   return history;
-// };
 const buildAppraisalScheduleFromAnchor = ({
   anchorDate,
   frequency,
@@ -905,370 +871,11 @@ const handleAppraisalLogic = async (
   mediaData.appraisal = appraisal;
   return mediaData;
 };
-// const handleAppraisalLogic = async (
-//   mediaData,
-//   existingMedia,
-//   userName,
-//   currentBaseRent,
-//   rentActuallyChanged,
-// ) => {
-//   const appraisal = mediaData.appraisal;
-//   const agreement = mediaData.agreement || existingMedia?.agreement;
-
-//   if (!appraisal || Number(appraisal.applicable) !== 1) return mediaData;
-//   if (!agreement?.startDate || !agreement?.endDate) return mediaData;
-
-//   const agreementStartDate = new Date(agreement.startDate);
-//   const agreementEndDate = new Date(agreement.endDate);
-
-//   let months = 0;
-//   if (Number(appraisal.frequency) === 4) {
-//     months = Number(appraisal.customFrequencyMonths || 0);
-//     if (months <= 0) {
-//       throw new Error("Custom frequency months must be greater than 0");
-//     }
-//   } else {
-//     months = APPRAISAL_FREQUENCY_MONTHS_MAP[Number(appraisal.frequency)] || 12;
-//   }
-
-//   const netPayable = Number(
-//     currentBaseRent ?? mediaData.rentalPayment?.totalRentalAmount ?? 0,
-//   );
-//   const isNew = !existingMedia;
-
-//   let nextDate = null;
-//   if (appraisal.nextAppraisalDate) {
-//     nextDate = toDateOnly(appraisal.nextAppraisalDate);
-//     appraisal.nextAppraisalDate = nextDate;
-//   }
-
-//   // ── CREATE flow ───────────────────────────────────────────────────────────
-//   if (isNew) {
-//     const manualLastAppraisalDate = appraisal.lastAppraisalDate
-//       ? toDateOnly(appraisal.lastAppraisalDate)
-//       : null;
-
-//     if (!nextDate && !manualLastAppraisalDate) {
-//       const firstDate = new Date(agreementStartDate);
-//       firstDate.setMonth(firstDate.getMonth() + months);
-//       nextDate = toDateOnly(firstDate);
-//       appraisal.nextAppraisalDate = nextDate;
-//     }
-
-//     const seedDate = manualLastAppraisalDate || nextDate;
-
-//     appraisal.history = [];
-//     if (seedDate) {
-//       appraisal.history.push({
-//         appraisalDate: seedDate,
-//         type: appraisal.type,
-//         percentage: appraisal.percentage || 0,
-//         fixedAmount: Number(appraisal.fixedAmount || 0),
-//         frequency: Number(appraisal.frequency),
-//         customFrequencyMonths: Number(appraisal.customFrequencyMonths || 0),
-//         previousRent: netPayable,
-//         appraisalAmount: 0,      // ✅ seed/anchor entry never bumps itself
-//         newRent: netPayable,     // ✅ flat — same as previousRent
-//         updatedBy: userName,
-//         updatedAt: nowIST(),
-//       });
-
-//       // ❌ REMOVED: appraisal.history = cascadeHistory(appraisal.history, netPayable);
-//       // cascadeHistory() applies the % increase to the seed entry itself —
-//       // that's exactly what was turning 50K → 55K ON the seed/lastAppraisalDate,
-//       // instead of only on the NEXT appraisal date.
-
-//       appraisal.history = autoScheduleFutureAppraisalEntries(
-//         appraisal.history,
-//         userName,
-//       );
-
-//       // ✅ safety net — force the seed entry back to flat no matter what
-//       // autoScheduleFutureAppraisalEntries does internally to index 0
-//       if (
-//         appraisal.history[0] &&
-//         dayKey(appraisal.history[0].appraisalDate) === dayKey(seedDate)
-//       ) {
-//         appraisal.history[0].previousRent = netPayable;
-//         appraisal.history[0].appraisalAmount = 0;
-//         appraisal.history[0].newRent = netPayable;
-//       }
-
-//       const lastEntry = appraisal.history[appraisal.history.length - 1];
-//       if (lastEntry)
-//         appraisal.nextAppraisalDate = new Date(lastEntry.appraisalDate);
-//     }
-
-//     if (manualLastAppraisalDate) {
-//       appraisal.lastAppraisalDate = manualLastAppraisalDate;
-//     }
-//     mediaData.appraisal = appraisal;
-//     return mediaData;
-//   }
-
-//   // ── UPDATE flow ───────────────────────────────────────────────────────────
-//   const oldAppraisal = existingMedia.appraisal
-//     ? JSON.parse(JSON.stringify(existingMedia.appraisal))
-//     : {};
-
-//   const oldRent = Number(existingMedia?.rentalPayment?.totalRentalAmount ?? 0);
-
-//   let history = (
-//     Array.isArray(oldAppraisal.history) ? oldAppraisal.history : []
-//   )
-//     .filter((h) => h.appraisalDate)
-//     .map((h) => ({ ...h }))
-//     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
-// const hasAnyExistingAppraisalHistory = history.length > 0;
-//   const seedBaseRent = hasAnyExistingAppraisalHistory ? oldRent : netPayable;
-//   const today = todayKey();
-
-//   let isNewFutureEntry = false;
-
-//   const existingLastAppraisalDate = existingMedia.appraisal?.lastAppraisalDate
-//     ? toDateOnly(existingMedia.appraisal.lastAppraisalDate)
-//     : null;
-
-//   const incomingLastAppraisalDate = appraisal.lastAppraisalDate
-//     ? toDateOnly(appraisal.lastAppraisalDate)
-//     : null;
-
-//   const anchorDateChanged =
-//     incomingLastAppraisalDate &&
-//     (!existingLastAppraisalDate ||
-//       dayKey(incomingLastAppraisalDate) !== dayKey(existingLastAppraisalDate));
-
-//   const configChanged =
-//     Number(appraisal.frequency) !== Number(existingMedia.appraisal?.frequency) ||
-//     Number(appraisal.customFrequencyMonths || 0) !==
-//       Number(existingMedia.appraisal?.customFrequencyMonths || 0) ||
-//     Number(appraisal.type) !== Number(existingMedia.appraisal?.type) ||
-//     Number(appraisal.percentage || 0) !==
-//       Number(existingMedia.appraisal?.percentage || 0) ||
-//     Number(appraisal.fixedAmount || 0) !==
-//       Number(existingMedia.appraisal?.fixedAmount || 0);
-
-//   const manualLastAppraisalDateUpdate =
-//     incomingLastAppraisalDate && (anchorDateChanged || configChanged)
-//       ? incomingLastAppraisalDate
-//       : null;
-
-//   if (manualLastAppraisalDateUpdate) {
-//     history = buildAppraisalScheduleFromAnchor({
-//       anchorDate: manualLastAppraisalDateUpdate,
-//       frequency: appraisal.frequency,
-//       customFrequencyMonths: appraisal.customFrequencyMonths,
-//       type: appraisal.type,
-//       percentage: appraisal.percentage,
-//       fixedAmount: appraisal.fixedAmount,
-//       baseRent: seedBaseRent,
-//       userName,
-//     });
-//   } else if (nextDate) {
-//     const nextDay = dayKey(nextDate);
-//     const existingIdx = history.findIndex(
-//       (h) => dayKey(h.appraisalDate) === nextDay,
-//     );
-
-//     let appliedEntry = null;
-
-//     if (existingIdx !== -1) {
-//       const previousFrequency = Number(history[existingIdx].frequency);
-//       const previousCustomMonths = Number(
-//         history[existingIdx].customFrequencyMonths || 0,
-//       );
-
-//       history[existingIdx] = {
-//         ...history[existingIdx],
-//         type: appraisal.type,
-//         percentage: appraisal.percentage || 0,
-//         fixedAmount: Number(appraisal.fixedAmount || 0),
-//         frequency: Number(appraisal.frequency),
-//         customFrequencyMonths: Number(appraisal.customFrequencyMonths || 0),
-//         updatedBy: userName,
-//         updatedAt: nowIST(),
-//       };
-
-//       const e = history[existingIdx];
-//       const isFutureEntry = dayKey(e.appraisalDate) > today;
-
-//       if (rentActuallyChanged && isFutureEntry) {
-//         e.previousRent = netPayable;
-//       }
-
-//       e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
-//       e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
-
-//       const frequencyChanged =
-//         e.frequency !== previousFrequency ||
-//         (e.frequency === 4 && e.customFrequencyMonths !== previousCustomMonths);
-
-//       if (frequencyChanged) {
-//         history = history.slice(0, existingIdx + 1);
-//       } else {
-//         let prev = e.newRent;
-//         for (let i = existingIdx + 1; i < history.length; i++) {
-//           if (dayKey(history[i].appraisalDate) > today) {
-//             history[i].previousRent = prev;
-//             history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
-//             history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
-//             prev = history[i].newRent;
-//           }
-//         }
-//       }
-
-//       appliedEntry = e;
-//     } else {
-//       if (history.length > 0) {
-//         let latestIdx = 0;
-//         for (let i = 1; i < history.length; i++) {
-//           if (
-//             new Date(history[i].appraisalDate) >
-//             new Date(history[latestIdx].appraisalDate)
-//           ) {
-//             latestIdx = i;
-//           }
-//         }
-
-//         const movedEntry = history[latestIdx];
-//         movedEntry.appraisalDate = nextDate;
-//         movedEntry.type = appraisal.type;
-//         movedEntry.percentage = appraisal.percentage || 0;
-//         movedEntry.fixedAmount = Number(appraisal.fixedAmount || 0);
-//         movedEntry.frequency = Number(appraisal.frequency);
-//         movedEntry.customFrequencyMonths = Number(
-//           appraisal.customFrequencyMonths || 0,
-//         );
-//         movedEntry.updatedBy = userName;
-//         movedEntry.updatedAt = nowIST();
-
-//         if (nextDay > today) isNewFutureEntry = true;
-
-//         history.sort(
-//           (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
-//         );
-
-//         const newIdx = history.findIndex(
-//           (h) => dayKey(h.appraisalDate) === nextDay,
-//         );
-
-//         let baseForNewEntry;
-//         if (newIdx > 0) {
-//           baseForNewEntry = history[newIdx - 1].newRent || 0;
-//         } else if (rentActuallyChanged && nextDay > today) {
-//           baseForNewEntry = netPayable;
-//         } else {
-//           baseForNewEntry = seedBaseRent;
-//         }
-
-//         history[newIdx].previousRent = baseForNewEntry;
-//         history[newIdx].appraisalAmount = computeAppraisalAmount(
-//           history[newIdx],
-//           baseForNewEntry,
-//         );
-//         history[newIdx].newRent = Math.floor(
-//           baseForNewEntry + history[newIdx].appraisalAmount,
-//         );
-
-//         let prev = history[newIdx].newRent;
-//         for (let i = newIdx + 1; i < history.length; i++) {
-//           if (dayKey(history[i].appraisalDate) > today) {
-//             history[i].previousRent = prev;
-//             history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
-//             history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
-//             prev = history[i].newRent;
-//           }
-//         }
-
-//         appliedEntry = history[newIdx];
-//       } else {
-//         history.push({
-//           appraisalDate: nextDate,
-//           type: appraisal.type,
-//           percentage: appraisal.percentage || 0,
-//           fixedAmount: Number(appraisal.fixedAmount || 0),
-//           frequency: Number(appraisal.frequency),
-//           customFrequencyMonths: Number(appraisal.customFrequencyMonths || 0),
-//           previousRent: seedBaseRent,
-//           appraisalAmount: 0,
-//           newRent: 0,
-//           updatedBy: userName,
-//           updatedAt: nowIST(),
-//         });
-
-//         const e = history[0];
-//         e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
-//         e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
-
-//         appliedEntry = e;
-//       }
-//     }
-
-//     if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
-//       const hasLaterEntry = history.some(
-//         (h) => dayKey(h.appraisalDate) > dayKey(appliedEntry.appraisalDate),
-//       );
-
-//       if (!hasLaterEntry) {
-//         history = autoScheduleFutureAppraisalEntries(history, userName);
-//       }
-//     }
-//   }
-
-//   for (const entry of history) {
-//     if (dayKey(entry.appraisalDate) <= today) {
-//       entry.appraisalAmount = computeAppraisalAmount(entry, entry.previousRent);
-//       entry.newRent = Math.floor(entry.previousRent + entry.appraisalAmount);
-//     }
-//   }
-
-//   history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
-//  if (history.length > 0) {
-//     history[0].appraisalAmount = 0;
-//     history[0].newRent = history[0].previousRent;
-//   }
-//   const futureDates = history.filter((h) => dayKey(h.appraisalDate) > today);
-//   const todayEntries = history.filter((h) => dayKey(h.appraisalDate) === today);
-
-//   if (todayEntries.length > 0) {
-//     appraisal.nextAppraisalDate = new Date(
-//       todayEntries[todayEntries.length - 1].appraisalDate,
-//     );
-//   } else if (futureDates.length > 0) {
-//     appraisal.nextAppraisalDate = new Date(futureDates[0].appraisalDate);
-//   } else {
-//     appraisal.nextAppraisalDate = null;
-//   }
-
-//   const currentEntry = history
-//     .filter((h) => dayKey(h.appraisalDate) <= today)
-//     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
-
-//   if (currentEntry) {
-//     appraisal.frequency = currentEntry.frequency;
-//     appraisal.customFrequencyMonths = currentEntry.customFrequencyMonths || 0;
-//   } else if (history.length > 0) {
-//     const firstEntry = history[0];
-//     appraisal.frequency = firstEntry.frequency;
-//     appraisal.customFrequencyMonths = firstEntry.customFrequencyMonths || 0;
-//   }
-
-//   appraisal.history = history;
-//   mediaData.appraisal = appraisal;
-//   return mediaData;
-// };
-
 const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   if (!appraisal) return appraisal;
 
   const today = todayKey();
 
-  // ✅ FIXED — handle the "history is empty/missing" case explicitly,
-  // instead of silently returning without touching lastAppraisalDate.
-  // If there's a nextAppraisalDate already sitting on the object and
-  // it's due (today or past), treat IT as the last appraisal — this
-  // covers the gap where handleAppraisalLogic hasn't converted it into
-  // a real history entry yet, or history is otherwise empty.
   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
     const pendingDate = appraisal.nextAppraisalDate
       ? toDateOnly(appraisal.nextAppraisalDate)
@@ -1340,69 +947,7 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
 };
 
 
-// const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
-//   if (
-//     !appraisal ||
-//     !Array.isArray(appraisal.history) ||
-//     !appraisal.history.length
-//   ) {
-//     return appraisal;
-//   }
 
-//   const sorted = appraisal.history
-//     .filter((h) => h.appraisalDate)
-//     .map((h) => ({ ...h, dateKey: dayKey(h.appraisalDate) }))
-//     .sort((a, b) => a.dateKey - b.dateKey);
-
-//   if (!sorted.length) return appraisal;
-
-//   const baseRent = Number(sorted[0].previousRent ?? fallbackBaseRent ?? 0);
-//   const today = todayKey();
-
-//   // ✅ FIXED — "due" entries are today-or-earlier (was strictly "< today"
-//   // before, which meant an entry landing exactly ON today never counted
-//   // as the last applied appraisal). This is what makes lastAppraisalDate
-//   // move forward automatically as frequency cycles pass.
-//   const dueEntries = sorted.filter((h) => h.dateKey <= today);
-//   const futureEntries = sorted.filter((h) => h.dateKey > today);
-
-//   // ✅ lastAppraisalDate = the MOST RECENT due entry, always freshly
-//   // derived from history — never frozen to a manually-submitted anchor.
-//   appraisal.lastAppraisalDate =
-//     dueEntries.length > 0
-//       ? new Date(dueEntries[dueEntries.length - 1].appraisalDate)
-//       : null;
-
-//   const currentEntry =
-//     dueEntries.length > 0 ? dueEntries[dueEntries.length - 1] : null;
-
-//   appraisal.currentRent = currentEntry
-//     ? Number(currentEntry.newRent || currentEntry.previousRent || baseRent)
-//     : baseRent;
-
-//   const nextEntry = futureEntries.length > 0 ? futureEntries[0] : null;
-
-//   appraisal.nextAppraisalDate = nextEntry
-//     ? new Date(nextEntry.appraisalDate)
-//     : null;
-
-//   const displayEntry = nextEntry || currentEntry;
-//   if (displayEntry) {
-//     appraisal.type = displayEntry.type;
-//     appraisal.percentage = displayEntry.percentage || 0;
-//     appraisal.fixedAmount = displayEntry.fixedAmount || 0;
-//     appraisal.appraisalAmount = Number(displayEntry.appraisalAmount || 0);
-//     appraisal.totalAppraisalAmount = Math.floor(
-//       Number(displayEntry.newRent || 0),
-//     );
-//   } else {
-//     appraisal.totalAppraisalAmount = Math.floor(
-//       Number(appraisal.currentRent || 0),
-//     );
-//   }
-
-//   return appraisal;
-// };
 const getFrequencyMonths = (frequency, customMonths) => {
   // const EXTRA_BUFFER_MONTHS = 1; // every frequency gets +1 month added
 
@@ -2170,16 +1715,42 @@ const mediaOnboarding = async (req, res) => {
           delete mediaData.agreement.agreementPDF;
         }
       }
+      // if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+      //   mediaData.landOwners.forEach((owner, idx) => {
+      //     const existingOwner = media.landOwners?.[idx];
+      //     OWNER_FILE_FIELDS.forEach((field) => {
+      //       if (typeof owner[field] === "string") {
+      //         owner[field] = existingOwner ? existingOwner[field] : undefined;
+      //       }
+      //     });
+      //   });
+      // }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
-        mediaData.landOwners.forEach((owner, idx) => {
-          const existingOwner = media.landOwners?.[idx];
-          OWNER_FILE_FIELDS.forEach((field) => {
-            if (typeof owner[field] === "string") {
-              owner[field] = existingOwner ? existingOwner[field] : undefined;
-            }
-          });
-        });
+  mediaData.landOwners.forEach((owner, idx) => {
+    const existingOwner = media.landOwners?.[idx];
+
+    // ✅ NEW — preserve the EXISTING owner's real _id, matched by
+    // array position, whenever the frontend doesn't send a valid
+    // matching _id (or sends none at all). Without this, Mongoose
+    // silently generates a BRAND-NEW _id for the owner subdocument on
+    // every update — permanently orphaning every ledger/GST/TDS
+    // record that was already tied to the owner's original _id.
+    if (existingOwner) {
+      const sentIdMatchesExisting =
+        owner._id && String(owner._id) === String(existingOwner._id);
+
+      if (!sentIdMatchesExisting) {
+        owner._id = existingOwner._id;
       }
+    }
+
+    OWNER_FILE_FIELDS.forEach((field) => {
+      if (typeof owner[field] === "string") {
+        owner[field] = existingOwner ? existingOwner[field] : undefined;
+      }
+    });
+  });
+}
       // Step 1 & 2: track totalRentalAmount change; get the effective base rent.
       const { currentBaseRent, rentActuallyChanged } =
         handleRentalAmountHistory(mediaData, media, userName);

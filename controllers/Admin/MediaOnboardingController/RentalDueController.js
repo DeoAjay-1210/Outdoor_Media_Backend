@@ -3188,7 +3188,11 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     const orFilters = [];
     if (Number(isOverdue) === 1) orFilters.push({ isOverdueThisMonth: true });
-    if (Number(isPending) === 1) orFilters.push({ isPendingThisMonth: true });
+    // if (Number(isPending) === 1) orFilters.push({ isPendingThisMonth: true });
+    if (Number(isPending) === 1) {
+      orFilters.push({ isPendingThisMonth: true });
+      orFilters.push({ isOverdueThisMonth: true });
+    }
     if (Number(isApproved) === 1) orFilters.push({ isApprovedThisMonth: true });
     if (Number(isPastPending) === 1)
       orFilters.push({ isPastPendingByRole: true });
