@@ -353,7 +353,7 @@ exports.createLedgerEntry = async (req, res) => {
             dueMonth,
             cycle: currentCycle,
             tdsAmount,
-            isPaid: true,
+            isUtrEntry: true,
             paidAmount: tdsAmount,
             paidAt: entryDate,
             paidBy: req.user?.userName || "Admin",
@@ -371,7 +371,7 @@ exports.createLedgerEntry = async (req, res) => {
           // Same owner + same dueMonth already paid once before -> UPDATE in place
           // (e.g. re-saving July again just corrects that same July record)
           tdsRecord.tdsAmount = tdsAmount;
-          tdsRecord.isPaid = true;
+          tdsRecord.isUtrEntry = true;
           tdsRecord.paidAmount = tdsAmount;
           tdsRecord.paidAt = entryDate;
           tdsRecord.paidBy = req.user?.userName || "Admin";
@@ -860,14 +860,14 @@ exports.listMediaByLedger = async (req, res) => {
             month: monthName,
             cycle: cycleDate,
             tdsAmount,
-            isPaid: false,
+            isUtrEntry: false,
             paidAmount: 0,
             paidAt: null,
             landOwnerId: owner._id,
             landOwnerName: owner.name,
             utrNumber: "",
-            date: cycleDate,
-            isVirtual: true,
+            date: null,
+            // isVirtual: true,
           });
         });
       });
@@ -1375,7 +1375,7 @@ exports.getLedgerHistory = async (req, res) => {
     if (fullTdsBalanceHistory.length > 0) {
       const hasUnpaidTds = fullTdsBalanceHistory.some(
         (entry) =>
-          entry.isPaid === false ||
+          entry.isUtrEntry === false ||
           !entry.utrNumber ||
           entry.utrNumber.trim() === "",
       );
@@ -1496,10 +1496,63 @@ exports.getLedgerHistory = async (req, res) => {
     // "unpaid" entries for every tdsApplicable owner who doesn't
     // already have a real record for this month. Mirrors
     // listMediaByLedger's TDS logic so both APIs behave consistently.
-    const getTdsBalanceHistoryForMonth = (monthName, yearFromEntry) => {
+    // const getTdsBalanceHistoryForMonth = (monthName, yearFromEntry) => {
+    //   const realForMonth = (fullTdsBalanceHistory || []).filter((entry) => {
+    //     if (!entry || !entry.dueMonth) return false;
+    //     return entry.dueMonth.toLowerCase().includes(monthName.toLowerCase());
+    //   });
+
+    //   const realOwnerIds = new Set(
+    //     realForMonth.map((t) => String(t.landOwnerId)),
+    //   );
+
+    //   const virtualForMonth = [];
+    //   (media.landOwners || []).forEach((owner) => {
+    //     const isApplicable =
+    //       owner.tdsApplicable === 1 ||
+    //       owner.tdsApplicable === "1" ||
+    //       owner.tdsApplicable === true;
+    //     if (!isApplicable) return;
+    //     if (realOwnerIds.has(String(owner._id))) return;
+
+    //     virtualForMonth.push({
+    //       _id: null,
+    //       dueMonth: `${monthName} ${yearFromEntry || ""}`.trim(),
+    //       month: monthName,
+    //       cycle: null,
+    //       tdsAmount: Number(owner.tdsAmount || 0),
+    //       isUtrEntry: false,
+    //       paidAmount: 0,
+    //       paidAt: null,
+    //       landOwnerId: owner._id,
+    //       landOwnerName: owner.name,
+    //       utrNumber: "",
+    //       date: null,
+    //       // isVirtual: true,
+    //     });
+    //   });
+
+    //   return [...realForMonth, ...virtualForMonth];
+    // };
+const getTdsBalanceHistoryForMonth = (monthName, yearFromEntry) => {
+      // ✅ FIXED — match by BOTH month and year exactly, not just a
+      // substring check on dueMonth. Prevents "July 2025" and
+      // "July 2026" from colliding just because both contain "July".
       const realForMonth = (fullTdsBalanceHistory || []).filter((entry) => {
-        if (!entry || !entry.dueMonth) return false;
-        return entry.dueMonth.toLowerCase().includes(monthName.toLowerCase());
+        if (!entry) return false;
+        if (entry.month && entry.month.toLowerCase() !== monthName.toLowerCase()) {
+          return false;
+        }
+        if (!entry.month && entry.dueMonth) {
+          // fallback for older records without a separate `month` field
+          const expectedDueMonth = `${monthName} ${yearFromEntry}`.toLowerCase();
+          return entry.dueMonth.toLowerCase() === expectedDueMonth;
+        }
+        // if entry has month but we also have year context, verify year too
+        if (yearFromEntry && entry.dueMonth) {
+          return entry.dueMonth.toLowerCase().includes(String(yearFromEntry));
+        }
+        return !!entry.month;
       });
 
       const realOwnerIds = new Set(
@@ -1521,7 +1574,7 @@ exports.getLedgerHistory = async (req, res) => {
           month: monthName,
           cycle: null,
           tdsAmount: Number(owner.tdsAmount || 0),
-          isPaid: false,
+          isUtrEntry: false,
           paidAmount: 0,
           paidAt: null,
           landOwnerId: owner._id,
@@ -1534,7 +1587,6 @@ exports.getLedgerHistory = async (req, res) => {
 
       return [...realForMonth, ...virtualForMonth];
     };
-
     const transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
       ...yearEntry,
       months: yearEntry.months.map((monthEntry) => {
@@ -1650,7 +1702,7 @@ exports.getLedgerHistory = async (req, res) => {
         },
         ledgerHistory: transformedLedgerHistory,
         gstPayment: gstPayment,
-        tdsPayment: tdsPayment,
+        // tdsPayment: tdsPayment,
       },
       200,
     );

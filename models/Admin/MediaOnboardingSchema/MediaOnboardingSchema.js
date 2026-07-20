@@ -170,7 +170,7 @@ const ledgerSchema = new mongoose.Schema({
   landOwnerName: { type: String, trim: true, default: "" }, // ✅ added
   paymentMode: { type: String, enum: ["Cash", "Online"], default: null }, // ✅ NEW
   utrNumber: { type: String, trim: true },
-  date: { type: Date, default: Date.now },
+  date: { type: Date, default: null },
   status: {
     type: Number,
     enum: [0, 1], // 0=not Approve 1=Approve
@@ -243,7 +243,7 @@ const tdsBalanceSchema = new mongoose.Schema(
     dueMonth: { type: String, trim: true },
     cycle: { type: Date, default: null },
     tdsAmount: { type: Number, default: 0, min: 0 },
-    isPaid: { type: Boolean, default: false },
+    isUtrEntry: { type: Boolean, default: false },
     paidAmount: { type: Number, default: 0 },
     paidAt: { type: Date, default: null },
     paidBy: { type: String, trim: true },
