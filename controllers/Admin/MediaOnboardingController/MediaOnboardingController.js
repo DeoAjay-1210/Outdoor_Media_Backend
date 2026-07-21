@@ -873,7 +873,13 @@ const handleAppraisalLogic = async (
 };
 const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   if (!appraisal) return appraisal;
+  if (Number(appraisal.applicable) !== 1) {
+    appraisal.currentRent = Number(fallbackBaseRent || 0);
+    appraisal.appraisalAmount = 0;
+    appraisal.totalAppraisalAmount = Number(fallbackBaseRent || 0);
 
+    return appraisal;
+  }
   const today = todayKey();
 
   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
@@ -1764,7 +1770,7 @@ const mediaOnboarding = async (req, res) => {
         rentActuallyChanged,
       );
 
-      if (Number(mediaData.appraisal?.applicable) === 1) {
+      if (mediaData.appraisal) {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 

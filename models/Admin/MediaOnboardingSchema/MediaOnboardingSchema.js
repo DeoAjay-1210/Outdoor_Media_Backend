@@ -893,7 +893,16 @@ MediaSchema.pre("save", function () {
     }
 
     owner.shareAmount = resolvedShareAmount;
+  const paymentCategory = Number(owner.paymentCategory || 1);
+    let tdsBaseAmount = 0;
 
+    if (paymentCategory === 1) {
+      tdsBaseAmount = 0; // cash only — no TDS
+    } else if (paymentCategory === 2) {
+      tdsBaseAmount = resolvedShareAmount; // online only — full share
+    } else if (paymentCategory === 3) {
+      tdsBaseAmount = Number(owner.onlineAmount || 0); // split — ONLY online portion
+    }
     // ── TDS — on this owner's own shareAmount (now always fresh) ──
     const tdsApplicable = Number(owner.tdsApplicable || 0);
     const tdsPercentage =
@@ -906,7 +915,7 @@ MediaSchema.pre("save", function () {
 
     const tdsAmount =
       tdsApplicable === 1 && tdsPercentage > 0
-        ? Math.round((resolvedShareAmount * tdsPercentage) / 100)
+        ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
         : 0;
     owner.tdsAmount = tdsAmount;
 
@@ -916,7 +925,7 @@ MediaSchema.pre("save", function () {
     if (rentalGstApplicable === 1) {
       gstBaseAmount = resolvedShareAmount;
     } else {
-      const paymentCategory = Number(owner.paymentCategory || 1);
+      // const paymentCategory = Number(owner.paymentCategory || 1);
       if (paymentCategory === 1) {
         gstBaseAmount = 0;
       } else if (paymentCategory === 2) {
@@ -1000,6 +1009,8 @@ MediaSchema.pre("save", function () {
     return payment;
   });
 });
+
+
 MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
   if (!rp) return;
