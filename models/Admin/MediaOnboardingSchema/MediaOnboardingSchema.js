@@ -706,6 +706,9 @@ MediaSchema.pre("save", function () {
 });
 
 
+// ─────────────────────────────────────────────────────────────
+// PRE-SAVE 3 — Next Billing Date
+// ─────────────────────────────────────────────────────────────
 // MediaSchema.pre("save", function () {
 //   const rp = this.rentalPayment;
 //   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
@@ -726,19 +729,42 @@ MediaSchema.pre("save", function () {
 //   }
 
 //   this.landOwners.forEach((owner) => {
-//     // ── shareAmount: respect frontend value; fall back to
-//     // sharePercentage-derived amount ONLY if not sent at all ──
-//     const ownerShareFromFrontend = Number(owner.shareAmount || 0);
-//     let resolvedShareAmount = ownerShareFromFrontend;
-//     if (!resolvedShareAmount && Number(owner.typeShare) === 1) {
+//     // ✅ FIXED — for percentage-type owners, shareAmount is ALWAYS
+//     // recalculated fresh from sharePercentage × totalRentalAmount on
+//     // EVERY save, regardless of whatever value was previously stored
+//     // or echoed back by the frontend. This prevents a stale
+//     // shareAmount (computed under a DIFFERENT GST state) from
+//     // silently carrying forward and dragging tdsAmount/gstAmount
+//     // along with it, which is what made toggling GST on/off look
+//     // like "everything changed" — really it was one stale field
+//     // never being refreshed.
+//     //
+//     // Fixed-amount owners (typeShare === 2) still respect whatever
+//     // shareAmount the frontend explicitly sends, since there's no
+//     // formula to derive it from — it's a manually-entered value.
+//     let resolvedShareAmount;
+
+//     if (Number(owner.typeShare) === 1) {
 //       const sharePercentage = Number(owner.sharePercentage || 0);
 //       resolvedShareAmount = Math.round(
 //         (totalRentalAmount * sharePercentage) / 100,
 //       );
+//     } else {
+//       resolvedShareAmount = Number(owner.shareAmount || 0);
 //     }
-//     owner.shareAmount = resolvedShareAmount;
 
-//     // ── TDS — on this owner's own shareAmount ──
+//     owner.shareAmount = resolvedShareAmount;
+//   const paymentCategory = Number(owner.paymentCategory || 1);
+//     let tdsBaseAmount = 0;
+
+//     if (paymentCategory === 1) {
+//       tdsBaseAmount = 0; // cash only — no TDS
+//     } else if (paymentCategory === 2) {
+//       tdsBaseAmount = resolvedShareAmount; // online only — full share
+//     } else if (paymentCategory === 3) {
+//       tdsBaseAmount = Number(owner.onlineAmount || 0); // split — ONLY online portion
+//     }
+//     // ── TDS — on this owner's own shareAmount (now always fresh) ──
 //     const tdsApplicable = Number(owner.tdsApplicable || 0);
 //     const tdsPercentage =
 //       tdsApplicable === 1
@@ -750,7 +776,7 @@ MediaSchema.pre("save", function () {
 
 //     const tdsAmount =
 //       tdsApplicable === 1 && tdsPercentage > 0
-//         ? Math.round((resolvedShareAmount * tdsPercentage) / 100)
+//         ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
 //         : 0;
 //     owner.tdsAmount = tdsAmount;
 
@@ -760,7 +786,7 @@ MediaSchema.pre("save", function () {
 //     if (rentalGstApplicable === 1) {
 //       gstBaseAmount = resolvedShareAmount;
 //     } else {
-//       const paymentCategory = Number(owner.paymentCategory || 1);
+//       // const paymentCategory = Number(owner.paymentCategory || 1);
 //       if (paymentCategory === 1) {
 //         gstBaseAmount = 0;
 //       } else if (paymentCategory === 2) {
@@ -800,9 +826,10 @@ MediaSchema.pre("save", function () {
 //     0,
 //   );
 
-//   rp.netPayable =
-//     totalRentalAmount - totalTdsAcrossOwners + totalGstAcrossOwners;
-
+//   // rp.netPayable =
+//   //   totalRentalAmount - totalTdsAcrossOwners + totalGstAcrossOwners;
+// rp.netPayable =
+//   totalRentalAmount + totalTdsAcrossOwners + totalGstAcrossOwners;
 //   rp.ownerPayments = this.landOwners.map((owner) => {
 //     const ownerAmount = Number(owner.shareAmount || 0);
 //     const paymentCategory = Number(owner.paymentCategory || 1);
@@ -844,10 +871,6 @@ MediaSchema.pre("save", function () {
 //     return payment;
 //   });
 // });
-
-// ─────────────────────────────────────────────────────────────
-// PRE-SAVE 3 — Next Billing Date
-// ─────────────────────────────────────────────────────────────
 MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
@@ -868,19 +891,6 @@ MediaSchema.pre("save", function () {
   }
 
   this.landOwners.forEach((owner) => {
-    // ✅ FIXED — for percentage-type owners, shareAmount is ALWAYS
-    // recalculated fresh from sharePercentage × totalRentalAmount on
-    // EVERY save, regardless of whatever value was previously stored
-    // or echoed back by the frontend. This prevents a stale
-    // shareAmount (computed under a DIFFERENT GST state) from
-    // silently carrying forward and dragging tdsAmount/gstAmount
-    // along with it, which is what made toggling GST on/off look
-    // like "everything changed" — really it was one stale field
-    // never being refreshed.
-    //
-    // Fixed-amount owners (typeShare === 2) still respect whatever
-    // shareAmount the frontend explicitly sends, since there's no
-    // formula to derive it from — it's a manually-entered value.
     let resolvedShareAmount;
 
     if (Number(owner.typeShare) === 1) {
@@ -893,17 +903,17 @@ MediaSchema.pre("save", function () {
     }
 
     owner.shareAmount = resolvedShareAmount;
-  const paymentCategory = Number(owner.paymentCategory || 1);
+    const paymentCategory = Number(owner.paymentCategory || 1);
     let tdsBaseAmount = 0;
 
     if (paymentCategory === 1) {
-      tdsBaseAmount = 0; // cash only — no TDS
+      tdsBaseAmount = 0;
     } else if (paymentCategory === 2) {
-      tdsBaseAmount = resolvedShareAmount; // online only — full share
+      tdsBaseAmount = resolvedShareAmount;
     } else if (paymentCategory === 3) {
-      tdsBaseAmount = Number(owner.onlineAmount || 0); // split — ONLY online portion
+      tdsBaseAmount = Number(owner.onlineAmount || 0);
     }
-    // ── TDS — on this owner's own shareAmount (now always fresh) ──
+
     const tdsApplicable = Number(owner.tdsApplicable || 0);
     const tdsPercentage =
       tdsApplicable === 1
@@ -919,28 +929,25 @@ MediaSchema.pre("save", function () {
         : 0;
     owner.tdsAmount = tdsAmount;
 
-    // ── GST base depends on WHICH GST source is active ──
+    // ✅ FIXED — owner-level GST is now ENTIRELY independent of
+    // rentalGstApplicable. When rentalPayment.gstApplicable is on,
+    // GST is tracked ONLY at the rentalPayment level (rp.gstAmount,
+    // already included in totalRentalAmountWithGst) — it no longer
+    // forces every owner's gstApplicable to 1 or computes a
+    // duplicate owner-level gstAmount on top of it.
     let gstBaseAmount = 0;
+    const paymentCategoryForGst = Number(owner.paymentCategory || 1);
 
-    if (rentalGstApplicable === 1) {
+    if (paymentCategoryForGst === 1) {
+      gstBaseAmount = 0;
+    } else if (paymentCategoryForGst === 2) {
       gstBaseAmount = resolvedShareAmount;
-    } else {
-      // const paymentCategory = Number(owner.paymentCategory || 1);
-      if (paymentCategory === 1) {
-        gstBaseAmount = 0;
-      } else if (paymentCategory === 2) {
-        gstBaseAmount = resolvedShareAmount;
-      } else if (paymentCategory === 3) {
-        gstBaseAmount = Number(owner.onlineAmount || 0);
-      }
+    } else if (paymentCategoryForGst === 3) {
+      gstBaseAmount = Number(owner.onlineAmount || 0);
     }
 
-    const ownerGstApplicable =
-      rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0);
-    const ownerGstPct =
-      rentalGstApplicable === 1
-        ? envGstPct
-        : Number(owner.gstPercentage || 0) || envGstPct;
+    const ownerGstApplicable = Number(owner.gstApplicable || 0);
+    const ownerGstPct = Number(owner.gstPercentage || 0) || envGstPct;
 
     const ownerGstAmount =
       ownerGstApplicable === 1 && gstBaseAmount > 0
@@ -965,8 +972,10 @@ MediaSchema.pre("save", function () {
     0,
   );
 
-  rp.netPayable =
-    totalRentalAmount - totalTdsAcrossOwners + totalGstAcrossOwners;
+    const effectiveGstAmount =
+    rentalGstApplicable === 1 ? rp.gstAmount : totalGstAcrossOwners;
+
+  rp.netPayable = totalRentalAmount + effectiveGstAmount;
 
   rp.ownerPayments = this.landOwners.map((owner) => {
     const ownerAmount = Number(owner.shareAmount || 0);
@@ -984,8 +993,7 @@ MediaSchema.pre("save", function () {
       tdsApplicable: Number(owner.tdsApplicable || 0),
       tdsPercentage: Number(owner.tdsPercentage || 0),
       tdsAmount: Number(owner.tdsAmount || 0),
-      gstApplicable:
-        rentalGstApplicable === 1 ? 1 : Number(owner.gstApplicable || 0),
+      gstApplicable: Number(owner.gstApplicable || 0), // ✅ CHANGED — always own flag
       gstPercentage: Number(owner.gstPercentage || 0),
       gstAmount: Number(owner.gstAmount || 0),
       totalAmountWithGst: Number(owner.totalAmountWithGst || ownerAmount),
@@ -1009,7 +1017,6 @@ MediaSchema.pre("save", function () {
     return payment;
   });
 });
-
 
 MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
