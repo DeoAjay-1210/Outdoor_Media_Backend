@@ -256,6 +256,33 @@ const tdsBalanceSchema = new mongoose.Schema(
   },
   { _id: true },
 );
+
+const pendingMonthOwnerSchema = new mongoose.Schema(
+  {
+    landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    landOwnerName: { type: String, trim: true, default: "" },
+    paymentCategory: { type: Number, enum: [1, 2, 3], default: 1 },
+    cashAmount: { type: Number, default: undefined },
+    cashEntry: { type: Boolean, default: undefined },
+    onlineAmount: { type: Number, default: undefined },
+    onlineEntry: { type: Boolean, default: undefined },
+    pendingType: {
+      type: String,
+      enum: ["cashPending", "onlinePending", "cash+onlinePending"],
+      default: null,
+    },
+  },
+  { _id: false },
+);
+
+const pendingMonthSchema = new mongoose.Schema(
+  {
+    month: { type: String, trim: true }, // "May 2026"
+    cycle: { type: Date, default: null },
+    owners: [pendingMonthOwnerSchema],
+  },
+  { _id: false },
+);
 // ─────────────────────────────────────────────────────────────
 // MAIN SCHEMA
 // ─────────────────────────────────────────────────────────────
@@ -678,6 +705,7 @@ const MediaSchema = new mongoose.Schema(
     withGst1Ledger: [ledgerSchema],
     ledgerHistory: [ledgerHistoryYearSchema],
     tdsBalanceHistory: [tdsBalanceSchema],
+    pendingMonths: [pendingMonthSchema],
 
     agreementDocVerification: [agreementDocVerificationSchema],
     rentalDue: [rentalDueEntrySchema],
