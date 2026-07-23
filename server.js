@@ -42,6 +42,7 @@ app.use(cors({
     "https://yourfrontend.com",
     "https://peaceful-entremet-3dd657.netlify.app",
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
+    "https://adinn-outdoor-media.netlify.app",
     "http://192.168.1.42:5000"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
