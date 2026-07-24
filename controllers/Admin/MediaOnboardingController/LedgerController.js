@@ -202,29 +202,40 @@ function recomputePendingMonths(media) {
         paymentCategory,
       };
 
+       const ownerCashAmount = Number(owner.cashAmount || 0);
+      const ownerOnlineAmount = Number(owner.onlineAmount || 0);
+
       if (paymentCategory === 1) {
         if (!cashEntry) {
           pendingType = "cashPending";
           ownerRecord.cashEntry = cashEntry;
+          ownerRecord.cashAmount = ownerCashAmount;
         }
       } else if (paymentCategory === 2) {
         if (!onlineEntry) {
           pendingType = "onlinePending";
           ownerRecord.onlineEntry = onlineEntry;
+          ownerRecord.onlineAmount = ownerOnlineAmount;
         }
       } else if (paymentCategory === 3) {
         if (!cashEntry && !onlineEntry) {
           pendingType = "cash+onlinePending";
           ownerRecord.cashEntry = cashEntry;
+          ownerRecord.cashAmount = ownerCashAmount;
           ownerRecord.onlineEntry = onlineEntry;
+          ownerRecord.onlineAmount = ownerOnlineAmount;
         } else if (!cashEntry) {
           pendingType = "cashPending";
           ownerRecord.cashEntry = cashEntry;
+          ownerRecord.cashAmount = ownerCashAmount;
           ownerRecord.onlineEntry = onlineEntry;
+          ownerRecord.onlineAmount = ownerOnlineAmount;
         } else if (!onlineEntry) {
           pendingType = "onlinePending";
           ownerRecord.cashEntry = cashEntry;
+          ownerRecord.cashAmount = ownerCashAmount;
           ownerRecord.onlineEntry = onlineEntry;
+          ownerRecord.onlineAmount = ownerOnlineAmount;
         }
       }
 
