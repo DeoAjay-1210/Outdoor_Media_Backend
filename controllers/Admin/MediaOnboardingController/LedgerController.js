@@ -2533,19 +2533,13 @@ recomputePendingMonths(media);
         );
       }
 
-      // ✅ NEW — isGstPending=1 keeps only sites with any unpaid GST entry
-      // (current cycle + every past month, since gstPendingEntries is built
-      // from the full gstBalanceHistory).
-      if (isGstPendingFilter) {
-        finalMediaListData = finalMediaListData.filter((m) => m.isGstPending);
-      }
-
-      // ✅ NEW — isTdsPending=1 keeps only sites with any unpaid TDS entry
-      // (current cycle + every past month, since tdsPendingEntries is built
-      // from the full tdsBalanceHistoryFiltered, real + virtual).
-      if (isTdsPendingFilter) {
-        finalMediaListData = finalMediaListData.filter((m) => m.isTdsPending);
-      }
+        if (isGstPendingFilter || isTdsPendingFilter) {
+      finalMediaListData = finalMediaListData.filter((m) => {
+        const matchesGst = isGstPendingFilter && m.isGstPending;
+        const matchesTds = isTdsPendingFilter && m.isTdsPending;
+        return matchesGst || matchesTds;
+      });
+    }
 
       if (tdsStatusFilter === 4) {
         finalMediaListData = finalMediaListData.filter(
