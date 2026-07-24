@@ -871,6 +871,86 @@ const handleAppraisalLogic = async (
   mediaData.appraisal = appraisal;
   return mediaData;
 };
+// const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
+//   if (!appraisal) return appraisal;
+//   if (Number(appraisal.applicable) !== 1) {
+//     appraisal.currentRent = Number(fallbackBaseRent || 0);
+//     appraisal.appraisalAmount = 0;
+//     appraisal.totalAppraisalAmount = Number(fallbackBaseRent || 0);
+
+//     return appraisal;
+//   }
+//   const today = todayKey();
+
+//   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
+//     const pendingDate = appraisal.nextAppraisalDate
+//       ? toDateOnly(appraisal.nextAppraisalDate)
+//       : null;
+
+//     appraisal.lastAppraisalDate =
+//       pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
+
+//     return appraisal;
+//   }
+
+//   const sorted = appraisal.history
+//     .filter((h) => h.appraisalDate)
+//     .map((h) => ({ ...h, dateKey: dayKey(h.appraisalDate) }))
+//     .sort((a, b) => a.dateKey - b.dateKey);
+
+//   if (!sorted.length) {
+//     const pendingDate = appraisal.nextAppraisalDate
+//       ? toDateOnly(appraisal.nextAppraisalDate)
+//       : null;
+
+//     appraisal.lastAppraisalDate =
+//       pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
+
+//     return appraisal;
+//   }
+
+//   const baseRent = Number(sorted[0].previousRent ?? fallbackBaseRent ?? 0);
+
+//   const dueEntries = sorted.filter((h) => h.dateKey <= today);
+//   const futureEntries = sorted.filter((h) => h.dateKey > today);
+
+//   // ✅ lastAppraisalDate = the MOST RECENT due entry, always freshly
+//   // derived from history — never left null when a due entry exists.
+//   appraisal.lastAppraisalDate =
+//     dueEntries.length > 0
+//       ? new Date(dueEntries[dueEntries.length - 1].appraisalDate)
+//       : null;
+
+//   const currentEntry =
+//     dueEntries.length > 0 ? dueEntries[dueEntries.length - 1] : null;
+
+//   appraisal.currentRent = currentEntry
+//     ? Number(currentEntry.newRent || currentEntry.previousRent || baseRent)
+//     : baseRent;
+
+//   const nextEntry = futureEntries.length > 0 ? futureEntries[0] : null;
+
+//   appraisal.nextAppraisalDate = nextEntry
+//     ? new Date(nextEntry.appraisalDate)
+//     : null;
+
+//   const displayEntry = nextEntry || currentEntry;
+//   if (displayEntry) {
+//     appraisal.type = displayEntry.type;
+//     appraisal.percentage = displayEntry.percentage || 0;
+//     appraisal.fixedAmount = displayEntry.fixedAmount || 0;
+//     appraisal.appraisalAmount = Number(displayEntry.appraisalAmount || 0);
+//     appraisal.totalAppraisalAmount = Math.floor(
+//       Number(displayEntry.newRent || 0),
+//     );
+//   } else {
+//     appraisal.totalAppraisalAmount = Math.floor(
+//       Number(appraisal.currentRent || 0),
+//     );
+//   }
+
+//   return appraisal;
+// };
 const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   if (!appraisal) return appraisal;
   if (Number(appraisal.applicable) !== 1) {
@@ -914,8 +994,6 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   const dueEntries = sorted.filter((h) => h.dateKey <= today);
   const futureEntries = sorted.filter((h) => h.dateKey > today);
 
-  // ✅ lastAppraisalDate = the MOST RECENT due entry, always freshly
-  // derived from history — never left null when a due entry exists.
   appraisal.lastAppraisalDate =
     dueEntries.length > 0
       ? new Date(dueEntries[dueEntries.length - 1].appraisalDate)
@@ -934,16 +1012,29 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
     ? new Date(nextEntry.appraisalDate)
     : null;
 
-  const displayEntry = nextEntry || currentEntry;
-  if (displayEntry) {
-    appraisal.type = displayEntry.type;
-    appraisal.percentage = displayEntry.percentage || 0;
-    appraisal.fixedAmount = displayEntry.fixedAmount || 0;
-    appraisal.appraisalAmount = Number(displayEntry.appraisalAmount || 0);
+  // ✅ FIXED — type/percentage/fixedAmount still show the UPCOMING
+  // schedule's config (nextEntry preferred, falls back to
+  // currentEntry) — this is just display metadata about the
+  // appraisal rule, not the amount itself.
+  const configEntry = nextEntry || currentEntry;
+  if (configEntry) {
+    appraisal.type = configEntry.type;
+    appraisal.percentage = configEntry.percentage || 0;
+    appraisal.fixedAmount = configEntry.fixedAmount || 0;
+  }
+
+  // ✅ FIXED — appraisalAmount/totalAppraisalAmount now ALWAYS come
+  // from currentEntry (the currently ACTIVE/applied appraisal), never
+  // from nextEntry. This is what was wrong before — a future entry's
+  // amount (e.g. August's 54000) was leaking into the CURRENT display
+  // even though that bump hasn't happened yet.
+  if (currentEntry) {
+    appraisal.appraisalAmount = Number(currentEntry.appraisalAmount || 0);
     appraisal.totalAppraisalAmount = Math.floor(
-      Number(displayEntry.newRent || 0),
+      Number(currentEntry.newRent || appraisal.currentRent || 0),
     );
   } else {
+    appraisal.appraisalAmount = 0;
     appraisal.totalAppraisalAmount = Math.floor(
       Number(appraisal.currentRent || 0),
     );
@@ -951,7 +1042,6 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
 
   return appraisal;
 };
-
 
 
 const getFrequencyMonths = (frequency, customMonths) => {
