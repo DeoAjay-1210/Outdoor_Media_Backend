@@ -655,819 +655,6 @@ recomputePendingMonths(media);
     );
   }
 };
-
-
-// exports.listMediaByLedger = async (req, res) => {
-//   try {
-//     const {
-//       pageNumber = 1,
-//       count = 10,
-//       search,
-//       status,
-//       dateRange,
-//       currentMonth,
-//       isPending,
-//     } = req.body;
-
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
-
-//     const filter = {};
-//     filter.rentalStatus = 3;
-//     if (search) {
-//       filter.mediaName = { $regex: search, $options: "i" };
-//     }
-
-//     let tdsStatusFilter = null;
-//     if (status !== undefined && status !== null && status !== "") {
-//       const statusNum = Number(status);
-//       if ([4, 5].includes(statusNum)) {
-//         tdsStatusFilter = statusNum;
-//       }
-//     }
-
-//     if (status !== undefined && status !== null && status !== "") {
-//       const statusNum = Number(status);
-//       if (![0, 1, 2, 3, 4, 5].includes(statusNum)) {
-//         return errorResponse(
-//           res,
-//           "status must be one of 0 (Not approve), 1 (Approve), 2 (GST Pending), 3 (GST Completed), 4 (TDS Pending), 5 (TDS Completed)",
-//           null,
-//           400,
-//         );
-//       }
-//       if (statusNum === 1) {
-//         filter["ledger"] = {
-//           $exists: true,
-//           $not: { $size: 0 },
-//           $elemMatch: { status: 1 },
-//         };
-//       } else if (statusNum === 0) {
-//         filter.$or = [
-//           { ledger: { $exists: false } },
-//           { ledger: { $size: 0 } },
-//           { "ledger.status": 0 },
-//         ];
-//       } else if (statusNum === 2) {
-//         filter["gstBalanceHistory"] = {
-//           $exists: true,
-//           $not: { $size: 0 },
-//           $elemMatch: { isPaid: false },
-//         };
-//       } else if (statusNum === 3) {
-//         filter["gstBalanceHistory"] = {
-//           $exists: true,
-//           $not: { $size: 0 },
-//           $all: [{ $elemMatch: { isPaid: true, utrNumber: { $ne: "" } } }],
-//         };
-//         filter["gstBalanceHistory.isPaid"] = { $ne: false };
-//         filter["gstBalanceHistory.utrNumber"] = { $ne: "" };
-//       }
-//     }
-
-//     const validateMonthYear = (monthYear) =>
-//       /^(0[1-9]|1[0-2])-([0-9]{4})$/.test(monthYear);
-
-//     const getMonthDateRange = (monthYear) => {
-//       const [month, year] = monthYear.split("-").map(Number);
-//       const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-//       const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
-//       return { startDate, endDate };
-//     };
-
-//     let requestedMonthRange = null;
-
-//     let isPendingFilter = false;
-//     if (isPending !== undefined && isPending !== null && isPending !== "") {
-//       const isPendingNum = Number(isPending);
-//       if (isPendingNum !== 1) {
-//         return errorResponse(
-//           res,
-//           "isPending must be 1 (any other value is invalid)",
-//           null,
-//           400,
-//         );
-//       }
-//       isPendingFilter = true;
-//     }
-
-//     let isPendingExplicitCutoff = null;
-//     const refMonthYear = dateRange || currentMonth || null;
-//     if (refMonthYear) {
-//       if (!validateMonthYear(refMonthYear)) {
-//         return errorResponse(
-//           res,
-//           "Invalid format. Use MM-YYYY format (e.g., 07-2026)",
-//           null,
-//           400,
-//         );
-//       }
-//       const [refMonth, refYear] = refMonthYear.split("-").map(Number);
-//       isPendingExplicitCutoff = { year: refYear, monthIndex: refMonth - 1 };
-
-//       const { startDate, endDate } = getMonthDateRange(refMonthYear);
-//       requestedMonthRange = { startDate, endDate };
-//     }
-
-//     const skip = (pageNumbers - 1) * pageSize;
-//     const needsFullFetchForTdsFilter = tdsStatusFilter !== null;
-//     const needsFullFetch =
-//       needsFullFetchForTdsFilter || isPendingFilter || !!isPendingExplicitCutoff;
-
-//     const [results, totalCount] = await Promise.all([
-//       needsFullFetch
-//         ? Media.find(filter)
-//             .select(
-//               "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
-//             )
-//             .sort({ updatedAt: -1 })
-//         : Media.find(filter)
-//             .select(
-//               "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
-//             )
-//             .sort({ updatedAt: -1 })
-//             .skip(skip)
-//             .limit(pageSize),
-//       Media.countDocuments(filter),
-//     ]);
-
-//     let overallGstPendingAmount = 0;
-//     let overallPastMonthPendingCount = 0;
-//     const MONTH_NAME_TO_INDEX = MONTH_NAMES.reduce((acc, name, idx) => {
-//       acc[name.toLowerCase()] = idx;
-//       return acc;
-//     }, {});
-
-//     const mediaListData = results.map((media) => {
-//       const mediaObj = media.toObject();
-
-//       const inRequestedMonth = (date) => {
-//         if (!requestedMonthRange || !date) return true;
-//         const d = new Date(date);
-//         return (
-//           d >= requestedMonthRange.startDate && d <= requestedMonthRange.endDate
-//         );
-//       };
-
-//       const siteLiveCycleDate =
-//         mediaObj.rentalPayment?.nextBillingDate ||
-//         mediaObj.rentalPayment?.lastBillPaidDate;
-
-//       // ══════════════════════════════════════════════════════
-//       // Pending-month calculation — ALWAYS runs for every site
-//       // ══════════════════════════════════════════════════════
-//       let isPendingAcrossPastMonths = false;
-//       let earliestPendingMonthKey = null;
-//       let allPendingMonthKeys = [];
-//       let pastMonthPendingCount = 0;
-//       {
-//         let referenceYear = null;
-//         let referenceMonthIndex = null;
-
-//         if (isPendingExplicitCutoff) {
-//           referenceYear = isPendingExplicitCutoff.year;
-//           referenceMonthIndex = isPendingExplicitCutoff.monthIndex;
-//         } else {
-//           const referenceDateRaw =
-//             mediaObj.rentalPayment?.lastBillPaidDate ||
-//             mediaObj.rentalPayment?.nextBillingDate ||
-//             null;
-//           if (referenceDateRaw) {
-//             const refDate = new Date(referenceDateRaw);
-//             referenceYear = refDate.getUTCFullYear();
-//             referenceMonthIndex = refDate.getUTCMonth();
-//           }
-//         }
-
-//         if (referenceYear !== null) {
-//          const savedLedgerMonthKeys = new Set();
-//           (mediaObj.ledgerHistory || []).forEach((yearBucket) => {
-//             (yearBucket.months || []).forEach((monthBucket) => {
-//               const monthIdx = MONTH_NAMES.findIndex(
-//                 (m) => m.toLowerCase() === monthBucket.month.toLowerCase(),
-//               );
-//               const entries = monthBucket.entries || [];
-//               const gst2Entries = entries.filter((e) => e.withGst === 2);
-
-//               // ✅ FIXED — a month only counts as "saved" once EVERY
-//               // landOwner's REQUIRED entries (per paymentCategory) are
-//               // complete. Previously this checked entries.some(...) —
-//               // ANY single withGst:2 entry (e.g. just Cash for a
-//               // Cash+Online owner) would incorrectly mark the whole
-//               // month as saved, dropping it from pending entirely even
-//               // though the Online portion was still outstanding.
-//               const allOwnersComplete =
-//                 (mediaObj.landOwners || []).length > 0 &&
-//                 (mediaObj.landOwners || []).every((owner) => {
-//                   const ownerEntries = gst2Entries.filter(
-//                     (e) => String(e.landOwnerId) === String(owner._id),
-//                   );
-//                   const hasCash = ownerEntries.some(
-//                     (e) => e.paymentMode === "Cash",
-//                   );
-//                   const hasOnline = ownerEntries.some(
-//                     (e) => e.paymentMode === "Online",
-//                   );
-
-//                   const paymentCategory = Number(owner.paymentCategory || 1);
-//                   if (paymentCategory === 1) return hasCash;
-//                   if (paymentCategory === 2) return hasOnline;
-//                   if (paymentCategory === 3) return hasCash && hasOnline;
-//                   return hasCash || hasOnline;
-//                 });
-
-//               if (allOwnersComplete) {
-//                 savedLedgerMonthKeys.add(`${yearBucket.year}-${monthIdx}`);
-//               }
-//             });
-//           });
-
-//           const neededMonthKeys = new Set();
-
-//           if (Array.isArray(mediaObj.rentalDue)) {
-//             mediaObj.rentalDue.forEach((due) => {
-//               if (!due.dueDate) return;
-//               const d = new Date(due.dueDate);
-//               if (isNaN(d.getTime())) return;
-//               neededMonthKeys.add(`${d.getUTCFullYear()}-${d.getUTCMonth()}`);
-//             });
-//           }
-
-//           if (mediaObj.rentalPayment?.lastBillPaidDate) {
-//             const d = new Date(mediaObj.rentalPayment.lastBillPaidDate);
-//             if (!isNaN(d.getTime())) {
-//               neededMonthKeys.add(`${d.getUTCFullYear()}-${d.getUTCMonth()}`);
-//             }
-//           }
-
-//           (mediaObj.ledgerHistory || []).forEach((yearBucket) => {
-//             (yearBucket.months || []).forEach((monthBucket) => {
-//               const monthIdx = MONTH_NAMES.findIndex(
-//                 (m) => m.toLowerCase() === monthBucket.month.toLowerCase(),
-//               );
-//               neededMonthKeys.add(`${yearBucket.year}-${monthIdx}`);
-//             });
-//           });
-
-//           const pendingKeys = [];
-//           for (const key of neededMonthKeys) {
-//             const [yrStr, monthIdxStr] = key.split("-");
-//             const yr = Number(yrStr);
-//             const monthIdx = Number(monthIdxStr);
-
-//             const isBeforeReference =
-//               yr < referenceYear ||
-//               (yr === referenceYear && monthIdx < referenceMonthIndex);
-
-//             if (isBeforeReference && !savedLedgerMonthKeys.has(key)) {
-//               pendingKeys.push({ key, yr, monthIdx });
-//             }
-//           }
-
-//           pendingKeys.sort((a, b) => a.yr - b.yr || a.monthIdx - b.monthIdx);
-
-//           if (pendingKeys.length > 0) {
-//             isPendingAcrossPastMonths = true;
-//             earliestPendingMonthKey = pendingKeys[0];
-//             allPendingMonthKeys = pendingKeys;
-//             pastMonthPendingCount = pendingKeys.length;
-//           }
-//         }
-//       }
-
-//       // ══════════════════════════════════════════════════════
-//       // ✅ pendingMonths — cashEntry/onlineEntry shown ONLY per
-//       // paymentCategory: 1 -> cashEntry only, 2 -> onlineEntry only,
-//       // 3 -> both fields present.
-//       // ══════════════════════════════════════════════════════
-//       const pendingMonths = [];
-
-//       allPendingMonthKeys.forEach((pendingMonth) => {
-//         const targetYear = String(pendingMonth.yr);
-//         const targetMonthName = MONTH_NAMES[pendingMonth.monthIdx];
-//         const targetMonthLabel = `${targetMonthName} ${pendingMonth.yr}`;
-//         const pendingCycleDate = new Date(
-//           Date.UTC(pendingMonth.yr, pendingMonth.monthIdx, 1),
-//         );
-
-//         const yearBucket = (mediaObj.ledgerHistory || []).find(
-//           (y) => String(y.year).trim() === targetYear,
-//         );
-//         const monthBucket = yearBucket?.months.find(
-//           (m) => m.month.toLowerCase() === targetMonthName.toLowerCase(),
-//         );
-//         const monthEntries = monthBucket?.entries || [];
-//         const gst2Entries = monthEntries.filter((e) => e.withGst === 2);
-
-//         const owners = [];
-
-//         (mediaObj.landOwners || []).forEach((owner) => {
-//           const paymentCategory = Number(owner.paymentCategory || 1);
-//           const ownerEntries = gst2Entries.filter(
-//             (e) => String(e.landOwnerId) === String(owner._id),
-//           );
-//           const cashEntry = ownerEntries.some(
-//             (e) => e.paymentMode === "Cash",
-//           );
-//           const onlineEntry = ownerEntries.some(
-//             (e) => e.paymentMode === "Online",
-//           );
-
-//           let pendingType = null;
-//           const ownerRecord = {
-//             landOwnerId: owner._id,
-//             landOwnerName: owner.name,
-//             paymentCategory,
-//           };
-
-//           if (paymentCategory === 1) {
-//             // ✅ Cash only — ONLY cashEntry field, never onlineEntry
-//             if (!cashEntry) {
-//               pendingType = "cashPending";
-//               ownerRecord.cashEntry = cashEntry;
-//             }
-//           } else if (paymentCategory === 2) {
-//             // ✅ Online only — ONLY onlineEntry field, never cashEntry
-//             if (!onlineEntry) {
-//               pendingType = "onlinePending";
-//               ownerRecord.onlineEntry = onlineEntry;
-//             }
-//           } else if (paymentCategory === 3) {
-//             // ✅ Cash + Online — BOTH fields present
-//             if (!cashEntry && !onlineEntry) {
-//               pendingType = "cash+onlinePending";
-//               ownerRecord.cashEntry = cashEntry;
-//               ownerRecord.onlineEntry = onlineEntry;
-//             } else if (!cashEntry) {
-//               pendingType = "cashPending";
-//               ownerRecord.cashEntry = cashEntry;
-//               ownerRecord.onlineEntry = onlineEntry;
-//             } else if (!onlineEntry) {
-//               pendingType = "onlinePending";
-//               ownerRecord.cashEntry = cashEntry;
-//               ownerRecord.onlineEntry = onlineEntry;
-//             }
-//           }
-
-//           if (pendingType) {
-//             ownerRecord.pendingType = pendingType;
-//             owners.push(ownerRecord);
-//           }
-//         });
-
-//         if (owners.length > 0) {
-//           pendingMonths.push({
-//             month: targetMonthLabel,
-//             cycle: pendingCycleDate,
-//             owners,
-//           });
-//         }
-//       });
-
-//       const isSiteCurrentLiveCycleMonth =
-//         requestedMonthRange &&
-//         siteLiveCycleDate &&
-//         (() => {
-//           const d = new Date(siteLiveCycleDate);
-//           return (
-//             d.getUTCFullYear() ===
-//               requestedMonthRange.startDate.getUTCFullYear() &&
-//             d.getUTCMonth() === requestedMonthRange.startDate.getUTCMonth()
-//           );
-//         })();
-
-//       let gst2SourceEntries;
-//       let gst1SourceEntries;
-//       let monthHistoryEntries = [];
-
-//       if (requestedMonthRange) {
-//         const requestedMonthName =
-//           MONTH_NAMES[requestedMonthRange.startDate.getUTCMonth()];
-//         const requestedYear = String(
-//           requestedMonthRange.startDate.getUTCFullYear(),
-//         );
-
-//         const yearBucket = (mediaObj.ledgerHistory || []).find(
-//           (y) => String(y.year).trim() === requestedYear,
-//         );
-//         const monthBucket = yearBucket?.months.find(
-//           (m) =>
-//             String(m.month).trim().toLowerCase() ===
-//             requestedMonthName.toLowerCase(),
-//         );
-
-//         monthHistoryEntries = [...(monthBucket?.entries || [])].sort(
-//           (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//         );
-
-//         if (isSiteCurrentLiveCycleMonth) {
-//           gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
-//           gst1SourceEntries = mediaObj.withGst1Ledger || [];
-//         } else {
-//           const allMonthEntries = monthBucket?.entries || [];
-//           gst2SourceEntries = allMonthEntries.filter((e) => e.withGst === 2);
-//           gst1SourceEntries = allMonthEntries.filter((e) => e.withGst === 1);
-//         }
-//       } else {
-//         gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
-//         gst1SourceEntries = mediaObj.withGst1Ledger || [];
-//       }
-
-//       const dedupeByKey = (entries, getKey) => {
-//         const withPos = entries.map((entry, pos) => ({ entry, pos }));
-//         const sorted = withPos.sort(
-//           (a, b) => new Date(b.entry.updatedAt) - new Date(a.entry.updatedAt),
-//         );
-//         const seen = new Set();
-//         const deduped = [];
-//         for (const { entry, pos } of sorted) {
-//           const key = getKey(entry, pos);
-//           if (!seen.has(key)) {
-//             seen.add(key);
-//             deduped.push(entry);
-//           }
-//         }
-//         return deduped;
-//       };
-
-//       const gst2Key = (entry, pos) =>
-//         entry.index !== undefined && entry.index !== null
-//           ? `idx_${entry.index}`
-//           : entry._id
-//             ? `id_${String(entry._id)}`
-//             : `pos_${pos}`;
-
-//       const gst1Key = (entry, pos) =>
-//         entry.rentalDueId
-//           ? `rd_${String(entry.rentalDueId)}`
-//           : entry.landOwnerId
-//             ? `owner_${String(entry.landOwnerId)}_${entry.month || ""}`
-//             : entry._id
-//               ? `id_${String(entry._id)}`
-//               : `pos_${pos}`;
-
-//       let latestLedger = [];
-//       let withGst1Ledger = [];
-
-//       if (isPendingFilter && earliestPendingMonthKey) {
-//         const targetYear = String(earliestPendingMonthKey.yr);
-//         const targetMonthName = MONTH_NAMES[earliestPendingMonthKey.monthIdx];
-
-//         const yearBucket = (mediaObj.ledgerHistory || []).find(
-//           (y) => String(y.year).trim() === targetYear,
-//         );
-//         const monthBucket = yearBucket?.months.find(
-//           (m) => m.month.toLowerCase() === targetMonthName.toLowerCase(),
-//         );
-//         const monthEntries = monthBucket?.entries || [];
-
-//         latestLedger = monthEntries.filter((e) => e.withGst === 2);
-//         withGst1Ledger = monthEntries.filter((e) => e.withGst === 1);
-//       } else {
-//         const sourcedFromLiveLedger =
-//           !requestedMonthRange || isSiteCurrentLiveCycleMonth;
-
-//         if (gst2SourceEntries.length > 0) {
-//           const monthScoped = requestedMonthRange
-//             ? gst2SourceEntries
-//             : gst2SourceEntries.filter((entry) => inRequestedMonth(entry.date));
-//           latestLedger = sourcedFromLiveLedger
-//             ? [...monthScoped].sort(
-//                 (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//               )
-//             : dedupeByKey(monthScoped, gst2Key);
-//         }
-
-//         if (gst1SourceEntries.length > 0) {
-//           const monthScoped = requestedMonthRange
-//             ? gst1SourceEntries
-//             : gst1SourceEntries.filter((entry) => inRequestedMonth(entry.date));
-//           withGst1Ledger = sourcedFromLiveLedger
-//             ? [...monthScoped].sort(
-//                 (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//               )
-//             : dedupeByKey(monthScoped, gst1Key);
-//         }
-//       }
-
-//       let rentalDueWithApproval = [];
-//       if (Array.isArray(mediaObj.rentalDue) && mediaObj.rentalDue.length > 0) {
-//         const monthScopedDue = mediaObj.rentalDue.filter((due) =>
-//           inRequestedMonth(due.dueDate),
-//         );
-//         const sortedDue = [...monthScopedDue].sort((a, b) => {
-//           const dateA = a.ownerApprovalDate
-//             ? new Date(a.ownerApprovalDate)
-//             : new Date(0);
-//           const dateB = b.ownerApprovalDate
-//             ? new Date(b.ownerApprovalDate)
-//             : new Date(0);
-//           return dateB - dateA;
-//         });
-//         rentalDueWithApproval = sortedDue
-//           .filter((due) => due.ownerApprovalDate)
-//           .map((due) => ({
-//             _id: due._id,
-//             ownerApprovalDate: due.ownerApprovalDate,
-//             dueMonth: due.dueMonth,
-//             dueDate: due.dueDate,
-//             netPayable: due.netPayable,
-//             approvalStatus: due.approvalStatus,
-//             withGst: due.withGst,
-//             gstAmount: due.gstAmount,
-//             baseAmount: due.baseAmount,
-//             paymentFrequency: due.paymentFrequency,
-//             campaignName: due.campaignName,
-//             status: due.status,
-//             updatedAt: due.updatedAt,
-//             createdAt: due.createdAt,
-//           }));
-//       }
-
-//       const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
-//         ? mediaObj.gstBalanceHistory
-//         : [];
-//       let gstPendingAmount = 0;
-//       if (fullGstBalanceHistory.length > 0) {
-//         fullGstBalanceHistory.forEach((entry) => {
-//           const isPaid = entry.isPaid;
-//           const isPaidFalse =
-//             isPaid === false ||
-//             isPaid === "false" ||
-//             isPaid === 0 ||
-//             isPaid === "0";
-//           if (isPaidFalse) {
-//             const amount =
-//               Number(entry.paidAmount) ||
-//               Number(entry.amount) ||
-//               Number(entry.gstAmount) ||
-//               0;
-//             gstPendingAmount += amount;
-//           }
-//         });
-//       }
-
-//       let gstPayment = false;
-//       if (fullGstBalanceHistory.length > 0) {
-//         const hasEmptyUtr = fullGstBalanceHistory.some(
-//           (entry) => !entry.utrNumber || entry.utrNumber.trim() === "",
-//         );
-//         gstPayment = hasEmptyUtr;
-//       }
-
-//       const realTdsEntries = Array.isArray(mediaObj.tdsBalanceHistory)
-//         ? mediaObj.tdsBalanceHistory
-//         : [];
-
-//       const toDueMonth = (dateVal) => {
-//         if (!dateVal) return null;
-//         const d = new Date(dateVal);
-//         if (isNaN(d.getTime())) return null;
-//         return `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-//       };
-
-//       const uniqueDueMonths = new Map();
-
-//       const addDueMonth = (dueMonthRaw, cycleValue) => {
-//         const dueMonth = dueMonthRaw || toDueMonth(cycleValue);
-//         if (!dueMonth) return;
-//         if (!uniqueDueMonths.has(dueMonth)) {
-//           uniqueDueMonths.set(
-//             dueMonth,
-//             cycleValue ? new Date(cycleValue) : null,
-//           );
-//         }
-//       };
-
-//       fullGstBalanceHistory.forEach((g) => {
-//         addDueMonth(g.dueMonth, g.cycle || g.date);
-//       });
-
-//       if (uniqueDueMonths.size === 0 && Array.isArray(mediaObj.rentalDue)) {
-//         mediaObj.rentalDue.forEach((due) => {
-//           addDueMonth(due.dueMonth, due.dueDate);
-//         });
-//       }
-
-//       if (uniqueDueMonths.size === 0 && Array.isArray(mediaObj.ledgerHistory)) {
-//         mediaObj.ledgerHistory.forEach((yearBucket) => {
-//           (yearBucket.months || []).forEach((monthBucket) => {
-//             const dueMonth = `${monthBucket.month} ${yearBucket.year}`;
-//             addDueMonth(dueMonth, null);
-//           });
-//         });
-//       }
-
-//       if (uniqueDueMonths.size === 0) {
-//         const fallbackCycle =
-//           mediaObj.rentalPayment?.nextBillingDate ||
-//           mediaObj.rentalPayment?.lastBillPaidDate ||
-//           new Date();
-//         addDueMonth(null, fallbackCycle);
-//       }
-
-//       const realTdsKeySet = new Set(
-//         realTdsEntries.map((t) => `${String(t.landOwnerId)}_${t.dueMonth}`),
-//       );
-
-//       const virtualTdsEntries = [];
-//       uniqueDueMonths.forEach((cycleDate, dueMonth) => {
-//         const monthName = dueMonth.split(" ")[0];
-
-//         (mediaObj.landOwners || []).forEach((owner) => {
-//           const isApplicable =
-//             owner.tdsApplicable === 1 ||
-//             owner.tdsApplicable === "1" ||
-//             owner.tdsApplicable === true;
-//           if (!isApplicable) return;
-
-//           const key = `${String(owner._id)}_${dueMonth}`;
-//           if (realTdsKeySet.has(key)) return;
-
-//           const tdsAmount = Number(owner.tdsAmount || 0);
-
-//           virtualTdsEntries.push({
-//             _id: null,
-//             dueMonth,
-//             month: monthName,
-//             cycle: cycleDate,
-//             tdsAmount,
-//             isUtrEntry: false,
-//             paidAmount: 0,
-//             paidAt: null,
-//             landOwnerId: owner._id,
-//             landOwnerName: owner.name,
-//             utrNumber: "",
-//             date: null,
-//             isVirtual: true,
-//           });
-//         });
-//       });
-
-//       const tdsBalanceHistoryFiltered = [
-//         ...realTdsEntries,
-//         ...virtualTdsEntries,
-//       ].sort(
-//         (a, b) =>
-//           new Date(a.cycle || a.date || 0) - new Date(b.cycle || b.date || 0),
-//       );
-
-//       let tdsPendingAmount = 0;
-//       tdsBalanceHistoryFiltered.forEach((entry) => {
-//         const isUtrEntry = entry.isUtrEntry;
-//         const isUnpaid =
-//           isUtrEntry === false ||
-//           isUtrEntry === "false" ||
-//           isUtrEntry === undefined ||
-//           isUtrEntry === null;
-//         if (isUnpaid) {
-//           const amount =
-//             Number(entry.paidAmount) || Number(entry.tdsAmount) || 0;
-//           tdsPendingAmount += amount;
-//         }
-//       });
-
-//       const hasUnpaidTds = tdsBalanceHistoryFiltered.some(
-//         (t) => !t.isUtrEntry || !t.utrNumber || t.utrNumber.trim() === "",
-//       );
-//       const hasAnyTdsRecord = tdsBalanceHistoryFiltered.length > 0;
-//       const isTdsFullyPaid = hasAnyTdsRecord && !hasUnpaidTds;
-
-//       const { ledgerHistory, ...restOfMediaObj } = mediaObj;
-
-//       return {
-//         ...restOfMediaObj,
-//         ledger: latestLedger,
-//         withGst1Ledger: withGst1Ledger,
-//         pendingMonths,
-//         monthHistoryEntries: requestedMonthRange
-//           ? monthHistoryEntries
-//           : undefined,
-//         rentalDue: rentalDueWithApproval,
-//         gstPayment: gstPayment,
-//         gstBalanceHistory: fullGstBalanceHistory,
-//         gstPendingAmount: gstPendingAmount,
-//         tdsPendingAmount: tdsPendingAmount,
-//         tdsBalanceHistory: tdsBalanceHistoryFiltered,
-//         tdsStatusFlags: { hasUnpaidTds, isTdsFullyPaid },
-//         isPendingAcrossPastMonths,
-//         _pastMonthPendingCount: pastMonthPendingCount,
-//       };
-//     });
-
-//     let finalMediaListData = mediaListData;
-
-//     if (requestedMonthRange && !isPendingFilter) {
-//       const requestedMonthName =
-//         MONTH_NAMES[requestedMonthRange.startDate.getUTCMonth()];
-
-//       finalMediaListData = finalMediaListData.filter((m) => {
-//         const lastBillPaidDate = m.rentalPayment?.lastBillPaidDate;
-//         if (lastBillPaidDate) {
-//           const d = new Date(lastBillPaidDate);
-//           if (
-//             d >= requestedMonthRange.startDate &&
-//             d <= requestedMonthRange.endDate
-//           ) {
-//             return true;
-//           }
-//         }
-
-//         if (Array.isArray(m.rentalDue)) {
-//           const hasMatchingDue = m.rentalDue.some((due) => {
-//             if (!due.dueDate) return false;
-//             const d = new Date(due.dueDate);
-//             return (
-//               d >= requestedMonthRange.startDate &&
-//               d <= requestedMonthRange.endDate
-//             );
-//           });
-//           if (hasMatchingDue) return true;
-//         }
-
-//         const hasLedgerActivity =
-//           (Array.isArray(m.ledger) &&
-//             m.ledger.some(
-//               (e) => !e.isVirtual && e.month?.includes(requestedMonthName),
-//             )) ||
-//           (Array.isArray(m.withGst1Ledger) &&
-//             m.withGst1Ledger.some(
-//               (e) => !e.isVirtual && e.month?.includes(requestedMonthName),
-//             ));
-//         if (hasLedgerActivity) return true;
-
-//         return false;
-//       });
-//     }
-
-//     if (isPendingFilter) {
-//       finalMediaListData = finalMediaListData.filter(
-//         (m) => m.isPendingAcrossPastMonths,
-//       );
-//     }
-
-//     if (tdsStatusFilter === 4) {
-//       finalMediaListData = finalMediaListData.filter(
-//         (m) => m.tdsStatusFlags.hasUnpaidTds,
-//       );
-//     } else if (tdsStatusFilter === 5) {
-//       finalMediaListData = finalMediaListData.filter(
-//         (m) => m.tdsStatusFlags.isTdsFullyPaid,
-//       );
-//     }
-
-//     overallGstPendingAmount = mediaListData.reduce(
-//       (sum, m) => sum + (m.gstPendingAmount || 0),
-//       0,
-//     );
-//     const overallTdsPendingAmount = mediaListData.reduce(
-//       (sum, m) => sum + (m.tdsPendingAmount || 0),
-//       0,
-//     );
-//     overallPastMonthPendingCount = mediaListData.filter(
-//       (m) => (m._pastMonthPendingCount || 0) > 0,
-//     ).length;
-
-//     finalMediaListData = finalMediaListData.map(
-//       ({
-//         tdsStatusFlags,
-//         isPendingAcrossPastMonths,
-//         _pastMonthPendingCount,
-//         ...rest
-//       }) => rest,
-//     );
-
-//     let effectiveTotalCount = totalCount;
-//     if (needsFullFetch) {
-//       effectiveTotalCount = finalMediaListData.length;
-//       finalMediaListData = finalMediaListData.slice(skip, skip + pageSize);
-//     }
-
-//     return successResponse(
-//       res,
-//       "Media list fetched successfully",
-//       {
-//         pageNumber: pageNumbers,
-//         count: pageSize,
-//         totalCount: effectiveTotalCount,
-//         totalPages: Math.ceil(effectiveTotalCount / pageSize),
-//         overallGstPendingAmount,
-//         overallTdsPendingAmount,
-//         overallPastMonthPendingCount,
-//         mediaList: finalMediaListData,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     console.error("listMediaByLedger error:", error);
-//     return errorResponse(
-//       res,
-//       "Something went wrong while fetching media list",
-//       { error: error.message },
-//       500,
-//     );
-//   }
-// };
 exports.listMediaByLedger = async (req, res) => {
   try {
     const {
@@ -2283,823 +1470,6 @@ exports.listMediaByLedger = async (req, res) => {
     );
   }
 };
-// exports.listMediaByLedger = async (req, res) => {
-//   try {
-//     const {
-//       pageNumber = 1,
-//       count = 10,
-//       search,
-//       status,
-//       dateRange,
-//       currentMonth,
-//       isPending,
-//     } = req.body;
-
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
-
-//     const filter = {};
-//     filter.rentalStatus = 3;
-//     if (search) {
-//       filter.mediaName = { $regex: search, $options: "i" };
-//     }
-
-//     let tdsStatusFilter = null;
-//     if (status !== undefined && status !== null && status !== "") {
-//       const statusNum = Number(status);
-//       if ([4, 5].includes(statusNum)) {
-//         tdsStatusFilter = statusNum;
-//       }
-//     }
-
-//     if (status !== undefined && status !== null && status !== "") {
-//       const statusNum = Number(status);
-//       if (![0, 1, 2, 3, 4, 5].includes(statusNum)) {
-//         return errorResponse(
-//           res,
-//           "status must be one of 0 (Not approve), 1 (Approve), 2 (GST Pending), 3 (GST Completed), 4 (TDS Pending), 5 (TDS Completed)",
-//           null,
-//           400,
-//         );
-//       }
-//       if (statusNum === 1) {
-//         filter["ledger"] = {
-//           $exists: true,
-//           $not: { $size: 0 },
-//           $elemMatch: { status: 1 },
-//         };
-//       } else if (statusNum === 0) {
-//         filter.$or = [
-//           { ledger: { $exists: false } },
-//           { ledger: { $size: 0 } },
-//           { "ledger.status": 0 },
-//         ];
-//       } else if (statusNum === 2) {
-//         filter["gstBalanceHistory"] = {
-//           $exists: true,
-//           $not: { $size: 0 },
-//           $elemMatch: { isPaid: false },
-//         };
-//       } else if (statusNum === 3) {
-//         filter["gstBalanceHistory"] = {
-//           $exists: true,
-//           $not: { $size: 0 },
-//           $all: [{ $elemMatch: { isPaid: true, utrNumber: { $ne: "" } } }],
-//         };
-//         filter["gstBalanceHistory.isPaid"] = { $ne: false };
-//         filter["gstBalanceHistory.utrNumber"] = { $ne: "" };
-//       }
-//     }
-
-//     const validateMonthYear = (monthYear) =>
-//       /^(0[1-9]|1[0-2])-([0-9]{4})$/.test(monthYear);
-
-//     const getMonthDateRange = (monthYear) => {
-//       const [month, year] = monthYear.split("-").map(Number);
-//       const startDate = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-//       const endDate = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
-//       return { startDate, endDate };
-//     };
-
-//     let requestedMonthRange = null;
-
-//     let isPendingFilter = false;
-//     if (isPending !== undefined && isPending !== null && isPending !== "") {
-//       const isPendingNum = Number(isPending);
-//       if (isPendingNum !== 1) {
-//         return errorResponse(
-//           res,
-//           "isPending must be 1 (any other value is invalid)",
-//           null,
-//           400,
-//         );
-//       }
-//       isPendingFilter = true;
-//     }
-
-//     let isPendingExplicitCutoff = null;
-//     const refMonthYear = dateRange || currentMonth || null;
-//     if (refMonthYear) {
-//       if (!validateMonthYear(refMonthYear)) {
-//         return errorResponse(
-//           res,
-//           "Invalid format. Use MM-YYYY format (e.g., 07-2026)",
-//           null,
-//           400,
-//         );
-//       }
-//       const [refMonth, refYear] = refMonthYear.split("-").map(Number);
-//       isPendingExplicitCutoff = { year: refYear, monthIndex: refMonth - 1 };
-
-//       const { startDate, endDate } = getMonthDateRange(refMonthYear);
-//       requestedMonthRange = { startDate, endDate };
-//     }
-
-//     const skip = (pageNumbers - 1) * pageSize;
-//     const needsFullFetchForTdsFilter = tdsStatusFilter !== null;
-//     const needsFullFetch =
-//       needsFullFetchForTdsFilter || isPendingFilter || !!isPendingExplicitCutoff;
-
-//     const [results, totalCount] = await Promise.all([
-//       needsFullFetch
-//         ? Media.find(filter)
-//             .select(
-//               "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
-//             )
-//             .sort({ updatedAt: -1 })
-//         : Media.find(filter)
-//             .select(
-//               "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue createdAt updatedAt",
-//             )
-//             .sort({ updatedAt: -1 })
-//             .skip(skip)
-//             .limit(pageSize),
-//       Media.countDocuments(filter),
-//     ]);
-
-//     let overallGstPendingAmount = 0;
-//     let overallPastMonthPendingCount = 0;
-//     const MONTH_NAME_TO_INDEX = MONTH_NAMES.reduce((acc, name, idx) => {
-//       acc[name.toLowerCase()] = idx;
-//       return acc;
-//     }, {});
-
-//     const mediaListData = results.map((media) => {
-//       const mediaObj = media.toObject();
-
-//       const inRequestedMonth = (date) => {
-//         if (!requestedMonthRange || !date) return true;
-//         const d = new Date(date);
-//         return (
-//           d >= requestedMonthRange.startDate && d <= requestedMonthRange.endDate
-//         );
-//       };
-
-//       const siteLiveCycleDate =
-//         mediaObj.rentalPayment?.nextBillingDate ||
-//         mediaObj.rentalPayment?.lastBillPaidDate;
-
-//       // ══════════════════════════════════════════════════════
-//       // Pending-month calculation — ALWAYS runs for every site,
-//       // regardless of isPendingFilter.
-//       // ══════════════════════════════════════════════════════
-//       let isPendingAcrossPastMonths = false;
-//       let earliestPendingMonthKey = null;
-//       let allPendingMonthKeys = [];
-//       let pastMonthPendingCount = 0;
-//       {
-//         let referenceYear = null;
-//         let referenceMonthIndex = null;
-
-//         if (isPendingExplicitCutoff) {
-//           referenceYear = isPendingExplicitCutoff.year;
-//           referenceMonthIndex = isPendingExplicitCutoff.monthIndex;
-//         } else {
-//           const referenceDateRaw =
-//             mediaObj.rentalPayment?.lastBillPaidDate ||
-//             mediaObj.rentalPayment?.nextBillingDate ||
-//             null;
-//           if (referenceDateRaw) {
-//             const refDate = new Date(referenceDateRaw);
-//             referenceYear = refDate.getUTCFullYear();
-//             referenceMonthIndex = refDate.getUTCMonth();
-//           }
-//         }
-
-//         if (referenceYear !== null) {
-//           const savedLedgerMonthKeys = new Set();
-//           (mediaObj.ledgerHistory || []).forEach((yearBucket) => {
-//             (yearBucket.months || []).forEach((monthBucket) => {
-//               const monthIdx = MONTH_NAMES.findIndex(
-//                 (m) => m.toLowerCase() === monthBucket.month.toLowerCase(),
-//               );
-//               const entries = monthBucket.entries || [];
-//               const hasLedgerSave = entries.some((e) => e.withGst === 2);
-//               if (hasLedgerSave) {
-//                 savedLedgerMonthKeys.add(`${yearBucket.year}-${monthIdx}`);
-//               }
-//             });
-//           });
-
-//           const neededMonthKeys = new Set();
-
-//           if (Array.isArray(mediaObj.rentalDue)) {
-//             mediaObj.rentalDue.forEach((due) => {
-//               if (!due.dueDate) return;
-//               const d = new Date(due.dueDate);
-//               if (isNaN(d.getTime())) return;
-//               neededMonthKeys.add(`${d.getUTCFullYear()}-${d.getUTCMonth()}`);
-//             });
-//           }
-
-//           if (mediaObj.rentalPayment?.lastBillPaidDate) {
-//             const d = new Date(mediaObj.rentalPayment.lastBillPaidDate);
-//             if (!isNaN(d.getTime())) {
-//               neededMonthKeys.add(`${d.getUTCFullYear()}-${d.getUTCMonth()}`);
-//             }
-//           }
-
-//           (mediaObj.ledgerHistory || []).forEach((yearBucket) => {
-//             (yearBucket.months || []).forEach((monthBucket) => {
-//               const monthIdx = MONTH_NAMES.findIndex(
-//                 (m) => m.toLowerCase() === monthBucket.month.toLowerCase(),
-//               );
-//               neededMonthKeys.add(`${yearBucket.year}-${monthIdx}`);
-//             });
-//           });
-
-//           const pendingKeys = [];
-//           for (const key of neededMonthKeys) {
-//             const [yrStr, monthIdxStr] = key.split("-");
-//             const yr = Number(yrStr);
-//             const monthIdx = Number(monthIdxStr);
-
-//             const isBeforeReference =
-//               yr < referenceYear ||
-//               (yr === referenceYear && monthIdx < referenceMonthIndex);
-
-//             if (isBeforeReference && !savedLedgerMonthKeys.has(key)) {
-//               pendingKeys.push({ key, yr, monthIdx });
-//             }
-//           }
-
-//           pendingKeys.sort((a, b) => a.yr - b.yr || a.monthIdx - b.monthIdx);
-
-//           if (pendingKeys.length > 0) {
-//             isPendingAcrossPastMonths = true;
-//             earliestPendingMonthKey = pendingKeys[0];
-//             allPendingMonthKeys = pendingKeys;
-//             pastMonthPendingCount = pendingKeys.length;
-//           }
-//         }
-//       }
-
-//       const isSiteCurrentLiveCycleMonth =
-//         requestedMonthRange &&
-//         siteLiveCycleDate &&
-//         (() => {
-//           const d = new Date(siteLiveCycleDate);
-//           return (
-//             d.getUTCFullYear() ===
-//               requestedMonthRange.startDate.getUTCFullYear() &&
-//             d.getUTCMonth() === requestedMonthRange.startDate.getUTCMonth()
-//           );
-//         })();
-
-//       let gst2SourceEntries;
-//       let gst1SourceEntries;
-//       let monthHistoryEntries = [];
-
-//       if (requestedMonthRange) {
-//         const requestedMonthName =
-//           MONTH_NAMES[requestedMonthRange.startDate.getUTCMonth()];
-//         const requestedYear = String(
-//           requestedMonthRange.startDate.getUTCFullYear(),
-//         );
-
-//         const yearBucket = (mediaObj.ledgerHistory || []).find(
-//           (y) => String(y.year).trim() === requestedYear,
-//         );
-//         const monthBucket = yearBucket?.months.find(
-//           (m) =>
-//             String(m.month).trim().toLowerCase() ===
-//             requestedMonthName.toLowerCase(),
-//         );
-
-//         monthHistoryEntries = [...(monthBucket?.entries || [])].sort(
-//           (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//         );
-
-//         if (isSiteCurrentLiveCycleMonth) {
-//           gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
-//           gst1SourceEntries = mediaObj.withGst1Ledger || [];
-//         } else {
-//           const allMonthEntries = monthBucket?.entries || [];
-//           gst2SourceEntries = allMonthEntries.filter((e) => e.withGst === 2);
-//           gst1SourceEntries = allMonthEntries.filter((e) => e.withGst === 1);
-//         }
-//       } else {
-//         gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
-//         gst1SourceEntries = mediaObj.withGst1Ledger || [];
-//       }
-
-//       const dedupeByKey = (entries, getKey) => {
-//         const withPos = entries.map((entry, pos) => ({ entry, pos }));
-//         const sorted = withPos.sort(
-//           (a, b) => new Date(b.entry.updatedAt) - new Date(a.entry.updatedAt),
-//         );
-//         const seen = new Set();
-//         const deduped = [];
-//         for (const { entry, pos } of sorted) {
-//           const key = getKey(entry, pos);
-//           if (!seen.has(key)) {
-//             seen.add(key);
-//             deduped.push(entry);
-//           }
-//         }
-//         return deduped;
-//       };
-
-//       const gst2Key = (entry, pos) =>
-//         entry.index !== undefined && entry.index !== null
-//           ? `idx_${entry.index}`
-//           : entry._id
-//             ? `id_${String(entry._id)}`
-//             : `pos_${pos}`;
-
-//       const gst1Key = (entry, pos) =>
-//         entry.rentalDueId
-//           ? `rd_${String(entry.rentalDueId)}`
-//           : entry.landOwnerId
-//             ? `owner_${String(entry.landOwnerId)}_${entry.month || ""}`
-//             : entry._id
-//               ? `id_${String(entry._id)}`
-//               : `pos_${pos}`;
-
-//       let latestLedger = [];
-//       let withGst1Ledger = [];
-
-//       if (isPendingFilter && earliestPendingMonthKey) {
-//         const targetYear = String(earliestPendingMonthKey.yr);
-//         const targetMonthName = MONTH_NAMES[earliestPendingMonthKey.monthIdx];
-
-//         const yearBucket = (mediaObj.ledgerHistory || []).find(
-//           (y) => String(y.year).trim() === targetYear,
-//         );
-//         const monthBucket = yearBucket?.months.find(
-//           (m) => m.month.toLowerCase() === targetMonthName.toLowerCase(),
-//         );
-//         const monthEntries = monthBucket?.entries || [];
-
-//         latestLedger = monthEntries.filter((e) => e.withGst === 2);
-//         withGst1Ledger = monthEntries.filter((e) => e.withGst === 1);
-//         if (latestLedger.length === 0 && withGst1Ledger.length === 0) {
-//           const pendingCycleDate = new Date(
-//             Date.UTC(
-//               earliestPendingMonthKey.yr,
-//               earliestPendingMonthKey.monthIdx,
-//               1,
-//             ),
-//           );
-//           const targetMonthLabel = `${targetMonthName} ${earliestPendingMonthKey.yr}`;
-//           latestLedger = (mediaObj.landOwners || []).map((owner) => ({
-//             landOwnerId: owner._id,
-//             landOwnerName: owner.name,
-//             utrNumber: "",
-//             paymentMode: null,
-//             date: null,
-//             status: 0,
-//             withGst: 2,
-//             month: targetMonthLabel,
-//             cycle: pendingCycleDate,
-//             rentalDueId: null,
-//             index: null,
-//             updatedBy: "",
-//             updatedAt: null,
-//             isVirtual: true,
-//           }));
-
-//           withGst1Ledger = (mediaObj.landOwners || []).map((owner) => ({
-//             landOwnerId: owner._id,
-//             landOwnerName: owner.name,
-//             utrNumber: "",
-//             paymentMode: null,
-//             date: null,
-//             status: 0,
-//             withGst: 1,
-//             month: targetMonthLabel,
-//             cycle: pendingCycleDate,
-//             rentalDueId: null,
-//             index: null,
-//             updatedBy: "",
-//             updatedAt: null,
-//             isPaid: false,
-//             gstAmount: 0,
-//             isVirtual: true,
-//           }));
-//         }
-//       } else {
-//         const sourcedFromLiveLedger =
-//           !requestedMonthRange || isSiteCurrentLiveCycleMonth;
-
-//         if (gst2SourceEntries.length > 0) {
-//           const monthScoped = requestedMonthRange
-//             ? gst2SourceEntries
-//             : gst2SourceEntries.filter((entry) => inRequestedMonth(entry.date));
-//           latestLedger = sourcedFromLiveLedger
-//             ? [...monthScoped].sort(
-//                 (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//               )
-//             : dedupeByKey(monthScoped, gst2Key);
-//         }
-
-//         if (gst1SourceEntries.length > 0) {
-//           const monthScoped = requestedMonthRange
-//             ? gst1SourceEntries
-//             : gst1SourceEntries.filter((entry) => inRequestedMonth(entry.date));
-//           withGst1Ledger = sourcedFromLiveLedger
-//             ? [...monthScoped].sort(
-//                 (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//               )
-//             : dedupeByKey(monthScoped, gst1Key);
-//         }
-
-//         // ✅ earliest-pending fallback, restored from earlier fix
-//         let earliestPendingDueDate = null;
-//         if (allPendingMonthKeys.length > 0) {
-//           const earliest = allPendingMonthKeys[0];
-//           earliestPendingDueDate = new Date(
-//             Date.UTC(earliest.yr, earliest.monthIdx, 1),
-//           );
-//         }
-
-//         if (latestLedger.length === 0 && withGst1Ledger.length === 0) {
-//           const dueDateRaw =
-//             earliestPendingDueDate ||
-//             (Array.isArray(mediaObj.rentalDue) &&
-//               mediaObj.rentalDue[mediaObj.rentalDue.length - 1]?.dueDate) ||
-//             mediaObj.rentalPayment?.lastBillPaidDate ||
-//             mediaObj.rentalPayment?.nextBillingDate ||
-//             null;
-
-//           if (dueDateRaw) {
-//             const dueDate = new Date(dueDateRaw);
-//             if (!isNaN(dueDate.getTime())) {
-//               const dueMonthName = MONTH_NAMES[dueDate.getUTCMonth()];
-//               const dueMonthLabel = `${dueMonthName} ${dueDate.getUTCFullYear()}`;
-//               latestLedger = (mediaObj.landOwners || []).map((owner) => ({
-//                 landOwnerId: owner._id,
-//                 landOwnerName: owner.name,
-//                 utrNumber: "",
-//                 paymentMode: null,
-//                 date: null,
-//                 status: 0,
-//                 withGst: 2,
-//                 month: dueMonthLabel,
-//                 cycle: dueDate,
-//                 rentalDueId: null,
-//                 index: null,
-//                 updatedBy: "",
-//                 updatedAt: null,
-//                 isVirtual: true,
-//               }));
-
-//               withGst1Ledger = (mediaObj.landOwners || []).map((owner) => ({
-//                 landOwnerId: owner._id,
-//                 landOwnerName: owner.name,
-//                 utrNumber: "",
-//                 paymentMode: null,
-//                 date: null,
-//                 status: 0,
-//                 withGst: 1,
-//                 month: dueMonthLabel,
-//                 cycle: dueDate,
-//                 rentalDueId: null,
-//                 index: null,
-//                 updatedBy: "",
-//                 updatedAt: null,
-//                 isPaid: false,
-//                 gstAmount: 0,
-//                 isVirtual: true,
-//               }));
-//             }
-//           }
-//         }
-//       }
-
-//       let rentalDueWithApproval = [];
-//       if (Array.isArray(mediaObj.rentalDue) && mediaObj.rentalDue.length > 0) {
-//         const monthScopedDue = mediaObj.rentalDue.filter((due) =>
-//           inRequestedMonth(due.dueDate),
-//         );
-//         const sortedDue = [...monthScopedDue].sort((a, b) => {
-//           const dateA = a.ownerApprovalDate
-//             ? new Date(a.ownerApprovalDate)
-//             : new Date(0);
-//           const dateB = b.ownerApprovalDate
-//             ? new Date(b.ownerApprovalDate)
-//             : new Date(0);
-//           return dateB - dateA;
-//         });
-//         rentalDueWithApproval = sortedDue
-//           .filter((due) => due.ownerApprovalDate)
-//           .map((due) => ({
-//             _id: due._id,
-//             ownerApprovalDate: due.ownerApprovalDate,
-//             dueMonth: due.dueMonth,
-//             dueDate: due.dueDate,
-//             netPayable: due.netPayable,
-//             approvalStatus: due.approvalStatus,
-//             withGst: due.withGst,
-//             gstAmount: due.gstAmount,
-//             baseAmount: due.baseAmount,
-//             paymentFrequency: due.paymentFrequency,
-//             campaignName: due.campaignName,
-//             status: due.status,
-//             updatedAt: due.updatedAt,
-//             createdAt: due.createdAt,
-//           }));
-//       }
-
-//       const fullGstBalanceHistory = Array.isArray(mediaObj.gstBalanceHistory)
-//         ? mediaObj.gstBalanceHistory
-//         : [];
-//       let gstPendingAmount = 0;
-//       if (fullGstBalanceHistory.length > 0) {
-//         fullGstBalanceHistory.forEach((entry) => {
-//           const isPaid = entry.isPaid;
-//           const isPaidFalse =
-//             isPaid === false ||
-//             isPaid === "false" ||
-//             isPaid === 0 ||
-//             isPaid === "0";
-//           if (isPaidFalse) {
-//             const amount =
-//               Number(entry.paidAmount) ||
-//               Number(entry.amount) ||
-//               Number(entry.gstAmount) ||
-//               0;
-//             gstPendingAmount += amount;
-//           }
-//         });
-//       }
-
-//       let gstPayment = false;
-//       if (fullGstBalanceHistory.length > 0) {
-//         const hasEmptyUtr = fullGstBalanceHistory.some(
-//           (entry) => !entry.utrNumber || entry.utrNumber.trim() === "",
-//         );
-//         gstPayment = hasEmptyUtr;
-//       }
-
-//       const realTdsEntries = Array.isArray(mediaObj.tdsBalanceHistory)
-//         ? mediaObj.tdsBalanceHistory
-//         : [];
-
-//       const toDueMonth = (dateVal) => {
-//         if (!dateVal) return null;
-//         const d = new Date(dateVal);
-//         if (isNaN(d.getTime())) return null;
-//         return `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-//       };
-
-//       const uniqueDueMonths = new Map();
-
-//       const addDueMonth = (dueMonthRaw, cycleValue) => {
-//         const dueMonth = dueMonthRaw || toDueMonth(cycleValue);
-//         if (!dueMonth) return;
-//         if (!uniqueDueMonths.has(dueMonth)) {
-//           uniqueDueMonths.set(
-//             dueMonth,
-//             cycleValue ? new Date(cycleValue) : null,
-//           );
-//         }
-//       };
-
-//       fullGstBalanceHistory.forEach((g) => {
-//         addDueMonth(g.dueMonth, g.cycle || g.date);
-//       });
-
-//       if (uniqueDueMonths.size === 0 && Array.isArray(mediaObj.rentalDue)) {
-//         mediaObj.rentalDue.forEach((due) => {
-//           addDueMonth(due.dueMonth, due.dueDate);
-//         });
-//       }
-
-//       if (uniqueDueMonths.size === 0 && Array.isArray(mediaObj.ledgerHistory)) {
-//         mediaObj.ledgerHistory.forEach((yearBucket) => {
-//           (yearBucket.months || []).forEach((monthBucket) => {
-//             const dueMonth = `${monthBucket.month} ${yearBucket.year}`;
-//             addDueMonth(dueMonth, null);
-//           });
-//         });
-//       }
-
-//       if (uniqueDueMonths.size === 0) {
-//         const fallbackCycle =
-//           mediaObj.rentalPayment?.nextBillingDate ||
-//           mediaObj.rentalPayment?.lastBillPaidDate ||
-//           new Date();
-//         addDueMonth(null, fallbackCycle);
-//       }
-
-//       const realTdsKeySet = new Set(
-//         realTdsEntries.map((t) => `${String(t.landOwnerId)}_${t.dueMonth}`),
-//       );
-
-//       const virtualTdsEntries = [];
-//       uniqueDueMonths.forEach((cycleDate, dueMonth) => {
-//         const monthName = dueMonth.split(" ")[0];
-
-//         (mediaObj.landOwners || []).forEach((owner) => {
-//           const isApplicable =
-//             owner.tdsApplicable === 1 ||
-//             owner.tdsApplicable === "1" ||
-//             owner.tdsApplicable === true;
-//           if (!isApplicable) return;
-
-//           const key = `${String(owner._id)}_${dueMonth}`;
-//           if (realTdsKeySet.has(key)) return;
-
-//           const tdsAmount = Number(owner.tdsAmount || 0);
-
-//           virtualTdsEntries.push({
-//             _id: null,
-//             dueMonth,
-//             month: monthName,
-//             cycle: cycleDate,
-//             tdsAmount,
-//             isUtrEntry: false,
-//             paidAmount: 0,
-//             paidAt: null,
-//             landOwnerId: owner._id,
-//             landOwnerName: owner.name,
-//             utrNumber: "",
-//             date: null,
-//             isVirtual: true,
-//           });
-//         });
-//       });
-
-//       const tdsBalanceHistoryFiltered = [
-//         ...realTdsEntries,
-//         ...virtualTdsEntries,
-//       ].sort(
-//         (a, b) =>
-//           new Date(a.cycle || a.date || 0) - new Date(b.cycle || b.date || 0),
-//       );
-
-//       // ✅ FIXED — tdsPendingAmount now computed from
-//       // tdsBalanceHistoryFiltered (REAL + VIRTUAL combined), not just
-//       // mediaObj.tdsBalanceHistory (real-only). This was the bug:
-//       // owner.tdsAmount that only ever existed as a VIRTUAL entry
-//       // (nothing ever saved) was never being summed at all.
-//       let tdsPendingAmount = 0;
-//       tdsBalanceHistoryFiltered.forEach((entry) => {
-//         const isUtrEntry = entry.isUtrEntry;
-//         const isUnpaid =
-//           isUtrEntry === false ||
-//           isUtrEntry === "false" ||
-//           isUtrEntry === undefined ||
-//           isUtrEntry === null;
-//         if (isUnpaid) {
-//           const amount =
-//             Number(entry.paidAmount) || Number(entry.tdsAmount) || 0;
-//           tdsPendingAmount += amount;
-//         }
-//       });
-
-//       const hasUnpaidTds = tdsBalanceHistoryFiltered.some(
-//         (t) => !t.isUtrEntry || !t.utrNumber || t.utrNumber.trim() === "",
-//       );
-//       const hasAnyTdsRecord = tdsBalanceHistoryFiltered.length > 0;
-//       const isTdsFullyPaid = hasAnyTdsRecord && !hasUnpaidTds;
-
-//       const { ledgerHistory, ...restOfMediaObj } = mediaObj;
-
-//       return {
-//         ...restOfMediaObj,
-//         ledger: latestLedger,
-//         withGst1Ledger: withGst1Ledger,
-//         monthHistoryEntries: requestedMonthRange
-//           ? monthHistoryEntries
-//           : undefined,
-//         rentalDue: rentalDueWithApproval,
-//         gstPayment: gstPayment,
-//         gstBalanceHistory: fullGstBalanceHistory,
-//         gstPendingAmount: gstPendingAmount,
-//         tdsPendingAmount: tdsPendingAmount, // ✅ NEW field per site
-//         tdsBalanceHistory: tdsBalanceHistoryFiltered,
-//         tdsStatusFlags: { hasUnpaidTds, isTdsFullyPaid },
-//         isPendingAcrossPastMonths,
-//         _pastMonthPendingCount: pastMonthPendingCount,
-//       };
-//     });
-
-//     let finalMediaListData = mediaListData;
-
-//     if (requestedMonthRange && !isPendingFilter) {
-//       const requestedMonthName =
-//         MONTH_NAMES[requestedMonthRange.startDate.getUTCMonth()];
-
-//       finalMediaListData = finalMediaListData.filter((m) => {
-//         const lastBillPaidDate = m.rentalPayment?.lastBillPaidDate;
-//         if (lastBillPaidDate) {
-//           const d = new Date(lastBillPaidDate);
-//           if (
-//             d >= requestedMonthRange.startDate &&
-//             d <= requestedMonthRange.endDate
-//           ) {
-//             return true;
-//           }
-//         }
-
-//         if (Array.isArray(m.rentalDue)) {
-//           const hasMatchingDue = m.rentalDue.some((due) => {
-//             if (!due.dueDate) return false;
-//             const d = new Date(due.dueDate);
-//             return (
-//               d >= requestedMonthRange.startDate &&
-//               d <= requestedMonthRange.endDate
-//             );
-//           });
-//           if (hasMatchingDue) return true;
-//         }
-
-//         const hasLedgerActivity =
-//           (Array.isArray(m.ledger) &&
-//             m.ledger.some(
-//               (e) => !e.isVirtual && e.month?.includes(requestedMonthName),
-//             )) ||
-//           (Array.isArray(m.withGst1Ledger) &&
-//             m.withGst1Ledger.some(
-//               (e) => !e.isVirtual && e.month?.includes(requestedMonthName),
-//             ));
-//         if (hasLedgerActivity) return true;
-
-//         return false;
-//       });
-//     }
-
-//     if (isPendingFilter) {
-//       finalMediaListData = finalMediaListData.filter(
-//         (m) => m.isPendingAcrossPastMonths,
-//       );
-//     }
-
-//     if (tdsStatusFilter === 4) {
-//       finalMediaListData = finalMediaListData.filter(
-//         (m) => m.tdsStatusFlags.hasUnpaidTds,
-//       );
-//     } else if (tdsStatusFilter === 5) {
-//       finalMediaListData = finalMediaListData.filter(
-//         (m) => m.tdsStatusFlags.isTdsFullyPaid,
-//       );
-//     }
-
-//     // ✅ overallGstPendingAmount / overallTdsPendingAmount — fixed
-//     // totals across ALL sites (mediaListData, unfiltered), unaffected
-//     // by isPending/status/month filtering narrowing mediaList.
-//     overallGstPendingAmount = mediaListData.reduce(
-//       (sum, m) => sum + (m.gstPendingAmount || 0),
-//       0,
-//     );
-//     const overallTdsPendingAmount = mediaListData.reduce(
-//       (sum, m) => sum + (m.tdsPendingAmount || 0),
-//       0,
-//     );
-
-//     // ✅ overallPastMonthPendingCount — count of SITES with pending
-//     // months, scoped to the FINAL filtered list.
-//     overallPastMonthPendingCount = mediaListData.filter(
-//       (m) => (m._pastMonthPendingCount || 0) > 0,
-//     ).length;
-
-//     finalMediaListData = finalMediaListData.map(
-//       ({
-//         tdsStatusFlags,
-//         isPendingAcrossPastMonths,
-//         _pastMonthPendingCount,
-//         ...rest
-//       }) => rest,
-//     );
-
-//     let effectiveTotalCount = totalCount;
-//     if (needsFullFetch) {
-//       effectiveTotalCount = finalMediaListData.length;
-//       finalMediaListData = finalMediaListData.slice(skip, skip + pageSize);
-//     }
-
-//     return successResponse(
-//       res,
-//       "Media list fetched successfully",
-//       {
-//         pageNumber: pageNumbers,
-//         count: pageSize,
-//         totalCount: effectiveTotalCount,
-//         totalPages: Math.ceil(effectiveTotalCount / pageSize),
-//         overallGstPendingAmount,
-//         overallTdsPendingAmount,
-//         overallPastMonthPendingCount,
-//         mediaList: finalMediaListData,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     console.error("listMediaByLedger error:", error);
-//     return errorResponse(
-//       res,
-//       "Something went wrong while fetching media list",
-//       { error: error.message },
-//       500,
-//     );
-//   }
-// };
-
-
-
-
-
 // exports.getLedgerHistory = async (req, res) => {
 //   try {
 //     const { mediaId, year, month } = req.query;
@@ -3110,7 +1480,7 @@ exports.listMediaByLedger = async (req, res) => {
 
 //     const media = await Media.findById(mediaId)
 //       .select(
-//         "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue",
+//         "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths",
 //       )
 //       .lean();
 
@@ -3327,51 +1697,18 @@ exports.listMediaByLedger = async (req, res) => {
 //       "July", "August", "September", "October", "November", "December",
 //     ];
 
-//     // ✅ NEW — builds pendingLedgerHistory for one month bucket:
-//     // every landOwner, category-conditional cash/online amount+entry
-//     // fields, plus month + cycle on each entry.
-//     const buildPendingLedgerHistory = (
-//       allEntries,
-//       monthName,
-//       yearValue,
-//       cycleDate,
-//     ) => {
+//     // ✅ CHANGED — pendingLedgerHistory is now looked up from the
+//     // STORED media.pendingMonths field (kept in sync by
+//     // recomputePendingMonths() on every ledger save), matched by
+//     // month label — instead of being recomputed live here.
+//     const storedPendingMonths = Array.isArray(media.pendingMonths)
+//       ? media.pendingMonths
+//       : [];
+
+//     const getPendingLedgerHistoryForMonth = (monthName, yearValue) => {
 //       const monthLabel = `${monthName} ${yearValue}`;
-//       const gst2Entries = (allEntries || []).filter((e) => e.withGst === 2);
-
-//       return (media.landOwners || []).map((owner) => {
-//         const paymentCategory = Number(owner.paymentCategory || 1);
-//         const ownerEntries = gst2Entries.filter(
-//           (e) => String(e.landOwnerId) === String(owner._id),
-//         );
-//         const cashEntry = ownerEntries.some((e) => e.paymentMode === "Cash");
-//         const onlineEntry = ownerEntries.some(
-//           (e) => e.paymentMode === "Online",
-//         );
-
-//         const record = {
-//           landOwnerId: owner._id,
-//           landOwnerName: owner.name,
-//           paymentCategory,
-//           month: monthLabel,
-//           cycle: cycleDate,
-//         };
-
-//         if (paymentCategory === 1) {
-//           record.cashAmount = Number(owner.cashAmount || 0);
-//           record.cashEntry = cashEntry;
-//         } else if (paymentCategory === 2) {
-//           record.onlineAmount = Number(owner.onlineAmount || 0);
-//           record.onlineEntry = onlineEntry;
-//         } else if (paymentCategory === 3) {
-//           record.cashAmount = Number(owner.cashAmount || 0);
-//           record.cashEntry = cashEntry;
-//           record.onlineAmount = Number(owner.onlineAmount || 0);
-//           record.onlineEntry = onlineEntry;
-//         }
-
-//         return record;
-//       });
+//       const match = storedPendingMonths.find((pm) => pm.month === monthLabel);
+//       return match ? match.owners || [] : [];
 //     };
 
 //     let transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
@@ -3412,12 +1749,11 @@ exports.listMediaByLedger = async (req, res) => {
 //           cycleDateForMonth,
 //         );
 
-//         // ✅ NEW — pendingLedgerHistory for this month bucket
-//         const pendingLedgerHistory = buildPendingLedgerHistory(
-//           allEntries,
+//         // ✅ CHANGED — read from stored pendingMonths instead of
+//         // computing live
+//         const pendingLedgerHistory = getPendingLedgerHistoryForMonth(
 //           monthEntry.month,
 //           yearEntry.year,
-//           cycleDateForMonth,
 //         );
 
 //         const realLedgerMapped = latestGst2.map((entry) => ({
@@ -3539,7 +1875,7 @@ exports.listMediaByLedger = async (req, res) => {
 //           })),
 //           gstBalanceHistory: gstBalanceHistoryForMonth,
 //           tdsBalanceHistory: tdsBalanceHistoryForMonth,
-//           pendingLedgerHistory, // ✅ NEW
+//           pendingLedgerHistory,
 //         };
 //       }),
 //     }));
@@ -3600,12 +1936,11 @@ exports.listMediaByLedger = async (req, res) => {
 //         isVirtual: true,
 //       }));
 
-//       // ✅ NEW — pendingLedgerHistory for the fallback synthetic bucket
-//       const pendingLedgerHistory = buildPendingLedgerHistory(
-//         [],
+//       // ✅ CHANGED — read from stored pendingMonths for the fallback
+//       // bucket too
+//       const pendingLedgerHistory = getPendingLedgerHistoryForMonth(
 //         targetMonthName,
 //         targetYear,
-//         d,
 //       );
 
 //       transformedLedgerHistory = [
@@ -3619,7 +1954,7 @@ exports.listMediaByLedger = async (req, res) => {
 //               allEntries: [],
 //               gstBalanceHistory: gstBalanceHistoryForMonth,
 //               tdsBalanceHistory: tdsBalanceHistoryForMonth,
-//               pendingLedgerHistory, // ✅ NEW
+//               pendingLedgerHistory,
 //             },
 //           ],
 //         },
@@ -3652,8 +1987,8 @@ exports.listMediaByLedger = async (req, res) => {
 //         },
 //         ledgerHistory: transformedLedgerHistory,
 //         rentalDueEntries,
-//         // gstPayment: gstPayment,
-//         // tdsPayment: tdsPayment,
+//         gstPayment: gstPayment,
+//         tdsPayment: tdsPayment,
 //       },
 //       200,
 //     );
@@ -3668,6 +2003,7 @@ exports.listMediaByLedger = async (req, res) => {
 //     );
 //   }
 // };
+
 exports.getLedgerHistory = async (req, res) => {
   try {
     const { mediaId, year, month } = req.query;
@@ -3770,7 +2106,7 @@ exports.getLedgerHistory = async (req, res) => {
             ? `id_${String(entry._id)}`
             : `pos_${pos}`;
 
-    const getGstBalanceDetails = (landOwnerId, month, rentalDueId, entryDate) => {
+    const getGstBalanceDetails = (landOwnerId, monthLabel, rentalDueId, entryDate) => {
       try {
         if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
           return { isPaid: false, gstAmount: 0 };
@@ -3785,7 +2121,7 @@ exports.getLedgerHistory = async (req, res) => {
           (entry) =>
             entry &&
             String(entry.landOwnerId) === String(landOwnerId) &&
-            entry.month === month,
+            entry.month === monthLabel,
         );
 
         if (!gstEntry && rentalDueId) {
@@ -3814,7 +2150,7 @@ exports.getLedgerHistory = async (req, res) => {
 
         if (!gstEntry) {
           const monthMatches = fullGstBalanceHistory.filter(
-            (entry) => entry && entry.month === month,
+            (entry) => entry && entry.month === monthLabel,
           );
           if (monthMatches.length === 1) {
             gstEntry = monthMatches[0];
@@ -3895,10 +2231,6 @@ exports.getLedgerHistory = async (req, res) => {
       "July", "August", "September", "October", "November", "December",
     ];
 
-    // ✅ CHANGED — pendingLedgerHistory is now looked up from the
-    // STORED media.pendingMonths field (kept in sync by
-    // recomputePendingMonths() on every ledger save), matched by
-    // month label — instead of being recomputed live here.
     const storedPendingMonths = Array.isArray(media.pendingMonths)
       ? media.pendingMonths
       : [];
@@ -3906,7 +2238,16 @@ exports.getLedgerHistory = async (req, res) => {
     const getPendingLedgerHistoryForMonth = (monthName, yearValue) => {
       const monthLabel = `${monthName} ${yearValue}`;
       const match = storedPendingMonths.find((pm) => pm.month === monthLabel);
-      return match ? match.owners || [] : [];
+      if (!match) return [];
+
+      // ✅ NEW — merge month + cycle (from the parent pendingMonths
+      // entry) into EACH owner record, so every item in
+      // pendingLedgerHistory carries its own month/cycle context.
+      return (match.owners || []).map((owner) => ({
+        ...owner,
+        month: match.month,
+        cycle: match.cycle,
+      }));
     };
 
     let transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
@@ -3947,8 +2288,6 @@ exports.getLedgerHistory = async (req, res) => {
           cycleDateForMonth,
         );
 
-        // ✅ CHANGED — read from stored pendingMonths instead of
-        // computing live
         const pendingLedgerHistory = getPendingLedgerHistoryForMonth(
           monthEntry.month,
           yearEntry.year,
@@ -4074,9 +2413,124 @@ exports.getLedgerHistory = async (req, res) => {
           gstBalanceHistory: gstBalanceHistoryForMonth,
           tdsBalanceHistory: tdsBalanceHistoryForMonth,
           pendingLedgerHistory,
+          isSyntheticMonth: false,
         };
       }),
     }));
+
+    // ══════════════════════════════════════════════════════
+    // ✅ NEW — generate a synthetic month bucket for EVERY entry in
+    // storedPendingMonths (e.g. April) that doesn't already have a
+    // REAL bucket (e.g. May, already built above). This was missing
+    // entirely — without it, only real/saved months ever appeared.
+    // ══════════════════════════════════════════════════════
+    const existingBucketKeys = new Set();
+    transformedLedgerHistory.forEach((yearEntry) => {
+      (yearEntry.months || []).forEach((monthEntry) => {
+        existingBucketKeys.add(`${yearEntry.year}-${monthEntry.month.toLowerCase()}`);
+      });
+    });
+
+    storedPendingMonths.forEach((pendingMonthEntry) => {
+      const parts = pendingMonthEntry.month.trim().split(/\s+/);
+      const pendingMonthName = parts[0];
+      const pendingYear = parts[1];
+      if (!pendingMonthName || !pendingYear) return;
+
+      const bucketKey = `${pendingYear}-${pendingMonthName.toLowerCase()}`;
+      if (existingBucketKeys.has(bucketKey)) return;
+
+      const cycleDate = pendingMonthEntry.cycle
+        ? new Date(pendingMonthEntry.cycle)
+        : new Date(
+            Date.UTC(
+              Number(pendingYear),
+              MONTH_NAMES_LOCAL.findIndex(
+                (m) => m.toLowerCase() === pendingMonthName.toLowerCase(),
+              ),
+              1,
+            ),
+          );
+
+      const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(pendingMonthName);
+      const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(
+        pendingMonthName,
+        pendingYear,
+        cycleDate,
+      );
+
+      const virtualLedgerEntries = (media.landOwners || []).map((owner) => ({
+        landOwnerId: owner._id,
+        landOwnerName: owner.name,
+        utrNumber: "",
+        date: null,
+        status: 0,
+        withGst: 2,
+        month: pendingMonthName,
+        cycle: cycleDate,
+        rentalDueId: null,
+        index: null,
+        updatedBy: "",
+        updatedAt: null,
+        isVirtual: true,
+      }));
+
+      const virtualWithGst1Entries = (media.landOwners || []).map((owner) => ({
+        landOwnerId: owner._id,
+        landOwnerName: owner.name,
+        utrNumber: "",
+        date: null,
+        status: 0,
+        withGst: 1,
+        month: pendingMonthName,
+        cycle: cycleDate,
+        rentalDueId: null,
+        index: null,
+        updatedBy: "",
+        updatedAt: null,
+        isPaid: false,
+        gstAmount: 0,
+        isVirtual: true,
+      }));
+
+      const syntheticMonthBucket = {
+        month: pendingMonthName,
+        ledger: virtualLedgerEntries,
+        withGst1Ledger: virtualWithGst1Entries,
+        allEntries: [],
+        gstBalanceHistory: gstBalanceHistoryForMonth,
+        tdsBalanceHistory: tdsBalanceHistoryForMonth,
+        pendingLedgerHistory: (pendingMonthEntry.owners || []).map((owner) => ({
+          ...owner,
+          month: pendingMonthEntry.month,
+          cycle: pendingMonthEntry.cycle,
+        })),
+        isSyntheticMonth: true,
+      };
+
+      let yearEntry = transformedLedgerHistory.find(
+        (y) => y.year === pendingYear,
+      );
+      if (!yearEntry) {
+        yearEntry = { year: pendingYear, months: [] };
+        transformedLedgerHistory.push(yearEntry);
+      }
+      yearEntry.months.push(syntheticMonthBucket);
+      existingBucketKeys.add(bucketKey);
+    });
+
+    transformedLedgerHistory.sort((a, b) => Number(a.year) - Number(b.year));
+    transformedLedgerHistory.forEach((yearEntry) => {
+      yearEntry.months.sort((a, b) => {
+        const idxA = MONTH_NAMES_LOCAL.findIndex(
+          (m) => m.toLowerCase() === a.month.toLowerCase(),
+        );
+        const idxB = MONTH_NAMES_LOCAL.findIndex(
+          (m) => m.toLowerCase() === b.month.toLowerCase(),
+        );
+        return idxA - idxB;
+      });
+    });
 
     if (transformedLedgerHistory.length === 0) {
       let targetYear = year ? String(year) : null;
@@ -4134,8 +2588,6 @@ exports.getLedgerHistory = async (req, res) => {
         isVirtual: true,
       }));
 
-      // ✅ CHANGED — read from stored pendingMonths for the fallback
-      // bucket too
       const pendingLedgerHistory = getPendingLedgerHistoryForMonth(
         targetMonthName,
         targetYear,
@@ -4153,6 +2605,7 @@ exports.getLedgerHistory = async (req, res) => {
               gstBalanceHistory: gstBalanceHistoryForMonth,
               tdsBalanceHistory: tdsBalanceHistoryForMonth,
               pendingLedgerHistory,
+              isSyntheticMonth: true,
             },
           ],
         },
@@ -4206,464 +2659,3 @@ exports.getLedgerHistory = async (req, res) => {
 
 
 
-
-
-
-// exports.getLedgerHistory = async (req, res) => {
-//   try {
-//     const { mediaId, year, month } = req.query;
-
-//     if (!mongoose.Types.ObjectId.isValid(mediaId)) {
-//       return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
-//     }
-
-//     const media = await Media.findById(mediaId)
-//       .select(
-//         "mediaName city mediaType mediaCode rentalPayment ledgerHistory landOwners agreement  gstBalanceHistory tdsBalanceHistory rentalDue",
-//       )
-//       .lean();
-
-//     if (!media) {
-//       return errorResponse(res, "Media not found for given mediaId", null, 404);
-//     }
-
-//     let ledgerHistory = media.ledgerHistory || [];
-
-//     if (year) {
-//       ledgerHistory = ledgerHistory.filter(
-//         (item) => item.year === String(year),
-//       );
-//     }
-
-//     if (month) {
-//       const monthNames = [
-//         "January",
-//         "February",
-//         "March",
-//         "April",
-//         "May",
-//         "June",
-//         "July",
-//         "August",
-//         "September",
-//         "October",
-//         "November",
-//         "December",
-//       ];
-//       const monthName = monthNames[Number(month) - 1];
-
-//       ledgerHistory = ledgerHistory
-//         .map((item) => ({
-//           ...item,
-//           months: item.months.filter(
-//             (m) => m.month.toLowerCase() === monthName.toLowerCase(),
-//           ),
-//         }))
-//         .filter((item) => item.months.length > 0);
-//     }
-
-//     const fullGstBalanceHistory = Array.isArray(media.gstBalanceHistory)
-//       ? media.gstBalanceHistory
-//       : [];
-//     let gstPayment = false;
-//     if (fullGstBalanceHistory.length > 0) {
-//       const hasEmptyUtr = fullGstBalanceHistory.some(
-//         (entry) => !entry.utrNumber || entry.utrNumber.trim() === "",
-//       );
-//       gstPayment = hasEmptyUtr;
-//     }
-
-//     const fullTdsBalanceHistory = Array.isArray(media.tdsBalanceHistory)
-//       ? media.tdsBalanceHistory
-//       : [];
-//     let tdsPayment = false;
-//     if (fullTdsBalanceHistory.length > 0) {
-//       const hasUnpaidTds = fullTdsBalanceHistory.some(
-//         (entry) =>
-//           entry.isUtrEntry === false ||
-//           !entry.utrNumber ||
-//           entry.utrNumber.trim() === "",
-//       );
-//       tdsPayment = hasUnpaidTds;
-//     }
-
-//     const dedupeByKey = (entries, getKey) => {
-//       const withPos = entries.map((entry, pos) => ({ entry, pos }));
-//       const sorted = withPos.sort(
-//         (a, b) => new Date(b.entry.updatedAt) - new Date(a.entry.updatedAt),
-//       );
-//       const seen = new Set();
-//       const deduped = [];
-
-//       for (const { entry, pos } of sorted) {
-//         const key = getKey(entry, pos);
-//         if (!seen.has(key)) {
-//           seen.add(key);
-//           deduped.push(entry);
-//         }
-//       }
-//       return deduped;
-//     };
-
-//     const gst2Key = (entry, pos) =>
-//       entry.index !== undefined && entry.index !== null
-//         ? `idx_${entry.index}`
-//         : entry._id
-//           ? `id_${String(entry._id)}`
-//           : `pos_${pos}`;
-
-//     const gst1Key = (entry, pos) =>
-//       entry.rentalDueId
-//         ? `rd_${String(entry.rentalDueId)}`
-//         : entry.landOwnerId
-//           ? `owner_${String(entry.landOwnerId)}_${entry.month || ""}`
-//           : entry._id
-//             ? `id_${String(entry._id)}`
-//             : `pos_${pos}`;
-
-//     const getGstBalanceDetails = (
-//       landOwnerId,
-//       month,
-//       rentalDueId,
-//       entryDate,
-//     ) => {
-//       try {
-//         if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
-//           return { isPaid: false, gstAmount: 0 };
-//         }
-//         if (!landOwnerId) {
-//           return { isPaid: false, gstAmount: 0 };
-//         }
-
-//         let gstEntry = null;
-
-//         gstEntry = fullGstBalanceHistory.find(
-//           (entry) =>
-//             entry &&
-//             String(entry.landOwnerId) === String(landOwnerId) &&
-//             entry.month === month,
-//         );
-
-//         if (!gstEntry && rentalDueId) {
-//           gstEntry = fullGstBalanceHistory.find(
-//             (entry) =>
-//               entry &&
-//               entry.rentalDueId &&
-//               String(entry.rentalDueId) === String(rentalDueId),
-//           );
-//         }
-
-//         if (!gstEntry && entryDate) {
-//           const entryDateObj = new Date(entryDate);
-//           const entryMonth = entryDateObj.getMonth();
-//           const entryYear = entryDateObj.getFullYear();
-
-//           gstEntry = fullGstBalanceHistory.find(
-//             (entry) =>
-//               entry &&
-//               entry.date &&
-//               String(entry.landOwnerId) === String(landOwnerId) &&
-//               new Date(entry.date).getMonth() === entryMonth &&
-//               new Date(entry.date).getFullYear() === entryYear,
-//           );
-//         }
-
-//         if (!gstEntry) {
-//           const monthMatches = fullGstBalanceHistory.filter(
-//             (entry) => entry && entry.month === month,
-//           );
-//           if (monthMatches.length === 1) {
-//             gstEntry = monthMatches[0];
-//           }
-//         }
-
-//         return {
-//           isPaid: gstEntry ? gstEntry.isPaid || false : false,
-//           gstAmount: gstEntry ? gstEntry.gstAmount || 0 : 0,
-//         };
-//       } catch (gstError) {
-//         console.error("Error getting GST balance details:", gstError);
-//         return { isPaid: false, gstAmount: 0 };
-//       }
-//     };
-
-//     const getGstBalanceHistoryForMonth = (monthName) => {
-//       if (!fullGstBalanceHistory || fullGstBalanceHistory.length === 0) {
-//         return [];
-//       }
-//       return fullGstBalanceHistory.filter((entry) => {
-//         if (!entry || !entry.dueMonth) return false;
-//         return entry.dueMonth.toLowerCase().includes(monthName.toLowerCase());
-//       });
-//     };
-
-//     // ✅ FIXED — now accepts a resolved `cycleDate` param, so virtual
-//     // entries carry a real cycle value instead of always being null.
-//     const getTdsBalanceHistoryForMonth = (
-//       monthName,
-//       yearFromEntry,
-//       cycleDate,
-//     ) => {
-//       const realForMonth = (fullTdsBalanceHistory || []).filter((entry) => {
-//         if (!entry) return false;
-//         if (
-//           entry.month &&
-//           entry.month.toLowerCase() !== monthName.toLowerCase()
-//         ) {
-//           return false;
-//         }
-//         if (!entry.month && entry.dueMonth) {
-//           const expectedDueMonth =
-//             `${monthName} ${yearFromEntry}`.toLowerCase();
-//           return entry.dueMonth.toLowerCase() === expectedDueMonth;
-//         }
-//         if (yearFromEntry && entry.dueMonth) {
-//           return entry.dueMonth.toLowerCase().includes(String(yearFromEntry));
-//         }
-//         return !!entry.month;
-//       });
-
-//       const realOwnerIds = new Set(
-//         realForMonth.map((t) => String(t.landOwnerId)),
-//       );
-
-//       const virtualForMonth = [];
-//       (media.landOwners || []).forEach((owner) => {
-//         const isApplicable =
-//           owner.tdsApplicable === 1 ||
-//           owner.tdsApplicable === "1" ||
-//           owner.tdsApplicable === true;
-//         if (!isApplicable) return;
-//         if (realOwnerIds.has(String(owner._id))) return;
-
-//         virtualForMonth.push({
-//           _id: null,
-//           dueMonth: `${monthName} ${yearFromEntry || ""}`.trim(),
-//           month: monthName,
-//           cycle: cycleDate || null, // ✅ FIXED — was hardcoded null
-//           tdsAmount: Number(owner.tdsAmount || 0),
-//           isUtrEntry: false,
-//           paidAmount: 0,
-//           paidAt: null,
-//           landOwnerId: owner._id,
-//           landOwnerName: owner.name,
-//           utrNumber: "",
-//           date: null,
-//           // isVirtual: true,
-//         });
-//       });
-
-//       return [...realForMonth, ...virtualForMonth];
-//     };
-
-//     const MONTH_NAMES_LOCAL = [
-//       "January",
-//       "February",
-//       "March",
-//       "April",
-//       "May",
-//       "June",
-//       "July",
-//       "August",
-//       "September",
-//       "October",
-//       "November",
-//       "December",
-//     ];
-
-//     let transformedLedgerHistory = ledgerHistory.map((yearEntry) => ({
-//       ...yearEntry,
-//       months: yearEntry.months.map((monthEntry) => {
-//         const allEntries = monthEntry.entries || [];
-
-//         const withGst2Entries = allEntries.filter(
-//           (entry) => entry.withGst === 2,
-//         );
-//         const withGst1Entries = allEntries.filter(
-//           (entry) => entry.withGst === 1,
-//         );
-
-//         const sortByUpdatedAt = (entries) =>
-//           [...entries].sort(
-//             (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
-//           );
-
-//         const latestGst2 = dedupeByKey(withGst2Entries, gst2Key);
-//         const latestGst1 = dedupeByKey(withGst1Entries, gst1Key);
-//         const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(
-//           monthEntry.month,
-//         );
-
-//         // ✅ Resolve the cycle date for THIS specific year/month bucket
-//         const monthIndex = MONTH_NAMES_LOCAL.findIndex(
-//           (m) => m.toLowerCase() === monthEntry.month.toLowerCase(),
-//         );
-
-//         const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate
-//           ? new Date(media.rentalPayment.lastBillPaidDate)
-//           : null;
-
-//         const cycleDateForMonth =
-//           lastBillPaidDate &&
-//           String(lastBillPaidDate.getUTCFullYear()) === yearEntry.year &&
-//           lastBillPaidDate.getUTCMonth() === monthIndex
-//             ? lastBillPaidDate
-//             : new Date(Date.UTC(Number(yearEntry.year), monthIndex, 1));
-
-//         const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(
-//           monthEntry.month,
-//           yearEntry.year,
-//           cycleDateForMonth, // ✅ pass resolved cycle date
-//         );
-
-//         return {
-//           month: monthEntry.month,
-
-//           ledger: latestGst2.map((entry) => ({
-//             landOwnerId: entry.landOwnerId,
-//             landOwnerName: entry.landOwnerName,
-//             utrNumber: entry.utrNumber,
-//             date: entry.date,
-//             status: entry.status,
-//             withGst: entry.withGst,
-//             month: entry.month,
-//             cycle: entry.cycle,
-//             rentalDueId: entry.rentalDueId,
-//             index: entry.index,
-//             updatedBy: entry.updatedBy,
-//             updatedAt: entry.updatedAt,
-//             _id: entry._id,
-//             mediaName: media.mediaName,
-//             paymentFrequency: entry.paymentFrequency,
-//             netPayable: entry.netPayable,
-//             lastBillPaidDate: entry.lastBillPaidDate,
-//             nextBillingDate: entry.nextBillingDate,
-//           })),
-
-//           withGst1Ledger: latestGst1.map((entry) => {
-//             const gstDetails = getGstBalanceDetails(
-//               entry.landOwnerId,
-//               entry.month || monthEntry.month,
-//               entry.rentalDueId,
-//               entry.date || entry.createdAt,
-//             );
-
-//             return {
-//               landOwnerId: entry.landOwnerId,
-//               landOwnerName: entry.landOwnerName,
-//               utrNumber: entry.utrNumber,
-//               date: entry.date,
-//               status: entry.status,
-//               withGst: entry.withGst,
-//               month: entry.month || monthEntry.month,
-//               cycle: entry.cycle,
-//               rentalDueId: entry.rentalDueId,
-//               index: entry.index,
-//               updatedBy: entry.updatedBy,
-//               updatedAt: entry.updatedAt,
-//               _id: entry._id,
-//               mediaName: media.mediaName,
-//               paymentFrequency: entry.paymentFrequency,
-//               netPayable: entry.netPayable,
-//               lastBillPaidDate: entry.lastBillPaidDate,
-//               nextBillingDate: entry.nextBillingDate,
-//               isPaid: gstDetails.isPaid,
-//               gstAmount: gstDetails.gstAmount,
-//             };
-//           }),
-
-//           allEntries: sortByUpdatedAt(allEntries).map((entry) => ({
-//             ...entry,
-//             mediaName: media.mediaName,
-//           })),
-//           gstBalanceHistory: gstBalanceHistoryForMonth,
-//           tdsBalanceHistory: tdsBalanceHistoryForMonth,
-//         };
-//       }),
-//     }));
-
-//     // ✅ Fallback synthetic bucket for first-time media (no real
-//     // ledgerHistory saved yet) — prioritizes lastBillPaidDate over
-//     // nextBillingDate, and now passes the resolved cycle date into
-//     // getTdsBalanceHistoryForMonth so `cycle` is never null here either.
-//     if (transformedLedgerHistory.length === 0) {
-//       let targetYear = year ? String(year) : null;
-//       let targetMonthName = month ? MONTH_NAMES_LOCAL[Number(month) - 1] : null;
-
-//       const fallbackCycle =
-//         media.rentalPayment?.lastBillPaidDate ||
-//         media.rentalPayment?.nextBillingDate ||
-//         new Date();
-//       const d = new Date(fallbackCycle);
-
-//       if (!targetYear || !targetMonthName) {
-//         targetYear = targetYear || String(d.getUTCFullYear());
-//         targetMonthName = targetMonthName || MONTH_NAMES_LOCAL[d.getUTCMonth()];
-//       }
-
-//       const gstBalanceHistoryForMonth =
-//         getGstBalanceHistoryForMonth(targetMonthName);
-//       const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(
-//         targetMonthName,
-//         targetYear,
-//         d, // ✅ resolved cycle date
-//       );
-
-//       transformedLedgerHistory = [
-//         {
-//           year: targetYear,
-//           months: [
-//             {
-//               month: targetMonthName,
-//               ledger: [],
-//               withGst1Ledger: [],
-//               allEntries: [],
-//               gstBalanceHistory: gstBalanceHistoryForMonth,
-//               tdsBalanceHistory: tdsBalanceHistoryForMonth,
-//             },
-//           ],
-//         },
-//       ];
-//     }
-//     const rentalDueEntries = Array.isArray(media.rentalDue)
-//       ? [...new Set(media.rentalDue.map((entry) => entry.withGst))].map(
-//           (withGst) => ({ withGst }),
-//         )
-//       : [];
-
-//     return successResponse(
-//       res,
-//       "Ledger history fetched successfully",
-//       {
-//         mediaId: media._id,
-//         mediaName: media.mediaName,
-//         mediaType: media.mediaType,
-//         mediaCode: media.mediaCode,
-//         city: media.city,
-//         rentalPayment: media.rentalPayment,
-//         landOwners: media.landOwners,
-//         agreement: media.agreement,
-//         currentRentalPayment: {
-//           paymentFrequency: media.rentalPayment.paymentFrequency,
-//           netPayable: media.rentalPayment.netPayable,
-//           lastBillPaidDate: media.rentalPayment.lastBillPaidDate,
-//           nextBillingDate: media.rentalPayment.nextBillingDate,
-//         },
-//         ledgerHistory: transformedLedgerHistory,
-//         rentalDueEntries,
-//         // gstPayment: gstPayment,
-//         // tdsPayment: tdsPayment,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     console.error("getLedgerHistory error:", error);
-
-//     return errorResponse(
-//       res,
-//       "Something went wrong while fetching ledger history",
-//       { error: error.message },
-//       500,
-//     );
-//   }
-// };

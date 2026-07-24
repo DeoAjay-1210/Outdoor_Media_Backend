@@ -384,6 +384,19 @@ async function sendRentalDueApprovalMail(media, entry) {
 
     // ✅ NEW — appraisal is only included when nextAppraisalDate falls
     // in the CURRENT calendar month. Otherwise, send an empty object.
+        let previousRentValue = 0;
+    if (appraisal.lastAppraisalDate && Array.isArray(appraisal.history)) {
+      const lastAppraisalKey = new Date(
+        appraisal.lastAppraisalDate,
+      ).getTime();
+      const matchingEntry = appraisal.history.find(
+        (h) =>
+          h.appraisalDate &&
+          new Date(h.appraisalDate).getTime() === lastAppraisalKey,
+      );
+      previousRentValue = Number(matchingEntry?.previousRent || 0);
+    }
+
     let appraisalPayload = {};
     if (appraisal.lastAppraisalDate) {
       const lastAppraisalDate = new Date(appraisal.lastAppraisalDate);
@@ -399,7 +412,7 @@ async function sendRentalDueApprovalMail(media, entry) {
           percentage: appraisal.percentage || 0,
           fixedAmount: appraisal.fixedAmount || 0,
           frequency: appraisal.frequency || 0,
-          currentRent: appraisal.currentRent || 0,
+          currentRent: previousRentValue,
           appraisalAmount: appraisal.appraisalAmount || 0,
           totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
           lastAppraisalDate: formatDMY(appraisal.lastAppraisalDate),
