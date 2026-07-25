@@ -378,17 +378,15 @@ async function sendRentalDueApprovalMail(media, entry) {
       tdsPercentage: owner.tdsPercentage || 0,
       tdsAmount: owner.tdsAmount || 0,
       totalAmountWithGst: owner.totalAmountWithGst || 0,
-        tdsHold: 0,
+      tdsHold: 0,
       gstHold: gstHoldValue, // ✅ NEW — same value for every owner
     }));
 
     // ✅ NEW — appraisal is only included when nextAppraisalDate falls
     // in the CURRENT calendar month. Otherwise, send an empty object.
-        let previousRentValue = 0;
+    let previousRentValue = 0;
     if (appraisal.lastAppraisalDate && Array.isArray(appraisal.history)) {
-      const lastAppraisalKey = new Date(
-        appraisal.lastAppraisalDate,
-      ).getTime();
+      const lastAppraisalKey = new Date(appraisal.lastAppraisalDate).getTime();
       const matchingEntry = appraisal.history.find(
         (h) =>
           h.appraisalDate &&
@@ -420,7 +418,9 @@ async function sendRentalDueApprovalMail(media, entry) {
         };
       }
     }
-
+const proofOfCampaignPayload = entry?.proofOfCampaign.filePath
+  ? [entry.proofOfCampaign.filePath]
+  : [];
     const mailPayload = {
       mailtype: "cmdapproval",
       to: [toMail],
@@ -439,7 +439,7 @@ async function sendRentalDueApprovalMail(media, entry) {
         status: media.status || 0,
         totalSqFt: media.totalSqFt || 0,
         numberOfLandOwners: media.numberOfLandOwners || 0,
-
+        proof_of_campaign: proofOfCampaignPayload,
         rentalPayment: {
           totalRentalAmount: rp.totalRentalAmount || 0,
           gstApplicable: rp.gstApplicable || 0,
@@ -2839,7 +2839,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
                             {
                               $size: {
                                 $filter: {
-                                  input: { $ifNull: ["$$rd.approvalSteps", []] },
+                                  input: {
+                                    $ifNull: ["$$rd.approvalSteps", []],
+                                  },
                                   as: "s",
                                   cond: {
                                     $and: [
@@ -2881,7 +2883,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
                             {
                               $size: {
                                 $filter: {
-                                  input: { $ifNull: ["$$rd.approvalSteps", []] },
+                                  input: {
+                                    $ifNull: ["$$rd.approvalSteps", []],
+                                  },
                                   as: "s",
                                   cond: {
                                     $and: [
@@ -3138,7 +3142,8 @@ exports.getRentalDueListWithStats = async (req, res) => {
     const overDueAmountTotal = statsAgg[0]?.overdueAmount || 0;
     // ✅ Merged: Pending now includes Overdue
     const pendingCount = (statsAgg[0]?.pending || 0) + overDueSiteCount;
-    const pendingAmountTotal = (statsAgg[0]?.pendingAmount || 0) + overDueAmountTotal;
+    const pendingAmountTotal =
+      (statsAgg[0]?.pendingAmount || 0) + overDueAmountTotal;
 
     // ✅ NEW — Past Pending Approval (sites whose nextBillingDate is before
     // monthStart and haven't been approved by targetRole)
@@ -3216,7 +3221,10 @@ exports.getRentalDueListWithStats = async (req, res) => {
           count: { $sum: 1 },
           amount: {
             $sum: {
-              $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+              $ifNull: [
+                "$matchingEntry.netPayable",
+                "$rentalPayment.netPayable",
+              ],
             },
           },
         },
@@ -3459,7 +3467,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
       const historyForMonth = (item.verificationProgressHistory || []).filter(
         (v) => {
           if (!v.cycle || !targetCycleDate) return false;
-          return new Date(v.cycle).getTime() === new Date(targetCycleDate).getTime();
+          return (
+            new Date(v.cycle).getTime() === new Date(targetCycleDate).getTime()
+          );
         },
       );
 
@@ -3479,7 +3489,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
       const cycleVerifications = (item.agreementDocVerification || []).filter(
         (h) => {
           if (!h.isVerified || !h.cycle || !targetCycleDate) return false;
-          return new Date(h.cycle).getTime() === new Date(targetCycleDate).getTime();
+          return (
+            new Date(h.cycle).getTime() === new Date(targetCycleDate).getTime()
+          );
         },
       );
 
@@ -3526,8 +3538,11 @@ exports.getRentalDueListWithStats = async (req, res) => {
         item.rentalPayment?.nextBillingDate &&
         new Date(item.rentalPayment.nextBillingDate) < monthStart;
 
-      const usePastDetails = Number(isPastPending) === 1 && isActuallyPastPending;
-      const targetCycleDate = usePastDetails ? item.rentalPayment.nextBillingDate : monthStart;
+      const usePastDetails =
+        Number(isPastPending) === 1 && isActuallyPastPending;
+      const targetCycleDate = usePastDetails
+        ? item.rentalPayment.nextBillingDate
+        : monthStart;
 
       const filteredRentalDueEntries = (item.rentalDue || []).filter(
         (entry) => {
@@ -3579,7 +3594,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
         dueStatus: item.rentalPayment?.status,
         dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
-         gstApplicableDisplay: resolveGstApplicable(item),
+        gstApplicableDisplay: resolveGstApplicable(item),
         agreementPeriod: {
           startDate: item.agreement?.startDate,
           endDate: item.agreement?.endDate,
@@ -3587,10 +3602,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,
-        verificationProgress: buildVerificationProgress(
-          item,
-          targetCycleDate,
-        ),
+        verificationProgress: buildVerificationProgress(item, targetCycleDate),
         verificationProgressHistory: item.verificationProgressHistory || [],
         gstBalanceHistory: item.gstBalanceHistory || [],
         rentalDueEntries: filteredRentalDueEntries,
