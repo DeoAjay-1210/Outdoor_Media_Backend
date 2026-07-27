@@ -12,6 +12,8 @@ const mediaRoutes = require("./routes/Admin/MediaOnboardingRoutes/MediaOnboardin
 const ledgerRoutes = require("./routes/Admin/MediaOnboardingRoutes/LedgerRoutes");
 const RentalDue = require("./routes/Admin/MediaOnboardingRoutes/rentalDueRoutes");
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
+const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
+
 connectDB();
 
 const app = express();
@@ -24,6 +26,7 @@ app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
 app.use("/admin", ledgerRoutes);
 app.use("/admin", RentalDue);
+app.use("/admin", LandownerMasterRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {

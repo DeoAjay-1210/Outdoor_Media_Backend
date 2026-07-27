@@ -696,7 +696,10 @@ exports.listMediaByLedger = async (req, res) => {
       const filter = {};
       filter.rentalStatus = 3;
       if (search) {
-        filter.mediaName = { $regex: search, $options: "i" };
+        filter.$or = [
+          { mediaName: { $regex: search, $options: "i" } },
+          { mediaCode: { $regex: search, $options: "i" } },
+        ];
       }
 
       // ✅ NEW — snapshot the base filter BEFORE any status-specific (0-5)

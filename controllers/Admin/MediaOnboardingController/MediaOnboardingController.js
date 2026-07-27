@@ -2,7 +2,8 @@ const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/Med
 const { successResponse, errorResponse } = require("../../../utils/response");
 const path = require("path");
 const XLSX = require("xlsx");
-
+const mongoose = require("mongoose");
+const { syncOrLinkMediaOwnerToMaster,correctLinkedSiteAmounts  } = require("../landOwnerMasterController/landOwnerMasterController");
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
 // ─────────────────────────────────────────────────────────────
@@ -273,14 +274,14 @@ const dateString = (date) => {
   return `${y}-${m}-${day}`;
 };
 
-const APPRAISAL_FREQUENCY_MONTHS = { 1: 6, 2: 12, 3: 24 };
+const APPRAISAL_FREQUENCY_MONTHS = { 1: 12, 2:24, 3: 36 };
 const APPRAISAL_FREQUENCY_LABEL = {
-  1: "6 Months",
-  2: "Yearly (12 Months)",
-  3: "2 Years (24 Months)",
+  1: "1 Year",
+  2: "2 Years",
+  3: "3 Years",
   4: "Custom",
 };
-const APPRAISAL_FREQUENCY_MONTHS_MAP = { 1: 6, 2: 12, 3: 24 };
+const APPRAISAL_FREQUENCY_MONTHS_MAP = { 1: 12, 2: 24, 3: 36 };
 
 const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
   const incomingAmount = Number(
@@ -346,7 +347,7 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
     return {
       valid: false,
       message:
-        "appraisal.frequency must be 1 (6 Months), 2 (Yearly), 3 (2 Years), or 4 (Custom)",
+        "appraisal.frequency must be 1 (Year), 2 (Years), 3 (3 Years), or 4 (Custom)",
     };
   }
 
@@ -1233,9 +1234,9 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
 
   if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
 
-  const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+  const frequencyMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
   const monthsToAdd =
-    paymentFrequency === 7
+    paymentFrequency === 6
       ? customPaymentFrequency || 1
       : frequencyMap[paymentFrequency] || 1;
 
@@ -1307,7 +1308,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
       customPaymentFrequency:
-        Number(incoming.rentalPayment?.paymentFrequency) === 7
+        Number(incoming.rentalPayment?.paymentFrequency) === 6
           ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
           : null,
       // Step 4: include who changed the rental amount in the history snapshot too.
@@ -1405,7 +1406,7 @@ const mediaOnboarding = async (req, res) => {
     // matches "landOwners[3][bankPassbook]" -> index "3"
     const parseLandOwnerFile = (fieldname) => {
       const match = fieldname.match(
-        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage)\]$/,
+        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage|aadharCardImage)\]$/,
       );
       return match ? { index: Number(match[1]), key: match[2] } : null;
     };
@@ -1416,6 +1417,7 @@ const mediaOnboarding = async (req, res) => {
       "bankPassbook",
       "cancelCheckLeaf",
       "panCardImage",
+      "aadharCardImage"
     ];
     const FILE_OBJECT_FIELDS = [
       "frontView",
@@ -1444,6 +1446,9 @@ const mediaOnboarding = async (req, res) => {
         }
         if (ownerFiles.panCardImage) {
           owner.panCardImage = req.processFile(ownerFiles.panCardImage);
+        }
+        if (ownerFiles.aadharCardImage) {
+          owner.aadharCardImage = req.processFile(ownerFiles.aadharCardImage);
         }
         // const OWNER_FILE_FIELDS = [
         //   "bankPassbook",
@@ -1847,6 +1852,26 @@ const mediaOnboarding = async (req, res) => {
     });
   });
 }
+ // ✅ ADDED — Media → LandOwnerMaster sync. For any owner that's
+      // already linked (has landOwnerMasterId), push this property's
+      // edits (name, amounts, GST/TDS, etc.) into the linked Master
+      // record. Owners without a landOwnerMasterId are skipped.
+         if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        const mediaInfo = {
+          mediaId: media._id,
+          mediaCode: mediaData.mediaCode || media.mediaCode,
+          mediaName: mediaData.mediaName || media.mediaName,
+        };
+ 
+        for (const owner of mediaData.landOwners) {
+          await syncOrLinkMediaOwnerToMaster(owner, userName, null, mediaInfo);
+        }
+ 
+        mediaData.landOwnerMasterIds = mediaData.landOwners
+          .map((o) => o.landOwnerMasterId)
+          .filter(Boolean);
+      }
+
       // Step 1 & 2: track totalRentalAmount change; get the effective base rent.
       const { currentBaseRent, rentActuallyChanged } =
         handleRentalAmountHistory(mediaData, media, userName);
@@ -1881,10 +1906,10 @@ const mediaOnboarding = async (req, res) => {
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: pf,
-          // Only set customPaymentFrequency when frequency is actually Custom (7).
+          // Only set customPaymentFrequency when frequency is actually Custom (6).
           // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
-          // validator, since `required` only applies when paymentFrequency === 7.
-          ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+          // validator, since `required` only applies when paymentFrequency === 6.
+          ...(pf === 6 && mediaData.rentalPayment.customPaymentFrequency
             ? {
                 customPaymentFrequency: Number(
                   mediaData.rentalPayment.customPaymentFrequency,
@@ -1903,6 +1928,18 @@ const mediaOnboarding = async (req, res) => {
 
       await media.save();
       media = await MediaOnboarding.findById(media._id).lean();
+       if (media.landOwners && Array.isArray(media.landOwners)) {
+              for (const savedOwner of media.landOwners) {
+                if (savedOwner.landOwnerMasterId) {
+                  await correctLinkedSiteAmounts(
+                    savedOwner.landOwnerMasterId,
+                    media._id,
+                    savedOwner,
+                    null,
+                  );
+                }
+              }
+            }
     } else {
       // ── CREATE ──────────────────────────────────────────────────────────
       isNew = true;
@@ -1918,6 +1955,28 @@ const mediaOnboarding = async (req, res) => {
             if (typeof owner[field] === "string") delete owner[field];
           });
         });
+      }
+      // ✅ ADDED — same Media → LandOwnerMaster sync as the update
+      // branch, in case a brand-new Media property is created with
+      // an owner already picked from the landowner list (has a
+      // landOwnerMasterId attached).
+        if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        const generatedMediaId = new mongoose.Types.ObjectId();
+        mediaData._id = generatedMediaId;
+ 
+        const mediaInfo = {
+          mediaId: generatedMediaId,
+          mediaCode: mediaData.mediaCode,
+          mediaName: mediaData.mediaName,
+        };
+ 
+        for (const owner of mediaData.landOwners) {
+          await syncOrLinkMediaOwnerToMaster(owner, userName, null, mediaInfo);
+        }
+ 
+        mediaData.landOwnerMasterIds = mediaData.landOwners
+          .map((o) => o.landOwnerMasterId)
+          .filter(Boolean);
       }
       // Step 1 & 2: record first-ever totalRentalAmount.
       const { currentBaseRent, rentActuallyChanged } =
@@ -1944,10 +2003,10 @@ const mediaOnboarding = async (req, res) => {
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: pf,
-          // Only set customPaymentFrequency when frequency is actually Custom (7).
+          // Only set customPaymentFrequency when frequency is actually Custom (6).
           // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
-          // validator, since `required` only applies when paymentFrequency === 7.
-          ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+          // validator, since `required` only applies when paymentFrequency === 6.
+          ...(pf === 6 && mediaData.rentalPayment.customPaymentFrequency
             ? {
                 customPaymentFrequency: Number(
                   mediaData.rentalPayment.customPaymentFrequency,
@@ -1961,7 +2020,21 @@ const mediaOnboarding = async (req, res) => {
       media = new MediaOnboarding(mediaData);
       await media.save();
       media = await MediaOnboarding.findById(media._id).lean();
-    }
+      // ✅ ADDED — same pass-2 correction as UPDATE branch.
+            if (media.landOwners && Array.isArray(media.landOwners)) {
+              for (const savedOwner of media.landOwners) {
+                if (savedOwner.landOwnerMasterId) {
+                  await correctLinkedSiteAmounts(
+                    savedOwner.landOwnerMasterId,
+                    media._id,
+                    savedOwner,
+                    null,
+                  );
+                }
+              }
+            }
+          }
+    
 
     const message = isNew
       ? "Media created successfully"
@@ -2153,7 +2226,7 @@ const updateAgreement = async (req, res) => {
       );
     }
 
-    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6, 7];
+    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6];
     if (
       !validPaymentFrequencies.includes(
         newAgreement.rentalPayment.paymentFrequency,
@@ -2161,19 +2234,19 @@ const updateAgreement = async (req, res) => {
     ) {
       return errorResponse(
         res,
-        `paymentFrequency must be one of: ${validPaymentFrequencies.join(", ")} (1=Monthly, 2=2M, 3=3M, 4=6M, 5=1Y, 6=2Y)`,
+        `paymentFrequency must be one of: ${validPaymentFrequencies.join(", ")} (1=Monthly, 2=3M, 3=6M, 4=1Y, 5=2Y)`,
         null,
         400,
       );
     }
     if (
-      newAgreement.rentalPayment.paymentFrequency === 7 &&
+      newAgreement.rentalPayment.paymentFrequency === 6 &&
       (!newAgreement.rentalPayment.customPaymentFrequency ||
         newAgreement.rentalPayment.customPaymentFrequency < 1)
     ) {
       return errorResponse(
         res,
-        "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 7",
+        "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 6 (Custom)",
         null,
         400,
       );

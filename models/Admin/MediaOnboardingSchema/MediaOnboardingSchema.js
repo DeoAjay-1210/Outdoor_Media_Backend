@@ -96,7 +96,7 @@ const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
     newRent: { type: Number, default: 0 },
     frequency: {
       type: Number,
-      enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
+      enum: [1, 2, 3, 4], // 1=1y 2=2Year 3=3Y 4=Custom
     },
     customFrequencyMonths: {
       type: Number,
@@ -145,14 +145,14 @@ const agreementHistorySchema = new mongoose.Schema({
     },
     paymentFrequency: {
       type: Number,
-      enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+      enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
       required: true,
     },
     customPaymentFrequency: {
       type: Number,
       min: 1,
       required: function () {
-        return this.paymentFrequency === 7;
+        return this.paymentFrequency === 6;
       },
     },
     // ← NEW: who changed totalRentalAmount in this agreement snapshot
@@ -349,7 +349,13 @@ const MediaSchema = new mongoose.Schema(
       type: Number,
       min: 1,
     },
-
+    landOwnerMasterIds: [
+      // ← ADD THIS
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "LandOwnerMaster",
+      },
+    ],
     // ─────────────────────────────────────────────────────────
     // RENTAL PAYMENT
     // ─────────────────────────────────────────────────────────
@@ -385,14 +391,14 @@ const MediaSchema = new mongoose.Schema(
       },
       paymentFrequency: {
         type: Number,
-        enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+        enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
         required: true,
       },
       customPaymentFrequency: {
         type: Number,
         min: 1,
         required: function () {
-          return this.paymentFrequency === 7;
+          return this.paymentFrequency === 6;
         },
       },
       lastBillPaidDate: {
@@ -440,6 +446,13 @@ const MediaSchema = new mongoose.Schema(
     // ─────────────────────────────────────────────────────────
     landOwners: [
       {
+        landOwnerMasterId: {
+          // ← ADD THIS
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "LandOwnerMaster",
+          default: null,
+        },
+
         name: { type: String, trim: true },
         phone: { type: String, trim: true },
         bankName: { type: String, trim: true },
@@ -447,6 +460,8 @@ const MediaSchema = new mongoose.Schema(
         accountNumber: { type: String, trim: true },
         upiId: { type: String, trim: true },
         panNumber: { type: String, trim: true, uppercase: true },
+         aadharCardNumber: { type: String, trim: true },
+    
         paymentCategory: {
           type: Number,
           enum: [1, 2, 3], // 1 cash, 2 online 3 cash + online
@@ -470,6 +485,15 @@ const MediaSchema = new mongoose.Schema(
           enum: [1, 2, 3], // 1=Bank Transfer  2=UPI  3=Cheque
         },
         panCardImage: {
+          originalName: { type: String },
+          fileName: { type: String },
+          filePath: { type: String },
+          mimeType: { type: String },
+          size: { type: Number },
+          fileType: { type: String, enum: ["image"], default: "image" },
+          uploadedAt: { type: Date, default: null },
+        },
+        aadharCardImage: {
           originalName: { type: String },
           fileName: { type: String },
           filePath: { type: String },
@@ -598,14 +622,14 @@ const MediaSchema = new mongoose.Schema(
         },
         paymentFrequency: {
           type: Number,
-          enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+          enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
           required: true,
         },
         customPaymentFrequency: {
           type: Number,
           min: 1,
           required: function () {
-            return this.paymentFrequency === 7;
+            return this.paymentFrequency === 6;
           },
         },
         updatedBy: { type: String },
@@ -638,7 +662,7 @@ const MediaSchema = new mongoose.Schema(
       },
       frequency: {
         type: Number,
-        enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
+        enum: [1, 2, 3, 4], // 1=1y 2=2Year 3=3Y 4=Custom
       },
       customFrequencyMonths: {
         type: Number,
@@ -732,7 +756,6 @@ const MediaSchema = new mongoose.Schema(
 MediaSchema.pre("save", function () {
   this.totalSqFt = this.width * this.height;
 });
-
 
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 3 — Next Billing Date
@@ -1000,7 +1023,7 @@ MediaSchema.pre("save", function () {
     0,
   );
 
-    const effectiveGstAmount =
+  const effectiveGstAmount =
     rentalGstApplicable === 1 ? rp.gstAmount : totalGstAcrossOwners;
 
   rp.netPayable = totalRentalAmount + effectiveGstAmount;
@@ -1063,9 +1086,9 @@ MediaSchema.pre("save", function () {
   if (isNewDoc && billingDateProvided) return;
 
   if (rp.lastBillPaidDate && rp.paymentFrequency) {
-    const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+    const frequencyMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
     const monthsToAdd =
-      Number(rp.paymentFrequency) === 7
+      Number(rp.paymentFrequency) === 6
         ? Number(rp.customPaymentFrequency) || 1
         : frequencyMap[Number(rp.paymentFrequency)] || 1;
 

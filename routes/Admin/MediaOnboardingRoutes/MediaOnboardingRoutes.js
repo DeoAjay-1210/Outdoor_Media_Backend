@@ -20,6 +20,8 @@ const { upload, processFile } = createUploader("mediaImages", {
   additionalImages: "mediaImages",
   bankPassbook: "mediaImages",
   cancelCheckLeaf: "mediaImages",
+  panCardImage: "mediaImages",
+  aadharCardImage: "mediaImages",
 });
 // Only TWO routes
 router.post(
