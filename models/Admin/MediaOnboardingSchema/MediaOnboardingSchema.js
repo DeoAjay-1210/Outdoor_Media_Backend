@@ -467,6 +467,11 @@ const MediaSchema = new mongoose.Schema(
           enum: [1, 2, 3], // 1 cash, 2 online 3 cash + online
           required: true,
         },
+         eligibleMode: {                    // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = Cash, 2 = Online
+          default: null,
+        },
         typeShare: {
           type: Number,
           enum: [1, 2], // 1.percentage 2.amount

@@ -2200,6 +2200,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           mediaName: 1,
           landOwners: 1,
           appraisal: 1,
+          frontView:1,
           mediaType: 1,
           city: 1,
           state: 1,
@@ -2362,6 +2363,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         gstAmount: item.rentalPayment?.gstAmount || 0,
         landOwners: item.landOwners,
         appraisal: item.appraisal,
+        frontView: item.frontView,
         paymentFrequency: item.rentalPayment?.paymentFrequency,
         customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
         paymentFrequencyLabel:
