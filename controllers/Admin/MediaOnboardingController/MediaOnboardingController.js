@@ -872,86 +872,7 @@ const handleAppraisalLogic = async (
   mediaData.appraisal = appraisal;
   return mediaData;
 };
-// const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
-//   if (!appraisal) return appraisal;
-//   if (Number(appraisal.applicable) !== 1) {
-//     appraisal.currentRent = Number(fallbackBaseRent || 0);
-//     appraisal.appraisalAmount = 0;
-//     appraisal.totalAppraisalAmount = Number(fallbackBaseRent || 0);
 
-//     return appraisal;
-//   }
-//   const today = todayKey();
-
-//   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
-//     const pendingDate = appraisal.nextAppraisalDate
-//       ? toDateOnly(appraisal.nextAppraisalDate)
-//       : null;
-
-//     appraisal.lastAppraisalDate =
-//       pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
-
-//     return appraisal;
-//   }
-
-//   const sorted = appraisal.history
-//     .filter((h) => h.appraisalDate)
-//     .map((h) => ({ ...h, dateKey: dayKey(h.appraisalDate) }))
-//     .sort((a, b) => a.dateKey - b.dateKey);
-
-//   if (!sorted.length) {
-//     const pendingDate = appraisal.nextAppraisalDate
-//       ? toDateOnly(appraisal.nextAppraisalDate)
-//       : null;
-
-//     appraisal.lastAppraisalDate =
-//       pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
-
-//     return appraisal;
-//   }
-
-//   const baseRent = Number(sorted[0].previousRent ?? fallbackBaseRent ?? 0);
-
-//   const dueEntries = sorted.filter((h) => h.dateKey <= today);
-//   const futureEntries = sorted.filter((h) => h.dateKey > today);
-
-//   // ✅ lastAppraisalDate = the MOST RECENT due entry, always freshly
-//   // derived from history — never left null when a due entry exists.
-//   appraisal.lastAppraisalDate =
-//     dueEntries.length > 0
-//       ? new Date(dueEntries[dueEntries.length - 1].appraisalDate)
-//       : null;
-
-//   const currentEntry =
-//     dueEntries.length > 0 ? dueEntries[dueEntries.length - 1] : null;
-
-//   appraisal.currentRent = currentEntry
-//     ? Number(currentEntry.newRent || currentEntry.previousRent || baseRent)
-//     : baseRent;
-
-//   const nextEntry = futureEntries.length > 0 ? futureEntries[0] : null;
-
-//   appraisal.nextAppraisalDate = nextEntry
-//     ? new Date(nextEntry.appraisalDate)
-//     : null;
-
-//   const displayEntry = nextEntry || currentEntry;
-//   if (displayEntry) {
-//     appraisal.type = displayEntry.type;
-//     appraisal.percentage = displayEntry.percentage || 0;
-//     appraisal.fixedAmount = displayEntry.fixedAmount || 0;
-//     appraisal.appraisalAmount = Number(displayEntry.appraisalAmount || 0);
-//     appraisal.totalAppraisalAmount = Math.floor(
-//       Number(displayEntry.newRent || 0),
-//     );
-//   } else {
-//     appraisal.totalAppraisalAmount = Math.floor(
-//       Number(appraisal.currentRent || 0),
-//     );
-//   }
-
-//   return appraisal;
-// };
 const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   if (!appraisal) return appraisal;
   if (Number(appraisal.applicable) !== 1) {
@@ -1144,7 +1065,53 @@ const buildNextAppraisalEntry = (appliedEntry, userName) => {
 
   return nextEntry;
 };
+// ✅ NEW — REVERT rent (and every landOwner's share) back to the
+// pre-appraisal base amount the instant appraisal.applicable flips
+// from 1 -> 0 in THIS request. Without this, turning appraisal off
+// left totalRentalAmount — and every landOwner's shareAmount — stuck
+// at the last applied appraisal bump forever, since nothing else in
+// this file undoes an appraisal once applied; applyAppraisalRentIfDuent
+// only ever pushes rent UP when applicable === 1, it never runs (and
+// never reverts anything) once applicable === 0.
+const revertAppraisalRentIfTurnedOff = (mediaData, existingMedia) => {
+  if (!existingMedia) return false;
 
+  const wasApplicable = Number(existingMedia.appraisal?.applicable) === 1;
+  const isNowApplicable = Number(mediaData.appraisal?.applicable) === 1;
+
+  // Only fires on the exact 1 -> 0 transition, in THIS request.
+  if (!wasApplicable || isNowApplicable) return false;
+
+  const history = Array.isArray(existingMedia.appraisal?.history)
+    ? existingMedia.appraisal.history
+    : [];
+
+  const today = todayKey();
+
+  // Same "currently active entry" lookup applyAppraisalRentIfDuent uses —
+  // the latest entry whose appraisalDate has actually arrived.
+  const dueEntries = history
+    .filter((h) => h.appraisalDate && dayKey(h.appraisalDate) <= today)
+    .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
+
+  // previousRent on that entry IS the base rent from before this
+  // appraisal bump was applied — exactly what we revert back to.
+  const baseRent =
+    dueEntries.length > 0
+      ? Number(dueEntries[0].previousRent || 0)
+      : Number(
+          history[0]?.previousRent ??
+            existingMedia.rentalPayment?.totalRentalAmount ??
+            0,
+        );
+
+  if (!baseRent) return false;
+
+  if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
+  mediaData.rentalPayment.totalRentalAmount = baseRent;
+
+  return true;
+};
 // This is for Appraisal Amout based TotalRentalAmount Calculation
 const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
   const appraisal = mediaData.appraisal;
@@ -1596,7 +1563,9 @@ const mediaOnboarding = async (req, res) => {
       }
   
     }
-
+if (id) {
+      revertAppraisalRentIfTurnedOff(mediaData, existingMediaForValidation);
+    }
     // ✅ NEW — auto-rescale landOwners proportionally BEFORE validation,
     // whenever totalRentalAmount changed on update. This fixes the bug
     // where a rent-amount edit (manual OR via appraisal) combined with

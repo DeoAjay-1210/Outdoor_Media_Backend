@@ -2194,7 +2194,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       listPipeline.push({ $match: { $or: orFilters } });
     }
 const listSortStage =
-      Number(edit) === 1 ? { _id: 1 } : { updatedAt: -1 };
+      Number(edit) === 1 ? { updatedAt: 1 } : { updatedAt: -1 };
 
     listPipeline.push(
       {
