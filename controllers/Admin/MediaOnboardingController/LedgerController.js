@@ -491,6 +491,9 @@ exports.createLedgerEntry = async (req, res) => {
           matchingGstRecords.forEach((g) => {
             g.utrNumber = item.utrNumber;
             g.date = entryDate;
+             g.isUtrEntry = true; 
+               g.updatedBy = req.user?.userName || ""; // ← ADDED — same fallback pattern used everywhere else in this function
+            g.updatedAt = nowIST();  
             updatedGstBalanceRecords.push(g);
           });
           if (matchingGstRecords.length > 0)

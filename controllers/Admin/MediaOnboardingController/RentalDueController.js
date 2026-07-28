@@ -1545,6 +1545,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       isApproved,
       isPastPending,
       roleType,
+      edit
     } = req.body;
 
     // ✅ If roleType is provided (1, 2, or 3), we show stats/list for THAT
@@ -2192,6 +2193,8 @@ exports.getRentalDueListWithStats = async (req, res) => {
     if (orFilters.length > 0) {
       listPipeline.push({ $match: { $or: orFilters } });
     }
+const listSortStage =
+      Number(edit) === 1 ? { _id: 1 } : { updatedAt: -1 };
 
     listPipeline.push(
       {
@@ -2220,7 +2223,8 @@ exports.getRentalDueListWithStats = async (req, res) => {
       {
         $facet: {
           data: [
-            { $sort: { updatedAt: -1 } },
+            // { $sort: { updatedAt: -1 } },
+             { $sort: listSortStage },
             { $skip: skip },
             { $limit: pageSize },
           ],

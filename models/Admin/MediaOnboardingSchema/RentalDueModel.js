@@ -231,6 +231,9 @@ const gstBalanceSchema = new mongoose.Schema(
     ownerName: { type: String, trim: true, default: "" },
      utrNumber: { type: String, trim: true, default: "" },
     date: { type: Date, default: null },
+    isUtrEntry: { type: Boolean, default: false },
+    updatedBy: { type: String, trim: true, default: null },   // ← ADDED
+    updatedAt: { type: Date, default: null },                 
   },
   { _id: true }, // needs its own _id so it can be targeted by the new API
 );
