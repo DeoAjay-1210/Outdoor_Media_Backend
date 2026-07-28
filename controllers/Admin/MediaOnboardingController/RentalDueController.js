@@ -2190,11 +2190,19 @@ exports.getRentalDueListWithStats = async (req, res) => {
     if (Number(isPastPending) === 1)
       orFilters.push({ isPastPendingByRole: true });
 
-    if (orFilters.length > 0) {
-      listPipeline.push({ $match: { $or: orFilters } });
-    }
+    // if (orFilters.length > 0) {
+    //   listPipeline.push({ $match: { $or: orFilters } });
+    // }
+    if (Number(edit) === 1 && Array.isArray(orderedIds) && orderedIds.length) {
+  listPipeline.push({
+    $addFields: {
+      __sortIndex: { $indexOfArray: [orderedIds.map(String), { $toString: "$_id" }] },
+    },
+  });
+  listSortStage = { __sortIndex: 1 };
+}
 const listSortStage =
-      Number(edit) === 1 ? { updatedAt: 1 } : { updatedAt: -1 };
+      Number(edit) === 1 ? { _id: 1 } : { updatedAt: -1 };
 
     listPipeline.push(
       {
