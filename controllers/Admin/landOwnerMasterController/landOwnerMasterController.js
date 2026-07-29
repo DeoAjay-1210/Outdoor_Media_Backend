@@ -639,15 +639,66 @@ const landOwnerSave = async (req, res) => {
 };
 
 
+// const landOwnerList = async (req, res) => {
+//   try {
+//     const { pageNumber = 1, count = 10, search } = req.body;
+
+//     const pageNumbers = parseInt(pageNumber) || 1;
+//     const pageSize = parseInt(count) || 10;
+
+//     const filter = {};
+
+//     if (search && search.trim() !== "") {
+//       const searchRegex = new RegExp(search.trim(), "i");
+//       filter.$or = [
+//         { name: searchRegex },
+//         { phone: searchRegex },
+//         { panNumber: searchRegex },
+//         { aadharCardNumber: searchRegex },
+//       ];
+//     }
+
+//     const totalCount = await LandOwnerMaster.countDocuments(filter);
+
+//     const landOwnerListRaw = await LandOwnerMaster.find(filter)
+//       .sort({ updatedAt: -1 })
+//       .skip((pageNumbers - 1) * pageSize)
+//       .limit(pageSize)
+//       .lean();
+
+//     const landOwnerListData = landOwnerListRaw.map((owner) => ({
+//       ...owner,
+//       totalSites: Array.isArray(owner.linkedSites)
+//         ? owner.linkedSites.length
+//         : 0,
+//     }));
+
+//     return successResponse(
+//       res,
+//       "LandOwner list fetched successfully",
+//       {
+//         pageNumber: pageNumbers,
+//         count: pageSize,
+//         totalCount,
+//         totalPages: Math.ceil(totalCount / pageSize),
+//         landOwnerList: landOwnerListData,
+//       },
+//       200,
+//     );
+//   } catch (error) {
+//     return errorResponse(res, error.message, null, 400);
+//   }
+// };
 const landOwnerList = async (req, res) => {
   try {
-    const { pageNumber = 1, count = 10, search } = req.body;
+    const { pageNumber = 1, count = 10, search, landOwnerName } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
 
     const filter = {};
 
+    // Main search filter for the list
     if (search && search.trim() !== "") {
       const searchRegex = new RegExp(search.trim(), "i");
       filter.$or = [
@@ -658,6 +709,17 @@ const landOwnerList = async (req, res) => {
       ];
     }
 
+    // Filter for landOwnerName autocomplete suggestions
+    const nameFilter = {};
+    if (landOwnerName && landOwnerName.trim() !== "") {
+      const nameRegex = new RegExp(landOwnerName.trim(), "i");
+      nameFilter.name = nameRegex;
+    }
+
+    // Get distinct landowner names for autocomplete
+    const landOwnerNameFilter = await LandOwnerMaster.distinct("name", nameFilter);
+
+    // Get paginated list with main search filter
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
     const landOwnerListRaw = await LandOwnerMaster.find(filter)
@@ -682,6 +744,7 @@ const landOwnerList = async (req, res) => {
         totalCount,
         totalPages: Math.ceil(totalCount / pageSize),
         landOwnerList: landOwnerListData,
+        landOwnerNameFilter, // Added this field
       },
       200,
     );
@@ -689,7 +752,6 @@ const landOwnerList = async (req, res) => {
     return errorResponse(res, error.message, null, 400);
   }
 };
-
 module.exports = {
   landOwnerSave,
   landOwnerList,

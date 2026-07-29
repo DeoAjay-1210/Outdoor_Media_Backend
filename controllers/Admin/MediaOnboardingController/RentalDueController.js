@@ -2262,75 +2262,73 @@ exports.getRentalDueListWithStats = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    const buildVerificationProgress = (item, targetCycleDate) => {
-      const historyForMonth = (item.verificationProgressHistory || []).filter(
-        (v) => {
-          if (!v.cycle || !targetCycleDate) return false;
-          return (
-            new Date(v.cycle).getTime() === new Date(targetCycleDate).getTime()
-          );
-        },
-      );
+    
+const buildVerificationProgress = (item, targetCycleDate) => {
+  const targetCycleStr = getCurrentCycle(targetCycleDate);
 
-      if (historyForMonth.length > 0) {
-        const latest = historyForMonth[historyForMonth.length - 1];
-        return {
-          currentCycle: latest.currentCycleLabel,
-          staffVerified: latest.staffVerified,
-          teamLeadVerified: latest.teamLeadVerified,
-          ownerVerified: latest.ownerVerified,
-          verifiedCount: latest.verifiedCount,
-          isComplete: latest.isComplete,
-          highestVerifiedRole: latest.highestVerifiedRole,
-        };
-      }
+  const historyForMonth = (item.verificationProgressHistory || []).filter(
+    (v) => {
+      if (!v.cycle || !targetCycleStr) return false;
+      return getCurrentCycle(v.cycle) === targetCycleStr;
+    },
+  );
 
-      const cycleVerifications = (item.agreementDocVerification || []).filter(
-        (h) => {
-          if (!h.isVerified || !h.cycle || !targetCycleDate) return false;
-          return (
-            new Date(h.cycle).getTime() === new Date(targetCycleDate).getTime()
-          );
-        },
-      );
-
-      const staffVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.STAFF,
-      );
-      const teamLeadVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
-      );
-      const ownerVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.OWNER,
-      );
-
-      const highestVerifiedRole = ownerVerified
-        ? ROLE.OWNER
-        : teamLeadVerified
-          ? ROLE.TEAM_LEAD
-          : staffVerified
-            ? ROLE.STAFF
-            : null;
-
-      const verifiedCount = [
-        staffVerified,
-        teamLeadVerified,
-        ownerVerified,
-      ].filter(Boolean).length;
-
-      const cycleString = getCurrentCycle(targetCycleDate);
-
-      return {
-        currentCycle: formatDate(cycleString),
-        staffVerified,
-        teamLeadVerified,
-        ownerVerified,
-        verifiedCount,
-        isComplete: verifiedCount >= 2,
-        highestVerifiedRole,
-      };
+  if (historyForMonth.length > 0) {
+    const latest = historyForMonth[historyForMonth.length - 1];
+    return {
+      currentCycle: latest.currentCycleLabel,
+      staffVerified: latest.staffVerified,
+      teamLeadVerified: latest.teamLeadVerified,
+      ownerVerified: latest.ownerVerified,
+      verifiedCount: latest.verifiedCount,
+      isComplete: latest.isComplete,
+      highestVerifiedRole: latest.highestVerifiedRole,
     };
+  }
 
+  const cycleVerifications = (item.agreementDocVerification || []).filter(
+    (h) => {
+      if (!h.isVerified || !h.cycle || !targetCycleStr) return false;
+      return getCurrentCycle(h.cycle) === targetCycleStr;
+    },
+  );
+
+  const staffVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.STAFF,
+  );
+  const teamLeadVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+  );
+  const ownerVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.OWNER,
+  );
+
+  const highestVerifiedRole = ownerVerified
+    ? ROLE.OWNER
+    : teamLeadVerified
+      ? ROLE.TEAM_LEAD
+      : staffVerified
+        ? ROLE.STAFF
+        : null;
+
+  const verifiedCount = [
+    staffVerified,
+    teamLeadVerified,
+    ownerVerified,
+  ].filter(Boolean).length;
+
+  const cycleString = getCurrentCycle(targetCycleDate);
+
+  return {
+    currentCycle: formatDate(cycleString),
+    staffVerified,
+    teamLeadVerified,
+    ownerVerified,
+    verifiedCount,
+    isComplete: verifiedCount >= 2,
+    highestVerifiedRole,
+  };
+};
     const enriched = data.map((item) => {
       // Determine if we should show past entries or current entries for this item
       const isActuallyPastPending =
@@ -2341,7 +2339,20 @@ exports.getRentalDueListWithStats = async (req, res) => {
         Number(isPastPending) === 1 && isActuallyPastPending;
       const targetCycleDate = usePastDetails
         ? item.rentalPayment.nextBillingDate
-        : monthStart;
+        : (() => {
+    const monthlyEntry = (item.rentalDue || []).find((e) => {
+      if (!e.dueDate) return false;
+      const d = new Date(e.dueDate);
+      return d >= monthStart && d <= monthEnd;
+    });
+    if (monthlyEntry) return monthlyEntry.dueDate;
+    if (item.rentalPayment?.nextBillingDate) {
+      const nbd = new Date(item.rentalPayment.nextBillingDate);
+      if (nbd >= monthStart && nbd <= monthEnd)
+        return item.rentalPayment.nextBillingDate;
+    }
+    return monthStart;
+  })();
 
       const filteredRentalDueEntries = (item.rentalDue || []).filter(
         (entry) => {
