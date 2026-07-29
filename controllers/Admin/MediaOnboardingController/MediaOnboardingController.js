@@ -3,7 +3,10 @@ const { successResponse, errorResponse } = require("../../../utils/response");
 const path = require("path");
 const XLSX = require("xlsx");
 const mongoose = require("mongoose");
-const { syncOrLinkMediaOwnerToMaster,correctLinkedSiteAmounts  } = require("../landOwnerMasterController/landOwnerMasterController");
+const {
+  syncOrLinkMediaOwnerToMaster,
+  correctLinkedSiteAmounts,
+} = require("../landOwnerMasterController/landOwnerMasterController");
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
 // ─────────────────────────────────────────────────────────────
@@ -274,7 +277,7 @@ const dateString = (date) => {
   return `${y}-${m}-${day}`;
 };
 
-const APPRAISAL_FREQUENCY_MONTHS = { 1: 12, 2:24, 3: 36 };
+const APPRAISAL_FREQUENCY_MONTHS = { 1: 12, 2: 24, 3: 36 };
 const APPRAISAL_FREQUENCY_LABEL = {
   1: "1 Year",
   2: "2 Years",
@@ -365,7 +368,6 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
     months = APPRAISAL_FREQUENCY_MONTHS[frequency];
   }
 
-  
   // candidateDate is still computed in case you want to use/display it,
   // but it no longer blocks validation even if it falls on/after endDate.
   const candidateDate = new Date(startDate);
@@ -437,8 +439,6 @@ const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
     }
   });
 };
-
-
 
 const buildAppraisalScheduleFromAnchor = ({
   anchorDate,
@@ -566,9 +566,7 @@ const handleAppraisalLogic = async (
           seedEntry,
           netPayable,
         );
-        seedEntry.newRent = Math.floor(
-          netPayable + seedEntry.appraisalAmount,
-        );
+        seedEntry.newRent = Math.floor(netPayable + seedEntry.appraisalAmount);
       }
 
       appraisal.history.push(seedEntry);
@@ -638,7 +636,8 @@ const handleAppraisalLogic = async (
       dayKey(incomingLastAppraisalDate) !== dayKey(existingLastAppraisalDate));
 
   const configChanged =
-    Number(appraisal.frequency) !== Number(existingMedia.appraisal?.frequency) ||
+    Number(appraisal.frequency) !==
+      Number(existingMedia.appraisal?.frequency) ||
     Number(appraisal.customFrequencyMonths || 0) !==
       Number(existingMedia.appraisal?.customFrequencyMonths || 0) ||
     Number(appraisal.type) !== Number(existingMedia.appraisal?.type) ||
@@ -715,7 +714,10 @@ const handleAppraisalLogic = async (
         for (let i = existingIdx + 1; i < history.length; i++) {
           if (dayKey(history[i].appraisalDate) > today) {
             history[i].previousRent = prev;
-            history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
+            history[i].appraisalAmount = computeAppraisalAmount(
+              history[i],
+              prev,
+            );
             history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
             prev = history[i].newRent;
           }
@@ -780,7 +782,10 @@ const handleAppraisalLogic = async (
         for (let i = newIdx + 1; i < history.length; i++) {
           if (dayKey(history[i].appraisalDate) > today) {
             history[i].previousRent = prev;
-            history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
+            history[i].appraisalAmount = computeAppraisalAmount(
+              history[i],
+              prev,
+            );
             history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
             prev = history[i].newRent;
           }
@@ -965,16 +970,15 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   return appraisal;
 };
 
-
 const getFrequencyMonths = (frequency, customMonths) => {
   // const EXTRA_BUFFER_MONTHS = 1; // every frequency gets +1 month added
 
   if (Number(frequency) === 4) {
-    return (Number(customMonths || 0) || 1)
+    return Number(customMonths || 0) || 1;
     //  + EXTRA_BUFFER_MONTHS;
   }
   return (
-    (APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12) 
+    APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12
     // + EXTRA_BUFFER_MONTHS
   );
 };
@@ -1078,7 +1082,11 @@ const revertAppraisalRentIfTurnedOff = (mediaData, existingMedia) => {
 
   const wasApplicable = Number(existingMedia.appraisal?.applicable) === 1;
   const isNowApplicable = Number(mediaData.appraisal?.applicable) === 1;
+  const wasHeld = Number(existingMedia.appraisal?.appraisalHold) === 1;
+  const isNowHeld = Number(mediaData.appraisal?.appraisalHold) === 1;
 
+  const wasEffectivelyActive = wasApplicable && !wasHeld;
+  const isNowEffectivelyActive = isNowApplicable && !isNowHeld;
   // Only fires on the exact 1 -> 0 transition, in THIS request.
   if (!wasApplicable || isNowApplicable) return false;
 
@@ -1116,6 +1124,7 @@ const revertAppraisalRentIfTurnedOff = (mediaData, existingMedia) => {
 const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
   const appraisal = mediaData.appraisal;
   if (!appraisal || Number(appraisal.applicable) !== 1) return false;
+  if (Number(appraisal.appraisalHold) === 1) return false;
   if (!Array.isArray(appraisal.history) || !appraisal.history.length)
     return false;
 
@@ -1361,7 +1370,6 @@ const mediaOnboarding = async (req, res) => {
         );
     }
 
-   
     const getFileByFieldName = (fieldName) => {
       if (!req.files) return null;
       const file = req.files.find((f) => f.fieldname === fieldName);
@@ -1384,7 +1392,7 @@ const mediaOnboarding = async (req, res) => {
       "bankPassbook",
       "cancelCheckLeaf",
       "panCardImage",
-      "aadharCardImage"
+      "aadharCardImage",
     ];
     const FILE_OBJECT_FIELDS = [
       "frontView",
@@ -1561,9 +1569,8 @@ const mediaOnboarding = async (req, res) => {
           history: existingAppraisalPlain.history || [],
         };
       }
-  
     }
-if (id) {
+    if (id) {
       revertAppraisalRentIfTurnedOff(mediaData, existingMediaForValidation);
     }
     // ✅ NEW — auto-rescale landOwners proportionally BEFORE validation,
@@ -1796,46 +1803,77 @@ if (id) {
       //   });
       // }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
-  mediaData.landOwners.forEach((owner, idx) => {
-    const existingOwner = media.landOwners?.[idx];
+        mediaData.landOwners.forEach((owner, idx) => {
+          const existingOwner = media.landOwners?.[idx];
 
-    // ✅ NEW — preserve the EXISTING owner's real _id, matched by
-    // array position, whenever the frontend doesn't send a valid
-    // matching _id (or sends none at all). Without this, Mongoose
-    // silently generates a BRAND-NEW _id for the owner subdocument on
-    // every update — permanently orphaning every ledger/GST/TDS
-    // record that was already tied to the owner's original _id.
-    if (existingOwner) {
-      const sentIdMatchesExisting =
-        owner._id && String(owner._id) === String(existingOwner._id);
+          // ✅ NEW — preserve the EXISTING owner's real _id, matched by
+          // array position, whenever the frontend doesn't send a valid
+          // matching _id (or sends none at all). Without this, Mongoose
+          // silently generates a BRAND-NEW _id for the owner subdocument on
+          // every update — permanently orphaning every ledger/GST/TDS
+          // record that was already tied to the owner's original _id.
+          if (existingOwner) {
+            const sentIdMatchesExisting =
+              owner._id && String(owner._id) === String(existingOwner._id);
 
-      if (!sentIdMatchesExisting) {
-        owner._id = existingOwner._id;
+            if (!sentIdMatchesExisting) {
+              owner._id = existingOwner._id;
+            }
+          }
+
+          OWNER_FILE_FIELDS.forEach((field) => {
+            if (typeof owner[field] === "string") {
+              owner[field] = existingOwner ? existingOwner[field] : undefined;
+            }
+          });
+        });
       }
-    }
-
-    OWNER_FILE_FIELDS.forEach((field) => {
-      if (typeof owner[field] === "string") {
-        owner[field] = existingOwner ? existingOwner[field] : undefined;
-      }
-    });
-  });
-}
- // ✅ ADDED — Media → LandOwnerMaster sync. For any owner that's
+      // ✅ ADDED — Media → LandOwnerMaster sync. For any owner that's
       // already linked (has landOwnerMasterId), push this property's
       // edits (name, amounts, GST/TDS, etc.) into the linked Master
       // record. Owners without a landOwnerMasterId are skipped.
-         if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+      if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
         const mediaInfo = {
           mediaId: media._id,
           mediaCode: mediaData.mediaCode || media.mediaCode,
           mediaName: mediaData.mediaName || media.mediaName,
         };
- 
+
         for (const owner of mediaData.landOwners) {
-          await syncOrLinkMediaOwnerToMaster(owner, userName, null, mediaInfo);
+          const linkedMaster = await syncOrLinkMediaOwnerToMaster(
+            owner,
+            userName,
+            null,
+            mediaInfo,
+          );
+
+          // ✅ ADDED — pull this owner's OTHER sites from the Master's
+          // linkedSites (which sync just upserted THIS site into),
+          // filtering THIS site out, and denormalize onto the Media
+          // doc's embedded owner for display.
+          if (linkedMaster && Array.isArray(linkedMaster.linkedSites)) {
+            // const otherSites = linkedMaster.linkedSites.filter(
+            //   (site) => String(site.mediaId) !== String(mediaInfo.mediaId),
+            // );
+            const otherSites = linkedMaster.linkedSites;
+            // ✅ CHANGED — full field parity with LandOwnerMaster.linkedSites
+            owner.linkedSites = otherSites.map((site) => ({
+              mediaId: site.mediaId,
+              mediaCode: site.mediaCode,
+              mediaName: site.mediaName,
+              paymentCategory: site.paymentCategory,
+              shareAmount: site.shareAmount,
+              cashAmount: site.cashAmount,
+              onlineAmount: site.onlineAmount,
+              updatedAt: site.updatedAt,
+            }));
+            owner.linkedMediaCount = otherSites.length;
+          } else {
+            owner.linkedSites = [];
+            owner.linkedMediaCount = 0;
+          }
         }
- 
+
         mediaData.landOwnerMasterIds = mediaData.landOwners
           .map((o) => o.landOwnerMasterId)
           .filter(Boolean);
@@ -1897,18 +1935,18 @@ if (id) {
 
       await media.save();
       media = await MediaOnboarding.findById(media._id).lean();
-       if (media.landOwners && Array.isArray(media.landOwners)) {
-              for (const savedOwner of media.landOwners) {
-                if (savedOwner.landOwnerMasterId) {
-                  await correctLinkedSiteAmounts(
-                    savedOwner.landOwnerMasterId,
-                    media._id,
-                    savedOwner,
-                    null,
-                  );
-                }
-              }
-            }
+      if (media.landOwners && Array.isArray(media.landOwners)) {
+        for (const savedOwner of media.landOwners) {
+          if (savedOwner.landOwnerMasterId) {
+            await correctLinkedSiteAmounts(
+              savedOwner.landOwnerMasterId,
+              media._id,
+              savedOwner,
+              null,
+            );
+          }
+        }
+      }
     } else {
       // ── CREATE ──────────────────────────────────────────────────────────
       isNew = true;
@@ -1929,20 +1967,47 @@ if (id) {
       // branch, in case a brand-new Media property is created with
       // an owner already picked from the landowner list (has a
       // landOwnerMasterId attached).
-        if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+      if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
         const generatedMediaId = new mongoose.Types.ObjectId();
         mediaData._id = generatedMediaId;
- 
+
         const mediaInfo = {
           mediaId: generatedMediaId,
           mediaCode: mediaData.mediaCode,
           mediaName: mediaData.mediaName,
         };
- 
+
         for (const owner of mediaData.landOwners) {
-          await syncOrLinkMediaOwnerToMaster(owner, userName, null, mediaInfo);
+          const linkedMaster = await syncOrLinkMediaOwnerToMaster(
+            owner,
+            userName,
+            null,
+            mediaInfo,
+          );
+
+          // ✅ ADDED — same denormalization as UPDATE branch.
+          if (linkedMaster && Array.isArray(linkedMaster.linkedSites)) {
+            // const otherSites = linkedMaster.linkedSites.filter(
+            //   (site) => String(site.mediaId) !== String(mediaInfo.mediaId),
+            // );
+            const otherSites = linkedMaster.linkedSites;
+            owner.linkedSites = otherSites.map((site) => ({
+              mediaId: site.mediaId,
+              mediaCode: site.mediaCode,
+              mediaName: site.mediaName,
+              paymentCategory: site.paymentCategory,
+              shareAmount: site.shareAmount,
+              cashAmount: site.cashAmount,
+              onlineAmount: site.onlineAmount,
+              updatedAt: site.updatedAt,
+            }));
+            owner.linkedMediaCount = otherSites.length;
+          } else {
+            owner.linkedSites = [];
+            owner.linkedMediaCount = 0;
+          }
         }
- 
+
         mediaData.landOwnerMasterIds = mediaData.landOwners
           .map((o) => o.landOwnerMasterId)
           .filter(Boolean);
@@ -1990,20 +2055,19 @@ if (id) {
       await media.save();
       media = await MediaOnboarding.findById(media._id).lean();
       // ✅ ADDED — same pass-2 correction as UPDATE branch.
-            if (media.landOwners && Array.isArray(media.landOwners)) {
-              for (const savedOwner of media.landOwners) {
-                if (savedOwner.landOwnerMasterId) {
-                  await correctLinkedSiteAmounts(
-                    savedOwner.landOwnerMasterId,
-                    media._id,
-                    savedOwner,
-                    null,
-                  );
-                }
-              }
-            }
+      if (media.landOwners && Array.isArray(media.landOwners)) {
+        for (const savedOwner of media.landOwners) {
+          if (savedOwner.landOwnerMasterId) {
+            await correctLinkedSiteAmounts(
+              savedOwner.landOwnerMasterId,
+              media._id,
+              savedOwner,
+              null,
+            );
           }
-    
+        }
+      }
+    }
 
     const message = isNew
       ? "Media created successfully"
@@ -2532,161 +2596,7 @@ const updateAgreement = async (req, res) => {
     );
   }
 };
-// const mediaList = async (req, res) => {
-//   try {
-//     const {
-//       pageNumber = 1,
-//       count = 10,
-//       mediaType,
-//       agreementStatus,
-//       city,
-//       status,
-//       search,
-//     } = req.body;
 
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
-
-//     // ===============================
-//     // SEARCH FILTER
-//     // ===============================
-
-//     let searchFilter = {};
-
-//     if (search && search.trim() !== "") {
-//       const searchRegex = new RegExp(search.trim(), "i");
-//       searchFilter = {
-//         $or: [
-//           { mediaId: searchRegex },
-//           { mediaCode: searchRegex },
-//           { mediaName: searchRegex },
-//           { mediaType: searchRegex },
-//           { state: searchRegex },
-//           { city: searchRegex },
-//           { location: searchRegex },
-//         ],
-//       };
-//     }
-
-//     // ===============================
-//     // COMBINED FILTER
-//     // ===============================
-
-//     const filter = {};
-//     if (city) filter.city = Array.isArray(city) ? { $in: city } : city;
-//     if (mediaType) {
-//       filter.mediaType = Array.isArray(mediaType)
-//         ? { $in: mediaType }
-//         : mediaType;
-//     }
-//     if (status) {
-//       filter.status = Array.isArray(status) ? { $in: status } : status;
-//     }
-//     if (
-//       agreementStatus !== undefined &&
-//       agreementStatus !== null &&
-//       agreementStatus !== ""
-//     ) {
-//       filter["agreement.status"] = Number(agreementStatus);
-//     }
-//     // Merge search + dropdown filters
-//     const combinedFilter =
-//       Object.keys(searchFilter).length > 0
-//         ? {
-//             $and: [
-//               searchFilter,
-//               ...(Object.keys(filter).length > 0 ? [filter] : []),
-//             ],
-//           }
-//         : filter;
-
-//     // ===============================
-//     // QUERY
-//     // ===============================
-
-//     const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
-
-//     const mediaListData = await MediaOnboarding.find(combinedFilter)
-//       .sort({ updatedAt: -1 })
-//       .skip((pageNumbers - 1) * pageSize)
-//       .limit(pageSize)
-//       .lean();
-
-//     // ===============================
-//     // AGGREGATION FOR STATISTICS
-//     // ===============================
-
-//     // Get active count - using numeric status value (adjust based on your schema)
-//     // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
-//     const activeCount = await MediaOnboarding.countDocuments({
-//       status: 1, // Change this to match your active status number
-//     });
-
-//     // Get agreement expired count (agreement.status = 3)
-//     const agreementExpiredCount = await MediaOnboarding.countDocuments({
-//       "agreement.status": 3,
-//     });
-
-//     // Get total rental amounts from all documents
-//     const rentalAggregation = await MediaOnboarding.aggregate([
-//       {
-//         $group: {
-//           _id: null,
-//           totalRentalAmount: {
-//             $sum: "$rentalPayment.totalRentalAmount",
-//           },
-//           totalNetPayable: {
-//             $sum: "$rentalPayment.netPayable",
-//           },
-//         },
-//       },
-//     ]);
-
-//     const totalRentalAmount =
-//       rentalAggregation.length > 0 ? rentalAggregation[0].totalRentalAmount : 0;
-//     const totalNetPayable =
-//       rentalAggregation.length > 0 ? rentalAggregation[0].totalNetPayable : 0;
-
-//     // ===============================
-//     // FILTER OPTIONS (always from full collection)
-//     // ===============================
-
-//     const allData = await MediaOnboarding.find(
-//       {},
-//       "city mediaType status",
-//     ).lean();
-
-//     const cityFilter = [...new Set(allData.map((item) => item.city))].filter(
-//       Boolean,
-//     );
-//     const mediaTypeFilter = [
-//       ...new Set(allData.map((item) => item.mediaType)),
-//     ].filter(Boolean);
-
-//     return successResponse(
-//       res,
-//       "Media list fetched successfully",
-//       {
-//         pageNumber: pageNumbers,
-//         count: pageSize,
-//         totalCount,
-//         totalPages: Math.ceil(totalCount / pageSize),
-//         cityFilter,
-//         mediaTypeFilter,
-//         mediaList: mediaListData,
-//         // New keys added:
-//         activeCount,
-//         agreementExpiredCount,
-//         totalRentalAmount,
-//         totalNetPayable,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     return errorResponse(res, error.message, null, 400);
-//   }
-// };
-// Particular Get
 const mediaList = async (req, res) => {
   try {
     const {
@@ -2697,6 +2607,7 @@ const mediaList = async (req, res) => {
       city,
       status,
       search,
+      landOwnerName
     } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -2734,7 +2645,15 @@ const mediaList = async (req, res) => {
         ? { $in: mediaType }
         : mediaType;
     }
+   if (landOwnerName) {
+      const nameList = Array.isArray(landOwnerName)
+        ? landOwnerName
+        : [landOwnerName];
 
+      filter["landOwners.name"] = {
+        $in: nameList.map((n) => new RegExp(n.trim(), "i")),
+      };
+    }
     // ── STATUS FILTER ──────────────────────────────────────────
     // 1 / 2 / 3  -> plain `status` field (unchanged legacy behavior)
     // 4          -> virtual status, maps to agreement.status === 2
@@ -2837,7 +2756,7 @@ const mediaList = async (req, res) => {
 
     const allData = await MediaOnboarding.find(
       {},
-      "city mediaType status",
+      "city mediaType status landOwners.name",
     ).lean();
 
     const cityFilter = [...new Set(allData.map((item) => item.city))].filter(
@@ -2846,7 +2765,15 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
-
+ const landOwnerNameFilter = [
+      ...new Set(
+        allData.flatMap((item) =>
+          Array.isArray(item.landOwners)
+            ? item.landOwners.map((o) => o.name)
+            : [],
+        ),
+      ),
+    ].filter(Boolean);
     return successResponse(
       res,
       "Media list fetched successfully",
@@ -2857,6 +2784,7 @@ const mediaList = async (req, res) => {
         totalPages: Math.ceil(totalCount / pageSize),
         cityFilter,
         mediaTypeFilter,
+        landOwnerNameFilter,
         mediaList: mediaListData,
         // New keys added:
         activeCount,

@@ -94,9 +94,15 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
     landOwnerMaster.linkedSites = [];
   }
 
-  const existingIdx = landOwnerMaster.linkedSites.findIndex(
+    let existingIdx = landOwnerMaster.linkedSites.findIndex(
     (site) => String(site.mediaId) === String(mediaInfo.mediaId),
   );
+
+  if (existingIdx === -1 && mediaInfo.mediaCode) {
+    existingIdx = landOwnerMaster.linkedSites.findIndex(
+      (site) => site.mediaCode && site.mediaCode === mediaInfo.mediaCode,
+    );
+  }
 
   const now = nowIST();
 
@@ -118,7 +124,6 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
       shareAmount: Number(owner.shareAmount || 0),
       cashAmount: Number(owner.cashAmount || 0),
       onlineAmount: Number(owner.onlineAmount || 0),
-      addedAt: now,
       updatedAt: now,
     });
   }

@@ -302,7 +302,6 @@ const LandOwnerMasterSchema = new mongoose.Schema(
         shareAmount: { type: Number, default: 0, min: 0 },
         cashAmount: { type: Number, default: 0, min: 0 },
         onlineAmount: { type: Number, default: 0, min: 0 },
-        addedAt: { type: Date, default: null },
         updatedAt: { type: Date, default: null },
       },
     ],

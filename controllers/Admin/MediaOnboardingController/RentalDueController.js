@@ -98,7 +98,27 @@ function markRoleVerified(media, entry, role, userName) {
   media.agreementDocVerified[ROLE_FLAG_KEY[role]] = true;
   pushVerificationHistory(media, entry, role, userName);
 }
+const getCurrentCycle = (date) => {
+  if (!date) return null;
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
+const formatDate = (date) => {
+  if (!date) return "";
+  let d;
+  if (typeof date === "string" && date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [year, month, day] = date.split("-");
+    d = new Date(year, month - 1, day);
+  } else {
+    d = new Date(date);
+  }
+  const options = { year: "numeric", month: "long", day: "numeric" };
+  return d.toLocaleDateString("en-US", options);
+};
 function advanceRentalPaymentOnOwnerApproval(media) {
   const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
   const frequency = media.rentalPayment?.paymentFrequency;
@@ -1441,93 +1461,93 @@ exports.verifyAgreementDoc = async (req, res) => {
   }
 };
 // ── Helper functions ──
-function getCurrentCycle(nextBillingDate) {
-  if (!nextBillingDate) return null;
+// function getCurrentCycle(nextBillingDate) {
+//   if (!nextBillingDate) return null;
 
-  const billingDate = new Date(nextBillingDate);
-  const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
-  const day = String(billingDate.getDate()).padStart(2, "0");
+//   const billingDate = new Date(nextBillingDate);
+//   const year = billingDate.getFullYear();
+//   const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+//   const day = String(billingDate.getDate()).padStart(2, "0");
 
-  return `${year}-${month}-${day}`;
-}
+//   return `${year}-${month}-${day}`;
+// }
 
-function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return "Unknown";
+// function formatDate(cycleIdentifier) {
+//   if (!cycleIdentifier) return "Unknown";
 
-  if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split("-");
-    const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
+//   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
+//     const [year, month, day] = cycleIdentifier.split("-");
+//     const date = new Date(year, month - 1, day);
+//     return date.toLocaleDateString("en-US", {
+//       year: "numeric",
+//       month: "long",
+//       day: "numeric",
+//     });
+//   }
 
-  return cycleIdentifier;
-}
+//   return cycleIdentifier;
+// }
 
 // ── Helper functions ──
-function getCurrentCycle(nextBillingDate) {
-  if (!nextBillingDate) return null;
+// function getCurrentCycle(nextBillingDate) {
+//   if (!nextBillingDate) return null;
 
-  const billingDate = new Date(nextBillingDate);
-  const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
-  const day = String(billingDate.getDate()).padStart(2, "0");
+//   const billingDate = new Date(nextBillingDate);
+//   const year = billingDate.getFullYear();
+//   const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+//   const day = String(billingDate.getDate()).padStart(2, "0");
 
-  return `${year}-${month}-${day}`;
-}
+//   return `${year}-${month}-${day}`;
+// }
 
-function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return "Unknown";
+// function formatDate(cycleIdentifier) {
+//   if (!cycleIdentifier) return "Unknown";
 
-  if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split("-");
-    const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
+//   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
+//     const [year, month, day] = cycleIdentifier.split("-");
+//     const date = new Date(year, month - 1, day);
+//     return date.toLocaleDateString("en-US", {
+//       year: "numeric",
+//       month: "long",
+//       day: "numeric",
+//     });
+//   }
 
-  return cycleIdentifier;
-}
+//   return cycleIdentifier;
+// }
 // ── Helper function to get current cycle based on nextBillingDate ──
-function getCurrentCycle(nextBillingDate) {
-  if (!nextBillingDate) return null;
+// function getCurrentCycle(nextBillingDate) {
+//   if (!nextBillingDate) return null;
 
-  // Parse the nextBillingDate
-  const billingDate = new Date(nextBillingDate);
+//   // Parse the nextBillingDate
+//   const billingDate = new Date(nextBillingDate);
 
-  // Create a cycle identifier using year, month, and day
-  // This ensures each billing cycle is uniquely identified
-  const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
-  const day = String(billingDate.getDate()).padStart(2, "0");
+//   // Create a cycle identifier using year, month, and day
+//   // This ensures each billing cycle is uniquely identified
+//   const year = billingDate.getFullYear();
+//   const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+//   const day = String(billingDate.getDate()).padStart(2, "0");
 
-  return `${year}-${month}-${day}`;
-}
+//   return `${year}-${month}-${day}`;
+// }
 
 // ── Helper function to format date for display ──
-function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return "Unknown";
+// function formatDate(cycleIdentifier) {
+//   if (!cycleIdentifier) return "Unknown";
 
-  // If it's in YYYY-MM-DD format
-  if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split("-");
-    const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
+//   // If it's in YYYY-MM-DD format
+//   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
+//     const [year, month, day] = cycleIdentifier.split("-");
+//     const date = new Date(year, month - 1, day);
+//     return date.toLocaleDateString("en-US", {
+//       year: "numeric",
+//       month: "long",
+//       day: "numeric",
+//     });
+//   }
 
-  return cycleIdentifier;
-}
+//   return cycleIdentifier;
+// }
 
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
@@ -1545,7 +1565,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       isApproved,
       isPastPending,
       roleType,
-      edit
+      edit,
     } = req.body;
 
     // ✅ If roleType is provided (1, 2, or 3), we show stats/list for THAT
@@ -2193,8 +2213,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
     if (orFilters.length > 0) {
       listPipeline.push({ $match: { $or: orFilters } });
     }
-const listSortStage =
-      Number(edit) === 1 ? { _id: 1 } : { updatedAt: -1 };
+    const listSortStage = Number(edit) === 1 ? { _id: 1 } : { updatedAt: -1 };
     listPipeline.push(
       {
         $project: {
@@ -2202,7 +2221,7 @@ const listSortStage =
           mediaName: 1,
           landOwners: 1,
           appraisal: 1,
-          frontView:1,
+          frontView: 1,
           mediaType: 1,
           city: 1,
           state: 1,
@@ -2223,7 +2242,7 @@ const listSortStage =
         $facet: {
           data: [
             // { $sort: { updatedAt: -1 } },
-            { $sort: listSortStage }, 
+            { $sort: listSortStage },
             { $skip: skip },
             { $limit: pageSize },
           ],
