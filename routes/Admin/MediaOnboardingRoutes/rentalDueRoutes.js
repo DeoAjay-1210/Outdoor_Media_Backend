@@ -11,7 +11,7 @@ const {
   GstAmountPaid,
   revertAgreementDocVerification,
   revertRentalApproval
-} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNewController");
+} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");

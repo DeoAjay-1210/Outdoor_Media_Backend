@@ -2468,6 +2468,813 @@ exports.revertRentalApproval = async (req, res) => {
 //   }
 // };
 
+// exports.getRentalDueListWithStats = async (req, res) => {
+//   try {
+//     const {
+//       dueDate,
+//       city,
+//       mediaType,
+//       frequency,
+//       status,
+//       search,
+//       pageNumber = 1,
+//       count = 10,
+//       isOverdue,
+//       isPending,
+//       isApproved,
+//       isPastPending,
+//       roleType,
+//       edit,
+//     } = req.body;
+
+//     const targetRole = roleType ? parseInt(roleType) : null;
+
+//     if (!dueDate) {
+//       return res.status(400).json({
+//         success: false,
+//         message:
+//           "dueDate is required. Please use format MM-YYYY (e.g., 07-2026)",
+//       });
+//     }
+//     if (!dueDate.match(/^\d{2}-\d{4}$/)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Invalid dueDate format. Please use MM-YYYY (e.g., 07-2026)",
+//       });
+//     }
+
+//     const pageNumbers = parseInt(pageNumber) || 1;
+//     const pageSize = parseInt(count) || 10;
+
+//     const [mo, yr] = dueDate.split("-").map(Number);
+//     const monthStart = new Date(yr, mo - 1, 1);
+//     const monthEnd = new Date(yr, mo, 0, 23, 59, 59);
+
+//     // ═══════════════════════════════════════════════════════════
+//     // SECTION A — STATS (UNCHANGED — identical to the site-based
+//     // version, produces the exact same `value` block every time)
+//     // ═══════════════════════════════════════════════════════════
+
+//     const isClosedOverallCond = {
+//       $gt: [
+//         {
+//           $size: {
+//             $filter: {
+//               input: { $ifNull: ["$rentalDue", []] },
+//               as: "rd",
+//               cond: {
+//                 $and: [
+//                   { $gte: ["$$rd.dueDate", monthStart] },
+//                   { $lte: ["$$rd.dueDate", monthEnd] },
+//                   { $eq: ["$$rd.approvalStatus", 3] },
+//                 ],
+//               },
+//             },
+//           },
+//         },
+//         0,
+//       ],
+//     };
+
+//     const hasRoleApprovedCond =
+//       targetRole === null
+//         ? isClosedOverallCond
+//         : {
+//             $gt: [
+//               {
+//                 $size: {
+//                   $filter: {
+//                     input: { $ifNull: ["$rentalDue", []] },
+//                     as: "rd",
+//                     cond: {
+//                       $and: [
+//                         { $gte: ["$$rd.dueDate", monthStart] },
+//                         { $lte: ["$$rd.dueDate", monthEnd] },
+//                         {
+//                           $gt: [
+//                             {
+//                               $size: {
+//                                 $filter: {
+//                                   input: {
+//                                     $ifNull: ["$$rd.approvalSteps", []],
+//                                   },
+//                                   as: "s",
+//                                   cond: {
+//                                     $and: [
+//                                       { $eq: ["$$s.role", targetRole] },
+//                                       { $eq: ["$$s.status", 2] },
+//                                     ],
+//                                   },
+//                                 },
+//                               },
+//                             },
+//                             0,
+//                           ],
+//                         },
+//                       ],
+//                     },
+//                   },
+//                 },
+//               },
+//               0,
+//             ],
+//           };
+
+//     const hasRoleActedCond =
+//       targetRole === null
+//         ? isClosedOverallCond
+//         : {
+//             $gt: [
+//               {
+//                 $size: {
+//                   $filter: {
+//                     input: { $ifNull: ["$rentalDue", []] },
+//                     as: "rd",
+//                     cond: {
+//                       $and: [
+//                         { $gte: ["$$rd.dueDate", monthStart] },
+//                         { $lte: ["$$rd.dueDate", monthEnd] },
+//                         {
+//                           $gt: [
+//                             {
+//                               $size: {
+//                                 $filter: {
+//                                   input: {
+//                                     $ifNull: ["$$rd.approvalSteps", []],
+//                                   },
+//                                   as: "s",
+//                                   cond: {
+//                                     $and: [
+//                                       { $eq: ["$$s.role", targetRole] },
+//                                       { $in: ["$$s.status", [2, 3]] },
+//                                     ],
+//                                   },
+//                                 },
+//                               },
+//                             },
+//                             0,
+//                           ],
+//                         },
+//                       ],
+//                     },
+//                   },
+//                 },
+//               },
+//               0,
+//             ],
+//           };
+
+//     const relevantToRoleMatch =
+//       targetRole === null
+//         ? {}
+//         : {
+//             $expr: {
+//               $or: [
+//                 hasRoleApprovedCond,
+//                 {
+//                   $and: [
+//                     { $not: [isClosedOverallCond] },
+//                     { $not: [hasRoleActedCond] },
+//                   ],
+//                 },
+//               ],
+//             },
+//           };
+
+//     const mediaMatch = { status: 1 };
+//     if (city) mediaMatch.city = { $regex: city, $options: "i" };
+//     if (mediaType) mediaMatch.mediaType = { $regex: mediaType, $options: "i" };
+//     if (frequency)
+//       mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
+
+//     if (status !== undefined && status !== null && status !== "") {
+//       const statusMap = { active: 1, expiresoon: 2, overdue: 3, expired: 3 };
+//       const parsed = parseInt(status, 10);
+//       const resolvedStatus = isNaN(parsed)
+//         ? statusMap[String(status).toLowerCase()]
+//         : parsed;
+//       if (resolvedStatus) mediaMatch["rentalPayment.status"] = resolvedStatus;
+//     }
+
+//     if (search) {
+//       mediaMatch.$or = [
+//         { mediaCode: { $regex: search, $options: "i" } },
+//         { mediaName: { $regex: search, $options: "i" } },
+//         { city: { $regex: search, $options: "i" } },
+//         { location: { $regex: search, $options: "i" } },
+//         { "landOwners.name": { $regex: search, $options: "i" } },
+//       ];
+//     }
+
+//     const totalSites = await Media.countDocuments({ status: 1 });
+
+//     const monthOrCondition = {
+//       $or: [
+//         {
+//           "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
+//         },
+//         { "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd } },
+//       ],
+//     };
+
+//     const dueThisMonthAgg = await Media.aggregate([
+//       { $match: { status: 1 } },
+//       { $match: monthOrCondition },
+//       {
+//         $addFields: {
+//           matchingEntry: {
+//             $first: {
+//               $filter: {
+//                 input: { $ifNull: ["$rentalDue", []] },
+//                 as: "rd",
+//                 cond: {
+//                   $and: [
+//                     { $gte: ["$$rd.dueDate", monthStart] },
+//                     { $lte: ["$$rd.dueDate", monthEnd] },
+//                   ],
+//                 },
+//               },
+//             },
+//           },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           effectiveNetPayable: {
+//             $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+//           },
+//         },
+//       },
+//       {
+//         $group: {
+//           _id: null,
+//           totalNetPayable: { $sum: "$effectiveNetPayable" },
+//           count: { $sum: 1 },
+//         },
+//       },
+//     ]);
+//     const dueThisMonth = {
+//       totalNetPayable: dueThisMonthAgg[0]?.totalNetPayable || 0,
+//       count: dueThisMonthAgg[0]?.count || 0,
+//     };
+
+//     const dueAmountOpenAgg = await Media.aggregate([
+//       { $match: { status: 1, "rentalPayment.status": { $in: [2, 3] } } },
+//       { $match: monthOrCondition },
+//       { $match: { $expr: { $not: [isClosedOverallCond] } } },
+//       {
+//         $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
+//       },
+//     ]);
+//     const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
+
+//     const statsAgg = await Media.aggregate([
+//       { $match: { status: 1 } },
+//       { $match: monthOrCondition },
+//       {
+//         $addFields: {
+//           matchingEntry: {
+//             $first: {
+//               $filter: {
+//                 input: { $ifNull: ["$rentalDue", []] },
+//                 as: "rd",
+//                 cond: {
+//                   $and: [
+//                     { $gte: ["$$rd.dueDate", monthStart] },
+//                     { $lte: ["$$rd.dueDate", monthEnd] },
+//                   ],
+//                 },
+//               },
+//             },
+//           },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           effectiveNetPayable: {
+//             $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+//           },
+//           isApprovedByRole: hasRoleApprovedCond,
+//           isClosedOverall: isClosedOverallCond,
+//           hasRoleActed: hasRoleActedCond,
+//           isOverdueGlobally: { $eq: ["$rentalPayment.status", 3] },
+//         },
+//       },
+//       {
+//         $group: {
+//           _id: null,
+//           approved: { $sum: { $cond: ["$isApprovedByRole", 1, 0] } },
+//           approvedAmount: {
+//             $sum: { $cond: ["$isApprovedByRole", "$effectiveNetPayable", 0] },
+//           },
+//           overdue: {
+//             $sum: {
+//               $cond: [
+//                 {
+//                   $and: [
+//                     { $not: ["$isApprovedByRole"] },
+//                     { $not: ["$isClosedOverall"] },
+//                     { $not: ["$hasRoleActed"] },
+//                     { $eq: ["$isOverdueGlobally", true] },
+//                   ],
+//                 },
+//                 1,
+//                 0,
+//               ],
+//             },
+//           },
+//           overdueAmount: {
+//             $sum: {
+//               $cond: [
+//                 {
+//                   $and: [
+//                     { $not: ["$isApprovedByRole"] },
+//                     { $not: ["$isClosedOverall"] },
+//                     { $not: ["$hasRoleActed"] },
+//                     { $eq: ["$isOverdueGlobally", true] },
+//                   ],
+//                 },
+//                 "$effectiveNetPayable",
+//                 0,
+//               ],
+//             },
+//           },
+//           pending: {
+//             $sum: {
+//               $cond: [
+//                 {
+//                   $and: [
+//                     { $not: ["$isApprovedByRole"] },
+//                     { $not: ["$isClosedOverall"] },
+//                     { $not: ["$hasRoleActed"] },
+//                     { $not: ["$isOverdueGlobally"] },
+//                   ],
+//                 },
+//                 1,
+//                 0,
+//               ],
+//             },
+//           },
+//           pendingAmount: {
+//             $sum: {
+//               $cond: [
+//                 {
+//                   $and: [
+//                     { $not: ["$isApprovedByRole"] },
+//                     { $not: ["$isClosedOverall"] },
+//                     { $not: ["$hasRoleActed"] },
+//                     { $not: ["$isOverdueGlobally"] },
+//                   ],
+//                 },
+//                 "$effectiveNetPayable",
+//                 0,
+//               ],
+//             },
+//           },
+//         },
+//       },
+//     ]);
+
+//     const approvedCount = statsAgg[0]?.approved || 0;
+//     const approvedAmountTotal = statsAgg[0]?.approvedAmount || 0;
+//     const overDueSiteCount = statsAgg[0]?.overdue || 0;
+//     const overDueAmountTotal = statsAgg[0]?.overdueAmount || 0;
+//     const pendingCount = (statsAgg[0]?.pending || 0) + overDueSiteCount;
+//     const pendingAmountTotal =
+//       (statsAgg[0]?.pendingAmount || 0) + overDueAmountTotal;
+
+//     const pastPendingAgg = await Media.aggregate([
+//       {
+//         $match: {
+//           status: 1,
+//           "rentalPayment.nextBillingDate": { $lt: monthStart },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           matchingEntry: {
+//             $first: {
+//               $filter: {
+//                 input: { $ifNull: ["$rentalDue", []] },
+//                 as: "rd",
+//                 cond: {
+//                   $eq: ["$$rd.dueDate", "$rentalPayment.nextBillingDate"],
+//                 },
+//               },
+//             },
+//           },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           roleStep: {
+//             $cond: [
+//               { $eq: [targetRole, null] },
+//               null,
+//               {
+//                 $first: {
+//                   $filter: {
+//                     input: { $ifNull: ["$matchingEntry.approvalSteps", []] },
+//                     as: "s",
+//                     cond: { $eq: ["$$s.role", targetRole] },
+//                   },
+//                 },
+//               },
+//             ],
+//           },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           isApprovedByRole:
+//             targetRole === null
+//               ? { $eq: ["$matchingEntry.approvalStatus", 3] }
+//               : {
+//                   $and: [
+//                     { $eq: ["$roleStep.status", 2] },
+//                     { $eq: ["$matchingEntry.approvalStatus", 3] },
+//                   ],
+//                 },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           isPendingByRole:
+//             targetRole === null
+//               ? { $ne: ["$matchingEntry.approvalStatus", 3] }
+//               : {
+//                   $and: [
+//                     { $ne: ["$matchingEntry.approvalStatus", 3] },
+//                     { $not: [{ $in: ["$roleStep.status", [2, 3]] }] },
+//                   ],
+//                 },
+//         },
+//       },
+//       { $match: { isPendingByRole: true } },
+//       {
+//         $group: {
+//           _id: null,
+//           count: { $sum: 1 },
+//           amount: {
+//             $sum: {
+//               $ifNull: [
+//                 "$matchingEntry.netPayable",
+//                 "$rentalPayment.netPayable",
+//               ],
+//             },
+//           },
+//         },
+//       },
+//     ]);
+//     const pastPendingApproval = {
+//       count: pastPendingAgg[0]?.count || 0,
+//       amount: pastPendingAgg[0]?.amount || 0,
+//     };
+
+//     const approvalBreakdownAgg = await Media.aggregate([
+//       { $match: { status: 1 } },
+//       { $unwind: "$rentalDue" },
+//       {
+//         $match: {
+//           "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
+//           "rentalDue.approvalStatus": { $in: [1, 2] },
+//         },
+//       },
+//       { $group: { _id: "$rentalDue.currentPendingRole", count: { $sum: 1 } } },
+//     ]);
+//     const pendingByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
+//     approvalBreakdownAgg.forEach(({ _id, count }) => {
+//       if (_id === 1) pendingByRole.staff = count;
+//       if (_id === 2) pendingByRole.teamLead = count;
+//       if (_id === 3) pendingByRole.owner = count;
+//       pendingByRole.total += count;
+//     });
+
+//     const approvalCompletedBreakdownAgg = await Media.aggregate([
+//       { $match: { status: 1 } },
+//       { $unwind: "$rentalDue" },
+//       {
+//         $match: {
+//           "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
+//         },
+//       },
+//       { $unwind: "$rentalDue.approvalSteps" },
+//       { $match: { "rentalDue.approvalSteps.status": 2 } },
+//       {
+//         $group: {
+//           _id: "$rentalDue.approvalSteps.role",
+//           count: { $sum: 1 },
+//         },
+//       },
+//     ]);
+//     const approvedByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
+//     approvalCompletedBreakdownAgg.forEach(({ _id, count }) => {
+//       if (_id === 1) approvedByRole.staff = count;
+//       if (_id === 2) approvedByRole.teamLead = count;
+//       if (_id === 3) approvedByRole.owner = count;
+//       approvedByRole.total += count;
+//     });
+
+//     // ═══════════════════════════════════════════════════════════
+//     // SECTION B — LANDOWNER-GROUPED LIST (was site-based, now
+//     // grouped by landOwnerMasterId. Pagination applies to OWNERS.)
+//     // ═══════════════════════════════════════════════════════════
+
+//     const isPastPendingByRoleCond = {
+//       $and: [
+//         { $lt: ["$rentalPayment.nextBillingDate", monthStart] },
+//         {
+//           $let: {
+//             vars: {
+//               matchingEntry: {
+//                 $first: {
+//                   $filter: {
+//                     input: { $ifNull: ["$rentalDue", []] },
+//                     as: "rd",
+//                     cond: {
+//                       $eq: ["$$rd.dueDate", "$rentalPayment.nextBillingDate"],
+//                     },
+//                   },
+//                 },
+//               },
+//             },
+//             in:
+//               targetRole === null
+//                 ? { $ne: ["$$matchingEntry.approvalStatus", 3] }
+//                 : {
+//                     $let: {
+//                       vars: {
+//                         roleStep: {
+//                           $first: {
+//                             $filter: {
+//                               input: {
+//                                 $ifNull: ["$$matchingEntry.approvalSteps", []],
+//                               },
+//                               as: "s",
+//                               cond: { $eq: ["$$s.role", targetRole] },
+//                             },
+//                           },
+//                         },
+//                       },
+//                       in: {
+//                         $and: [
+//                           { $ne: ["$$matchingEntry.approvalStatus", 3] },
+//                           { $not: [{ $in: ["$$roleStep.status", [2, 3]] }] },
+//                         ],
+//                       },
+//                     },
+//                   },
+//           },
+//         },
+//       ],
+//     };
+
+//     const listMatch = { ...mediaMatch };
+//     const showPast = Number(isPastPending) === 1;
+//     const showCurrent =
+//       Number(isApproved) === 1 ||
+//       Number(isPending) === 1 ||
+//       Number(isOverdue) === 1 ||
+//       (!showPast && !isApproved && !isPending && !isOverdue);
+
+//     if (showPast && showCurrent) {
+//       listMatch.$or = [
+//         monthOrCondition,
+//         { "rentalPayment.nextBillingDate": { $lt: monthStart } },
+//       ];
+//     } else if (showPast) {
+//       listMatch["rentalPayment.nextBillingDate"] = { $lt: monthStart };
+//     } else {
+//       listMatch.$and = [monthOrCondition];
+//     }
+
+//     const listPipeline = [
+//       { $match: listMatch },
+//       { $match: relevantToRoleMatch },
+//       {
+//         $addFields: {
+//           isApprovedThisMonth: hasRoleApprovedCond,
+//           isClosedOverall: isClosedOverallCond,
+//           hasRoleActed: hasRoleActedCond,
+//           isOverdueGlobally: { $eq: ["$rentalPayment.status", 3] },
+//           isPastPendingByRole: isPastPendingByRoleCond,
+//         },
+//       },
+//       {
+//         $addFields: {
+//           isOverdueThisMonth: {
+//             $and: [
+//               { $not: ["$isApprovedThisMonth"] },
+//               { $not: ["$isClosedOverall"] },
+//               { $not: ["$hasRoleActed"] },
+//               { $eq: ["$isOverdueGlobally", true] },
+//             ],
+//           },
+//         },
+//       },
+//       {
+//         $addFields: {
+//           isPendingThisMonth: {
+//             $and: [
+//               { $not: ["$isApprovedThisMonth"] },
+//               { $not: ["$isClosedOverall"] },
+//               { $not: ["$hasRoleActed"] },
+//               { $not: ["$isOverdueGlobally"] },
+//               { $not: ["$isPastPendingByRole"] },
+//             ],
+//           },
+//         },
+//       },
+//     ];
+
+//     const orFilters = [];
+//     if (Number(isOverdue) === 1) orFilters.push({ isOverdueThisMonth: true });
+//     if (Number(isPending) === 1) {
+//       orFilters.push({ isPendingThisMonth: true });
+//       orFilters.push({ isOverdueThisMonth: true });
+//     }
+//     if (Number(isApproved) === 1) orFilters.push({ isApprovedThisMonth: true });
+//     if (Number(isPastPending) === 1)
+//       orFilters.push({ isPastPendingByRole: true });
+
+//     if (orFilters.length > 0) {
+//       listPipeline.push({ $match: { $or: orFilters } });
+//     }
+
+//     // ✅ No $skip/$limit here — pagination happens AFTER grouping by
+//     // owner below, so a site whose owner sits on a page boundary
+//     // never gets split across pages.
+//     listPipeline.push({
+//       $project: {
+//         mediaCode: 1,
+//         mediaName: 1,
+//         city: 1,
+//         landOwners: 1,
+//         rentalPayment: 1,
+//         agreement: 1,
+//         agreementDocVerification: 1,
+//         verificationProgressHistory: 1,
+//         gstApplicableFlag: 1,
+//         rentalDue: 1,
+//         updatedAt: 1,
+//       },
+//     });
+
+//     const sites = await Media.aggregate(listPipeline);
+
+//     const isSameCycle = (a, b) => {
+//       if (!a || !b) return false;
+//       const t1 = new Date(a).getTime();
+//       const t2 = new Date(b).getTime();
+//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
+//     };
+
+//     const ownerMap = new Map();
+
+//     for (const site of sites) {
+//       if (!Array.isArray(site.landOwners)) continue;
+
+//       const currentCycle = getCurrentCycle(site.rentalPayment?.nextBillingDate);
+//       const cycleVerifications = (site.agreementDocVerification || []).filter(
+//         (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+//       );
+//       const staffVerified = cycleVerifications.some((h) => h.verifiedByRole === ROLE.STAFF);
+//       const teamLeadVerified = cycleVerifications.some((h) => h.verifiedByRole === ROLE.TEAM_LEAD);
+//       const ownerVerified = cycleVerifications.some((h) => h.verifiedByRole === ROLE.OWNER);
+//       const verifiedCount = [staffVerified, teamLeadVerified, ownerVerified].filter(Boolean).length;
+//       const highestVerifiedRole = ownerVerified
+//         ? ROLE.OWNER
+//         : teamLeadVerified
+//           ? ROLE.TEAM_LEAD
+//           : staffVerified
+//             ? ROLE.STAFF
+//             : null;
+
+//       for (const owner of site.landOwners) {
+//         if (!owner.landOwnerMasterId) continue;
+//         const key = String(owner.landOwnerMasterId);
+
+//         if (!ownerMap.has(key)) {
+//           ownerMap.set(key, {
+//             landOwnerMasterId: owner.landOwnerMasterId,
+//             landOwnerName: owner.name,
+//             phone: owner.phone,
+//             totalSites: 0,
+//             totalShareAmount: 0,
+//             totalGstAmount: 0,
+//             totalNetPayableToOwner: 0,
+//             latestUpdatedAt: site.updatedAt,
+//             sites: [],
+//           });
+//         }
+
+//         const bucket = ownerMap.get(key);
+//         bucket.totalSites += 1;
+//         bucket.totalShareAmount += owner.shareAmount || 0;
+//         bucket.totalGstAmount += owner.gstAmount || 0;
+//         bucket.totalNetPayableToOwner += owner.netPayableToOwner || 0;
+//         if (new Date(site.updatedAt) > new Date(bucket.latestUpdatedAt)) {
+//           bucket.latestUpdatedAt = site.updatedAt;
+//         }
+
+//         bucket.sites.push({
+//           mediaId: site._id,
+//           mediaCode: site.mediaCode,
+//           mediaName: site.mediaName,
+//           city: site.city,
+//           paymentCategory: owner.paymentCategory,
+//           shareAmount: owner.shareAmount || 0,
+//           gstAmount: owner.gstAmount || 0,
+//           tdsAmount: owner.tdsAmount || 0,
+//           netPayableToOwner: owner.netPayableToOwner || 0,
+//           dueStatus: site.rentalPayment?.status,
+//           dueStatusLabel: STATUS_LABEL[site.rentalPayment?.status] || "",
+//           paymentFrequency: site.rentalPayment?.paymentFrequency,
+//           paymentFrequencyLabel: FREQ_LABEL[site.rentalPayment?.paymentFrequency] || "",
+//           nextBillingDate: site.rentalPayment?.nextBillingDate,
+//           lastBillPaidDate: site.rentalPayment?.lastBillPaidDate,
+//           gstApplicableDisplay: resolveGstApplicable(site),
+//           verificationProgress: {
+//             currentCycle: formatDate(currentCycle),
+//             staffVerified,
+//             teamLeadVerified,
+//             ownerVerified,
+//             verifiedCount,
+//             isComplete: verifiedCount >= 2,
+//             highestVerifiedRole,
+//           },
+//           agreementPeriod: {
+//             startDate: site.agreement?.startDate,
+//             endDate: site.agreement?.endDate,
+//           },
+//         });
+//       }
+//     }
+
+//     let allOwners = Array.from(ownerMap.values());
+
+//     // ✅ edit-mode stability — same principle as the site-based list:
+//     // when edit === 1, sort by landOwnerMasterId (stable, never
+//     // reshuffles) instead of latestUpdatedAt (which jumps the moment
+//     // any of the owner's sites gets edited).
+//     if (Number(edit) === 1) {
+//       allOwners.sort((a, b) =>
+//         String(a.landOwnerMasterId).localeCompare(String(b.landOwnerMasterId)),
+//       );
+//     } else {
+//       allOwners.sort((a, b) => new Date(b.latestUpdatedAt) - new Date(a.latestUpdatedAt));
+//     }
+
+//     allOwners = allOwners.map(({ latestUpdatedAt, ...rest }) => rest);
+
+//     const startIdx = (pageNumbers - 1) * pageSize;
+//     const pagedOwners = allOwners.slice(startIdx, startIdx + pageSize);
+
+//     // ═══════════════════════════════════════════════════════════
+//     // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is now
+//     // the landowner-grouped, paginated array.
+//     // ═══════════════════════════════════════════════════════════
+//     return res.status(200).json({
+//       success: true,
+//       value: {
+//         totalSites,
+//         dueThisMonth,
+//         dueAmountOpen,
+//         overDue: { siteCount: overDueSiteCount, amount: overDueAmountTotal },
+//         approvedCount,
+//         approvedAmountTotal,
+//         pendingCount,
+//         pendingAmountTotal,
+//         pastPendingApproval,
+//         pendingApproval: {
+//           staff: pendingByRole.staff,
+//           teamLead: pendingByRole.teamLead,
+//           owner: pendingByRole.owner,
+//           total: pendingByRole.total,
+//         },
+//         approvalBreakdown: {
+//           staff: approvedByRole.staff,
+//           teamLead: approvedByRole.teamLead,
+//           owner: approvedByRole.owner,
+//           total: approvedByRole.total,
+//         },
+//         pagination: {
+//           count: pageSize,
+//           pageNumber: pageNumbers,
+//           totalCount: allOwners.length,
+//           totalPages: Math.ceil(allOwners.length / pageSize),
+//         },
+//       },
+//       data: pagedOwners,
+//     });
+//   } catch (err) {
+//     return res
+//       .status(500)
+//       .json({ success: false, message: "Server error", error: err.message });
+//   }
+// };
+
+
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const {
@@ -2976,8 +3783,13 @@ exports.getRentalDueListWithStats = async (req, res) => {
     });
 
     // ═══════════════════════════════════════════════════════════
-    // SECTION B — LANDOWNER-GROUPED LIST (was site-based, now
-    // grouped by landOwnerMasterId. Pagination applies to OWNERS.)
+    // SECTION B — LANDOWNER-GROUPED LIST, with FULL SITE DETAIL
+    // nested inside each owner's sites[] entry (same field set as
+    // the original site-based `enriched` response — mediaType,
+    // totalSqFt, appraisal, frontView, full landOwners[], history
+    // arrays, etc.) PLUS the owner-specific slice (paymentCategory,
+    // shareAmount, gstAmount, tdsAmount, netPayableToOwner) laid on
+    // top. Pagination applies to OWNERS.
     // ═══════════════════════════════════════════════════════════
 
     const isPastPendingByRoleCond = {
@@ -3104,17 +3916,29 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // ✅ No $skip/$limit here — pagination happens AFTER grouping by
     // owner below, so a site whose owner sits on a page boundary
     // never gets split across pages.
+    // ✅ Full field set projected — same fields the site-based list
+    // returns (mediaType, state, location, rentalStatus, totalSqFt,
+    // appraisal, frontView, etc.) so each owner's sites[] entry can
+    // carry the FULL site detail, not a trimmed subset.
     listPipeline.push({
       $project: {
         mediaCode: 1,
         mediaName: 1,
+        mediaType: 1,
         city: 1,
+        state: 1,
+        location: 1,
+        rentalStatus: 1,
+        totalSqFt: 1,
         landOwners: 1,
+        appraisal: 1,
+        frontView: 1,
         rentalPayment: 1,
         agreement: 1,
         agreementDocVerification: 1,
         verificationProgressHistory: 1,
         gstApplicableFlag: 1,
+        gstBalanceHistory: 1,
         rentalDue: 1,
         updatedAt: 1,
       },
@@ -3129,19 +3953,49 @@ exports.getRentalDueListWithStats = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    const ownerMap = new Map();
+    // ✅ SAME buildVerificationProgress as the site-based list — reused
+    // as-is so verificationProgress inside each site entry matches
+    // exactly what the original site-based response produced.
+    const buildVerificationProgress = (item, targetCycleDate) => {
+      const targetCycleStr = getCurrentCycle(targetCycleDate);
 
-    for (const site of sites) {
-      if (!Array.isArray(site.landOwners)) continue;
-
-      const currentCycle = getCurrentCycle(site.rentalPayment?.nextBillingDate);
-      const cycleVerifications = (site.agreementDocVerification || []).filter(
-        (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
+      const historyForMonth = (item.verificationProgressHistory || []).filter(
+        (v) => {
+          if (!v.cycle || !targetCycleStr) return false;
+          return getCurrentCycle(v.cycle) === targetCycleStr;
+        },
       );
-      const staffVerified = cycleVerifications.some((h) => h.verifiedByRole === ROLE.STAFF);
-      const teamLeadVerified = cycleVerifications.some((h) => h.verifiedByRole === ROLE.TEAM_LEAD);
-      const ownerVerified = cycleVerifications.some((h) => h.verifiedByRole === ROLE.OWNER);
-      const verifiedCount = [staffVerified, teamLeadVerified, ownerVerified].filter(Boolean).length;
+
+      if (historyForMonth.length > 0) {
+        const latest = historyForMonth[historyForMonth.length - 1];
+        return {
+          currentCycle: latest.currentCycleLabel,
+          staffVerified: latest.staffVerified,
+          teamLeadVerified: latest.teamLeadVerified,
+          ownerVerified: latest.ownerVerified,
+          verifiedCount: latest.verifiedCount,
+          isComplete: latest.isComplete,
+          highestVerifiedRole: latest.highestVerifiedRole,
+        };
+      }
+
+      const cycleVerifications = (item.agreementDocVerification || []).filter(
+        (h) => {
+          if (!h.isVerified || !h.cycle || !targetCycleStr) return false;
+          return getCurrentCycle(h.cycle) === targetCycleStr;
+        },
+      );
+
+      const staffVerified = cycleVerifications.some(
+        (h) => h.verifiedByRole === ROLE.STAFF,
+      );
+      const teamLeadVerified = cycleVerifications.some(
+        (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+      );
+      const ownerVerified = cycleVerifications.some(
+        (h) => h.verifiedByRole === ROLE.OWNER,
+      );
+
       const highestVerifiedRole = ownerVerified
         ? ROLE.OWNER
         : teamLeadVerified
@@ -3149,6 +4003,130 @@ exports.getRentalDueListWithStats = async (req, res) => {
           : staffVerified
             ? ROLE.STAFF
             : null;
+
+      const verifiedCount = [
+        staffVerified,
+        teamLeadVerified,
+        ownerVerified,
+      ].filter(Boolean).length;
+
+      const cycleString = getCurrentCycle(targetCycleDate);
+
+      return {
+        currentCycle: formatDate(cycleString),
+        staffVerified,
+        teamLeadVerified,
+        ownerVerified,
+        verifiedCount,
+        isComplete: verifiedCount >= 2,
+        highestVerifiedRole,
+      };
+    };
+
+    // ✅ SAME per-site enrichment as the site-based list — builds the
+    // FULL detail object for one site (identical shape to the
+    // original `enriched` map entries).
+    const buildFullSiteDetail = (item) => {
+      const isActuallyPastPending =
+        item.rentalPayment?.nextBillingDate &&
+        new Date(item.rentalPayment.nextBillingDate) < monthStart;
+
+      const usePastDetails =
+        Number(isPastPending) === 1 && isActuallyPastPending;
+      const targetCycleDate = usePastDetails
+        ? item.rentalPayment.nextBillingDate
+        : (() => {
+            const monthlyEntry = (item.rentalDue || []).find((e) => {
+              if (!e.dueDate) return false;
+              const d = new Date(e.dueDate);
+              return d >= monthStart && d <= monthEnd;
+            });
+            if (monthlyEntry) return monthlyEntry.dueDate;
+            if (item.rentalPayment?.nextBillingDate) {
+              const nbd = new Date(item.rentalPayment.nextBillingDate);
+              if (nbd >= monthStart && nbd <= monthEnd)
+                return item.rentalPayment.nextBillingDate;
+            }
+            return monthStart;
+          })();
+
+      const filteredRentalDueEntries = (item.rentalDue || []).filter(
+        (entry) => {
+          if (!entry.dueDate) return false;
+          if (usePastDetails) {
+            return (
+              new Date(entry.dueDate).getTime() ===
+              new Date(item.rentalPayment.nextBillingDate).getTime()
+            );
+          }
+          const entryDate = new Date(entry.dueDate);
+          return entryDate >= monthStart && entryDate <= monthEnd;
+        },
+      );
+
+      const filteredAgreementDocVerificationHistory = (
+        item.agreementDocVerification || []
+      ).filter((h) => {
+        if (!h.cycle) return false;
+        if (usePastDetails) {
+          return (
+            new Date(h.cycle).getTime() ===
+            new Date(item.rentalPayment.nextBillingDate).getTime()
+          );
+        }
+        const cycleDate = new Date(h.cycle);
+        return cycleDate >= monthStart && cycleDate <= monthEnd;
+      });
+
+      return {
+        _id: item._id,
+        mediaCode: item.mediaCode,
+        mediaName: item.mediaName,
+        mediaType: item.mediaType,
+        city: item.city,
+        state: item.state,
+        location: item.location,
+        rentalStatus: item.rentalStatus,
+        totalSqFt: item.totalSqFt,
+        totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
+        netPayable: item.rentalPayment?.netPayable || 0,
+        gstApplicable: item.rentalPayment?.gstApplicable || 0,
+        gstAmount: item.rentalPayment?.gstAmount || 0,
+        landOwners: item.landOwners,
+        appraisal: item.appraisal,
+        frontView: item.frontView,
+        paymentFrequency: item.rentalPayment?.paymentFrequency,
+        customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
+        paymentFrequencyLabel:
+          FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
+        nextBillingDate: item.rentalPayment?.nextBillingDate,
+        lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+        dueStatus: item.rentalPayment?.status,
+        dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+        gstApplicableDisplay: resolveGstApplicable(item),
+        agreementPeriod: {
+          startDate: item.agreement?.startDate,
+          endDate: item.agreement?.endDate,
+          agreementPDF: item.agreement?.agreementPDF,
+        },
+        agreementDocVerificationHistory:
+          filteredAgreementDocVerificationHistory,
+        verificationProgress: buildVerificationProgress(item, targetCycleDate),
+        verificationProgressHistory: item.verificationProgressHistory || [],
+        gstBalanceHistory: item.gstBalanceHistory || [],
+        rentalDueEntries: filteredRentalDueEntries,
+      };
+    };
+
+    const ownerMap = new Map();
+
+    for (const site of sites) {
+      if (!Array.isArray(site.landOwners)) continue;
+
+      // Build the full site detail ONCE per site — reused for every
+      // owner on that site, so the (potentially large) history arrays
+      // aren't recomputed per-owner.
+      const fullSiteDetail = buildFullSiteDetail(site);
 
       for (const owner of site.landOwners) {
         if (!owner.landOwnerMasterId) continue;
@@ -3177,36 +4155,21 @@ exports.getRentalDueListWithStats = async (req, res) => {
           bucket.latestUpdatedAt = site.updatedAt;
         }
 
+        // ✅ MERGED — full site detail (mediaType, totalSqFt, appraisal,
+        // frontView, full landOwners[], history arrays, etc.) PLUS the
+        // owner-specific slice (paymentCategory, shareAmount, gstAmount,
+        // tdsAmount, netPayableToOwner) laid on top. The owner-specific
+        // fields intentionally OVERRIDE any same-named field coming
+        // from fullSiteDetail (e.g. gstAmount) so each entry reads as
+        // "this owner's amount on this site", not the site's total.
         bucket.sites.push({
+          ...fullSiteDetail,
           mediaId: site._id,
-          mediaCode: site.mediaCode,
-          mediaName: site.mediaName,
-          city: site.city,
           paymentCategory: owner.paymentCategory,
           shareAmount: owner.shareAmount || 0,
           gstAmount: owner.gstAmount || 0,
           tdsAmount: owner.tdsAmount || 0,
           netPayableToOwner: owner.netPayableToOwner || 0,
-          dueStatus: site.rentalPayment?.status,
-          dueStatusLabel: STATUS_LABEL[site.rentalPayment?.status] || "",
-          paymentFrequency: site.rentalPayment?.paymentFrequency,
-          paymentFrequencyLabel: FREQ_LABEL[site.rentalPayment?.paymentFrequency] || "",
-          nextBillingDate: site.rentalPayment?.nextBillingDate,
-          lastBillPaidDate: site.rentalPayment?.lastBillPaidDate,
-          gstApplicableDisplay: resolveGstApplicable(site),
-          verificationProgress: {
-            currentCycle: formatDate(currentCycle),
-            staffVerified,
-            teamLeadVerified,
-            ownerVerified,
-            verifiedCount,
-            isComplete: verifiedCount >= 2,
-            highestVerifiedRole,
-          },
-          agreementPeriod: {
-            startDate: site.agreement?.startDate,
-            endDate: site.agreement?.endDate,
-          },
         });
       }
     }
@@ -3232,7 +4195,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     // ═══════════════════════════════════════════════════════════
     // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is now
-    // the landowner-grouped, paginated array.
+    // the landowner-grouped, paginated array with full site detail.
     // ═══════════════════════════════════════════════════════════
     return res.status(200).json({
       success: true,
