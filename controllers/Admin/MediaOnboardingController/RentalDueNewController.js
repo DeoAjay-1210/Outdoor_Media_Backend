@@ -167,6 +167,229 @@ function computeGstSplit(media, withGst) {
   };
 }
 
+// async function sendRentalDueApprovalMail(media, entry) {
+//   try {
+//     const toMail = process.env.T0_EMail;
+//     const ccMail = process.env.CC_EMail;
+//     const mailMode = process.env.MAIL_MODE || "development";
+//     const formatDMY = (date) =>
+//       date
+//         ? new Date(date).toLocaleDateString("en-GB").replace(/\//g, "-")
+//         : null;
+
+//     const rp = media.rentalPayment || {};
+//     const appraisal = media.appraisal || {};
+//     const agreement = media.agreement || {};
+
+//     const gstHoldValue = Number(entry?.withGst) === 1 ? 1 : 0;
+
+//     const landOwnersPayload = (media.landOwners || []).map((owner) => ({
+//       name: owner.name || "",
+//       phone: owner.phone || "",
+//       bankName: owner.bankName || "",
+//       ifsc: owner.ifsc || "",
+//       accountNumber: owner.accountNumber || "",
+//       panNumber: owner.panNumber || "",
+//       paymentCategory: owner.paymentCategory || 0,
+//       typeShare: owner.typeShare || 0,
+//       shareAmount: owner.shareAmount || 0,
+//       onlineMode: owner.onlineMode || 0,
+//       onlineAmount: owner.onlineAmount || 0,
+//       cashAmount: owner.cashAmount || 0,
+//       gstApplicable: owner.gstApplicable || 0,
+//       gstPercentage: owner.gstPercentage || 0,
+//       gstAmount: owner.gstAmount || 0,
+//       tdsApplicable: owner.tdsApplicable || 0,
+//       tdsPercentage: owner.tdsPercentage || 0,
+//       tdsAmount: owner.tdsAmount || 0,
+//       totalAmountWithGst: owner.totalAmountWithGst || 0,
+//       tdsHold: 0,
+//       gstHold: gstHoldValue,
+//     }));
+
+//     let previousRentValue = 0;
+//     if (appraisal.lastAppraisalDate && Array.isArray(appraisal.history)) {
+//       const lastAppraisalKey = new Date(appraisal.lastAppraisalDate).getTime();
+//       const matchingEntry = appraisal.history.find(
+//         (h) =>
+//           h.appraisalDate &&
+//           new Date(h.appraisalDate).getTime() === lastAppraisalKey,
+//       );
+//       previousRentValue = Number(matchingEntry?.previousRent || 0);
+//     }
+
+//     let appraisalPayload = {};
+//     if (appraisal.lastAppraisalDate) {
+//       const lastAppraisalDate = new Date(appraisal.lastAppraisalDate);
+//       const today = new Date();
+//       const isCurrentMonth =
+//         lastAppraisalDate.getUTCFullYear() === today.getUTCFullYear() &&
+//         lastAppraisalDate.getUTCMonth() === today.getUTCMonth();
+
+//       if (isCurrentMonth) {
+//         appraisalPayload = {
+//           applicable: appraisal.applicable || 0,
+//           type: appraisal.type || 0,
+//           percentage: appraisal.percentage || 0,
+//           fixedAmount: appraisal.fixedAmount || 0,
+//           frequency: appraisal.frequency || 0,
+//           currentRent: previousRentValue,
+//           appraisalAmount: appraisal.appraisalAmount || 0,
+//           totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
+//           lastAppraisalDate: formatDMY(appraisal.lastAppraisalDate),
+//           nextAppraisalDate: formatDMY(appraisal.nextAppraisalDate),
+//         };
+//       }
+//     }
+//     const proofOfCampaignPayload = entry?.proofOfCampaign?.filePath
+//       ? [entry.proofOfCampaign.filePath]
+//       : [];
+//     const mailPayload = {
+//       mailtype: "cmdapproval",
+//       to: [toMail],
+//       data: {
+//         _id: media._id,
+//         mediaCode: media.mediaCode || "",
+//         mediaName: media.mediaName || "",
+//         mediaType: media.mediaType || "",
+//         state: media.state || "",
+//         city: media.city || "",
+//         location: media.location || "",
+//         width: media.width || 0,
+//         height: media.height || 0,
+//         status: media.status || 0,
+//         totalSqFt: media.totalSqFt || 0,
+//         numberOfLandOwners: media.numberOfLandOwners || 0,
+//         proof_of_campaign: proofOfCampaignPayload,
+//         rentalPayment: {
+//           totalRentalAmount: rp.totalRentalAmount || 0,
+//           gstApplicable: rp.gstApplicable || 0,
+//           gstNumber: rp.gstNumber || "",
+//           gstPercentage: rp.gstPercentage || 0,
+//           gstAmount: rp.gstAmount || 0,
+//           totalRentalAmountWithGst: rp.totalRentalAmountWithGst || 0,
+//           netPayable: rp.netPayable || 0,
+//           paymentFrequency: rp.paymentFrequency || 0,
+//           customPaymentFrequency: rp.rentalPayment || 0,
+//           lastBillPaidDate: formatDMY(rp.lastBillPaidDate),
+//           nextBillingDate: formatDMY(rp.nextBillingDate),
+//           balanceGstAmount: rp.balanceGstAmount || 0,
+//           status: rp.status || 0,
+//         },
+//         appraisal: appraisalPayload,
+//         agreement: {
+//           startDate: formatDMY(agreement.startDate),
+//           endDate: formatDMY(agreement.endDate),
+//           reminderBeforeExpiry: agreement.reminderBeforeExpiry || 0,
+//           advanceRent: agreement.advanceRent || 0,
+//           status: agreement.status || 0,
+//         },
+//         landOwners: landOwnersPayload,
+//       },
+//     };
+
+//     console.log(
+//       "📧 RENTAL DUE MAIL PAYLOAD:",
+//       JSON.stringify(mailPayload, null, 2),
+//     );
+//     if (mailMode !== "production") {
+//       console.log(
+//         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`,
+//       );
+//       return {
+//         mailtype: "cmdapproval",
+//         to: [toMail],
+//         cc: [ccMail],
+//         success: true,
+//         sent: false,
+//         statusCode: 200,
+//         message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
+//         data: mailPayload.data,
+//       };
+//     }
+//     const response = await axios.post(
+//       "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
+//       mailPayload,
+//       { headers: { "Content-Type": "application/json" } },
+//     );
+
+//     const isMailSuccess =
+//       response.data &&
+//       (response.data.success === true ||
+//         response.data.status === "success" ||
+//         response.status === 200);
+
+//     return {
+//       mailtype: "cmdapproval",
+//       to: [toMail],
+//       cc: [ccMail],
+//       success: !!isMailSuccess,
+//       sent: !!isMailSuccess,
+//       statusCode: response.status || (isMailSuccess ? 200 : 500),
+//       message: isMailSuccess
+//         ? "Rental due approval mail sent successfully"
+//         : "Rental due approval mail failed",
+//       data: mailPayload.data,
+//     };
+//   } catch (mailErr) {
+//     console.error(
+//       "❌ Rental due approval mail error:",
+//       mailErr?.message || mailErr,
+//     );
+//     return {
+//       mailtype: "cmdapproval",
+//       to: [process.env.T0_EMail],
+//       cc: [process.env.CC_EMail],
+//       success: false,
+//       sent: false,
+//       statusCode: 500,
+//       message: mailErr?.message || "Unknown mail error",
+//       data: null,
+//     };
+//   }
+// }
+// ─────────────────────────────────────────────────────────────
+// Helper — same "only include appraisal if lastAppraisalDate falls
+// in the CURRENT calendar month" rule the current site already uses,
+// extracted so it can be reused for both the current site AND every
+// linked site.
+// ─────────────────────────────────────────────────────────────
+function buildAppraisalPayloadIfDueThisMonth(appraisal, formatDMY) {
+  if (!appraisal || !appraisal.lastAppraisalDate) return {};
+
+  let previousRentValue = 0;
+  if (Array.isArray(appraisal.history)) {
+    const lastAppraisalKey = new Date(appraisal.lastAppraisalDate).getTime();
+    const matchingEntry = appraisal.history.find(
+      (h) =>
+        h.appraisalDate &&
+        new Date(h.appraisalDate).getTime() === lastAppraisalKey,
+    );
+    previousRentValue = Number(matchingEntry?.previousRent || 0);
+  }
+
+  const lastAppraisalDate = new Date(appraisal.lastAppraisalDate);
+  const today = new Date();
+  const isCurrentMonth =
+    lastAppraisalDate.getUTCFullYear() === today.getUTCFullYear() &&
+    lastAppraisalDate.getUTCMonth() === today.getUTCMonth();
+
+  if (!isCurrentMonth) return {};
+
+  return {
+    applicable: appraisal.applicable || 0,
+    type: appraisal.type || 0,
+    percentage: appraisal.percentage || 0,
+    fixedAmount: appraisal.fixedAmount || 0,
+    frequency: appraisal.frequency || 0,
+    currentRent: previousRentValue,
+    appraisalAmount: appraisal.appraisalAmount || 0,
+    totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
+    lastAppraisalDate: formatDMY(appraisal.lastAppraisalDate),
+    nextAppraisalDate: formatDMY(appraisal.nextAppraisalDate),
+  };
+}
+
 async function sendRentalDueApprovalMail(media, entry) {
   try {
     const toMail = process.env.T0_EMail;
@@ -183,29 +406,99 @@ async function sendRentalDueApprovalMail(media, entry) {
 
     const gstHoldValue = Number(entry?.withGst) === 1 ? 1 : 0;
 
-    const landOwnersPayload = (media.landOwners || []).map((owner) => ({
-      name: owner.name || "",
-      phone: owner.phone || "",
-      bankName: owner.bankName || "",
-      ifsc: owner.ifsc || "",
-      accountNumber: owner.accountNumber || "",
-      panNumber: owner.panNumber || "",
-      paymentCategory: owner.paymentCategory || 0,
-      typeShare: owner.typeShare || 0,
-      shareAmount: owner.shareAmount || 0,
-      onlineMode: owner.onlineMode || 0,
-      onlineAmount: owner.onlineAmount || 0,
-      cashAmount: owner.cashAmount || 0,
-      gstApplicable: owner.gstApplicable || 0,
-      gstPercentage: owner.gstPercentage || 0,
-      gstAmount: owner.gstAmount || 0,
-      tdsApplicable: owner.tdsApplicable || 0,
-      tdsPercentage: owner.tdsPercentage || 0,
-      tdsAmount: owner.tdsAmount || 0,
-      totalAmountWithGst: owner.totalAmountWithGst || 0,
-      tdsHold: 0,
-      gstHold: gstHoldValue,
-    }));
+    // ✅ NEW — collect every OTHER site referenced across all owners on
+    // this Media (landOwners[].linkedSites[].mediaId), one DB call for
+    // all of them combined, so we don't run N queries for N owners.
+    const allLinkedMediaIds = new Set();
+    (media.landOwners || []).forEach((owner) => {
+      (owner.linkedSites || []).forEach((site) => {
+        if (site.mediaId) allLinkedMediaIds.add(String(site.mediaId));
+      });
+    });
+
+    let linkedMediaDocsById = {};
+    if (allLinkedMediaIds.size > 0) {
+      const linkedMediaDocs = await MediaOnboarding.find(
+        { _id: { $in: Array.from(allLinkedMediaIds) } },
+        "mediaCode mediaName rentalPayment agreement appraisal",
+      ).lean();
+
+      linkedMediaDocs.forEach((doc) => {
+        linkedMediaDocsById[String(doc._id)] = doc;
+      });
+    }
+
+    const landOwnersPayload = (media.landOwners || []).map((owner) => {
+      // ✅ NEW — build linkedSites for THIS owner, merging the
+      // lightweight snapshot already stored on owner.linkedSites
+      // (paymentCategory/shareAmount/cashAmount/onlineAmount) with the
+      // FULL rentalPayment/agreement/appraisal fetched above for each
+      // linked site.
+      const linkedSitesPayload = (owner.linkedSites || []).map((site) => {
+        const fullSite = linkedMediaDocsById[String(site.mediaId)];
+
+        return {
+          mediaId: site.mediaId,
+          mediaCode: site.mediaCode || fullSite?.mediaCode || "",
+          mediaName: site.mediaName || fullSite?.mediaName || "",
+          paymentCategory: site.paymentCategory || 0,
+          shareAmount: site.shareAmount || 0,
+          cashAmount: site.cashAmount || 0,
+          onlineAmount: site.onlineAmount || 0,
+          rentalPayment: {
+            totalRentalAmount: fullSite?.rentalPayment?.totalRentalAmount || 0,
+            gstApplicable: fullSite?.rentalPayment?.gstApplicable || 0,
+            gstAmount: fullSite?.rentalPayment?.gstAmount || 0,
+            netPayable: fullSite?.rentalPayment?.netPayable || 0,
+            paymentFrequency: fullSite?.rentalPayment?.paymentFrequency || 0,
+            lastBillPaidDate: formatDMY(fullSite?.rentalPayment?.lastBillPaidDate),
+            nextBillingDate: formatDMY(fullSite?.rentalPayment?.nextBillingDate),
+            balanceGstAmount: fullSite?.rentalPayment?.balanceGstAmount || 0,
+            status: fullSite?.rentalPayment?.status || 0,
+          },
+          agreement: {
+            startDate: formatDMY(fullSite?.agreement?.startDate),
+            endDate: formatDMY(fullSite?.agreement?.endDate),
+            reminderBeforeExpiry: fullSite?.agreement?.reminderBeforeExpiry || 0,
+            advanceRent: fullSite?.agreement?.advanceRent || 0,
+            status: fullSite?.agreement?.status || 0,
+          },
+          // ✅ same "due this month" rule as the current site's own appraisal
+          appraisal: buildAppraisalPayloadIfDueThisMonth(
+            fullSite?.appraisal,
+            formatDMY,
+          ),
+        };
+      });
+
+      return {
+        name: owner.name || "",
+        phone: owner.phone || "",
+        bankName: owner.bankName || "",
+        ifsc: owner.ifsc || "",
+        accountNumber: owner.accountNumber || "",
+        panNumber: owner.panNumber || "",
+        paymentCategory: owner.paymentCategory || 0,
+        typeShare: owner.typeShare || 0,
+        shareAmount: owner.shareAmount || 0,
+        onlineMode: owner.onlineMode || 0,
+        onlineAmount: owner.onlineAmount || 0,
+        cashAmount: owner.cashAmount || 0,
+        gstApplicable: owner.gstApplicable || 0,
+        gstPercentage: owner.gstPercentage || 0,
+        gstAmount: owner.gstAmount || 0,
+        tdsApplicable: owner.tdsApplicable || 0,
+        tdsPercentage: owner.tdsPercentage || 0,
+        tdsAmount: owner.tdsAmount || 0,
+        totalAmountWithGst: owner.totalAmountWithGst || 0,
+        tdsHold: 0,
+        gstHold: gstHoldValue,
+
+        // ✅ NEW — site-linkage info for this owner
+        totalSites: linkedSitesPayload.length + 1, // +1 for THIS current site
+        linkedSites: linkedSitesPayload,
+      };
+    });
 
     let previousRentValue = 0;
     if (appraisal.lastAppraisalDate && Array.isArray(appraisal.history)) {
@@ -241,9 +534,11 @@ async function sendRentalDueApprovalMail(media, entry) {
         };
       }
     }
+
     const proofOfCampaignPayload = entry?.proofOfCampaign?.filePath
       ? [entry.proofOfCampaign.filePath]
       : [];
+
     const mailPayload = {
       mailtype: "cmdapproval",
       to: [toMail],
@@ -348,7 +643,6 @@ async function sendRentalDueApprovalMail(media, entry) {
     };
   }
 }
-
 function addGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.gstAddedToBalance) return;
 

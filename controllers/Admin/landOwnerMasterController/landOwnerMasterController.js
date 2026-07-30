@@ -1,3 +1,4 @@
+
 // const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 // const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 // const { successResponse, errorResponse } = require("../../../utils/response");
@@ -86,7 +87,6 @@
 //   }
 // };
 
-
 // const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
 //   if (!mediaInfo || !mediaInfo.mediaId) return; // no site context — nothing to record
 
@@ -94,7 +94,7 @@
 //     landOwnerMaster.linkedSites = [];
 //   }
 
-//     let existingIdx = landOwnerMaster.linkedSites.findIndex(
+//   let existingIdx = landOwnerMaster.linkedSites.findIndex(
 //     (site) => String(site.mediaId) === String(mediaInfo.mediaId),
 //   );
 
@@ -131,9 +131,7 @@
 //   landOwnerMaster.linkedMediaCount = landOwnerMaster.linkedSites.length;
 // };
 
-
 // const syncOrLinkMediaOwnerToMaster = async (owner, userName, session, mediaInfo) => {
-
 //   sanitizeOwnerFileFields(owner);
 
 //   let landOwnerMaster = null;
@@ -166,7 +164,7 @@
 //       aadharCardNumber: owner.aadharCardNumber,
 //       aadharCardImage: owner.aadharCardImage,
 //       paymentCategory: owner.paymentCategory,
-//       eligibleMode: owner.eligibleMode, 
+//       eligibleMode: owner.eligibleMode,
 //       bankPassbook: owner.bankPassbook,
 //       cancelCheckLeaf: owner.cancelCheckLeaf,
 //       onlineMode: owner.onlineMode,
@@ -203,7 +201,6 @@
 
 //   return landOwnerMaster;
 // };
-
 
 // const correctLinkedSiteAmounts = async (masterId, mediaId, savedOwner, session) => {
 //   if (!masterId || !mediaId) return null;
@@ -250,7 +247,6 @@
 
 //   return landOwnerMaster;
 // };
-
 
 // const computeFinancialFields = (landOwner) => {
 //   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
@@ -306,7 +302,7 @@
 //     gstApplicable === 1 && gstBaseAmount > 0 ? gstPct : 0;
 //   landOwner.gstAmount = gstAmount;
 
-//   // ── NET PAYABLE — the fix ───────────────────────────────
+//   // ── NET PAYABLE ──────────────────────────────────────────
 //   // owner.totalAmountWithGst / netPayableToOwner / netPayable are
 //   // ALWAYS derived here now — they no longer silently stay 0 just
 //   // because the client didn't send them.
@@ -316,11 +312,8 @@
 // };
 
 // // ─────────────────────────────────────────────────────────────
-// // ATTACH UPLOADED FILES FOR A SINGLE OWNER FROM req.files.
-// // Supports three fieldname shapes:
-// //   1) Single owner, flat:      "panCardImage"
-// //   2) Multi owner, bracket:    "landOwners[0][panCardImage]"
-// //   3) Multi owner, dot:        "landOwners[0].panCardImage"
+// // ATTACH UPLOADED FILES FOR THE (single) OWNER FROM req.files.
+// // Supports plain, flat fieldnames only, e.g. "panCardImage".
 // // ─────────────────────────────────────────────────────────────
 // const OWNER_FILE_FIELDS = [
 //   "panCardImage",
@@ -329,28 +322,14 @@
 //   "aadharCardImage",
 // ];
 
-// const attachFilesToOwner = (owner, files, processFile, index) => {
+// const attachFilesToOwner = (owner, files, processFile) => {
 //   OWNER_FILE_FIELDS.forEach((field) => {
-//     let matchedFile = null;
-
-//     if (index === null) {
-//       // single-owner payload — plain field name
-//       matchedFile = files.find((f) => f.fieldname === field);
-//     } else {
-//       // multi-owner payload — bracket OR dot indexed field name
-//       matchedFile = files.find(
-//         (f) =>
-//           f.fieldname === `landOwners[${index}][${field}]` ||
-//           f.fieldname === `landOwners[${index}].${field}`,
-//       );
-//     }
-
+//     const matchedFile = files.find((f) => f.fieldname === field);
 //     if (matchedFile) {
 //       owner[field] = processFile(matchedFile);
 //     }
 //   });
 // };
-
 
 // const sanitizeOwnerFileFields = (owner) => {
 //   OWNER_FILE_FIELDS.forEach((field) => {
@@ -386,7 +365,6 @@
 //   });
 // };
 
-
 // const OWNER_UPDATABLE_FIELDS = [
 //   // profile
 //   "name",
@@ -398,7 +376,7 @@
 //   "panNumber",
 //   "aadharCardNumber",
 //   "paymentCategory",
-//     "eligibleMode",        
+//   "eligibleMode",
 //   "onlineMode",
 //   // files
 //   "panCardImage",
@@ -406,7 +384,7 @@
 //   "cancelCheckLeaf",
 //   "aadharCardImage",
 //   // financial inputs
-//   "typeShare", // ← this was the missing field
+//   "typeShare",
 //   "sharePercentage",
 //   "shareAmount",
 //   "onlineAmount",
@@ -418,49 +396,15 @@
 //   "tdsPercentage", // used as fallback input inside computeFinancialFields
 // ];
 
-
-// const normalizeLandOwnersBody = (body) => {
-//   const dotKeyPattern = /^landOwners\[(\d+)\]\.(.+)$/;
-//   const bracketKeyPattern = /^landOwners\[(\d+)\]\[(.+)\]$/;
-
-//   const foundKeys = Object.keys(body).filter(
-//     (key) => dotKeyPattern.test(key) || bracketKeyPattern.test(key),
-//   );
-
-//   if (foundKeys.length === 0) return body; // nothing to normalize
-
-//   const landOwners = [];
-
-//   foundKeys.forEach((key) => {
-//     const dotMatch = key.match(dotKeyPattern);
-//     const bracketMatch = key.match(bracketKeyPattern);
-//     const match = dotMatch || bracketMatch;
-
-//     const index = Number(match[1]);
-//     const field = match[2];
-//     const value = body[key];
-
-//     if (!landOwners[index]) landOwners[index] = {};
-//     landOwners[index][field] = value;
-
-//     delete body[key]; // remove the flat key now that it's folded in
-//   });
-
-//   body.landOwners = landOwners.filter(Boolean); // drop any sparse holes
-//   return body;
-// };
-
 // // ─────────────────────────────────────────────────────────────
-// // SAVE OR UPDATE A SINGLE OWNER PAYLOAD.
+// // SAVE OR UPDATE THE (single) OWNER PAYLOAD.
 // // Returns the saved LandOwnerMaster document.
 // // ─────────────────────────────────────────────────────────────
 // const saveSingleLandOwner = async (owner, userName, session) => {
 //   // ✅ safety net — strips empty-string/junk values from the 4 file
-//   // fields BEFORE anything is assigned onto a Mongoose document,
-//   // regardless of which entry point (single/multi/dot/bracket) this
-//   // owner payload came through. Fixes "fileType: `` is not a valid
-//   // enum value" when a file field is sent but no actual file was
-//   // uploaded for it.
+//   // fields BEFORE anything is assigned onto a Mongoose document.
+//   // Fixes "fileType: `` is not a valid enum value" when a file field
+//   // is sent but no actual file was uploaded for it.
 //   sanitizeOwnerFileFields(owner);
 
 //   let landOwner;
@@ -479,12 +423,9 @@
 //     }
 
 //     // ✅ ALL updatable owner fields, copied generically from a single
-//     // list — replaces the old hand-picked if-statements, which had
-//     // silently OMITTED `typeShare` (present in the schema, worked
-//     // fine on CREATE via `new LandOwnerMaster(owner)`, but was never
-//     // copied here on UPDATE). Using one shared list means every field
-//     // in the schema is guaranteed to be updatable, and adding a new
-//     // schema field later only requires adding it here once.
+//     // list — every field in the schema is guaranteed to be
+//     // updatable, and adding a new schema field later only requires
+//     // adding it here once.
 //     //
 //     // EXCLUDED on purpose (always DERIVED by computeFinancialFields()
 //     // below, never taken from the client): gstAmount,
@@ -500,13 +441,11 @@
 //     // function for the exact .env-priority logic.
 
 //     // ✅ gstPercentage/gstAmount/totalAmountWithGst/tdsAmount/
-//     // netPayableToOwner/netPayable are ALL derived here — this is
-//     // the fix for netPayable showing 0.
+//     // netPayableToOwner/netPayable are ALL derived here.
 //     computeFinancialFields(landOwner);
 
 //     // ✅ IST audit stamp — same nowIST() pattern as
-//     // mediaOnboardingController.js. Set on EVERY update, regardless
-//     // of which fields changed.
+//     // mediaOnboardingController.js. Set on EVERY update.
 //     landOwner.updatedBy = userName;
 //     landOwner.updatedAt = nowIST();
 
@@ -543,13 +482,17 @@
 //   return landOwner;
 // };
 
-
+// // ─────────────────────────────────────────────────────────────
+// // SINGLE-OBJECT ONLY. req.body IS the owner payload directly.
+// // No landOwners[] array, no multi-owner branch, no dot/bracket
+// // key normalization.
+// // ─────────────────────────────────────────────────────────────
 // const landOwnerSave = async (req, res) => {
 //   const session = await mongoose.startSession();
 //   try {
 //     session.startTransaction();
 
-//     const body = normalizeLandOwnersBody(req.body);
+//     const owner = req.body;
 //     const files = req.files || [];
 //     const processFile =
 //       typeof req.processFile === "function" ? req.processFile : null;
@@ -557,79 +500,21 @@
 //     // same pattern as mediaOnboardingController.js
 //     const userName = req.user?.userName || "Admin";
 
-//     // ✅ After normalization, "landOwners[0].name" style keys become
-//     // a real body.landOwners array. If it ends up with exactly ONE
-//     // entry, treat it as a single-owner save (matches how the
-//     // frontend is sending it — landOwners[0].xxx — but the response
-//     // shape stays consistent with a plain single-owner call).
-//     const isMultiple =
-//       Array.isArray(body.landOwners) && body.landOwners.length > 1;
+//     const isNew = !owner.id;
 
-//     const isSingleViaArray =
-//       Array.isArray(body.landOwners) && body.landOwners.length === 1;
-
-//     if (isSingleViaArray) {
-//       const owner = body.landOwners[0];
-//       const isNew = !owner.id;
-
-//       if (processFile) {
-//         attachFilesToOwner(owner, files, processFile, 0);
-//       }
-
-//       const savedOwner = await saveSingleLandOwner(owner, userName, session);
-
-//       await session.commitTransaction();
-
-//       const message = isNew
-//         ? "LandOwner created successfully"
-//         : "LandOwner updated successfully";
-
-//       return successResponse(res, message, savedOwner, isNew ? 201 : 200);
+//     if (processFile) {
+//       attachFilesToOwner(owner, files, processFile);
 //     }
 
-//     if (isMultiple) {
-//       // ── MULTIPLE OWNERS ─────────────────────────────────────
-//       const owners = body.landOwners;
-//       const savedOwners = [];
+//     const savedOwner = await saveSingleLandOwner(owner, userName, session);
 
-//       for (let index = 0; index < owners.length; index++) {
-//         const owner = owners[index];
+//     await session.commitTransaction();
 
-//         if (processFile) {
-//           attachFilesToOwner(owner, files, processFile, index);
-//         }
+//     const message = isNew
+//       ? "LandOwner created successfully"
+//       : "LandOwner updated successfully";
 
-//         const saved = await saveSingleLandOwner(owner, userName, session);
-//         savedOwners.push(saved);
-//       }
-
-//       await session.commitTransaction();
-
-//       return successResponse(
-//         res,
-//         "LandOwners saved successfully",
-//         savedOwners,
-//         200,
-//       );
-//     } else {
-//       // ── SINGLE OWNER ─────────────────────────────────────────
-//       const owner = body;
-//       const isNew = !owner.id;
-
-//       if (processFile) {
-//         attachFilesToOwner(owner, files, processFile, null);
-//       }
-
-//       const savedOwner = await saveSingleLandOwner(owner, userName, session);
-
-//       await session.commitTransaction();
-
-//       const message = isNew
-//         ? "LandOwner created successfully"
-//         : "LandOwner updated successfully";
-
-//       return successResponse(res, message, savedOwner, isNew ? 201 : 200);
-//     }
+//     return successResponse(res, message, savedOwner, isNew ? 201 : 200);
 //   } catch (error) {
 //     await session.abortTransaction();
 //     return errorResponse(res, error.message, null, error.statusCode || 400);
@@ -638,57 +523,6 @@
 //   }
 // };
 
-
-// // const landOwnerList = async (req, res) => {
-// //   try {
-// //     const { pageNumber = 1, count = 10, search } = req.body;
-
-// //     const pageNumbers = parseInt(pageNumber) || 1;
-// //     const pageSize = parseInt(count) || 10;
-
-// //     const filter = {};
-
-// //     if (search && search.trim() !== "") {
-// //       const searchRegex = new RegExp(search.trim(), "i");
-// //       filter.$or = [
-// //         { name: searchRegex },
-// //         { phone: searchRegex },
-// //         { panNumber: searchRegex },
-// //         { aadharCardNumber: searchRegex },
-// //       ];
-// //     }
-
-// //     const totalCount = await LandOwnerMaster.countDocuments(filter);
-
-// //     const landOwnerListRaw = await LandOwnerMaster.find(filter)
-// //       .sort({ updatedAt: -1 })
-// //       .skip((pageNumbers - 1) * pageSize)
-// //       .limit(pageSize)
-// //       .lean();
-
-// //     const landOwnerListData = landOwnerListRaw.map((owner) => ({
-// //       ...owner,
-// //       totalSites: Array.isArray(owner.linkedSites)
-// //         ? owner.linkedSites.length
-// //         : 0,
-// //     }));
-
-// //     return successResponse(
-// //       res,
-// //       "LandOwner list fetched successfully",
-// //       {
-// //         pageNumber: pageNumbers,
-// //         count: pageSize,
-// //         totalCount,
-// //         totalPages: Math.ceil(totalCount / pageSize),
-// //         landOwnerList: landOwnerListData,
-// //       },
-// //       200,
-// //     );
-// //   } catch (error) {
-// //     return errorResponse(res, error.message, null, 400);
-// //   }
-// // };
 // const landOwnerList = async (req, res) => {
 //   try {
 //     const { pageNumber = 1, count = 10, search, landOwnerName } = req.body;
@@ -744,7 +578,7 @@
 //         totalCount,
 //         totalPages: Math.ceil(totalCount / pageSize),
 //         landOwnerList: landOwnerListData,
-//         landOwnerNameFilter, // Added this field
+//         landOwnerNameFilter,
 //       },
 //       200,
 //     );
@@ -752,14 +586,13 @@
 //     return errorResponse(res, error.message, null, 400);
 //   }
 // };
+
 // module.exports = {
 //   landOwnerSave,
 //   landOwnerList,
 //   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
 //   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
 // };
-
-
 
 
 
@@ -1143,11 +976,6 @@ const OWNER_UPDATABLE_FIELDS = [
   "paymentCategory",
   "eligibleMode",
   "onlineMode",
-  // files
-  "panCardImage",
-  "bankPassbook",
-  "cancelCheckLeaf",
-  "aadharCardImage",
   // financial inputs
   "typeShare",
   "sharePercentage",
@@ -1159,7 +987,36 @@ const OWNER_UPDATABLE_FIELDS = [
   "gstPercentage", // used as fallback input inside computeFinancialFields
   "tdsApplicable",
   "tdsPercentage", // used as fallback input inside computeFinancialFields
+  // ⚠️ file fields (panCardImage, bankPassbook, cancelCheckLeaf,
+  // aadharCardImage) are intentionally NOT in this list — they are
+  // handled separately by applyOwnerFileFields() below so that not
+  // re-sending a file on update never wipes out the existing one.
 ];
+
+// ─────────────────────────────────────────────────────────────
+// APPLY FILE FIELDS ON UPDATE ONLY.
+//
+// If a NEW valid file was sent this request (owner[field] is
+// already sanitized by sanitizeOwnerFileFields() before this runs,
+// so junk/empty values were already stripped off `owner`) —
+// overwrite it.
+//
+// If a file field is MISSING from `owner` this request (e.g.
+// bankPassbook wasn't re-uploaded on this update) — it is REMOVED
+// from the DB entirely (landOwner[field] = undefined → mongoose
+// $unsets that path on save). So an update that resends only 3 of
+// the 4 files will delete the 4th one from the document, and it
+// will no longer appear anywhere (list API, detail response, DB).
+// ─────────────────────────────────────────────────────────────
+const applyOwnerFileFields = (landOwner, owner) => {
+  OWNER_FILE_FIELDS.forEach((field) => {
+    if (owner[field] !== undefined) {
+      landOwner[field] = owner[field]; // new file provided — overwrite
+    } else {
+      landOwner[field] = undefined; // not sent this time — remove from DB
+    }
+  });
+};
 
 // ─────────────────────────────────────────────────────────────
 // SAVE OR UPDATE THE (single) OWNER PAYLOAD.
@@ -1200,6 +1057,11 @@ const saveSingleLandOwner = async (owner, userName, session) => {
         landOwner[field] = owner[field];
       }
     });
+
+    // ✅ file fields handled separately — preserves the existing DB
+    // value (e.g. bankPassbook) whenever it isn't re-sent on this
+    // update, instead of being overwritten/cleared.
+    applyOwnerFileFields(landOwner, owner);
 
     // client-sent gstPercentage/tdsPercentage above are used only as
     // FALLBACK inputs inside computeFinancialFields() — see that
@@ -1248,6 +1110,47 @@ const saveSingleLandOwner = async (owner, userName, session) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// BUILD RESPONSE PAYLOAD — RESPONSE-ONLY, DOES NOT TOUCH THE DB.
+//
+// On UPDATE: any file field (panCardImage/bankPassbook/
+// cancelCheckLeaf/aadharCardImage) that was NOT sent in THIS
+// request is removed from the object we send back, even though it
+// is still safely preserved in the database (via
+// applyOwnerFileFields in saveSingleLandOwner).
+//
+// On CREATE: nothing is stripped — every file that was uploaded is
+// returned as normal.
+// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// BUILD RESPONSE PAYLOAD — RESPONSE-ONLY SAFETY NET.
+//
+// applyOwnerFileFields() above now actually REMOVES a file field
+// from the DB when it isn't resent on update, so savedOwner.toObject()
+// normally won't include it anyway. This just guarantees the
+// response never echoes back a file field that wasn't part of THIS
+// request, even if some future change makes DB removal optional again.
+//
+// On CREATE: nothing is stripped — every file that was uploaded is
+// returned as normal.
+// ─────────────────────────────────────────────────────────────
+const buildResponsePayload = (savedOwner, owner, isNew) => {
+  const responseData =
+    typeof savedOwner.toObject === "function"
+      ? savedOwner.toObject()
+      : { ...savedOwner };
+
+  if (!isNew) {
+    OWNER_FILE_FIELDS.forEach((field) => {
+      if (owner[field] === undefined) {
+        delete responseData[field];
+      }
+    });
+  }
+
+  return responseData;
+};
+
+// ─────────────────────────────────────────────────────────────
 // SINGLE-OBJECT ONLY. req.body IS the owner payload directly.
 // No landOwners[] array, no multi-owner branch, no dot/bracket
 // key normalization.
@@ -1279,7 +1182,12 @@ const landOwnerSave = async (req, res) => {
       ? "LandOwner created successfully"
       : "LandOwner updated successfully";
 
-    return successResponse(res, message, savedOwner, isNew ? 201 : 200);
+    // ✅ response-only shaping — DB already has bankPassbook (etc.)
+    // safely preserved via applyOwnerFileFields; this just keeps it
+    // OUT of the response body when it wasn't part of this request.
+    const responsePayload = buildResponsePayload(savedOwner, owner, isNew);
+
+    return successResponse(res, message, responsePayload, isNew ? 201 : 200);
   } catch (error) {
     await session.abortTransaction();
     return errorResponse(res, error.message, null, error.statusCode || 400);
@@ -1322,6 +1230,10 @@ const landOwnerList = async (req, res) => {
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
     const landOwnerListRaw = await LandOwnerMaster.find(filter)
+      // ✅ exclude the 4 file fields from the LIST response — never
+      // even fetched from the DB for this endpoint, keeps the
+      // payload light. (Full file objects are still available via
+      // the single-owner fetch/detail endpoint if you have one.)
       .sort({ updatedAt: -1 })
       .skip((pageNumbers - 1) * pageSize)
       .limit(pageSize)
