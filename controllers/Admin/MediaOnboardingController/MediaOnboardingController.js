@@ -1548,6 +1548,8 @@ const mediaOnboarding = async (req, res) => {
     if (mediaData.status) mediaData.status = Number(mediaData.status);
     if (mediaData.numberOfLandOwners)
       mediaData.numberOfLandOwners = Number(mediaData.numberOfLandOwners);
+    if (mediaData.siteBillMode)
+      mediaData.siteBillMode = Number(mediaData.siteBillMode);
     let existingMediaForValidation = null;
     if (id) {
       existingMediaForValidation = await MediaOnboarding.findById(id);

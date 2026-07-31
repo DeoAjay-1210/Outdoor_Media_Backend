@@ -1,3 +1,4 @@
+
 // const mongoose = require("mongoose");
 // const axios = require("axios");
 // const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
@@ -764,6 +765,7 @@
 // // ── saveRentalDue — one site ───────────────────────────────────
 // async function processSingleRentalDue({
 //   mediaId,
+//   rentalDueId, // ✅ ADDED — optional, targets a specific month's entry
 //   campaignName,
 //   withGst,
 //   gstApplicableFlag,
@@ -851,9 +853,24 @@
 //     }
 //   }
 
-//   const pendingEntry = [...media.rentalDueEntries]
-//     .reverse()
-//     .find((e) => e.approvalStatus !== 3);
+//   // ✅ ADDED — if rentalDueId is provided, target THAT exact entry
+//   // (must still be unapproved). Falls back to the original "last
+//   // pending entry" behavior when rentalDueId is omitted, so existing
+//   // callers are unaffected.
+//   const pendingEntry = rentalDueId
+//     ? media.rentalDueEntries.find(
+//         (e) => String(e._id) === String(rentalDueId) && e.approvalStatus !== 3,
+//       )
+//     : [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3);
+
+//   if (rentalDueId && !pendingEntry) {
+//     return {
+//       success: false,
+//       mediaId,
+//       mediaName: media.mediaName,
+//       message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
+//     };
+//   }
 
 //   const currentCycleDate = media.rentalPayment?.nextBillingDate
 //     ? new Date(media.rentalPayment.nextBillingDate).getTime()
@@ -1039,6 +1056,7 @@
 //       mediaId: media._id,
 //       mediaName: media.mediaName,
 //       rentalDueId: entry._id,
+//       dueMonth: entry.dueMonth, // ✅ ADDED — makes it explicit which month this response is for
 //       campaignName: entry.campaignName,
 //       proofOfCampaign: entry.proofOfCampaign,
 //       approvalSteps: entry.approvalSteps,
@@ -1286,7 +1304,7 @@
 // exports.saveRentalDue = async (req, res) => {
 //   try {
 //     const { userType, userId, userName } = req.user;
-//     const { mediaId, campaignName, withGst, gstApplicableFlag, entries } =
+//     const { mediaId, rentalDueId, campaignName, withGst, gstApplicableFlag, entries } =
 //       req.body;
 
 //     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
@@ -1316,6 +1334,7 @@
 //       for (const item of entries) {
 //         const result = await processSingleRentalDue({
 //           mediaId: item.mediaId,
+//           rentalDueId: item.rentalDueId, // ✅ ADDED — targets a specific month
 //           campaignName: item.campaignName,
 //           withGst: item.withGst,
 //           gstApplicableFlag: item.gstApplicableFlag,
@@ -1396,6 +1415,7 @@
 
 //     const result = await processSingleRentalDue({
 //       mediaId,
+//       rentalDueId, // ✅ ADDED
 //       campaignName,
 //       withGst,
 //       gstApplicableFlag,
@@ -1427,7 +1447,7 @@
 // };
 
 // // ── verifyAgreementDoc — one site ──────────────────────────────
-// async function processSingleVerification({ mediaId, userType, userName }) {
+// async function processSingleVerification({ mediaId, rentalDueId, userType, userName }) {
 //   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
 //     return { success: false, mediaId, message: "A valid mediaId is required" };
 //   }
@@ -1437,7 +1457,31 @@
 //     return { success: false, mediaId, message: "Media not found" };
 //   }
 
-//   const currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
+//   // ✅ ADDED — if rentalDueId is provided, target THAT entry's own
+//   // dueDate as the cycle to verify, instead of nextBillingDate (which
+//   // no longer marks "the current pending cycle" now that dates
+//   // auto-advance regardless of approval — nextBillingDate could be a
+//   // future month with no rentalDue entry at all).
+//   let targetEntry = null;
+//   let currentCycle;
+
+//   if (rentalDueId) {
+//     targetEntry = (media.rentalDue || media.rentalDueEntries || []).find(
+//       (e) => String(e._id) === String(rentalDueId),
+//     );
+//     if (!targetEntry) {
+//       return {
+//         success: false,
+//         mediaId,
+//         mediaName: media.mediaName,
+//         message: `No rentalDue entry found with id ${rentalDueId} on this site`,
+//       };
+//     }
+//     currentCycle = getCurrentCycle(targetEntry.dueDate);
+//   } else {
+//     currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
+//   }
+
 //   if (!currentCycle) {
 //     return {
 //       success: false,
@@ -1507,10 +1551,10 @@
 //     verifiedBy: userName,
 //     verifiedByRole: userType,
 //     verifiedAt: nowIST(),
-//     rentalDueId: null,
+//     rentalDueId: targetEntry ? targetEntry._id : null, // ✅ CHANGED — links to the specific month, when targeted
 //     agreementPDF: media.agreement?.agreementPDF || {},
 //     cycle: currentCycle,
-//     cycleStartDate: media.rentalPayment?.nextBillingDate,
+//     cycleStartDate: targetEntry ? targetEntry.dueDate : media.rentalPayment?.nextBillingDate, // ✅ CHANGED
 //     updatedAt: nowIST(),
 //     updatedBy: userName,
 //   };
@@ -1603,7 +1647,11 @@
 //     success: true,
 //     mediaId: media._id,
 //     mediaName: media.mediaName,
-//     message: `${ROLE_LABEL[userType]} verified the agreement document successfully for the billing cycle starting ${formatDate(currentCycle)}`,
+//     rentalDueId: targetEntry ? targetEntry._id : null, // ✅ ADDED
+//     dueMonth: targetEntry ? targetEntry.dueMonth : null, // ✅ ADDED
+//     message: targetEntry
+//       ? `${ROLE_LABEL[userType]} verified the agreement document successfully for ${targetEntry.dueMonth}`
+//       : `${ROLE_LABEL[userType]} verified the agreement document successfully for the billing cycle starting ${formatDate(currentCycle)}`,
 //     currentCycle: formatDate(currentCycle),
 //     verificationProgress,
 //     verificationProgressHistory: media.verificationProgressHistory,
@@ -1615,7 +1663,7 @@
 // // ═════════════════════════════════════════════════════════════
 // exports.verifyAgreementDoc = async (req, res) => {
 //   try {
-//     const { mediaId, mediaIds } = req.body;
+//     const { mediaId, rentalDueId, mediaIds, entries } = req.body;
 //     const { userType, userName } = req.user;
 
 //     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
@@ -1624,7 +1672,36 @@
 //         .json({ success: false, message: "Invalid or missing user role" });
 //     }
 
-//     // ── NEW — batch mode: mediaIds: [id1, id2, id3] ──
+//     // ✅ ADDED — batch mode with per-site targeting:
+//     // entries: [ { mediaId, rentalDueId }, ... ]
+//     // Use this when you need to verify a SPECIFIC month per site
+//     // (e.g. May on Site A, June on Site B) in one call.
+//     if (Array.isArray(entries) && entries.length > 0) {
+//       const results = [];
+//       for (const item of entries) {
+//         const result = await processSingleVerification({
+//           mediaId: item.mediaId,
+//           rentalDueId: item.rentalDueId,
+//           userType,
+//           userName,
+//         });
+//         results.push(result);
+//       }
+
+//       const successCount = results.filter((r) => r.success).length;
+//       const failedCount = results.length - successCount;
+
+//       return res.status(200).json({
+//         success: true,
+//         message: `Processed verification for ${results.length} site(s)`,
+//         data: { results, totalSites: results.length, successCount, failedCount },
+//       });
+//     }
+
+//     // ── batch mode (unchanged): mediaIds: [id1, id2, id3] — always
+//     // targets each site's current nextBillingDate cycle, no per-site
+//     // month targeting. Use the new entries[] mode above if you need
+//     // to target specific months.
 //     if (Array.isArray(mediaIds) && mediaIds.length > 0) {
 //       const results = [];
 //       for (const id of mediaIds) {
@@ -1646,14 +1723,21 @@
 //       });
 //     }
 
-//     // ── OLD — single mediaId request, response shape UNCHANGED ──
+//     // ── OLD — single mediaId request, response shape UNCHANGED
+//     // (rentalDueId is a new OPTIONAL addition — omit it and behavior
+//     // is identical to before) ──
 //     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
 //       return res
 //         .status(400)
 //         .json({ success: false, message: "A valid mediaId is required" });
 //     }
 
-//     const result = await processSingleVerification({ mediaId, userType, userName });
+//     const result = await processSingleVerification({
+//       mediaId,
+//       rentalDueId, // ✅ ADDED
+//       userType,
+//       userName,
+//     });
 
 //     if (!result.success) {
 //       const statusCode = result.message === "Media not found" ? 404 : 400;
@@ -1664,6 +1748,8 @@
 //       success: true,
 //       message: result.message,
 //       data: {
+//         rentalDueId: result.rentalDueId, // ✅ ADDED
+//         dueMonth: result.dueMonth, // ✅ ADDED
 //         verificationRecord: undefined, // kept for shape parity — original returned this too
 //         currentCycle: result.currentCycle,
 //         verificationProgress: result.verificationProgress,
@@ -3180,6 +3266,11 @@
 //       .json({ success: false, message: "Server error", error: err.message });
 //   }
 // };
+
+
+
+
+
 
 
 
@@ -6151,6 +6242,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         location: 1,
         rentalStatus: 1,
         totalSqFt: 1,
+        siteBillMode: 1,
         landOwners: 1,
         appraisal: 1,
         frontView: 1,
@@ -6264,24 +6356,30 @@ exports.getRentalDueListWithStats = async (req, res) => {
         );
       });
 
-      const filteredRentalDueEntries = pendingEntriesUpToMonth.map((entry) => ({
-        ...entry,
-        verificationProgress: buildVerificationProgress(item, entry.dueDate),
-      }));
+      // ✅ CHANGED — verificationProgressHistory is now ALSO nested
+      // per-entry (filtered to that entry's own dueDate/cycle),
+      // alongside the already-per-entry verificationProgress. Neither
+      // field is returned at the site level anymore — both live only
+      // inside each rentalDueEntries[] item, scoped to that specific
+      // pending month.
+      const filteredRentalDueEntries = pendingEntriesUpToMonth.map((entry) => {
+        const entryCycleKey = entry.dueDate
+          ? new Date(entry.dueDate).getTime()
+          : null;
 
-      // used for the top-level summary verificationProgress field
-      // below — the most recent (latest dueDate) pending cycle.
-      const targetCycleDate =
-        pendingEntriesUpToMonth.length > 0
-          ? pendingEntriesUpToMonth[pendingEntriesUpToMonth.length - 1].dueDate
-          : (() => {
-              if (item.rentalPayment?.nextBillingDate) {
-                const nbd = new Date(item.rentalPayment.nextBillingDate);
-                if (nbd >= monthStart && nbd <= monthEnd)
-                  return item.rentalPayment.nextBillingDate;
-              }
-              return monthStart;
-            })();
+        const entryVerificationProgressHistory = (
+          item.verificationProgressHistory || []
+        ).filter((v) => {
+          if (!v.cycle || entryCycleKey === null) return false;
+          return new Date(v.cycle).getTime() === entryCycleKey;
+        });
+
+        return {
+          ...entry,
+          verificationProgress: buildVerificationProgress(item, entry.dueDate),
+          verificationProgressHistory: entryVerificationProgressHistory,
+        };
+      });
 
       // verification history across every still-pending cycle shown above
       const pendingCycleKeys = new Set(
@@ -6303,6 +6401,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         city: item.city,
         state: item.state,
         location: item.location,
+        siteBillMode: item.siteBillMode,
         rentalStatus: item.rentalStatus,
         totalSqFt: item.totalSqFt,
         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
@@ -6328,8 +6427,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,
-        verificationProgress: buildVerificationProgress(item, targetCycleDate),
-        verificationProgressHistory: item.verificationProgressHistory || [],
+        // ✅ REMOVED — verificationProgress and verificationProgressHistory
+        // no longer appear here at the site level. Both now live only
+        // inside each rentalDueEntries[] item above.
         gstBalanceHistory: item.gstBalanceHistory || [],
         rentalDueEntries: filteredRentalDueEntries,
       };

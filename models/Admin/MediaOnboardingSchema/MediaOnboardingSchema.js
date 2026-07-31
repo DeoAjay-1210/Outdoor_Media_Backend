@@ -349,6 +349,12 @@ const MediaSchema = new mongoose.Schema(
       type: Number,
       min: 1,
     },
+     siteBillMode: {
+          // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
     landOwnerMasterIds: [
       // ← ADD THIS
       {
@@ -460,16 +466,23 @@ const MediaSchema = new mongoose.Schema(
         accountNumber: { type: String, trim: true },
         upiId: { type: String, trim: true },
         panNumber: { type: String, trim: true, uppercase: true },
-         aadharCardNumber: { type: String, trim: true },
-    
+        aadharCardNumber: { type: String, trim: true },
+
         paymentCategory: {
           type: Number,
           enum: [1, 2, 3], // 1 cash, 2 online 3 cash + online
           required: true,
         },
-         eligibleMode: {                    // ← ADDED
+        eligibleMode: {
+          // ← ADDED
           type: Number,
           enum: [1, 2], // 1 = Cash, 2 = Online
+          default: null,
+        },
+        landOwnerBillMode: {
+          // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
           default: null,
         },
         typeShare: {
@@ -582,33 +595,33 @@ const MediaSchema = new mongoose.Schema(
           default: 0,
         },
         netPayable: { type: Number, min: 0, default: 0 },
-         linkedMediaCount: { type: Number, default: 0, min: 0 },
-        
-            // ✅ NEW — ONE landowner can be attached to MANY Media
-            // properties, each with its OWN paymentCategory/amounts (e.g.
-            // Site A = Cash only, Site B = Online only, Site C = Cash+Online).
-            // One entry per linked Media property, upserted (by mediaId) every
-            // time that property's owner data is saved from the Media side.
-            // This is what powers "which site, which landowner, how many
-            // sites, cash or online per site" reporting.
-            linkedSites: [
-              {
-                mediaId: {
-                  type: mongoose.Schema.Types.ObjectId,
-                  ref: "MediaOnboarding",
-                },
-                mediaCode: { type: String, trim: true },
-                mediaName: { type: String, trim: true },
-                // 1=Cash  2=Online  3=Cash+Online — SAME meaning as
-                // MediaSchema.landOwners[].paymentCategory, but scoped to
-                // just this one site, independent of every other site.
-                paymentCategory: { type: Number, enum: [1, 2, 3] },
-                shareAmount: { type: Number, default: 0, min: 0 },
-                cashAmount: { type: Number, default: 0, min: 0 },
-                onlineAmount: { type: Number, default: 0, min: 0 },
-                updatedAt: { type: Date, default: null },
-              },
-            ],
+        linkedMediaCount: { type: Number, default: 0, min: 0 },
+
+        // ✅ NEW — ONE landowner can be attached to MANY Media
+        // properties, each with its OWN paymentCategory/amounts (e.g.
+        // Site A = Cash only, Site B = Online only, Site C = Cash+Online).
+        // One entry per linked Media property, upserted (by mediaId) every
+        // time that property's owner data is saved from the Media side.
+        // This is what powers "which site, which landowner, how many
+        // sites, cash or online per site" reporting.
+        linkedSites: [
+          {
+            mediaId: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: "MediaOnboarding",
+            },
+            mediaCode: { type: String, trim: true },
+            mediaName: { type: String, trim: true },
+            // 1=Cash  2=Online  3=Cash+Online — SAME meaning as
+            // MediaSchema.landOwners[].paymentCategory, but scoped to
+            // just this one site, independent of every other site.
+            paymentCategory: { type: Number, enum: [1, 2, 3] },
+            shareAmount: { type: Number, default: 0, min: 0 },
+            cashAmount: { type: Number, default: 0, min: 0 },
+            onlineAmount: { type: Number, default: 0, min: 0 },
+            updatedAt: { type: Date, default: null },
+          },
+        ],
       },
     ],
 

@@ -763,6 +763,7 @@ const syncOrLinkMediaOwnerToMaster = async (owner, userName, session, mediaInfo)
       aadharCardImage: owner.aadharCardImage,
       paymentCategory: owner.paymentCategory,
       eligibleMode: owner.eligibleMode,
+      landOwnerBillMode: owner.landOwnerBillMode,
       bankPassbook: owner.bankPassbook,
       cancelCheckLeaf: owner.cancelCheckLeaf,
       onlineMode: owner.onlineMode,
@@ -975,6 +976,7 @@ const OWNER_UPDATABLE_FIELDS = [
   "aadharCardNumber",
   "paymentCategory",
   "eligibleMode",
+  "landOwnerBillMode",
   "onlineMode",
   // financial inputs
   "typeShare",
