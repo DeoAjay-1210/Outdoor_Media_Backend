@@ -349,12 +349,12 @@ const MediaSchema = new mongoose.Schema(
       type: Number,
       min: 1,
     },
-     siteBillMode: {
-          // ← ADDED
-          type: Number,
-          enum: [1, 2], // 1 = single, 2 = seperate
-          default: null,
-        },
+    siteBillMode: {
+      // ← ADDED
+      type: Number,
+      enum: [1, 2], // 1 = single, 2 = seperate
+      default: null,
+    },
     landOwnerMasterIds: [
       // ← ADD THIS
       {
@@ -391,6 +391,20 @@ const MediaSchema = new mongoose.Schema(
         type: Number,
         default: 0,
       },
+      siteOutStantAmont: {
+        type: Number,
+        default: 0,
+      },
+      gstOutStantAmont: {
+        type: Number,
+        default: 0,
+      },
+        outStantStatus: {
+      // ← ADDED
+      type: Number,
+      enum: [0, 1], // 0 no 1 yes
+      default: 0,
+    },
       totalRentalAmountWithGst: {
         type: Number,
         default: 0,
@@ -612,6 +626,12 @@ const MediaSchema = new mongoose.Schema(
             },
             mediaCode: { type: String, trim: true },
             mediaName: { type: String, trim: true },
+            siteBillMode: {
+              // ← ADDED
+              type: Number,
+              enum: [1, 2], // 1 = single, 2 = seperate
+              default: null,
+            },
             // 1=Cash  2=Online  3=Cash+Online — SAME meaning as
             // MediaSchema.landOwners[].paymentCategory, but scoped to
             // just this one site, independent of every other site.

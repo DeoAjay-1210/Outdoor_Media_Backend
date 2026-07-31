@@ -1,3 +1,4 @@
+
 // const mongoose = require("mongoose");
 // const axios = require("axios");
 // const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
@@ -814,9 +815,33 @@
 //     media.rentalPayment.balanceGstAmount = 0;
 //   }
 
-//   const currentCycleForVerification = getCurrentCycle(
-//     media.rentalPayment?.nextBillingDate,
-//   );
+//   // ✅ MOVED UP — find the target entry FIRST (via rentalDueId, or
+//   // fallback to the last pending one), so the verification gate below
+//   // can check against THIS entry's own cycle — not nextBillingDate,
+//   // which now auto-advances regardless of approval and would point at
+//   // a totally different (often future, entry-less) month.
+//   const pendingEntry = rentalDueId
+//     ? media.rentalDueEntries.find(
+//         (e) => String(e._id) === String(rentalDueId) && e.approvalStatus !== 3,
+//       )
+//     : [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3);
+
+//   if (rentalDueId && !pendingEntry) {
+//     return {
+//       success: false,
+//       mediaId,
+//       mediaName: media.mediaName,
+//       message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
+//     };
+//   }
+
+//   // Note: when pendingEntry is null (nothing pending — this request
+//   // will go through the CREATE branch further down), the fallback
+//   // below correctly verifies against nextBillingDate's cycle instead,
+//   // since there's no existing entry yet to reference.
+//   const currentCycleForVerification = pendingEntry
+//     ? getCurrentCycle(pendingEntry.dueDate)
+//     : getCurrentCycle(media.rentalPayment?.nextBillingDate);
 
 //   if (!currentCycleForVerification) {
 //     return {
@@ -835,53 +860,33 @@
 //   const verifiedRolesThisCycle = new Set(
 //     currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
 //   );
-//   const verifiedCountThisCycle = verifiedRolesThisCycle.size;
 //   const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
 
-//   if (userType === ROLE.OWNER) {
-//     const canProceedToSave =
-//       verifiedCountThisCycle >= 2 || hasVerifiedThisCycle;
-
-//     if (!canProceedToSave) {
-//       return {
-//         success: false,
-//         mediaId,
-//         mediaName: media.mediaName,
-//         message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
-//       };
-//     }
-//   }
-
-//   // ✅ ADDED — if rentalDueId is provided, target THAT exact entry
-//   // (must still be unapproved). Falls back to the original "last
-//   // pending entry" behavior when rentalDueId is omitted, so existing
-//   // callers are unaffected.
-//   const pendingEntry = rentalDueId
-//     ? media.rentalDueEntries.find(
-//         (e) => String(e._id) === String(rentalDueId) && e.approvalStatus !== 3,
-//       )
-//     : [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3);
-
-//   if (rentalDueId && !pendingEntry) {
+//   // ✅ FIXED — restored: EVERY role (Staff, Team Lead, Owner) must
+//   // personally verify THIS entry's own cycle before they can save/
+//   // approve it — no exceptions, no "2 others already verified"
+//   // bypass. Previously only Owner had any gate, and even that had a
+//   // bypass; both are removed.
+//   if (!hasVerifiedThisCycle) {
 //     return {
 //       success: false,
 //       mediaId,
 //       mediaName: media.mediaName,
-//       message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
+//       message: `${ROLE_LABEL[userType]} must verify the agreement document for ${pendingEntry ? pendingEntry.dueMonth : `the billing cycle starting ${formatDate(currentCycleForVerification)}`} before saving`,
 //     };
 //   }
 
-//   const currentCycleDate = media.rentalPayment?.nextBillingDate
-//     ? new Date(media.rentalPayment.nextBillingDate).getTime()
-//     : null;
-
-//   const ownerAlreadyClosedThisCycle = media.rentalDueEntries.some((e) => {
-//     if (e.status !== 3) return false;
-//     if (!currentCycleDate || !e.dueDate) return false;
-//     if (new Date(e.dueDate).getTime() !== currentCycleDate) return false;
-//     const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
-//     return ownerStep?.status === 2;
-//   });
+//   // ✅ FIXED — "already closed" check now compares against the TARGET
+//   // entry's own dueDate, not nextBillingDate.
+//   const ownerAlreadyClosedThisCycle = pendingEntry
+//     ? (() => {
+//         if (pendingEntry.status !== 3) return false;
+//         const ownerStep = pendingEntry.approvalSteps?.find(
+//           (s) => s.role === ROLE.OWNER,
+//         );
+//         return ownerStep?.status === 2;
+//       })()
+//     : false;
 
 //   if (userType === ROLE.OWNER && ownerAlreadyClosedThisCycle) {
 //     return {
@@ -1332,6 +1337,11 @@
 //       const results = [];
 //       for (const item of entries) {
 //         const result = await processSingleRentalDue({
+//           // ✅ FIXED — trim() defends against stray leading/trailing
+//           // whitespace in form-data values (Postman copy-paste
+//           // artifact — "entries[0][mediaId]" arrives as " 6a6c2eaf..."
+//           // with a leading space), which otherwise fails mongoose
+//           // ObjectId validation even though the ID itself is correct.
 //           mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
 //           rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
 //           campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
@@ -1406,16 +1416,19 @@
 //     }
 
 //     // ── OLD — single mediaId request, response shape UNCHANGED ──
-//     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+//     // ✅ FIXED — same trim() defense as the batch path above.
+//     const trimmedMediaId = typeof mediaId === "string" ? mediaId.trim() : mediaId;
+
+//     if (!trimmedMediaId || !mongoose.Types.ObjectId.isValid(trimmedMediaId)) {
 //       return res
 //         .status(400)
 //         .json({ success: false, message: "A valid mediaId is required" });
 //     }
 
 //     const result = await processSingleRentalDue({
-//       mediaId,
-//       rentalDueId, // ✅ ADDED
-//       campaignName,
+//       mediaId: trimmedMediaId,
+//       rentalDueId: typeof rentalDueId === "string" ? rentalDueId.trim() : rentalDueId,
+//       campaignName: typeof campaignName === "string" ? campaignName.trim() : campaignName,
 //       withGst,
 //       gstApplicableFlag,
 //       proofOfCampaign,
@@ -2875,20 +2888,13 @@
 //     };
 
 //     const listMatch = { ...mediaMatch };
-//     const showPast = Number(isPastPending) === 1;
-//     const showCurrent =
-//       Number(isApproved) === 1 ||
-//       Number(isPending) === 1 ||
-//       Number(isOverdue) === 1 ||
-//       (!showPast && !isApproved && !isPending && !isOverdue);
-
-//     if (showPast && showCurrent) {
-//       listMatch.$or = [
-//         monthOrCondition,
-//         { "rentalPayment.nextBillingDate": { $lt: monthStart } },
-//       ];
-//     } else if (showPast) {
-//       listMatch["rentalPayment.nextBillingDate"] = { $lt: monthStart };
+//     if (Number(isPastPending) === 1) {
+//       listMatch.rentalDue = {
+//         $elemMatch: {
+//           dueDate: { $lt: monthStart },
+//           approvalStatus: { $ne: 3 },
+//         },
+//       };
 //     } else {
 //       listMatch.$and = [monthOrCondition];
 //     }
@@ -2959,6 +2965,7 @@
 //         mediaName: 1,
 //         mediaType: 1,
 //         city: 1,
+        
 //         state: 1,
 //         location: 1,
 //         rentalStatus: 1,
@@ -3072,9 +3079,12 @@
 //     const buildFullSiteDetail = (item) => {
 //       const pendingEntriesUpToMonth = (item.rentalDue || []).filter((e) => {
 //         if (!e.dueDate) return false;
-//         return (
-//           new Date(e.dueDate) <= monthEnd && Number(e.approvalStatus) !== 3
-//         );
+//         const cutoff = Number(isPastPending) === 1 ? monthStart : monthEnd;
+//         const passesDateCheck =
+//           Number(isPastPending) === 1
+//             ? new Date(e.dueDate) < cutoff
+//             : new Date(e.dueDate) <= cutoff;
+//         return passesDateCheck && Number(e.approvalStatus) !== 3;
 //       });
 
 //       // ✅ CHANGED — verificationProgressHistory is now ALSO nested
@@ -3122,9 +3132,9 @@
 //         city: item.city,
 //         state: item.state,
 //         location: item.location,
-//         siteBillMode: item.siteBillMode,
 //         rentalStatus: item.rentalStatus,
 //         totalSqFt: item.totalSqFt,
+//         siteBillMode: item.siteBillMode,
 //         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
 //         netPayable: item.rentalPayment?.netPayable || 0,
 //         gstApplicable: item.rentalPayment?.gstApplicable || 0,
@@ -3281,8 +3291,6 @@
 
 
 
-
-
 const mongoose = require("mongoose");
 const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
@@ -3360,6 +3368,14 @@ function addMonthsLocal(date, months) {
 }
 
 async function generateMissedEntriesForMedia(media, userName) {
+  // ✅ ADDED — only Active (status: 1) sites auto-generate missed
+  // bills. Inactive (status: 2) sites are skipped entirely — no new
+  // pending months get created for them, regardless of how many
+  // cycles have passed.
+  if (Number(media.status) !== 1) {
+    return { generatedEntries: [] };
+  }
+
   const today = new Date();
   const anchorDate = media.rentalPayment?.nextBillingDate;
 
@@ -4369,6 +4385,19 @@ async function processSingleRentalDue({
   }
 
   // ── BRANCH 2: CREATE ──
+  // ✅ ADDED — inactive sites can't have BRAND NEW rentalDue entries
+  // created. (Existing pending entries left over from when the site
+  // was Active still go through BRANCH 1 above and remain approvable
+  // — this only blocks creating something new.)
+  if (Number(media.status) !== 1) {
+    return {
+      success: false,
+      mediaId,
+      mediaName: media.mediaName,
+      message: "This site is Inactive — rental due entries cannot be auto-generated or created",
+    };
+  }
+
   if (!campaignName) {
     return {
       success: false,
@@ -5631,6 +5660,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       isPastPending,
       roleType,
       edit,
+      landOwnerMasterId, // ✅ ADDED — filter to one specific landowner
     } = req.body;
 
     const targetRole = roleType ? parseInt(roleType) : null;
@@ -5812,7 +5842,21 @@ exports.getRentalDueListWithStats = async (req, res) => {
       ];
     }
 
-    const totalSites = await Media.countDocuments({ status: 1 });
+    // ✅ ADDED — restrict to sites that include this specific
+    // landowner. Applied at the DB query level so we never fetch
+    // sites unrelated to this owner in the first place.
+     if (landOwnerMasterId) {
+      if (!mongoose.Types.ObjectId.isValid(landOwnerMasterId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid landOwnerMasterId" });
+      }
+      mediaMatch["landOwners.landOwnerMasterId"] = new mongoose.Types.ObjectId(
+        landOwnerMasterId,
+      );
+    }
+
+    const totalSites = await Media.countDocuments({});
 
     // ✅ ADDED — before computing any stats/list data, sweep every
     // active site and catch it up on any missed billing cycles. Same
@@ -6172,20 +6216,32 @@ exports.getRentalDueListWithStats = async (req, res) => {
     };
 
     const listMatch = { ...mediaMatch };
-    const showPast = Number(isPastPending) === 1;
-    const showCurrent =
-      Number(isApproved) === 1 ||
-      Number(isPending) === 1 ||
-      Number(isOverdue) === 1 ||
-      (!showPast && !isApproved && !isPending && !isOverdue);
 
-    if (showPast && showCurrent) {
-      listMatch.$or = [
-        monthOrCondition,
-        { "rentalPayment.nextBillingDate": { $lt: monthStart } },
-      ];
-    } else if (showPast) {
-      listMatch["rentalPayment.nextBillingDate"] = { $lt: monthStart };
+    // ✅ FIXED — no longer relies on rentalPayment.nextBillingDate to
+    // detect "past pending" sites. Since Rule 1 was scrapped,
+    // nextBillingDate auto-advances every cycle regardless of
+    // approval, so it no longer marks "the stuck cycle" — it's just
+    // wherever the schedule currently sits (often already past every
+    // unapproved month). Matching on it here excluded every site with
+    // real past-pending entries, causing empty data[] even when
+    // pastPendingApproval.count was correctly > 0.
+    //
+    // Also fixed: isPastPending=1 now ALWAYS includes the current
+    // requested month too (e.g. May+June+July together), not just
+    // past months — matching what buildFullSiteDetail already returns
+    // per-site once the site passes this gate.
+    // ✅ FIXED — isPastPending=1 now means PAST-ONLY (excludes current
+    // month entirely, e.g. only May+June, never July). Without the
+    // flag, behavior is unchanged: matches the current requested
+    // month's sites (buildFullSiteDetail below then shows everything
+    // pending up through that month, past+current together).
+    if (Number(isPastPending) === 1) {
+      listMatch.rentalDue = {
+        $elemMatch: {
+          dueDate: { $lt: monthStart },
+          approvalStatus: { $ne: 3 },
+        },
+      };
     } else {
       listMatch.$and = [monthOrCondition];
     }
@@ -6366,11 +6422,17 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // entry carries its own verificationProgress, computed for that
     // entry's own dueDate/cycle.
     const buildFullSiteDetail = (item) => {
+      // ✅ FIXED — isPastPending=1 now excludes the current month
+      // (dueDate < monthStart, strictly past), so only May/June show,
+      // never July. Without the flag: unchanged, dueDate <= monthEnd
+      // shows everything pending up through the current month.
       const pendingEntriesUpToMonth = (item.rentalDue || []).filter((e) => {
         if (!e.dueDate) return false;
-        return (
-          new Date(e.dueDate) <= monthEnd && Number(e.approvalStatus) !== 3
-        );
+        const passesDateCheck =
+          Number(isPastPending) === 1
+            ? new Date(e.dueDate) < monthStart
+            : new Date(e.dueDate) <= monthEnd;
+        return passesDateCheck && Number(e.approvalStatus) !== 3;
       });
 
       // ✅ CHANGED — verificationProgressHistory is now ALSO nested
@@ -6465,6 +6527,13 @@ exports.getRentalDueListWithStats = async (req, res) => {
         if (!owner.landOwnerMasterId) continue;
         const key = String(owner.landOwnerMasterId);
 
+        // ✅ ADDED — when landOwnerMasterId filter is active, only
+        // build the entry for THAT owner. Without this, a shared site
+        // (e.g. Site B with Ramesh + Suresh) would still leak the
+        // OTHER co-owner into the response even though only one was
+        // requested.
+        if (landOwnerMasterId && key !== String(landOwnerMasterId)) continue;
+
         if (!ownerMap.has(key)) {
           ownerMap.set(key, {
             landOwnerMasterId: owner.landOwnerMasterId,
@@ -6527,8 +6596,12 @@ exports.getRentalDueListWithStats = async (req, res) => {
     const pagedOwners = allOwners.slice(startIdx, startIdx + pageSize);
 
     // ═══════════════════════════════════════════════════════════
-    // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is now
-    // the landowner-grouped, paginated array with full site detail.
+    // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is the
+    // landowner-grouped, paginated array with full site detail.
+    // landOwnerMasterId filter (see mediaMatch above + the owner-loop
+    // skip further up) still narrows `data` to one owner when sent —
+    // full LandOwnerMaster profiles are NOT fetched here anymore; use
+    // the separate landOwnerList API for that.
     // ═══════════════════════════════════════════════════════════
     return res.status(200).json({
       success: true,

@@ -1839,6 +1839,7 @@ const mediaOnboarding = async (req, res) => {
           mediaId: media._id,
           mediaCode: mediaData.mediaCode || media.mediaCode,
           mediaName: mediaData.mediaName || media.mediaName,
+          siteBillMode: mediaData.siteBillMode || media.siteBillMode,
         };
 
         for (const owner of mediaData.landOwners) {
@@ -1863,6 +1864,7 @@ const mediaOnboarding = async (req, res) => {
               mediaId: site.mediaId,
               mediaCode: site.mediaCode,
               mediaName: site.mediaName,
+              siteBillMode: site.siteBillMode,
               paymentCategory: site.paymentCategory,
               shareAmount: site.shareAmount,
               cashAmount: site.cashAmount,
@@ -1977,6 +1979,7 @@ const mediaOnboarding = async (req, res) => {
           mediaId: generatedMediaId,
           mediaCode: mediaData.mediaCode,
           mediaName: mediaData.mediaName,
+          siteBillMode: mediaData.siteBillMode,
         };
 
         for (const owner of mediaData.landOwners) {
@@ -1997,6 +2000,7 @@ const mediaOnboarding = async (req, res) => {
               mediaId: site.mediaId,
               mediaCode: site.mediaCode,
               mediaName: site.mediaName,
+              siteBillMode: site.siteBillMode,
               paymentCategory: site.paymentCategory,
               shareAmount: site.shareAmount,
               cashAmount: site.cashAmount,

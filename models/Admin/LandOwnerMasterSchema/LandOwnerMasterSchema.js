@@ -151,6 +151,12 @@ const LandOwnerMasterSchema = new mongoose.Schema(
         },
         mediaCode: { type: String, trim: true },
         mediaName: { type: String, trim: true },
+         siteBillMode: {
+          // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
         // 1=Cash  2=Online  3=Cash+Online — SAME meaning as
         // MediaSchema.landOwners[].paymentCategory, but scoped to
         // just this one site, independent of every other site.

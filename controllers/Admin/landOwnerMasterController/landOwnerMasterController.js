@@ -692,15 +692,9 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
     landOwnerMaster.linkedSites = [];
   }
 
-  let existingIdx = landOwnerMaster.linkedSites.findIndex(
+   const existingIdx = landOwnerMaster.linkedSites.findIndex(
     (site) => String(site.mediaId) === String(mediaInfo.mediaId),
   );
-
-  if (existingIdx === -1 && mediaInfo.mediaCode) {
-    existingIdx = landOwnerMaster.linkedSites.findIndex(
-      (site) => site.mediaCode && site.mediaCode === mediaInfo.mediaCode,
-    );
-  }
 
   const now = nowIST();
 
@@ -708,6 +702,7 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
     const site = landOwnerMaster.linkedSites[existingIdx];
     site.mediaCode = mediaInfo.mediaCode ?? site.mediaCode;
     site.mediaName = mediaInfo.mediaName ?? site.mediaName;
+    site.siteBillMode = mediaInfo.siteBillMode ?? site.siteBillMode;
     site.paymentCategory = Number(owner.paymentCategory || site.paymentCategory || 1);
     site.shareAmount = Number(owner.shareAmount ?? site.shareAmount ?? 0);
     site.cashAmount = Number(owner.cashAmount ?? site.cashAmount ?? 0);
@@ -718,6 +713,7 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
       mediaId: mediaInfo.mediaId,
       mediaCode: mediaInfo.mediaCode || "",
       mediaName: mediaInfo.mediaName || "",
+      siteBillMode: mediaInfo.siteBillMode || "",
       paymentCategory: Number(owner.paymentCategory || 1),
       shareAmount: Number(owner.shareAmount || 0),
       cashAmount: Number(owner.cashAmount || 0),
