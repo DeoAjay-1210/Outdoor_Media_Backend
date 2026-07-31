@@ -1,4 +1,3 @@
-
 // const mongoose = require("mongoose");
 // const axios = require("axios");
 // const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
@@ -1333,9 +1332,9 @@
 //       const results = [];
 //       for (const item of entries) {
 //         const result = await processSingleRentalDue({
-//           mediaId: item.mediaId,
-//           rentalDueId: item.rentalDueId, // ✅ ADDED — targets a specific month
-//           campaignName: item.campaignName,
+//           mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
+//           rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
+//           campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
 //           withGst: item.withGst,
 //           gstApplicableFlag: item.gstApplicableFlag,
 //           proofOfCampaign: null,
@@ -2964,6 +2963,7 @@
 //         location: 1,
 //         rentalStatus: 1,
 //         totalSqFt: 1,
+//         siteBillMode: 1,
 //         landOwners: 1,
 //         appraisal: 1,
 //         frontView: 1,
@@ -3077,24 +3077,30 @@
 //         );
 //       });
 
-//       const filteredRentalDueEntries = pendingEntriesUpToMonth.map((entry) => ({
-//         ...entry,
-//         verificationProgress: buildVerificationProgress(item, entry.dueDate),
-//       }));
+//       // ✅ CHANGED — verificationProgressHistory is now ALSO nested
+//       // per-entry (filtered to that entry's own dueDate/cycle),
+//       // alongside the already-per-entry verificationProgress. Neither
+//       // field is returned at the site level anymore — both live only
+//       // inside each rentalDueEntries[] item, scoped to that specific
+//       // pending month.
+//       const filteredRentalDueEntries = pendingEntriesUpToMonth.map((entry) => {
+//         const entryCycleKey = entry.dueDate
+//           ? new Date(entry.dueDate).getTime()
+//           : null;
 
-//       // used for the top-level summary verificationProgress field
-//       // below — the most recent (latest dueDate) pending cycle.
-//       const targetCycleDate =
-//         pendingEntriesUpToMonth.length > 0
-//           ? pendingEntriesUpToMonth[pendingEntriesUpToMonth.length - 1].dueDate
-//           : (() => {
-//               if (item.rentalPayment?.nextBillingDate) {
-//                 const nbd = new Date(item.rentalPayment.nextBillingDate);
-//                 if (nbd >= monthStart && nbd <= monthEnd)
-//                   return item.rentalPayment.nextBillingDate;
-//               }
-//               return monthStart;
-//             })();
+//         const entryVerificationProgressHistory = (
+//           item.verificationProgressHistory || []
+//         ).filter((v) => {
+//           if (!v.cycle || entryCycleKey === null) return false;
+//           return new Date(v.cycle).getTime() === entryCycleKey;
+//         });
+
+//         return {
+//           ...entry,
+//           verificationProgress: buildVerificationProgress(item, entry.dueDate),
+//           verificationProgressHistory: entryVerificationProgressHistory,
+//         };
+//       });
 
 //       // verification history across every still-pending cycle shown above
 //       const pendingCycleKeys = new Set(
@@ -3116,6 +3122,7 @@
 //         city: item.city,
 //         state: item.state,
 //         location: item.location,
+//         siteBillMode: item.siteBillMode,
 //         rentalStatus: item.rentalStatus,
 //         totalSqFt: item.totalSqFt,
 //         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
@@ -3141,8 +3148,9 @@
 //         },
 //         agreementDocVerificationHistory:
 //           filteredAgreementDocVerificationHistory,
-//         verificationProgress: buildVerificationProgress(item, targetCycleDate),
-//         verificationProgressHistory: item.verificationProgressHistory || [],
+//         // ✅ REMOVED — verificationProgress and verificationProgressHistory
+//         // no longer appear here at the site level. Both now live only
+//         // inside each rentalDueEntries[] item above.
 //         gstBalanceHistory: item.gstBalanceHistory || [],
 //         rentalDueEntries: filteredRentalDueEntries,
 //       };
@@ -3266,8 +3274,6 @@
 //       .json({ success: false, message: "Server error", error: err.message });
 //   }
 // };
-
-
 
 
 
@@ -4093,9 +4099,33 @@ async function processSingleRentalDue({
     media.rentalPayment.balanceGstAmount = 0;
   }
 
-  const currentCycleForVerification = getCurrentCycle(
-    media.rentalPayment?.nextBillingDate,
-  );
+  // ✅ MOVED UP — find the target entry FIRST (via rentalDueId, or
+  // fallback to the last pending one), so the verification gate below
+  // can check against THIS entry's own cycle — not nextBillingDate,
+  // which now auto-advances regardless of approval and would point at
+  // a totally different (often future, entry-less) month.
+  const pendingEntry = rentalDueId
+    ? media.rentalDueEntries.find(
+        (e) => String(e._id) === String(rentalDueId) && e.approvalStatus !== 3,
+      )
+    : [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3);
+
+  if (rentalDueId && !pendingEntry) {
+    return {
+      success: false,
+      mediaId,
+      mediaName: media.mediaName,
+      message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
+    };
+  }
+
+  // Note: when pendingEntry is null (nothing pending — this request
+  // will go through the CREATE branch further down), the fallback
+  // below correctly verifies against nextBillingDate's cycle instead,
+  // since there's no existing entry yet to reference.
+  const currentCycleForVerification = pendingEntry
+    ? getCurrentCycle(pendingEntry.dueDate)
+    : getCurrentCycle(media.rentalPayment?.nextBillingDate);
 
   if (!currentCycleForVerification) {
     return {
@@ -4114,53 +4144,33 @@ async function processSingleRentalDue({
   const verifiedRolesThisCycle = new Set(
     currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
   );
-  const verifiedCountThisCycle = verifiedRolesThisCycle.size;
   const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
 
-  if (userType === ROLE.OWNER) {
-    const canProceedToSave =
-      verifiedCountThisCycle >= 2 || hasVerifiedThisCycle;
-
-    if (!canProceedToSave) {
-      return {
-        success: false,
-        mediaId,
-        mediaName: media.mediaName,
-        message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
-      };
-    }
-  }
-
-  // ✅ ADDED — if rentalDueId is provided, target THAT exact entry
-  // (must still be unapproved). Falls back to the original "last
-  // pending entry" behavior when rentalDueId is omitted, so existing
-  // callers are unaffected.
-  const pendingEntry = rentalDueId
-    ? media.rentalDueEntries.find(
-        (e) => String(e._id) === String(rentalDueId) && e.approvalStatus !== 3,
-      )
-    : [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3);
-
-  if (rentalDueId && !pendingEntry) {
+  // ✅ FIXED — restored: EVERY role (Staff, Team Lead, Owner) must
+  // personally verify THIS entry's own cycle before they can save/
+  // approve it — no exceptions, no "2 others already verified"
+  // bypass. Previously only Owner had any gate, and even that had a
+  // bypass; both are removed.
+  if (!hasVerifiedThisCycle) {
     return {
       success: false,
       mediaId,
       mediaName: media.mediaName,
-      message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
+      message: `${ROLE_LABEL[userType]} must verify the agreement document for ${pendingEntry ? pendingEntry.dueMonth : `the billing cycle starting ${formatDate(currentCycleForVerification)}`} before saving`,
     };
   }
 
-  const currentCycleDate = media.rentalPayment?.nextBillingDate
-    ? new Date(media.rentalPayment.nextBillingDate).getTime()
-    : null;
-
-  const ownerAlreadyClosedThisCycle = media.rentalDueEntries.some((e) => {
-    if (e.status !== 3) return false;
-    if (!currentCycleDate || !e.dueDate) return false;
-    if (new Date(e.dueDate).getTime() !== currentCycleDate) return false;
-    const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
-    return ownerStep?.status === 2;
-  });
+  // ✅ FIXED — "already closed" check now compares against the TARGET
+  // entry's own dueDate, not nextBillingDate.
+  const ownerAlreadyClosedThisCycle = pendingEntry
+    ? (() => {
+        if (pendingEntry.status !== 3) return false;
+        const ownerStep = pendingEntry.approvalSteps?.find(
+          (s) => s.role === ROLE.OWNER,
+        );
+        return ownerStep?.status === 2;
+      })()
+    : false;
 
   if (userType === ROLE.OWNER && ownerAlreadyClosedThisCycle) {
     return {
@@ -4611,9 +4621,14 @@ exports.saveRentalDue = async (req, res) => {
       const results = [];
       for (const item of entries) {
         const result = await processSingleRentalDue({
-          mediaId: item.mediaId,
-          rentalDueId: item.rentalDueId, // ✅ ADDED — targets a specific month
-          campaignName: item.campaignName,
+          // ✅ FIXED — trim() defends against stray leading/trailing
+          // whitespace in form-data values (Postman copy-paste
+          // artifact — "entries[0][mediaId]" arrives as " 6a6c2eaf..."
+          // with a leading space), which otherwise fails mongoose
+          // ObjectId validation even though the ID itself is correct.
+          mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
+          rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
+          campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
           withGst: item.withGst,
           gstApplicableFlag: item.gstApplicableFlag,
           proofOfCampaign: null,
@@ -4685,16 +4700,19 @@ exports.saveRentalDue = async (req, res) => {
     }
 
     // ── OLD — single mediaId request, response shape UNCHANGED ──
-    if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+    // ✅ FIXED — same trim() defense as the batch path above.
+    const trimmedMediaId = typeof mediaId === "string" ? mediaId.trim() : mediaId;
+
+    if (!trimmedMediaId || !mongoose.Types.ObjectId.isValid(trimmedMediaId)) {
       return res
         .status(400)
         .json({ success: false, message: "A valid mediaId is required" });
     }
 
     const result = await processSingleRentalDue({
-      mediaId,
-      rentalDueId, // ✅ ADDED
-      campaignName,
+      mediaId: trimmedMediaId,
+      rentalDueId: typeof rentalDueId === "string" ? rentalDueId.trim() : rentalDueId,
+      campaignName: typeof campaignName === "string" ? campaignName.trim() : campaignName,
       withGst,
       gstApplicableFlag,
       proofOfCampaign,
@@ -6242,7 +6260,6 @@ exports.getRentalDueListWithStats = async (req, res) => {
         location: 1,
         rentalStatus: 1,
         totalSqFt: 1,
-        siteBillMode: 1,
         landOwners: 1,
         appraisal: 1,
         frontView: 1,
@@ -6401,7 +6418,6 @@ exports.getRentalDueListWithStats = async (req, res) => {
         city: item.city,
         state: item.state,
         location: item.location,
-        siteBillMode: item.siteBillMode,
         rentalStatus: item.rentalStatus,
         totalSqFt: item.totalSqFt,
         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
