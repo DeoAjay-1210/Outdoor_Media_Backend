@@ -164,10 +164,14 @@ const LandOwnerMasterSchema = new mongoose.Schema(
         shareAmount: { type: Number, default: 0, min: 0 },
         cashAmount: { type: Number, default: 0, min: 0 },
         onlineAmount: { type: Number, default: 0, min: 0 },
+          gstAmount: { type: Number, default: 0, min: 0 },              // ← ADDED, needed to sum totalGstAmount
+        netPayableToOwner: { type: Number, default: 0, min: 0 }, 
         updatedAt: { type: Date, default: null },
       },
     ],
-
+    totalShareAmount: { type: Number, default: 0, min: 0 },
+    totalGstAmount: { type: Number, default: 0, min: 0 },
+    totalNetPayableToOwner: { type: Number, default: 0, min: 0 },
     // ✅ IST-based audit fields — set manually in the controller via
     // nowIST() (same helper/pattern as mediaOnboardingController.js),
     // NOT mongoose's built-in { timestamps: true } (which stores UTC).

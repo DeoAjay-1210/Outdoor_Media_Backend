@@ -2,6 +2,8 @@ const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/Med
 const { successResponse, errorResponse } = require("../../../utils/response");
 const path = require("path");
 const XLSX = require("xlsx");
+const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema"); // ✅ ADDED
+
 const mongoose = require("mongoose");
 const {
   syncOrLinkMediaOwnerToMaster,
@@ -2771,15 +2773,7 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
- const landOwnerNameFilter = [
-      ...new Set(
-        allData.flatMap((item) =>
-          Array.isArray(item.landOwners)
-            ? item.landOwners.map((o) => o.name)
-            : [],
-        ),
-      ),
-    ].filter(Boolean);
+const landOwnerNameFilter = await LandOwnerMaster.distinct("name");
     return successResponse(
       res,
       "Media list fetched successfully",

@@ -343,7 +343,7 @@ const MediaSchema = new mongoose.Schema(
     status: {
       type: Number,
       enum: [1, 2, 3], // 1=Active 2=InActive 3=Hold
-      default: 1,
+      default: 2,
     },
     numberOfLandOwners: {
       type: Number,

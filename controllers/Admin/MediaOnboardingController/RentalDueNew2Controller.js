@@ -76,6 +76,14 @@
 // }
 
 // async function generateMissedEntriesForMedia(media, userName) {
+//   // ✅ ADDED — only Active (status: 1) sites auto-generate missed
+//   // bills. Inactive (status: 2) sites are skipped entirely — no new
+//   // pending months get created for them, regardless of how many
+//   // cycles have passed.
+//   if (Number(media.status) !== 1) {
+//     return { generatedEntries: [] };
+//   }
+
 //   const today = new Date();
 //   const anchorDate = media.rentalPayment?.nextBillingDate;
 
@@ -1085,6 +1093,19 @@
 //   }
 
 //   // ── BRANCH 2: CREATE ──
+//   // ✅ ADDED — inactive sites can't have BRAND NEW rentalDue entries
+//   // created. (Existing pending entries left over from when the site
+//   // was Active still go through BRANCH 1 above and remain approvable
+//   // — this only blocks creating something new.)
+//   if (Number(media.status) !== 1) {
+//     return {
+//       success: false,
+//       mediaId,
+//       mediaName: media.mediaName,
+//       message: "This site is Inactive — rental due entries cannot be auto-generated or created",
+//     };
+//   }
+
 //   if (!campaignName) {
 //     return {
 //       success: false,
@@ -2347,6 +2368,7 @@
 //       isPastPending,
 //       roleType,
 //       edit,
+//       landOwnerMasterId, // ✅ ADDED — filter to one specific landowner
 //     } = req.body;
 
 //     const targetRole = roleType ? parseInt(roleType) : null;
@@ -2528,7 +2550,21 @@
 //       ];
 //     }
 
-//     const totalSites = await Media.countDocuments({ status: 1 });
+//     // ✅ ADDED — restrict to sites that include this specific
+//     // landowner. Applied at the DB query level so we never fetch
+//     // sites unrelated to this owner in the first place.
+//      if (landOwnerMasterId) {
+//       if (!mongoose.Types.ObjectId.isValid(landOwnerMasterId)) {
+//         return res
+//           .status(400)
+//           .json({ success: false, message: "Invalid landOwnerMasterId" });
+//       }
+//       mediaMatch["landOwners.landOwnerMasterId"] = new mongoose.Types.ObjectId(
+//         landOwnerMasterId,
+//       );
+//     }
+
+//     const totalSites = await Media.countDocuments({});
 
 //     // ✅ ADDED — before computing any stats/list data, sweep every
 //     // active site and catch it up on any missed billing cycles. Same
@@ -2888,6 +2924,25 @@
 //     };
 
 //     const listMatch = { ...mediaMatch };
+
+//     // ✅ FIXED — no longer relies on rentalPayment.nextBillingDate to
+//     // detect "past pending" sites. Since Rule 1 was scrapped,
+//     // nextBillingDate auto-advances every cycle regardless of
+//     // approval, so it no longer marks "the stuck cycle" — it's just
+//     // wherever the schedule currently sits (often already past every
+//     // unapproved month). Matching on it here excluded every site with
+//     // real past-pending entries, causing empty data[] even when
+//     // pastPendingApproval.count was correctly > 0.
+//     //
+//     // Also fixed: isPastPending=1 now ALWAYS includes the current
+//     // requested month too (e.g. May+June+July together), not just
+//     // past months — matching what buildFullSiteDetail already returns
+//     // per-site once the site passes this gate.
+//     // ✅ FIXED — isPastPending=1 now means PAST-ONLY (excludes current
+//     // month entirely, e.g. only May+June, never July). Without the
+//     // flag, behavior is unchanged: matches the current requested
+//     // month's sites (buildFullSiteDetail below then shows everything
+//     // pending up through that month, past+current together).
 //     if (Number(isPastPending) === 1) {
 //       listMatch.rentalDue = {
 //         $elemMatch: {
@@ -2965,12 +3020,10 @@
 //         mediaName: 1,
 //         mediaType: 1,
 //         city: 1,
-        
 //         state: 1,
 //         location: 1,
 //         rentalStatus: 1,
 //         totalSqFt: 1,
-//         siteBillMode: 1,
 //         landOwners: 1,
 //         appraisal: 1,
 //         frontView: 1,
@@ -3077,13 +3130,16 @@
 //     // entry carries its own verificationProgress, computed for that
 //     // entry's own dueDate/cycle.
 //     const buildFullSiteDetail = (item) => {
+//       // ✅ FIXED — isPastPending=1 now excludes the current month
+//       // (dueDate < monthStart, strictly past), so only May/June show,
+//       // never July. Without the flag: unchanged, dueDate <= monthEnd
+//       // shows everything pending up through the current month.
 //       const pendingEntriesUpToMonth = (item.rentalDue || []).filter((e) => {
 //         if (!e.dueDate) return false;
-//         const cutoff = Number(isPastPending) === 1 ? monthStart : monthEnd;
 //         const passesDateCheck =
 //           Number(isPastPending) === 1
-//             ? new Date(e.dueDate) < cutoff
-//             : new Date(e.dueDate) <= cutoff;
+//             ? new Date(e.dueDate) < monthStart
+//             : new Date(e.dueDate) <= monthEnd;
 //         return passesDateCheck && Number(e.approvalStatus) !== 3;
 //       });
 
@@ -3134,7 +3190,6 @@
 //         location: item.location,
 //         rentalStatus: item.rentalStatus,
 //         totalSqFt: item.totalSqFt,
-//         siteBillMode: item.siteBillMode,
 //         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
 //         netPayable: item.rentalPayment?.netPayable || 0,
 //         gstApplicable: item.rentalPayment?.gstApplicable || 0,
@@ -3179,6 +3234,13 @@
 //       for (const owner of site.landOwners) {
 //         if (!owner.landOwnerMasterId) continue;
 //         const key = String(owner.landOwnerMasterId);
+
+//         // ✅ ADDED — when landOwnerMasterId filter is active, only
+//         // build the entry for THAT owner. Without this, a shared site
+//         // (e.g. Site B with Ramesh + Suresh) would still leak the
+//         // OTHER co-owner into the response even though only one was
+//         // requested.
+//         if (landOwnerMasterId && key !== String(landOwnerMasterId)) continue;
 
 //         if (!ownerMap.has(key)) {
 //           ownerMap.set(key, {
@@ -3242,8 +3304,12 @@
 //     const pagedOwners = allOwners.slice(startIdx, startIdx + pageSize);
 
 //     // ═══════════════════════════════════════════════════════════
-//     // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is now
-//     // the landowner-grouped, paginated array with full site detail.
+//     // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is the
+//     // landowner-grouped, paginated array with full site detail.
+//     // landOwnerMasterId filter (see mediaMatch above + the owner-loop
+//     // skip further up) still narrows `data` to one owner when sent —
+//     // full LandOwnerMaster profiles are NOT fetched here anymore; use
+//     // the separate landOwnerList API for that.
 //     // ═══════════════════════════════════════════════════════════
 //     return res.status(200).json({
 //       success: true,
@@ -3284,6 +3350,9 @@
 //       .json({ success: false, message: "Server error", error: err.message });
 //   }
 // };
+
+
+
 
 
 
@@ -3377,40 +3446,75 @@ async function generateMissedEntriesForMedia(media, userName) {
   }
 
   const today = new Date();
-  const anchorDate = media.rentalPayment?.nextBillingDate;
 
-  if (!anchorDate) return { generatedEntries: [] };
-
-  const cycleMonths = getCycleMonthsForFrequency(media);
-  if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
-
-  if (!Array.isArray(media.rentalDueEntries)) {
-    media.rentalDueEntries = Array.isArray(media.rentalDue)
-      ? media.rentalDue
-      : [];
+  // ✅ FIXED — operate DIRECTLY on media.rentalDue, the REAL schema
+  // field on MediaSchema. "rentalDueEntries" is NOT an actual schema
+  // path — it was only ever a plain in-memory alias
+  // (media.rentalDueEntries = media.rentalDue), and this function was
+  // calling media.markModified("rentalDueEntries") afterward, which
+  // targets a path that doesn't exist in the schema at all. Combined
+  // with the alias indirection, this made persistence unreliable —
+  // entries could appear generated in-memory/in the response but
+  // never actually get saved to the DB, so August looked like it
+  // "couldn't generate" (it kept vanishing on the next fetch).
+  if (!Array.isArray(media.rentalDue)) {
+    media.rentalDue = [];
   }
   if (!Array.isArray(media.rentalDueHistory)) {
     media.rentalDueHistory = [];
   }
 
+  const cycleMonths = getCycleMonthsForFrequency(media);
+  if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
+
   const existingDueDateKeys = new Set(
-    media.rentalDueEntries
+    media.rentalDue
       .filter((e) => e.dueDate)
       .map((e) => new Date(e.dueDate).getTime()),
   );
 
+  // ✅ FIXED (previous pass) — the walk's starting point comes from
+  // the LATEST EXISTING rentalDue entry (ground truth), NOT from
+  // rentalPayment.nextBillingDate, which can drift ahead and
+  // permanently hide gaps.
+  const sortedExistingEntries = [...media.rentalDue]
+    .filter((e) => e.dueDate)
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+
+  let candidateDate;
+  if (sortedExistingEntries.length > 0) {
+    const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
+    candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
+  } else {
+    // no entries exist at all yet — fall back to nextBillingDate as
+    // the seed for the very FIRST entry ever generated on this site.
+    const anchorDate = media.rentalPayment?.nextBillingDate;
+    if (!anchorDate) return { generatedEntries: [] };
+    candidateDate = new Date(anchorDate);
+  }
+
   const generatedEntries = [];
-  let candidateDate = new Date(anchorDate);
   let safety = 0;
 
-  // ✅ CHANGED — scrapped the old "Rule 1" restriction. Dates now
-  // auto-advance on schedule by paymentFrequency, regardless of
-  // approval status. previousCycleDate tracks the cycle just before
-  // candidateDate, so lastBillPaidDate/nextBillingDate can be updated
-  // to match wherever the walk actually lands.
-  let previousCycleDate = new Date(anchorDate);
+  // previousCycleDate tracks the cycle just before candidateDate, so
+  // lastBillPaidDate/nextBillingDate get updated to match wherever
+  // the walk actually lands — self-correcting any prior drift.
+  let previousCycleDate = new Date(candidateDate);
 
-  while (candidateDate < today && safety < 60) {
+  // ✅ compare against the END of the CURRENT CALENDAR MONTH — any
+  // cycle date within or before the current month generates
+  // immediately, matching "monthly" auto-generation rather than
+  // waiting for the exact billing day to pass.
+  const currentMonthEnd = new Date(
+    today.getFullYear(),
+    today.getMonth() + 1,
+    0,
+    23,
+    59,
+    59,
+  );
+
+  while (candidateDate <= currentMonthEnd && safety < 60) {
     safety++;
     const candidateKey = candidateDate.getTime();
 
@@ -3464,9 +3568,9 @@ async function generateMissedEntriesForMedia(media, userName) {
         updatedAt: nowIST(),
       };
 
-      media.rentalDueEntries.push(newEntry);
-      const savedEntry =
-        media.rentalDueEntries[media.rentalDueEntries.length - 1];
+      // ✅ FIXED — push directly onto the real schema field.
+      media.rentalDue.push(newEntry);
+      const savedEntry = media.rentalDue[media.rentalDue.length - 1];
 
       const yearLabel = getYearLabel(candidateDate);
       const monthLabel = getMonthLabel(candidateDate);
@@ -3521,7 +3625,10 @@ async function generateMissedEntriesForMedia(media, userName) {
   }
 
   if (generatedEntries.length > 0) {
-    media.markModified("rentalDueEntries");
+    // ✅ FIXED — markModified the REAL schema path ("rentalDue"), not
+    // the fake "rentalDueEntries" path that doesn't exist in the
+    // schema and was never actually doing anything.
+    media.markModified("rentalDue");
     media.markModified("rentalDueHistory");
     media.updatedBy = userName || "System";
     media.updatedAt = nowIST();
@@ -5661,6 +5768,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       roleType,
       edit,
       landOwnerMasterId, // ✅ ADDED — filter to one specific landowner
+      mediaId,
     } = req.body;
 
     const targetRole = roleType ? parseInt(roleType) : null;
@@ -5842,20 +5950,62 @@ exports.getRentalDueListWithStats = async (req, res) => {
       ];
     }
 
-    // ✅ ADDED — restrict to sites that include this specific
-    // landowner. Applied at the DB query level so we never fetch
-    // sites unrelated to this owner in the first place.
-     if (landOwnerMasterId) {
-      if (!mongoose.Types.ObjectId.isValid(landOwnerMasterId)) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid landOwnerMasterId" });
-      }
-      mediaMatch["landOwners.landOwnerMasterId"] = new mongoose.Types.ObjectId(
-        landOwnerMasterId,
+    // ✅ FIXED — aggregate() does NOT auto-cast strings to ObjectId
+    // the way Model.find() does. Comparing a raw string against the
+    // actual ObjectId field in landOwners.landOwnerMasterId silently
+    // matched nothing, even though the id was correct — this is why
+    // `data` came back empty despite the landowner genuinely existing.
+     let landOwnerMasterIdList = [];
+    if (landOwnerMasterId) {
+      landOwnerMasterIdList = Array.isArray(landOwnerMasterId)
+        ? landOwnerMasterId
+        : [landOwnerMasterId];
+
+      const invalidId = landOwnerMasterIdList.find(
+        (id) => !mongoose.Types.ObjectId.isValid(id),
       );
+      if (invalidId) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid landOwnerMasterId: ${invalidId}`,
+        });
+      }
+
+      mediaMatch["landOwners.landOwnerMasterId"] = {
+        $in: landOwnerMasterIdList.map((id) => new mongoose.Types.ObjectId(id)),
+      };
     }
 
+    // ✅ ADDED — mediaId filter, independent of landOwnerMasterId.
+    // When sent (single string or array), restricts the query to
+    // ONLY those specific sites — so "2 owners" no longer means
+    // "every site those 2 owners have", it means "only the site(s)
+    // you explicitly asked for, belonging to those owners".
+    let mediaIdList = [];
+    if (mediaId) {
+      mediaIdList = Array.isArray(mediaId) ? mediaId : [mediaId];
+
+      const invalidMediaId = mediaIdList.find(
+        (id) => !mongoose.Types.ObjectId.isValid(id),
+      );
+      if (invalidMediaId) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid mediaId: ${invalidMediaId}`,
+        });
+      }
+
+      mediaMatch._id = {
+        $in: mediaIdList.map((id) => new mongoose.Types.ObjectId(id)),
+      };
+    }
+
+    // ✅ FIXED — totalSites now counts EVERY site regardless of
+    // status (Active + Inactive), so inactive sites still show up in
+    // this count. Bill auto-generation itself still correctly skips
+    // inactive sites (see generateMissedEntriesForMedia's status
+    // guard) — this only affects the COUNT shown here, not whether
+    // bills get created.
     const totalSites = await Media.countDocuments({});
 
     // ✅ ADDED — before computing any stats/list data, sweep every
@@ -6532,7 +6682,11 @@ exports.getRentalDueListWithStats = async (req, res) => {
         // (e.g. Site B with Ramesh + Suresh) would still leak the
         // OTHER co-owner into the response even though only one was
         // requested.
-        if (landOwnerMasterId && key !== String(landOwnerMasterId)) continue;
+        if (
+          landOwnerMasterIdList.length > 0 &&
+          !landOwnerMasterIdList.map(String).includes(key)
+        )
+          continue;
 
         if (!ownerMap.has(key)) {
           ownerMap.set(key, {

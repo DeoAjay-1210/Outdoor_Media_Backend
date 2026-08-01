@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   landOwnerSave,
   landOwnerList,
+  landOwnerSiteFilter,
 } = require("../../../controllers/Admin/landOwnerMasterController/landOwnerMasterController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -29,5 +30,6 @@ router.post(
 );
 
 router.post("/landowner/list", protect, landOwnerList);
+router.post("/landowner/site-filter", protect, landOwnerSiteFilter);
 
 module.exports = router;
