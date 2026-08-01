@@ -1705,6 +1705,7 @@ const landOwnerSiteFilter = async (req, res) => {
         landOwnerMasterId: ownerId,
         // name: ownerNameById[ownerId] || "Unknown",
         totalSites: sites.length,
+         totalLandOwners: 1,
         ...buildAmounts(sites),
         landOwners: [
           {
@@ -1768,32 +1769,15 @@ const landOwnerSiteFilter = async (req, res) => {
       const amounts = buildAmounts(group.sites);
       const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
  
-      if (group.sites.length === 1) {
-        // ── "shared" — single multi-owner site ──
-        const site = group.sites[0];
         entries.push({
-          entryType: "shared",
-          mediaId: site.mediaId,
-          mediaCode: site.mediaCode,
-          mediaName: site.mediaName,
-          totalLandOwners: landOwners.length,
-          gstApplicable: site.gstApplicable,
-          ...amounts,
-          landOwners,
-          sites: [toSiteResponseShape(site)],
-        });
-      } else {
-        // ── "sharedGroup" — same owner-set across 2+ sites ──
-        entries.push({
-          entryType: "sharedGroup",
-          totalLandOwners: landOwners.length,
-          totalSites: group.sites.length,
-          gstApplicable: anyGstApplicable ? 1 : 0,
-          ...amounts,
-          landOwners,
-          sites: group.sites.map(toSiteResponseShape),
-        });
-      }
+        entryType: "shared",
+        totalLandOwners: landOwners.length,
+        totalSites: group.sites.length, // ✅ dynamic, not hardcoded
+        gstApplicable: anyGstApplicable ? 1 : 0,
+        ...amounts,
+        landOwners,
+        sites: group.sites.map(toSiteResponseShape),
+      });
     });
  
     // ── paginate the ENTRIES (not the raw owners) ──

@@ -3564,7 +3564,7 @@ async function generateMissedEntriesForMedia(media, userName) {
         withGst: 0,
         gstAmount: Number(gstSplit.gstAmount) || 0,
         baseAmount: Number(gstSplit.baseAmount) || 0,
-        updatedBy: userName || "System",
+        updatedBy: userName || "",
         updatedAt: nowIST(),
       };
 
@@ -3595,7 +3595,7 @@ async function generateMissedEntriesForMedia(media, userName) {
         savedBy: "System (auto-generated)",
         savedByRole: null,
         updatedAt: nowIST(),
-        updatedBy: userName || "System",
+        updatedBy: userName || "",
       });
 
       generatedEntries.push({
@@ -3630,7 +3630,7 @@ async function generateMissedEntriesForMedia(media, userName) {
     // schema and was never actually doing anything.
     media.markModified("rentalDue");
     media.markModified("rentalDueHistory");
-    media.updatedBy = userName || "System";
+    media.updatedBy = userName || "";
     media.updatedAt = nowIST();
     await media.save();
   }
@@ -4737,16 +4737,18 @@ exports.saveRentalDue = async (req, res) => {
         .json({ success: false, message: "Invalid or missing user role" });
     }
 
+    const files = req.files || [];
+
     let proofOfCampaign = null;
-    if (req.files?.proofOfCampaign?.[0]) {
-      const file = req.files.proofOfCampaign[0];
-      if (!file.mimetype?.startsWith("image/")) {
+    const singleProofFile = files.find((f) => f.fieldname === "proofOfCampaign");
+    if (singleProofFile) {
+      if (!singleProofFile.mimetype?.startsWith("image/")) {
         return res.status(400).json({
           success: false,
           message: "Proof of campaign must be an image file",
         });
       }
-      proofOfCampaign = req.processFile(file);
+      proofOfCampaign = req.processFile(singleProofFile);
     }
 
     // ── NEW — batch mode: entries: [ { mediaId, campaignName, withGst, gstApplicableFlag }, ... ]
@@ -4754,20 +4756,46 @@ exports.saveRentalDue = async (req, res) => {
     // request below (multipart with one file). Batch requests don't carry
     // a per-entry file in this version.
     if (Array.isArray(entries) && entries.length > 0) {
+      // ✅ ADDED — match "entries[N][proofOfCampaign]" fieldnames to
+      // their array index, same pattern landOwners[N][panCardImage]
+      // already uses elsewhere in this codebase.
+      const parseEntryFileIndex = (fieldname) => {
+        const match = fieldname.match(/^entries\[(\d+)\]\[proofOfCampaign\]$/);
+        return match ? Number(match[1]) : null;
+      };
+
+      const entryFileMap = {};
+      files.forEach((f) => {
+        const idx = parseEntryFileIndex(f.fieldname);
+        if (idx !== null) entryFileMap[idx] = f;
+      });
+
       const results = [];
-      for (const item of entries) {
+      for (let index = 0; index < entries.length; index++) {
+        const item = entries[index];
+
+        // ✅ ADDED — resolve THIS entry's own file, if one was sent.
+        let entryProofOfCampaign = null;
+        const entryFile = entryFileMap[index];
+        if (entryFile) {
+          if (!entryFile.mimetype?.startsWith("image/")) {
+            results.push({
+              success: false,
+              mediaId: item.mediaId,
+              message: `entries[${index}].proofOfCampaign must be an image file`,
+            });
+            continue;
+          }
+          entryProofOfCampaign = req.processFile(entryFile);
+        }
+
         const result = await processSingleRentalDue({
-          // ✅ FIXED — trim() defends against stray leading/trailing
-          // whitespace in form-data values (Postman copy-paste
-          // artifact — "entries[0][mediaId]" arrives as " 6a6c2eaf..."
-          // with a leading space), which otherwise fails mongoose
-          // ObjectId validation even though the ID itself is correct.
           mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
           rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
           campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
           withGst: item.withGst,
           gstApplicableFlag: item.gstApplicableFlag,
-          proofOfCampaign: null,
+          proofOfCampaign: entryProofOfCampaign, // ✅ CHANGED — was hardcoded null
           userType,
           userId,
           userName,
@@ -5769,6 +5797,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       edit,
       landOwnerMasterId, // ✅ ADDED — filter to one specific landowner
       mediaId,
+      sortOrder,
     } = req.body;
 
     const targetRole = roleType ? parseInt(roleType) : null;
@@ -6576,13 +6605,24 @@ exports.getRentalDueListWithStats = async (req, res) => {
       // (dueDate < monthStart, strictly past), so only May/June show,
       // never July. Without the flag: unchanged, dueDate <= monthEnd
       // shows everything pending up through the current month.
-      const pendingEntriesUpToMonth = (item.rentalDue || []).filter((e) => {
+          const pendingEntriesUpToMonth = (item.rentalDue || []).filter((e) => {
         if (!e.dueDate) return false;
         const passesDateCheck =
           Number(isPastPending) === 1
             ? new Date(e.dueDate) < monthStart
             : new Date(e.dueDate) <= monthEnd;
-        return passesDateCheck && Number(e.approvalStatus) !== 3;
+        if (!passesDateCheck) return false;
+
+        // ✅ FIXED — the CURRENT requested month's entry must always
+        // show, even after Owner approval (approvalStatus === 3).
+        // Removing approved entries is still correct for PAST months
+        // (isPastPending mode) — only the current month is exempt
+        // from being dropped once approved.
+        const isCurrentMonthEntry =
+          new Date(e.dueDate) >= monthStart && new Date(e.dueDate) <= monthEnd;
+        if (isCurrentMonthEntry) return true;
+
+        return Number(e.approvalStatus) !== 3;
       });
 
       // ✅ CHANGED — verificationProgressHistory is now ALSO nested
@@ -6736,7 +6776,21 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // when edit === 1, sort by landOwnerMasterId (stable, never
     // reshuffles) instead of latestUpdatedAt (which jumps the moment
     // any of the owner's sites gets edited).
-    if (Number(edit) === 1) {
+  if (Number(sortOrder) === 1) {
+      allOwners.sort(
+        (a, b) => (a.totalNetPayableToOwner || 0) - (b.totalNetPayableToOwner || 0),
+      );
+    } else if (Number(sortOrder) === 2) {
+      allOwners.sort(
+        (a, b) => (b.totalNetPayableToOwner || 0) - (a.totalNetPayableToOwner || 0),
+      );
+    }
+    // ✅ edit-mode stability — same principle as the site-based list:
+    // when edit === 1 AND sortOrder was NOT sent, sort by
+    // landOwnerMasterId (stable, never reshuffles) instead of
+    // latestUpdatedAt (which jumps the moment any of the owner's
+    // sites gets edited).
+    else if (Number(edit) === 1) {
       allOwners.sort((a, b) =>
         String(a.landOwnerMasterId).localeCompare(String(b.landOwnerMasterId)),
       );
