@@ -6493,6 +6493,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         city: 1,
         state: 1,
         location: 1,
+        siteBillMode: 1,
         rentalStatus: 1,
         totalSqFt: 1,
         landOwners: 1,
@@ -6670,12 +6671,22 @@ exports.getRentalDueListWithStats = async (req, res) => {
         city: item.city,
         state: item.state,
         location: item.location,
+        siteBillMode: item.siteBillMode,
         rentalStatus: item.rentalStatus,
         totalSqFt: item.totalSqFt,
         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
         netPayable: item.rentalPayment?.netPayable || 0,
         gstApplicable: item.rentalPayment?.gstApplicable || 0,
-        gstAmount: item.rentalPayment?.gstAmount || 0,
+        // gstAmount: item.rentalPayment?.gstAmount || 0,
+          gstAmount:
+          item.rentalPayment?.gstAmount ||
+          (Number(item.rentalPayment?.gstApplicable) === 1
+            ? Math.max(
+                (item.rentalPayment?.netPayable || 0) -
+                  (item.rentalPayment?.totalRentalAmount || 0),
+                0,
+              )
+            : 0),
         landOwners: item.landOwners,
         appraisal: item.appraisal,
         frontView: item.frontView,
@@ -6728,14 +6739,22 @@ exports.getRentalDueListWithStats = async (req, res) => {
         )
           continue;
 
-        if (!ownerMap.has(key)) {
+          if (!ownerMap.has(key)) {
           ownerMap.set(key, {
             landOwnerMasterId: owner.landOwnerMasterId,
             landOwnerName: owner.name,
             phone: owner.phone,
             totalSites: 0,
             totalShareAmount: 0,
-            totalGstAmount: 0,
+            // ✅ RENAMED — was totalGstAmount, now explicitly
+            // totalOwnerGstAmount, to sit alongside the NEW
+            // totalSiteGstAmount below without any ambiguity about
+            // which "GST total" each one means.
+            totalOwnerGstAmount: 0,
+            // ✅ ADDED — sum of each SITE's own gstAmount (the
+            // property's total GST, e.g. 10800), separate from the
+            // owner's personal GST above.
+            totalSiteGstAmount: 0,
             totalNetPayableToOwner: 0,
             latestUpdatedAt: site.updatedAt,
             sites: [],
@@ -6745,7 +6764,11 @@ exports.getRentalDueListWithStats = async (req, res) => {
         const bucket = ownerMap.get(key);
         bucket.totalSites += 1;
         bucket.totalShareAmount += owner.shareAmount || 0;
-        bucket.totalGstAmount += owner.gstAmount || 0;
+        bucket.totalOwnerGstAmount += owner.gstAmount || 0; // ✅ RENAMED
+        // ✅ ADDED — accumulate the SITE's own gstAmount (from
+        // fullSiteDetail, computed with the earlier netPayable
+        // fallback fix), not the owner's personal GST.
+        bucket.totalSiteGstAmount += fullSiteDetail.gstAmount || 0;
         bucket.totalNetPayableToOwner += owner.netPayableToOwner || 0;
         if (new Date(site.updatedAt) > new Date(bucket.latestUpdatedAt)) {
           bucket.latestUpdatedAt = site.updatedAt;
@@ -6753,17 +6776,17 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
         // ✅ MERGED — full site detail (mediaType, totalSqFt, appraisal,
         // frontView, full landOwners[], history arrays, etc.) PLUS the
-        // owner-specific slice (paymentCategory, shareAmount, gstAmount,
-        // tdsAmount, netPayableToOwner) laid on top. The owner-specific
-        // fields intentionally OVERRIDE any same-named field coming
-        // from fullSiteDetail (e.g. gstAmount) so each entry reads as
-        // "this owner's amount on this site", not the site's total.
+        // owner-specific slice (paymentCategory, shareAmount,
+        // ownerGstAmount, tdsAmount, netPayableToOwner) laid on top.
         bucket.sites.push({
           ...fullSiteDetail,
           mediaId: site._id,
           paymentCategory: owner.paymentCategory,
           shareAmount: owner.shareAmount || 0,
-          gstAmount: owner.gstAmount || 0,
+          // ✅ RENAMED — was gstAmount (which overwrote
+          // fullSiteDetail.gstAmount, the site's own GST). Now
+          // ownerGstAmount, so both coexist without collision.
+          ownerGstAmount: owner.gstAmount || 0,
           tdsAmount: owner.tdsAmount || 0,
           netPayableToOwner: owner.netPayableToOwner || 0,
         });
