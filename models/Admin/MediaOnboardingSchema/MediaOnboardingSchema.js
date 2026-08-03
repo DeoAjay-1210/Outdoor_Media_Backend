@@ -191,6 +191,7 @@ const ledgerSchema = new mongoose.Schema({
   // left null for withGst===1 entries (which live in
   // `media.withGst1Ledger` instead, identified by rentalDueId).
   index: { type: Number, default: null },
+    amount: { type: Number, default: 0, min: 0 },
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -218,8 +219,9 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     // getLedgerHistory / listMediaByLedger can reliably dedupe
     // withGst===2 entries by slot when reading past months.
     index: { type: Number, default: null },
+     amount: { type: Number, default: 0, min: 0 },
   },
-  { _id: false },
+  { _id: true },
 );
 
 const ledgerHistoryMonthSchema = new mongoose.Schema(
@@ -283,6 +285,68 @@ const pendingMonthSchema = new mongoose.Schema(
   },
   { _id: false },
 );
+const gstOutstandingHistorySchema = new mongoose.Schema({
+  dueMonth: {
+    type: String, // Format: "MMM YYYY" e.g., "May 2026"
+    required: true,
+  },
+  gstOutStandingAmount: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  updatedAt: {
+    type: Date,
+    default: null,
+  },
+  updatedBy: {
+    type: String,
+    default: "",
+  },paymentMode: { type: String, enum: ["Cash", "Online", "Cash+Online", null], default: null },
+  utrNumber: { type: String, trim: true, default: null },
+  date: { type: Date, default: null },
+  isPaid: { type: Boolean, default: false },
+  // populated only when paymentMode === "Cash+Online"
+  paymentBreakup: [
+    {
+      paymentMode: { type: String, enum: ["Cash", "Online"] },
+      amount: { type: Number, default: 0 },
+      utrNumber: { type: String, default: null },
+      date: { type: Date, default: null },
+    },
+  ],
+});
+const rentalOutstandingHistorySchema = new mongoose.Schema({
+  dueMonth: {
+    type: String, // Format: "MMM YYYY" e.g., "June 2026"
+    required: true,
+  },
+  baseRentOutstandingAmount: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  paymentMode: { type: String, enum: ["Cash", "Online", "Cash+Online", null], default: null },
+  utrNumber: { type: String, trim: true, default: null },
+  date: { type: Date, default: null },
+  isPaid: { type: Boolean, default: false },
+  paymentBreakup: [
+    {
+      paymentMode: { type: String, enum: ["Cash", "Online"] },
+      amount: { type: Number, default: 0 },
+      utrNumber: { type: String, default: null },
+      date: { type: Date, default: null },
+    },
+  ],
+  updatedAt: {
+    type: Date,
+    default: null,
+  },
+  updatedBy: {
+    type: String,
+    default: "",
+  },
+});
 // ─────────────────────────────────────────────────────────────
 // MAIN SCHEMA
 // ─────────────────────────────────────────────────────────────
@@ -391,20 +455,15 @@ const MediaSchema = new mongoose.Schema(
         type: Number,
         default: 0,
       },
-      siteOutStantAmont: {
+
+      outStantStatus: {
+        // ← ADDED
         type: Number,
+        enum: [0, 1], // 0 no 1 yes
         default: 0,
       },
-      gstOutStantAmont: {
-        type: Number,
-        default: 0,
-      },
-        outStantStatus: {
-      // ← ADDED
-      type: Number,
-      enum: [0, 1], // 0 no 1 yes
-      default: 0,
-    },
+      gstOutstandingHistory: [gstOutstandingHistorySchema],
+        rentalOutstandingHistory: [rentalOutstandingHistorySchema],
       totalRentalAmountWithGst: {
         type: Number,
         default: 0,

@@ -278,7 +278,96 @@ const dateString = (date) => {
   const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 };
+const processGstOutstandingHistory = (rentalPayment, userName) => {
+  if (!rentalPayment) return rentalPayment;
+  
+  // Initialize array if not exists
+  if (!rentalPayment.gstOutstandingHistory) {
+    rentalPayment.gstOutstandingHistory = [];
+  }
 
+  // If outStandingStatus is 1, manage history
+  if (rentalPayment.outStantStatus  === 1) {
+    // ✅ FIX: Check if history is provided in request AND has items
+    if (rentalPayment.gstOutstandingHistory && 
+        Array.isArray(rentalPayment.gstOutstandingHistory) && 
+        rentalPayment.gstOutstandingHistory.length > 0) {
+      
+      // Process each entry - keep existing data
+      rentalPayment.gstOutstandingHistory = rentalPayment.gstOutstandingHistory.map(item => ({
+        dueMonth: item.dueMonth,
+        gstOutStandingAmount: item.gstOutStandingAmount || 0,
+        // ✅ Keep existing _id, updatedAt, updatedBy if they exist
+        _id: item._id || new mongoose.Types.ObjectId(),
+        updatedBy: userName,
+        updatedAt: nowIST(),
+      }));
+      
+      // Remove duplicates (keep latest)
+      const uniqueHistory = [];
+      const seenMonths = new Set();
+      for (const item of rentalPayment.gstOutstandingHistory) {
+        if (!seenMonths.has(item.dueMonth)) {
+          seenMonths.add(item.dueMonth);
+          uniqueHistory.push(item);
+        }
+      }
+      rentalPayment.gstOutstandingHistory = uniqueHistory;
+      
+      // Calculate total
+      rentalPayment.gstOutStandingAmount = rentalPayment.gstOutstandingHistory.reduce(
+        (sum, item) => sum + (item.gstOutStandingAmount || 0),
+        0
+      );
+    } 
+    // ✅ If history array is empty in request BUT we have existing data, keep existing
+    else if (rentalPayment.gstOutstandingHistory && 
+             Array.isArray(rentalPayment.gstOutstandingHistory) && 
+             rentalPayment.gstOutstandingHistory.length === 0) {
+      // Keep the empty array - don't auto-generate
+      // This allows users to intentionally clear the history
+    }
+    // ✅ Auto-generate only if NO history exists at all
+    else if (!rentalPayment.gstOutstandingHistory || rentalPayment.gstOutstandingHistory.length === 0) {
+      // Auto-generate from lastBillPaidDate
+      const lastBillDate = new Date(rentalPayment.lastBillPaidDate);
+      const currentDate = new Date();
+      
+      const monthsDiff = (currentDate.getFullYear() - lastBillDate.getFullYear()) * 12 +
+                        (currentDate.getMonth() - lastBillDate.getMonth());
+      
+      if (monthsDiff >= 0) {
+        const gstAmount = rentalPayment.gstAmount || 
+                         (rentalPayment.totalRentalAmount * rentalPayment.gstPercentage / 100);
+        
+        rentalPayment.gstOutstandingHistory = [];
+        for (let i = 0; i <= monthsDiff; i++) {
+          const date = new Date(lastBillDate);
+          date.setMonth(date.getMonth() + i);
+          const dueMonth = date.toLocaleString('default', { month: 'short' }) + ' ' + date.getFullYear();
+          
+          rentalPayment.gstOutstandingHistory.push({
+            dueMonth: dueMonth,
+            gstOutStandingAmount: gstAmount,
+            updatedBy: userName,
+            updatedAt: nowIST(),
+          });
+        }
+        
+        rentalPayment.gstOutStandingAmount = rentalPayment.gstOutstandingHistory.reduce(
+          (sum, item) => sum + item.gstOutStandingAmount,
+          0
+        );
+      }
+    }
+  } else {
+    // If outStandingStatus is 0, clear everything
+    rentalPayment.gstOutstandingHistory = [];
+    rentalPayment.gstOutStandingAmount = 0;
+  }
+  
+  return rentalPayment;
+};
 const APPRAISAL_FREQUENCY_MONTHS = { 1: 12, 2: 24, 3: 36 };
 const APPRAISAL_FREQUENCY_LABEL = {
   1: "1 Year",
@@ -1614,7 +1703,12 @@ const mediaOnboarding = async (req, res) => {
       if (!gstCheck.valid)
         return errorResponse(res, gstCheck.message, null, 400);
     }
-
+ if (mediaData.rentalPayment) {
+      mediaData.rentalPayment = processGstOutstandingHistory(
+        mediaData.rentalPayment,
+        userName
+      );
+    }
     // if (
     //   mediaData.landOwners?.length &&
     //   mediaData.rentalPayment?.totalRentalAmount
@@ -1916,6 +2010,7 @@ const mediaOnboarding = async (req, res) => {
       applyOwnerApprovalBillingShift(mediaData, media, userName);
       if (mediaData.rentalPayment && mediaData.agreement) {
         const pf = mediaData.rentalPayment.paymentFrequency || 1;
+         const existingHistory = mediaData.rentalPayment.gstOutstandingHistory || [];
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: pf,
@@ -1929,6 +2024,7 @@ const mediaOnboarding = async (req, res) => {
                 ),
               }
             : {}),
+             gstOutstandingHistory: existingHistory,
         };
       }
       handleAgreementHistory(mediaData, media, userName);
@@ -2042,6 +2138,7 @@ const mediaOnboarding = async (req, res) => {
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
         const pf = mediaData.rentalPayment.paymentFrequency || 1;
+         const existingHistory = mediaData.rentalPayment.gstOutstandingHistory || [];
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: pf,
@@ -2055,6 +2152,7 @@ const mediaOnboarding = async (req, res) => {
                 ),
               }
             : {}),
+             gstOutstandingHistory: existingHistory,
         };
       }
       handleAgreementHistory(mediaData, null, userName);
@@ -2615,7 +2713,7 @@ const mediaList = async (req, res) => {
       city,
       status,
       search,
-      landOwnerName
+      landOwnerName,
     } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -2653,7 +2751,7 @@ const mediaList = async (req, res) => {
         ? { $in: mediaType }
         : mediaType;
     }
-   if (landOwnerName) {
+    if (landOwnerName) {
       const nameList = Array.isArray(landOwnerName)
         ? landOwnerName
         : [landOwnerName];
@@ -2773,7 +2871,7 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
-const landOwnerNameFilter = await LandOwnerMaster.distinct("name");
+    const landOwnerNameFilter = await LandOwnerMaster.distinct("name");
     return successResponse(
       res,
       "Media list fetched successfully",
