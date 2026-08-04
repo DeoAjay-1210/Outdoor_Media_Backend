@@ -1969,23 +1969,48 @@ if (Array.isArray(landOwnerMasterId) && landOwnerMasterId.length > 0) {
           return dateB - dateA;
         });
         rentalDueWithApproval = sortedDue
-          .filter((due) => due.ownerApprovalDate)
-          .map((due) => ({
-            _id: due._id,
-            ownerApprovalDate: due.ownerApprovalDate,
-            dueMonth: due.dueMonth,
-            dueDate: due.dueDate,
-            netPayable: due.netPayable,
-            approvalStatus: due.approvalStatus,
-            withGst: due.withGst,
-            gstAmount: due.gstAmount,
-            baseAmount: due.baseAmount,
-            paymentFrequency: due.paymentFrequency,
-            campaignName: due.campaignName,
-            status: due.status,
-            updatedAt: due.updatedAt,
-            createdAt: due.createdAt,
-          }));
+  .filter((due) => due.ownerApprovalDate)
+  .map((due) => {
+    // ✅ NEW — cashAmount/onlineAmount live on the landOwner subdocument,
+    // not on rentalDue itself. Match by due.landOwnerId if it exists on
+    // your rentalDue schema; otherwise fall back to summing across every
+    // landOwner on this media (covers the common single-owner-per-site case
+    // and multi-owner sites where the due isn't owner-scoped).
+    let cashAmount = 0;
+    let onlineAmount = 0;
+
+    if (due.landOwnerId) {
+      const matchedOwner = (mediaObj.landOwners || []).find(
+        (o) => String(o._id) === String(due.landOwnerId),
+      );
+      if (matchedOwner) {
+        cashAmount = Number(matchedOwner.cashAmount || 0);
+        onlineAmount = Number(matchedOwner.onlineAmount || 0);
+      }
+    } else {
+      cashAmount = (mediaObj.landOwners || []).reduce((sum, o) => sum + Number(o.cashAmount || 0), 0);
+      onlineAmount = (mediaObj.landOwners || []).reduce((sum, o) => sum + Number(o.onlineAmount || 0), 0);
+    }
+
+    return {
+      _id: due._id,
+      ownerApprovalDate: due.ownerApprovalDate,
+      dueMonth: due.dueMonth,
+      dueDate: due.dueDate,
+      netPayable: due.netPayable,
+      approvalStatus: due.approvalStatus,
+      withGst: due.withGst,
+      gstAmount: due.gstAmount,
+      baseAmount: due.baseAmount,
+      paymentFrequency: due.paymentFrequency,
+      campaignName: due.campaignName,
+      status: due.status,
+      updatedAt: due.updatedAt,
+      createdAt: due.createdAt,
+      cashAmount,
+      onlineAmount,
+    };
+  });
       }
 
       // ✅ NEW — owner-approval list ALWAYS includes past-month pending
