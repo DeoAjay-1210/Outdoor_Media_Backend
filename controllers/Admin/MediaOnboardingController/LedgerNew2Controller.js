@@ -337,10 +337,51 @@ function sumUnpaidRentalOutstanding(media) {
 }
 
 function getCurrentBaseRent(media) {
-  const netPayable = Number(media.rentalPayment?.totalRentalAmount || 0);
+  // ✅ FIXED — was zeroing out currentBaseRent the moment ANY single
+  // Cash/Online entry existed, even if the owner's other required mode
+  // (paymentCategory:3 needs BOTH) was still unpaid. Now checks
+  // per-owner, per-required-mode completeness — same rule already used
+  // by recomputePendingMonths/List API's isFullyPaid logic — and sums
+  // only the genuinely remaining unpaid amount.
   const liveLedger = media.ledger || [];
-  const anyPaidThisCycle = liveLedger.some((e) => e.status === 1);
-  return anyPaidThisCycle ? 0 : netPayable;
+  const owners = media.landOwners || [];
+
+  if (owners.length === 0) {
+    const netPayable = Number(media.rentalPayment?.totalRentalAmount || 0);
+    const anyPaidThisCycle = liveLedger.some((e) => e.status === 1);
+    return anyPaidThisCycle ? 0 : netPayable;
+  }
+
+  const getRequiredModes = (paymentCategory) => {
+    if (paymentCategory === 1) return ["Cash"];
+    if (paymentCategory === 2) return ["Online"];
+    if (paymentCategory === 3) return ["Cash", "Online"];
+    return ["Cash"];
+  };
+
+  let remainingDue = 0;
+  owners.forEach((owner) => {
+    const paymentCategory = Number(owner.paymentCategory || 1);
+    const requiredModes = getRequiredModes(paymentCategory);
+
+    requiredModes.forEach((mode) => {
+      const isPaid = liveLedger.some(
+        (e) =>
+          e.status === 1 &&
+          String(e.landOwnerId) === String(owner._id) &&
+          e.paymentMode === mode,
+      );
+      if (isPaid) return;
+
+      const modeAmount =
+        mode === "Cash"
+          ? Number(owner.cashAmount || owner.shareAmount || 0)
+          : Number(owner.onlineAmount || owner.shareAmount || 0);
+      remainingDue += modeAmount;
+    });
+  });
+
+  return remainingDue;
 }
 
 /**
@@ -2021,12 +2062,12 @@ exports.listMediaByLedger = async (req, res) => {
       needsFullFetch
         ? Media.find(filter)
             .select(
-              "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
+              "mediaCode mediaName mediaType state  siteBillMode city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
             )
             .sort({ updatedAt: -1 })
         : Media.find(filter)
             .select(
-              "mediaCode mediaName mediaType state city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
+              "mediaCode mediaName mediaType state siteBillMode city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
             )
             .sort({ updatedAt: -1 })
             .skip(skip)
@@ -2611,42 +2652,42 @@ approvedUnpaidDues.forEach((due) => {
 });
 
       latestLedger = [...latestLedger, ...dueVirtualEntries];
-      if (
-        latestLedger.length === 0 &&
-        (mediaObj.landOwners || []).length > 0 &&
-        currentCycleDueMonth
-      ) {
-        const getRequiredModesForOwner = (paymentCategory) => {
-          if (paymentCategory === 1) return ["Cash"];
-          if (paymentCategory === 2) return ["Online"];
-          if (paymentCategory === 3) return ["Cash", "Online"];
-          return ["Cash"];
-        };
+      // if (
+      //   latestLedger.length === 0 &&
+      //   (mediaObj.landOwners || []).length > 0 &&
+      //   currentCycleDueMonth
+      // ) {
+      //   const getRequiredModesForOwner = (paymentCategory) => {
+      //     if (paymentCategory === 1) return ["Cash"];
+      //     if (paymentCategory === 2) return ["Online"];
+      //     if (paymentCategory === 3) return ["Cash", "Online"];
+      //     return ["Cash"];
+      //   };
 
-        (mediaObj.landOwners || []).forEach((owner) => {
-          const paymentCategory = Number(owner.paymentCategory || 1);
-          getRequiredModesForOwner(paymentCategory).forEach((mode) => {
-            latestLedger.push({
-              landOwnerId: owner._id,
-              landOwnerName: owner.name,
-              paymentCategory,
-              paymentMode: mode,
-              utrNumber: "",
-              date: null,
-              status: 0,
-            //   withGst: 2,
-              dueMonth: currentCycleDueMonth,
-              cycle: mediaObj.rentalPayment?.nextBillingDate || null,
-              rentalDueId: null,
-              index: null,
-              updatedBy: "",
-              updatedAt: null,
-              amount: 0,
-              isVirtual: true,
-            });
-          });
-        });
-      }
+      //   (mediaObj.landOwners || []).forEach((owner) => {
+      //     const paymentCategory = Number(owner.paymentCategory || 1);
+      //     getRequiredModesForOwner(paymentCategory).forEach((mode) => {
+      //       latestLedger.push({
+      //         landOwnerId: owner._id,
+      //         landOwnerName: owner.name,
+      //         paymentCategory,
+      //         paymentMode: mode,
+      //         utrNumber: "",
+      //         date: null,
+      //         status: 0,
+      //       //   withGst: 2,
+      //         dueMonth: currentCycleDueMonth,
+      //         cycle: mediaObj.rentalPayment?.nextBillingDate || null,
+      //         rentalDueId: null,
+      //         index: null,
+      //         updatedBy: "",
+      //         updatedAt: null,
+      //         amount: 0,
+      //         isVirtual: true,
+      //       });
+      //     });
+      //   });
+      // }
       let rentalDueWithApproval = [];
       if (Array.isArray(mediaObj.rentalDue) && mediaObj.rentalDue.length > 0) {
         const sortedDue = [...mediaObj.rentalDue].sort((a, b) => {

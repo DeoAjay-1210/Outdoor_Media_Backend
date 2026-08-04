@@ -1438,7 +1438,25 @@ const mediaOnboarding = async (req, res) => {
         }
       }
     });
-
+if (
+  mediaData.rentalPayment &&
+  typeof mediaData.rentalPayment.gstOutstandingHistory === "string"
+) {
+  try {
+    mediaData.rentalPayment.gstOutstandingHistory = JSON.parse(
+      mediaData.rentalPayment.gstOutstandingHistory,
+    );
+  } catch {
+    mediaData.rentalPayment.gstOutstandingHistory = [];
+  }
+}
+if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
+  mediaData.rentalPayment.gstOutstandingHistory =
+    mediaData.rentalPayment.gstOutstandingHistory.map((item) => ({
+      ...item,
+      gstOutStandingAmount: Number(item?.gstOutStandingAmount || 0),
+    }));
+}
     if (mediaData.rentalPayment) {
       if (mediaData.rentalPayment.totalRentalAmount !== undefined)
         mediaData.rentalPayment.totalRentalAmount = Number(
@@ -1460,6 +1478,10 @@ const mediaOnboarding = async (req, res) => {
         mediaData.rentalPayment.gstApplicable = Number(
           mediaData.rentalPayment.gstApplicable,
         );
+          if (mediaData.rentalPayment.outStantStatus !== undefined)
+    mediaData.rentalPayment.outStantStatus = Number(
+      mediaData.rentalPayment.outStantStatus,
+    );
     }
 
     const getFileByFieldName = (fieldName) => {
