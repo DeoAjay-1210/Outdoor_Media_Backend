@@ -5,7 +5,7 @@ const {
   createLedgerEntry,
   listMediaByLedger,
   getLedgerHistory,
-} = require("../../../controllers/Admin/MediaOnboardingController/LedgerNewController");
+} = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
 
 
 

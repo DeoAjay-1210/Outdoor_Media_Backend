@@ -1427,6 +1427,7 @@ const mediaOnboarding = async (req, res) => {
       "rentalPayment",
       "agreement",
       "appraisal",
+       "gstOutstandingHistory", 
     ];
     jsonFields.forEach((field) => {
       if (mediaData[field] && typeof mediaData[field] === "string") {
