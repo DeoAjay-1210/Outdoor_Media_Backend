@@ -1293,246 +1293,6 @@ const landOwnerList = async (req, res) => {
 
 
 
-
-// const landOwnerSiteFilter = async (req, res) => {
-//   try {
-//     const {
-//       landOwnerMasterIds,
-//       search,
-//       pageNumber = 1,
-//       count = 10,
-//     } = req.body || {};
- 
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
- 
-//     let ownerFilter = {};
-//     if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
-//       ownerFilter._id = { $in: landOwnerMasterIds };
-//     } else if (search && search.trim() !== "") {
-//       const searchRegex = new RegExp(search.trim(), "i");
-//       ownerFilter.$or = [
-//         { name: searchRegex },
-//         { panNumber: searchRegex },
-//         { aadharCardNumber: searchRegex },
-//       ];
-//     }
-//     // no landOwnerMasterIds/search → empty filter → every landowner
- 
-//     const requestedOwners = await LandOwnerMaster.find(ownerFilter)
-//       .select("name phone")
-//       .lean();
- 
-//     if (requestedOwners.length === 0) {
-//       return successResponse(
-//         res,
-//         "No landowners found",
-//         {
-//           pagination: { count: pageSize, pageNumber: pageNumbers, totalCount: 0, totalPages: 0 },
-//           entries: [],
-//         },
-//         200,
-//       );
-//     }
- 
-//     const requestedOwnerIds = requestedOwners.map((o) => String(o._id));
-//     const ownerNameById = {};
-//     requestedOwners.forEach((o) => {
-//       ownerNameById[String(o._id)] = o.name;
-//     });
- 
-//     // ── ground truth — every Media property any of these owners is
-//     // actually on, straight from MediaOnboarding (NOT the
-//     // LandOwnerMaster.linkedSites cache, which can go stale) ──
-//     const relatedMediaDocs = await MediaOnboarding.find(
-//       { "landOwners.landOwnerMasterId": { $in: requestedOwnerIds } },
-//       "mediaCode mediaName rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner",
-//     ).lean();
- 
-//     // site map: mediaId -> { mediaCode, mediaName, amounts, ownerIds: [] }
-//     const siteMap = new Map();
-//     relatedMediaDocs.forEach((mediaDoc) => {
-//          const ownersOnThisSite = (mediaDoc.landOwners || []).filter(
-//         (o) => o.landOwnerMasterId,
-//       );
-//       const ownerIdsOnThisSite = ownersOnThisSite.map((o) =>
-//         String(o.landOwnerMasterId),
-//       );
-//       siteMap.set(String(mediaDoc._id), {
-//         mediaId: mediaDoc._id,
-//         mediaCode: mediaDoc.mediaCode,
-//         mediaName: mediaDoc.mediaName,
-//         totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
-//         gstAmount: mediaDoc.rentalPayment?.gstAmount || 0,
-//         gstApplicable: Number(mediaDoc.rentalPayment?.gstApplicable) || 0,
-//         ownerIds: ownerIdsOnThisSite,
-//         ownersDetail: ownersOnThisSite.map((o) => ({
-//           landOwnerMasterId: String(o.landOwnerMasterId),
-//           paymentCategory: o.paymentCategory,
-//           shareAmount: o.shareAmount || 0,
-//           gstAmount: o.gstAmount || 0,
-//           netPayableToOwner: o.netPayableToOwner || 0,
-//         })),
-//       });
-//     });
- 
-//     const toSiteResponseShape = (site) => ({
-//       mediaId: site.mediaId,
-//       mediaCode: site.mediaCode,
-//       mediaName: site.mediaName,
-//       baseRent: site.totalRentalAmount,
-//       gstAmount: site.gstAmount,
-//       gstApplicable: site.gstApplicable,
-//     });
- 
-//     const buildAmounts = (sites) => {
-//       const totalBaseRent = sites.reduce((s, site) => s + site.totalRentalAmount, 0);
-//       const gstHoldTotal = sites.reduce((s, site) => s + site.gstAmount, 0);
-//       return {
-//         totalBaseRent,
-//         gstHoldTotal,
-//         consolidatedPayable: totalBaseRent + gstHoldTotal,
-//       };
-//     };
- 
-//     // ── split sites: sole-owned (exactly 1 owner) vs multi-owned (2+) ──
-//     const soleOwnedSitesByOwner = new Map(); // ownerId -> [site, ...]
-//     const multiOwnerSites = []; // [site, ...]
- 
-//     siteMap.forEach((site) => {
-//       if (site.ownerIds.length <= 1) {
-//         const soloOwnerId = site.ownerIds[0];
-//         if (soloOwnerId) {
-//           if (!soleOwnedSitesByOwner.has(soloOwnerId)) {
-//             soleOwnedSitesByOwner.set(soloOwnerId, []);
-//           }
-//           soleOwnedSitesByOwner.get(soloOwnerId).push(site);
-//         }
-//       } else {
-//         multiOwnerSites.push(site);
-//       }
-//     });
- 
-//     // ── group multi-owner sites by EXACT owner-set signature ──
-//     // (sorted, joined owner ids) — same signature repeated on 2+
-//     // sites becomes "sharedGroup"; a signature appearing on only 1
-//     // site stays "shared".
-//     const signatureGroups = new Map(); // signature -> { ownerIds: [...], sites: [...] }
- 
-//     multiOwnerSites.forEach((site) => {
-//       const signature = [...site.ownerIds].sort().join(",");
-//       if (!signatureGroups.has(signature)) {
-//         signatureGroups.set(signature, { ownerIds: site.ownerIds, sites: [] });
-//       }
-//       signatureGroups.get(signature).sites.push(site);
-//     });
- 
-//     const entries = [];
- 
-//     // ── "single" entries — one per owner with 1+ sole-owned sites ──
-//     requestedOwnerIds.forEach((ownerId) => {
-//       const sites = soleOwnedSitesByOwner.get(ownerId);
-//       if (!sites || sites.length === 0) return;
- 
-//       entries.push({
-//         entryType: "single",
-//         landOwnerMasterId: ownerId,
-//         name: ownerNameById[ownerId] || "Unknown",
-//         totalSites: sites.length,
-//         ...buildAmounts(sites),
-//           landOwners: [
-//           {
-//             landOwnerMasterId: ownerId,
-//             name: ownerNameById[ownerId] || "Unknown",
-//           },
-//         ],
-//         sites: sites.map(toSiteResponseShape),
-//       });
-//     });
- 
-//     // ── "shared" (1 site) vs "sharedGroup" (2+ sites, same owner-set) ──
-//     signatureGroups.forEach((group) => {
-//      const landOwners = group.ownerIds.map((id) => {
-//         let totalShareAmount = 0;
-//         let totalGstAmount = 0;
-//         let totalNetPayableToOwner = 0;
-
-//         group.sites.forEach((site) => {
-//           const ownerDetail = site.ownersDetail?.find(
-//             (od) => od.landOwnerMasterId === id,
-//           );
-//           if (ownerDetail) {
-//             totalShareAmount += ownerDetail.shareAmount;
-//             totalGstAmount += ownerDetail.gstAmount;
-//             totalNetPayableToOwner += ownerDetail.netPayableToOwner;
-//           }
-//         });
-
-//         return {
-//           landOwnerMasterId: id,
-//           // may be "Unknown" if a co-owner on this site wasn't part of
-//           // the originally requested landOwnerMasterIds/search
-//           name: ownerNameById[id] || "Unknown",
-//           totalShareAmount,
-//           totalGstAmount,
-//           totalNetPayableToOwner,
-//         };
-//       });
- 
-//       const amounts = buildAmounts(group.sites);
-//       const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
- 
-//       if (group.sites.length === 1) {
-//         // ── "shared" — single multi-owner site ──
-//         const site = group.sites[0];
-//         entries.push({
-//           entryType: "shared",
-//           mediaId: site.mediaId,
-//           mediaCode: site.mediaCode,
-//           mediaName: site.mediaName,
-//           totalLandOwners: landOwners.length,
-//           gstApplicable: site.gstApplicable,
-//           ...amounts,
-//           landOwners,
-//           sites: [toSiteResponseShape(site)],
-//         });
-//       } else {
-//         // ── "sharedGroup" — same owner-set across 2+ sites ──
-//         entries.push({
-//           entryType: "sharedGroup",
-//           totalLandOwners: landOwners.length,
-//           totalSites: group.sites.length,
-//           gstApplicable: anyGstApplicable ? 1 : 0,
-//           ...amounts,
-//           landOwners,
-//           sites: group.sites.map(toSiteResponseShape),
-//         });
-//       }
-//     });
- 
-//     // ── paginate the ENTRIES (not the raw owners) ──
-//     const totalCount = entries.length;
-//     const startIdx = (pageNumbers - 1) * pageSize;
-//     const pagedEntries = entries.slice(startIdx, startIdx + pageSize);
- 
-//     return successResponse(
-//       res,
-//       "Billing summary fetched successfully",
-//       {
-//         pagination: {
-//           count: pageSize,
-//           pageNumber: pageNumbers,
-//           totalCount,
-//           totalPages: Math.ceil(totalCount / pageSize),
-//         },
-//         entries: pagedEntries,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     return errorResponse(res, error.message, null, 400);
-//   }
-// };
 const landOwnerSiteFilter = async (req, res) => {
   try {
     const {
@@ -1619,14 +1379,37 @@ const landOwnerSiteFilter = async (req, res) => {
       });
     });
  
-    const toSiteResponseShape = (site) => ({
-      mediaId: site.mediaId,
-      mediaCode: site.mediaCode,
-      mediaName: site.mediaName,
-      baseRent: site.totalRentalAmount,
-      gstAmount: site.gstAmount,
-      gstApplicable: site.gstApplicable,
-    });
+const toSiteResponseShape = (site, ownerIdForGst) => {
+      if (ownerIdForGst) {
+        const ownerDetail = site.ownersDetail?.find(
+          (od) => od.landOwnerMasterId === ownerIdForGst,
+        );
+        return {
+          mediaId: site.mediaId,
+          mediaCode: site.mediaCode,
+          mediaName: site.mediaName,
+          baseRent: site.totalRentalAmount,
+          gstAmount: ownerDetail?.gstAmount || 0,
+          gstApplicable: ownerDetail?.paymentCategory ? (ownerDetail.gstAmount > 0 ? 1 : 0) : 0,
+        };
+      }
+
+      const combinedGstAmount = (site.ownersDetail || []).reduce(
+        (sum, od) => sum + Number(od.gstAmount || 0),
+        0,
+      );
+      const anyOwnerGstApplicable = (site.ownersDetail || []).some(
+        (od) => Number(od.gstAmount || 0) > 0,
+      );
+      return {
+        mediaId: site.mediaId,
+        mediaCode: site.mediaCode,
+        mediaName: site.mediaName,
+        baseRent: site.totalRentalAmount,
+        gstAmount: combinedGstAmount,
+        gstApplicable: anyOwnerGstApplicable ? 1 : 0,
+      };
+    };
  
     const buildAmounts = (sites) => {
       const totalBaseRent = sites.reduce((s, site) => s + site.totalRentalAmount, 0);
@@ -1720,7 +1503,7 @@ const landOwnerSiteFilter = async (req, res) => {
             totalTdsAmount,
           },
         ],
-        sites: sites.map(toSiteResponseShape),
+        sites: sites.map((site) => toSiteResponseShape(site, ownerId)), // ✅ CHANGED — pass ownerId
       });
     });
  
@@ -1769,14 +1552,14 @@ const landOwnerSiteFilter = async (req, res) => {
       const amounts = buildAmounts(group.sites);
       const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
  
-        entries.push({
+            entries.push({
         entryType: "shared",
         totalLandOwners: landOwners.length,
         totalSites: group.sites.length, // ✅ dynamic, not hardcoded
         gstApplicable: anyGstApplicable ? 1 : 0,
         ...amounts,
         landOwners,
-        sites: group.sites.map(toSiteResponseShape),
+        sites: group.sites.map((site) => toSiteResponseShape(site)), // ✅ CHANGED — no ownerId, combined across all owners on this site
       });
     });
  

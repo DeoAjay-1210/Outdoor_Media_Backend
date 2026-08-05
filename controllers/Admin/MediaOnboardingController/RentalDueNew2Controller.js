@@ -9,6 +9,7 @@ const mongoose = require("mongoose");
 const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const path = require("path");
+const { computeOutstandingSummary } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller"); 
 const {
   ROLE,
   ROLE_LABEL,
@@ -3388,8 +3389,25 @@ exports.getRentalDueListWithStats = async (req, res) => {
           return new Date(v.cycle).getTime() === entryCycleKey;
         });
 
+        // ✅ NEW — entry.gstAmount is 0 for auto-generated entries
+        // (never computed against owner/site GST config). Fall back the
+        // same way gstApplicableDisplay already resolves it: check
+        // gstApplicableFlag to pick site-level vs owner-level GST.
+        let resolvedEntryGstAmount = Number(entry.gstAmount || 0);
+        if (resolvedEntryGstAmount === 0) {
+          const gstFlag = Number(item.gstApplicableFlag || 0);
+          if (gstFlag === 1 && Number(item.rentalPayment?.gstApplicable) === 1) {
+            resolvedEntryGstAmount = Number(item.rentalPayment?.gstAmount || 0);
+          } else if (gstFlag === 2) {
+            resolvedEntryGstAmount = (item.landOwners || [])
+              .filter((o) => Number(o.gstApplicable) === 1)
+              .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+          }
+        }
+
         return {
           ...entry,
+          gstAmount: resolvedEntryGstAmount, // ✅ CHANGED — was raw entry.gstAmount (often 0)
           verificationProgress: buildVerificationProgress(item, entry.dueDate),
           verificationProgressHistory: entryVerificationProgressHistory,
         };
@@ -3450,10 +3468,8 @@ exports.getRentalDueListWithStats = async (req, res) => {
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,
-        // ✅ REMOVED — verificationProgress and verificationProgressHistory
-        // no longer appear here at the site level. Both now live only
-        // inside each rentalDueEntries[] item above.
         gstBalanceHistory: item.gstBalanceHistory || [],
+        gstOutstandingHistory: item.rentalPayment?.gstOutstandingHistory || [], // ✅ NEW
         rentalDueEntries: filteredRentalDueEntries,
       };
     };
@@ -3578,6 +3594,44 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // full LandOwnerMaster profiles are NOT fetched here anymore; use
     // the separate landOwnerList API for that.
     // ═══════════════════════════════════════════════════════════
+    // ✅ FIXED — was matching { status: 1 } (EVERY Active site in the
+    // whole database), completely ignoring landOwnerMasterId/mediaId
+    // filters. Now scoped to mediaMatch — the exact same filtered site
+    // set used everywhere else in this endpoint (listMatch, sites
+    // aggregation, etc.) — so these totals only reflect the sites/owner
+    // actually requested, matching what the ledger List API already
+    // correctly shows for the same filter.
+      const outstandingScopedSites = await Media.find(mediaMatch)
+      .select("rentalDue landOwners ledger ledgerHistory rentalPayment pendingMonths gstBalanceHistory")
+      .lean();
+
+    const overallOutstandingTotals = outstandingScopedSites.reduce(
+      (acc, site) => {
+        const s = computeOutstandingSummary(site, null);
+        acc.overallCurrentBaseRentDue += s.currentBaseRent;
+        acc.overallCurrentGSTDue += s.currentGSTDue;
+        acc.overallPreviousBaseRentDue += s.previousBaseRentDue;
+        acc.overallPreviousGSTDue += s.previousGSTDue;
+        acc.overallTotalOutstandingAmount += s.totalOutstandingAmount;
+        return acc;
+      },
+      {
+        overallCurrentBaseRentDue: 0,
+        overallCurrentGSTDue: 0,
+        overallPreviousBaseRentDue: 0,
+        overallPreviousGSTDue: 0,
+        overallTotalOutstandingAmount: 0,
+      },
+    );
+
+    const {
+      overallCurrentBaseRentDue,
+      overallCurrentGSTDue,
+      overallPreviousBaseRentDue,
+      overallPreviousGSTDue,
+      overallTotalOutstandingAmount,
+    } = overallOutstandingTotals;
+
     return res.status(200).json({
       success: true,
       value: {
@@ -3602,6 +3656,12 @@ exports.getRentalDueListWithStats = async (req, res) => {
           owner: approvedByRole.owner,
           total: approvedByRole.total,
         },
+        // ══ NEW ══
+        overallCurrentBaseRentDue,
+        overallCurrentGSTDue,
+        overallPreviousBaseRentDue,
+        overallPreviousGSTDue,
+        overallTotalOutstandingAmount,
         pagination: {
           count: pageSize,
           pageNumber: pageNumbers,
