@@ -5144,7 +5144,7 @@ function buildSingleMediaHistoryBlock(
       isSyntheticMonth: true,
     };
 
-    let yearEntry = transformedLedgerHistory.find(
+ let yearEntry = transformedLedgerHistory.find(
       (y) => y.year === pendingYear,
     );
     if (!yearEntry) {
@@ -5152,6 +5152,59 @@ function buildSingleMediaHistoryBlock(
       transformedLedgerHistory.push(yearEntry);
     }
     yearEntry.months.push(syntheticMonthBucket);
+    existingBucketKeys.add(bucketKey);
+  });
+
+  // ✅ NEW — same auto-cycle-walking engine the List API's ledger[]
+  // builder uses. Ensures EVERY elapsed billing cycle (not just months
+  // that already have a real ledgerHistory bucket) shows up here too —
+  // e.g. August, even though only July has a real saved payment.
+  const autoCyclesForHistory = getAllDueCycles(media, null);
+  autoCyclesForHistory.forEach((cycleDate) => {
+    const cycleYear = String(cycleDate.getUTCFullYear());
+    const cycleMonthName = MONTH_NAMES_LOCAL[cycleDate.getUTCMonth()];
+    const bucketKey = `${cycleYear}-${cycleMonthName.toLowerCase()}`;
+    if (existingBucketKeys.has(bucketKey)) return; // already has a real or pending-derived bucket
+
+    const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(cycleMonthName);
+    const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(cycleMonthName, cycleYear, cycleDate);
+    const ledgerFinal = buildModeSplitLedger([], 2, cycleMonthName, cycleDate);
+
+    const withGst1Final = matchingLandOwners.map((owner) => ({
+      landOwnerId: owner._id,
+      landOwnerName: owner.name,
+      utrNumber: "",
+      date: null,
+      status: 0,
+      withGst: 1,
+      month: cycleMonthName,
+      cycle: cycleDate,
+      rentalDueId: null,
+      index: null,
+      updatedBy: "",
+      updatedAt: null,
+      isPaid: false,
+      gstAmount: 0,
+      isVirtual: true,
+    }));
+
+    const syntheticCycleBucket = {
+      month: cycleMonthName,
+      ledger: ledgerFinal,
+      withGst1Ledger: withGst1Final,
+      allEntries: [],
+      gstBalanceHistory: gstBalanceHistoryForMonth,
+      tdsBalanceHistory: tdsBalanceHistoryForMonth,
+      pendingLedgerHistory: [],
+      isSyntheticMonth: true,
+    };
+
+    let cycleYearEntry = transformedLedgerHistory.find((y) => y.year === cycleYear);
+    if (!cycleYearEntry) {
+      cycleYearEntry = { year: cycleYear, months: [] };
+      transformedLedgerHistory.push(cycleYearEntry);
+    }
+    cycleYearEntry.months.push(syntheticCycleBucket);
     existingBucketKeys.add(bucketKey);
   });
 
