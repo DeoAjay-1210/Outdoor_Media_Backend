@@ -1,15 +1,10 @@
 
-
-
-
-
-
-
 const mongoose = require("mongoose");
 const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const path = require("path");
 const { computeOutstandingSummary } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller"); 
+console.log("computeOutstandingSummary import check:", typeof computeOutstandingSummary); 
 const {
   ROLE,
   ROLE_LABEL,
@@ -82,27 +77,96 @@ function addMonthsLocal(date, months) {
   return d;
 }
 
+// async function generateMissedEntriesForMedia(media, userName) {
+//   // ✅ ADDED — only Active (status: 1) sites auto-generate missed
+//   // bills. Inactive (status: 2) sites are skipped entirely — no new
+//   // pending months get created for them, regardless of how many
+//   // cycles have passed.
+//   if (Number(media.status) !== 1) {
+//     return { generatedEntries: [] };
+//   }
+
+//   const today = new Date();
+
+//   // ✅ FIXED — operate DIRECTLY on media.rentalDue, the REAL schema
+//   // field on MediaSchema. "rentalDueEntries" is NOT an actual schema
+//   // path — it was only ever a plain in-memory alias
+//   // (media.rentalDueEntries = media.rentalDue), and this function was
+//   // calling media.markModified("rentalDueEntries") afterward, which
+//   // targets a path that doesn't exist in the schema at all. Combined
+//   // with the alias indirection, this made persistence unreliable —
+//   // entries could appear generated in-memory/in the response but
+//   // never actually get saved to the DB, so August looked like it
+//   // "couldn't generate" (it kept vanishing on the next fetch).
+//   if (!Array.isArray(media.rentalDue)) {
+//     media.rentalDue = [];
+//   }
+//   if (!Array.isArray(media.rentalDueHistory)) {
+//     media.rentalDueHistory = [];
+//   }
+
+//   const cycleMonths = getCycleMonthsForFrequency(media);
+//   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
+
+//   const existingDueDateKeys = new Set(
+//     media.rentalDue
+//       .filter((e) => e.dueDate)
+//       .map((e) => new Date(e.dueDate).getTime()),
+//   );
+
+//   // ✅ FIXED (previous pass) — the walk's starting point comes from
+//   // the LATEST EXISTING rentalDue entry (ground truth), NOT from
+//   // rentalPayment.nextBillingDate, which can drift ahead and
+//   // permanently hide gaps.
+//   const sortedExistingEntries = [...media.rentalDue]
+//     .filter((e) => e.dueDate)
+//     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+
+//   let candidateDate;
+//   if (sortedExistingEntries.length > 0) {
+//     const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
+//     candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
+//   } else {
+//     // no entries exist at all yet — fall back to nextBillingDate as
+//     // the seed for the very FIRST entry ever generated on this site.
+//     const anchorDate = media.rentalPayment?.nextBillingDate;
+//     if (!anchorDate) return { generatedEntries: [] };
+//     candidateDate = new Date(anchorDate);
+//   }
+function ensureNextBillingDateSeed(media) {
+  if (media.rentalPayment?.nextBillingDate) return false; // already seeded
+
+  const seedDate =
+    media.agreement?.startDate
+      ? new Date(media.agreement.startDate)
+      : new Date();
+
+  if (!media.rentalPayment) media.rentalPayment = {};
+  media.rentalPayment.nextBillingDate = seedDate;
+  media.markModified("rentalPayment");
+  return true;
+}
+
+function ensureNextBillingDateSeed(media) {
+  if (media.rentalPayment?.nextBillingDate) return false; // already set
+
+  const seedDate = media.agreement?.startDate
+    ? new Date(media.agreement.startDate)
+    : new Date();
+
+  if (!media.rentalPayment) media.rentalPayment = {};
+  media.rentalPayment.nextBillingDate = seedDate;
+  media.markModified("rentalPayment");
+  return true;
+}
+
 async function generateMissedEntriesForMedia(media, userName) {
-  // ✅ ADDED — only Active (status: 1) sites auto-generate missed
-  // bills. Inactive (status: 2) sites are skipped entirely — no new
-  // pending months get created for them, regardless of how many
-  // cycles have passed.
   if (Number(media.status) !== 1) {
     return { generatedEntries: [] };
   }
 
   const today = new Date();
 
-  // ✅ FIXED — operate DIRECTLY on media.rentalDue, the REAL schema
-  // field on MediaSchema. "rentalDueEntries" is NOT an actual schema
-  // path — it was only ever a plain in-memory alias
-  // (media.rentalDueEntries = media.rentalDue), and this function was
-  // calling media.markModified("rentalDueEntries") afterward, which
-  // targets a path that doesn't exist in the schema at all. Combined
-  // with the alias indirection, this made persistence unreliable —
-  // entries could appear generated in-memory/in the response but
-  // never actually get saved to the DB, so August looked like it
-  // "couldn't generate" (it kept vanishing on the next fetch).
   if (!Array.isArray(media.rentalDue)) {
     media.rentalDue = [];
   }
@@ -119,10 +183,6 @@ async function generateMissedEntriesForMedia(media, userName) {
       .map((e) => new Date(e.dueDate).getTime()),
   );
 
-  // ✅ FIXED (previous pass) — the walk's starting point comes from
-  // the LATEST EXISTING rentalDue entry (ground truth), NOT from
-  // rentalPayment.nextBillingDate, which can drift ahead and
-  // permanently hide gaps.
   const sortedExistingEntries = [...media.rentalDue]
     .filter((e) => e.dueDate)
     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
@@ -132,13 +192,12 @@ async function generateMissedEntriesForMedia(media, userName) {
     const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
     candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
   } else {
-    // no entries exist at all yet — fall back to nextBillingDate as
-    // the seed for the very FIRST entry ever generated on this site.
+    // ✅ CHANGED — self-seed instead of silently bailing out.
+    ensureNextBillingDateSeed(media);
     const anchorDate = media.rentalPayment?.nextBillingDate;
-    if (!anchorDate) return { generatedEntries: [] };
+    if (!anchorDate) return { generatedEntries: [] }; // only if agreement.startDate is ALSO missing
     candidateDate = new Date(anchorDate);
   }
-
   const generatedEntries = [];
   let safety = 0;
 
@@ -2789,10 +2848,35 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // nextBillingDate/lastBillPaidDate (Rule 1). This guarantees the
     // list always reflects up-to-date pending/overdue bills even for
     // sites nobody has opened saveRentalDue for recently.
-    const activeSitesForSweep = await Media.find({ status: 1 });
-    for (const siteDoc of activeSitesForSweep) {
-      await generateMissedEntriesForMedia(siteDoc, "");
-    }
+  const activeSitesForSweep = await Media.find({ status: 1 });
+const sweepDebugLog = [];
+for (const siteDoc of activeSitesForSweep) {
+  const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
+  const result = await generateMissedEntriesForMedia(siteDoc, "");
+  const generatedCount = result?.generatedEntries?.length || 0;
+
+  // ✅ CHANGED — save even when generatedCount is 0, so a freshly
+  // seeded nextBillingDate (via ensureNextBillingDateSeed inside
+  // generateMissedEntriesForMedia) isn't lost. Without this, the seed
+  // would be discarded every request and rentalDue would NEVER catch
+  // up on sites whose seed date is still in the future.
+  if (generatedCount > 0 || siteDoc.isModified()) {
+    await siteDoc.save();
+  }
+
+  sweepDebugLog.push({
+    mediaId: siteDoc._id,
+    mediaName: siteDoc.mediaName,
+    generatedCount,
+    latestDueMonth: siteDoc.rentalDue?.length
+      ? siteDoc.rentalDue[siteDoc.rentalDue.length - 1]?.dueMonth
+      : null,
+    // ✅ ADDED — makes the exact root cause visible in the response
+    // itself next time this happens, instead of having to guess.
+    nextBillingDateWasSeededThisRequest:
+      !hadNextBillingDateBefore && !!siteDoc.rentalPayment?.nextBillingDate,
+  });
+}
 
     const monthOrCondition = {
       $or: [
@@ -3159,16 +3243,18 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // flag, behavior is unchanged: matches the current requested
     // month's sites (buildFullSiteDetail below then shows everything
     // pending up through that month, past+current together).
-    if (Number(isPastPending) === 1) {
-      listMatch.rentalDue = {
-        $elemMatch: {
-          dueDate: { $lt: monthStart },
-          approvalStatus: { $ne: 3 },
-        },
-      };
-    } else {
-      listMatch.$and = [monthOrCondition];
-    }
+    const explicitMediaIdRequested = mediaIdList.length > 0;
+
+if (Number(isPastPending) === 1) {
+  listMatch.rentalDue = {
+    $elemMatch: {
+      dueDate: { $lt: monthStart },
+      approvalStatus: { $ne: 3 },
+    },
+  };
+} else if (!explicitMediaIdRequested) {
+  listMatch.$and = [monthOrCondition];
+}
 
     const listPipeline = [
       { $match: listMatch },
@@ -3231,6 +3317,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // appraisal, frontView, etc.) so each owner's sites[] entry can
     // carry the FULL site detail, not a trimmed subset.
     listPipeline.push({
+      
       $project: {
         mediaCode: 1,
         mediaName: 1,
@@ -3634,6 +3721,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     return res.status(200).json({
       success: true,
+      sweepDebugLog,
       value: {
         totalSites,
         dueThisMonth,

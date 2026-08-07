@@ -1111,13 +1111,13 @@ const saveSingleLandOwner = async (owner, userName, session) => {
   } else {
     // ── CREATE ──────────────────────────────────────────────
     const existing = await findMasterByPriority(owner, session);
-    if (existing) {
-      const err = new Error(
-        `LandOwner already exists with this phone/PAN/Aadhaar (id: ${existing._id})`,
-      );
-      err.statusCode = 400;
-      throw err;
-    }
+    // if (existing) {
+    //   const err = new Error(
+    //     `LandOwner already exists with this phone/PAN/Aadhaar (id: ${existing._id})`,
+    //   );
+    //   err.statusCode = 400;
+    //   throw err;
+    // }
 
     landOwner = new LandOwnerMaster(owner);
 
