@@ -1270,5 +1270,91 @@ MediaSchema.pre("save", function () {
     this.rentalPayment.status = 1;
   }
 });
+MediaSchema.pre("save", function () {
+  if (this.isNew && this.rentalPayment && !this.rentalPayment.billingStartDate) {
+    this.rentalPayment.billingStartDate = this.rentalPayment.lastBillPaidDate;
+  }
+});
+// ✅ NEW — advances lastBillPaidDate/nextBillingDate for REAL, based on
+// billingStartDate + paymentFrequency, whenever today's date has moved
+// past what's currently stored. Run this on a schedule (see cron example
+// below) — it's idempotent, safe to run as often as you like, and only
+// writes when a real advance is due.
+const CYCLE_MONTHS_BY_FREQUENCY = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
 
+function addMonthsUTC(date, months) {
+  const d = new Date(date);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
+}
+
+MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
+  const activeSites = await this.find({
+    status: 1,
+    "rentalPayment.billingStartDate": { $ne: null },
+  }).select("rentalPayment mediaName");
+
+  let updatedCount = 0;
+  const debugLog = [];
+
+  // ✅ FIXED — compare by CALENDAR MONTH, not exact date. Previously
+  // required the exact billing day (e.g. the 12th) to have passed before
+  // advancing, so "August 7" didn't count as August yet. Everywhere else
+  // in the system (getAllDueCycles, List/History) treats a new calendar
+  // month as the new cycle immediately on the 1st — this now matches
+  // that, while still PRESERVING the original day-of-month for the
+  // resulting stored date (still the 12th, just in the right month).
+  const asOfMonthKey = `${asOfDate.getUTCFullYear()}-${asOfDate.getUTCMonth()}`;
+
+  for (const media of activeSites) {
+    const { billingStartDate, paymentFrequency, customPaymentFrequency, lastBillPaidDate } =
+      media.rentalPayment || {};
+
+    if (!billingStartDate || !lastBillPaidDate) {
+      debugLog.push({ mediaName: media.mediaName, skipped: "missing billingStartDate or lastBillPaidDate" });
+      continue;
+    }
+
+    const cycleMonths =
+      paymentFrequency === 6
+        ? Number(customPaymentFrequency) || 1
+        : CYCLE_MONTHS_BY_FREQUENCY[paymentFrequency] || 1;
+
+    let cursor = new Date(lastBillPaidDate);
+    let advanced = false;
+    let guard = 0;
+
+    while (guard < 240) {
+      const nextCycle = addMonthsUTC(cursor, cycleMonths);
+      const nextCycleMonthKey = `${nextCycle.getUTCFullYear()}-${nextCycle.getUTCMonth()}`;
+      // ✅ CHANGED — advance if the NEXT cycle's month has already
+      // started (its month <= asOfDate's month), not requiring the exact
+      // day to have passed.
+      const nextCycleMonthStarted =
+        nextCycle.getUTCFullYear() < asOfDate.getUTCFullYear() ||
+        (nextCycle.getUTCFullYear() === asOfDate.getUTCFullYear() &&
+          nextCycle.getUTCMonth() <= asOfDate.getUTCMonth());
+      if (!nextCycleMonthStarted) break;
+      cursor = nextCycle;
+      advanced = true;
+      guard++;
+    }
+
+    if (advanced) {
+      media.rentalPayment.lastBillPaidDate = cursor;
+      media.rentalPayment.nextBillingDate = addMonthsUTC(cursor, cycleMonths);
+      await media.save();
+      updatedCount++;
+      debugLog.push({ mediaName: media.mediaName, advancedTo: cursor });
+    } else {
+      debugLog.push({
+        mediaName: media.mediaName,
+        notAdvanced: true,
+        lastBillPaidDate,
+        nextCycleWouldBe: addMonthsUTC(new Date(lastBillPaidDate), cycleMonths),
+      });
+    }
+  }
+
+  return { checked: activeSites.length, updated: updatedCount, asOfDateUsed: asOfDate, debugLog };
+};
 module.exports = mongoose.model("MediaOnboarding", MediaSchema);

@@ -3430,6 +3430,9 @@ for (const media of results) {
                 e.dueMonth === cycleMonthLabel,
             );
             if (realHistoryEntry) {
+               const matchedDueForApproval = (mediaObj.rentalDue || []).find(
+                (d) => d.dueMonth === cycleMonthLabel,
+              );
               latestLedger.push({
                 ...realHistoryEntry,
                 isVirtual: false,
@@ -3437,6 +3440,7 @@ for (const media of results) {
                 paymentCategory,
                 cashAmount: mode === "Cash" ? Number(owner.cashAmount || 0) : undefined,
                 onlineAmount: mode === "Online" ? Number(owner.onlineAmount || 0) : undefined,
+                rentalDueApprovalStatus: matchedDueForApproval?.approvalStatus ?? 0,
               });
               return;
             }
@@ -3451,7 +3455,10 @@ for (const media of results) {
               : undefined;
 
              const matchedRealDueForLedger = (mediaObj.rentalDue || []).find((d) => d.dueMonth === cycleMonthLabel);
-            dueVirtualEntries.push({
+            const matchedDueForApproval = (mediaObj.rentalDue || []).find(
+              (d) => d.dueMonth === cycleMonthLabel,
+            );
+             dueVirtualEntries.push({
               landOwnerId: owner._id,
               landOwnerName: owner.name,
               paymentCategory,
@@ -3470,6 +3477,7 @@ for (const media of results) {
               shareAmount: resolvedShareAmount,
               isVirtual: true,
               targetType,
+               rentalDueApprovalStatus: matchedDueForApproval?.approvalStatus ?? 0, // ✅ NEW
             });
           });
         });

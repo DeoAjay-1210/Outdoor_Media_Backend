@@ -1,3 +1,4 @@
+
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const path = require("path");
@@ -9,6 +10,7 @@ const {
   syncOrLinkMediaOwnerToMaster,
   correctLinkedSiteAmounts,
 } = require("../landOwnerMasterController/landOwnerMasterController");
+
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
 // ─────────────────────────────────────────────────────────────
@@ -2059,6 +2061,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       });
 
       await media.save();
+      await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
       if (media.landOwners && Array.isArray(media.landOwners)) {
         for (const savedOwner of media.landOwners) {
@@ -2182,6 +2185,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
 
       media = new MediaOnboarding(mediaData);
       await media.save();
+       await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
       // ✅ ADDED — same pass-2 correction as UPDATE branch.
       if (media.landOwners && Array.isArray(media.landOwners)) {
@@ -3071,11 +3075,19 @@ const uploadExcel = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
-
+const syncBillingCyclesNow = async (req, res) => {
+  try {
+    const result = await MediaOnboarding.syncBillingCycles();
+    return successResponse(res, "Billing cycles synced", result, 200);
+  } catch (error) {
+    return errorResponse(res, "Failed to sync billing cycles", { error: error.message }, 500);
+  }
+};
 module.exports = {
   mediaOnboarding,
   mediaList,
   uploadExcel,
   updateAgreement,
   getMediaById,
+  syncBillingCyclesNow
 };

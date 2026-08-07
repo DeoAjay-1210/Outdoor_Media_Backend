@@ -8,6 +8,7 @@ const {
   uploadExcel,
   updateAgreement,
   getMediaById,
+  syncBillingCyclesNow,
 } = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -45,6 +46,7 @@ router.post(
 );
 
 router.post("/media-list", protect, mediaList);
+router.post("/sync-billing-cycles", syncBillingCyclesNow);
 // router.post("/update-agreement",protect, updateAgreement);
 router.post(
   "/update-agreement",

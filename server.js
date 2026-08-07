@@ -1,6 +1,6 @@
 const dns = require("dns");
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
-
+const cron = require("node-cron");
 
 require("dotenv").config();
 const path = require("path");   
@@ -13,9 +13,25 @@ const ledgerRoutes = require("./routes/Admin/MediaOnboardingRoutes/LedgerRoutes"
 const RentalDue = require("./routes/Admin/MediaOnboardingRoutes/rentalDueRoutes");
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
 const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
-
+const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
+(async () => {
+  try {
+    const result = await Media.syncBillingCycles();
+    // console.log(`[syncBillingCycles startup] checked=${result.checked} updated=${result.updated}`);
+  } catch (err) {
+    // console.error("[syncBillingCycles startup] failed:", err.message);
+  }
+})();
 
+cron.schedule("5 0 * * *", async () => {
+  try {
+    const result = await Media.syncBillingCycles();
+    console.log(`[syncBillingCycles] checked=${result.checked} updated=${result.updated}`);
+  } catch (err) {
+    console.error("[syncBillingCycles] failed:", err.message);
+  }
+});
 const app = express();
 
 app.use(cors());
