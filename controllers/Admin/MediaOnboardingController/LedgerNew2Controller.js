@@ -544,13 +544,26 @@ const anchorDateObj = new Date(anchorRaw);
 
   let cursor = addMonthsUTC(anchorMonthStart, cycleMonths);
 
-  const cycles = [];
+ const cycles = [];
   let guard = 0;
   while (guard < 240) {
-    const cursorKey = `${cursor.getUTCFullYear()}-${cursor.getUTCMonth()}`;
+    // ✅ FIXED — check BEFORE pushing. For non-monthly frequencies,
+    // cycles rarely land exactly on the requested month, so pushing
+    // first then checking overshoot always included one future,
+    // not-yet-due cycle. Now: only push if this cycle's month is <= the
+    // reference month.
+    const cursorIsPastReference =
+      cursor.getUTCFullYear() > referenceDate.getUTCFullYear() ||
+      (cursor.getUTCFullYear() === referenceDate.getUTCFullYear() &&
+        cursor.getUTCMonth() > referenceDate.getUTCMonth());
+    if (cursorIsPastReference) break;
+
     cycles.push(new Date(cursor));
+
+    const cursorKey = `${cursor.getUTCFullYear()}-${cursor.getUTCMonth()}`;
+    const refKey = `${referenceDate.getUTCFullYear()}-${referenceDate.getUTCMonth()}`;
     if (cursorKey === refKey) break;
-    if (cursor > referenceDate) break;
+
     cursor = addMonthsUTC(cursor, cycleMonths);
     guard++;
   }

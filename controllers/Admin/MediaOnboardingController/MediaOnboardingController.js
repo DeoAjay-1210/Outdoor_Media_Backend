@@ -1526,20 +1526,49 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           ownerFileMap[parsed.index][parsed.key] = f;
         }
       });
+       const resolveOwnerImageValue = (fieldValue) => {
+        if (typeof fieldValue !== "string") return null;
+        const urlValue = fieldValue.trim();
+        if (!urlValue.startsWith("http")) return null;
+        return {
+          originalName: urlValue.split("/").pop(),
+          fileName: urlValue.split("/").pop(),
+          filePath: urlValue,
+          mimeType: null,
+          size: null,
+          fileType: "image",
+          uploadedAt: new Date(),
+        };
+      };
+
       mediaData.landOwners = mediaData.landOwners.map((owner, index) => {
         const ownerFiles = ownerFileMap[index] || {};
 
+        // ✅ CHANGED — binary file first, URL string fallback second, for
+        // each of the 4 owner image fields.
         if (ownerFiles.bankPassbook) {
           owner.bankPassbook = req.processFile(ownerFiles.bankPassbook);
+        } else {
+          const urlObj = resolveOwnerImageValue(owner.bankPassbook);
+          if (urlObj) owner.bankPassbook = urlObj;
         }
         if (ownerFiles.cancelCheckLeaf) {
           owner.cancelCheckLeaf = req.processFile(ownerFiles.cancelCheckLeaf);
+        } else {
+          const urlObj = resolveOwnerImageValue(owner.cancelCheckLeaf);
+          if (urlObj) owner.cancelCheckLeaf = urlObj;
         }
         if (ownerFiles.panCardImage) {
           owner.panCardImage = req.processFile(ownerFiles.panCardImage);
+        } else {
+          const urlObj = resolveOwnerImageValue(owner.panCardImage);
+          if (urlObj) owner.panCardImage = urlObj;
         }
         if (ownerFiles.aadharCardImage) {
           owner.aadharCardImage = req.processFile(ownerFiles.aadharCardImage);
+        } else {
+          const urlObj = resolveOwnerImageValue(owner.aadharCardImage);
+          if (urlObj) owner.aadharCardImage = urlObj;
         }
         // const OWNER_FILE_FIELDS = [
         //   "bankPassbook",
@@ -1845,7 +1874,20 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         mediaData[field] !== undefined &&
         typeof mediaData[field] === "string"
       ) {
-        delete mediaData[field];
+        const urlValue = mediaData[field].trim();
+        if (urlValue.startsWith("http")) {
+          mediaData[field] = {
+            originalName: urlValue.split("/").pop(),
+            fileName: urlValue.split("/").pop(),
+            filePath: urlValue,
+            mimeType: null,
+            size: null,
+            fileType: "image",
+            uploadedAt: new Date(),
+          };
+        } else {
+          delete mediaData[field];
+        }
       }
     });
 
@@ -2078,12 +2120,25 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
     } else {
       // ── CREATE ──────────────────────────────────────────────────────────
       isNew = true;
-      if (
-        mediaData.agreement &&
-        typeof mediaData.agreement.agreementPDF === "string"
-      ) {
+       if (
+      mediaData.agreement &&
+      typeof mediaData.agreement.agreementPDF === "string"
+    ) {
+      const urlValue = mediaData.agreement.agreementPDF.trim();
+      if (urlValue.startsWith("http")) {
+        mediaData.agreement.agreementPDF = {
+          originalName: urlValue.split("/").pop(),
+          fileName: urlValue.split("/").pop(),
+          filePath: urlValue,
+          mimeType: null,
+          size: null,
+          fileType: "pdf",
+          uploadedAt: new Date(),
+        };
+      } else {
         delete mediaData.agreement.agreementPDF;
       }
+    }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
         mediaData.landOwners.forEach((owner) => {
           OWNER_FILE_FIELDS.forEach((field) => {
