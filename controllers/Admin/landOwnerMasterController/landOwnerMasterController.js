@@ -1347,6 +1347,28 @@ const landOwnerSiteFilter = async (req, res) => {
       { "landOwners.landOwnerMasterId": { $in: requestedOwnerIds } },
       "mediaCode mediaName rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount",
     ).lean();
+   const allOwnerIdsFromMedia = new Set();
+    relatedMediaDocs.forEach((mediaDoc) => {
+      (mediaDoc.landOwners || []).forEach((o) => {
+        if (o.landOwnerMasterId) {
+          allOwnerIdsFromMedia.add(String(o.landOwnerMasterId));
+        }
+      });
+    });
+
+    // 🔥 FIX: Fetch names for ALL landowners found in media docs
+    const allOwnersFromMedia = await LandOwnerMaster.find(
+      { _id: { $in: Array.from(allOwnerIdsFromMedia) } },
+      "name"
+    ).lean();
+
+    // 🔥 FIX: Merge names into ownerNameById (preserve existing, add missing ones)
+    allOwnersFromMedia.forEach((o) => {
+      const id = String(o._id);
+      if (!ownerNameById[id]) {
+        ownerNameById[id] = o.name;
+      }
+    });
  
     // site map: mediaId -> { mediaCode, mediaName, amounts, ownerIds: [], ownersDetail: [] }
     const siteMap = new Map();

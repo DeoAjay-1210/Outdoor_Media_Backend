@@ -143,6 +143,7 @@ const agreementHistorySchema = new mongoose.Schema({
       default: 0,
       min: 0,
     },
+    
     paymentFrequency: {
       type: Number,
       enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
@@ -487,6 +488,7 @@ const MediaSchema = new mongoose.Schema(
       nextBillingDate: {
         type: Date,
       },
+       billingStartDate: { type: Date, default: null },
       // tdsApplicable: {
       //   type: Number,
       //   enum: [0, 1],
