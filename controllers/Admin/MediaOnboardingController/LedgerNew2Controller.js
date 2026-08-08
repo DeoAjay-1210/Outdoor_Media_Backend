@@ -4274,7 +4274,7 @@ latestLedger = latestLedger.sort((a, b) => {
         GSTPeningCount,
         TDSPeningCount,
         ...overallOutstandingTotals, // ✅ NEW
-        billGroups, // ✅ NEW
+        // billGroups, // ✅ NEW
         mediaList: finalMediaListData,
       },
       200,

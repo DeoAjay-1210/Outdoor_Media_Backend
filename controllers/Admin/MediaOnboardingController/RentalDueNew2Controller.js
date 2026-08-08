@@ -3141,7 +3141,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // list always reflects up-to-date pending/overdue bills even for
     // sites nobody has opened saveRentalDue for recently.
   const activeSitesForSweep = await Media.find({ status: 1 });
-const sweepDebugLog = [];
+// const sweepDebugLog = [];
 for (const siteDoc of activeSitesForSweep) {
   const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
   const result = await generateMissedEntriesForMedia(siteDoc, "");
@@ -3156,18 +3156,18 @@ for (const siteDoc of activeSitesForSweep) {
     await siteDoc.save();
   }
 
-  sweepDebugLog.push({
-    mediaId: siteDoc._id,
-    mediaName: siteDoc.mediaName,
-    generatedCount,
-    latestDueMonth: siteDoc.rentalDue?.length
-      ? siteDoc.rentalDue[siteDoc.rentalDue.length - 1]?.dueMonth
-      : null,
-    // ✅ ADDED — makes the exact root cause visible in the response
-    // itself next time this happens, instead of having to guess.
-    nextBillingDateWasSeededThisRequest:
-      !hadNextBillingDateBefore && !!siteDoc.rentalPayment?.nextBillingDate,
-  });
+  // sweepDebugLog.push({
+  //   mediaId: siteDoc._id,
+  //   mediaName: siteDoc.mediaName,
+  //   generatedCount,
+  //   latestDueMonth: siteDoc.rentalDue?.length
+  //     ? siteDoc.rentalDue[siteDoc.rentalDue.length - 1]?.dueMonth
+  //     : null,
+  //   // ✅ ADDED — makes the exact root cause visible in the response
+  //   // itself next time this happens, instead of having to guess.
+  //   nextBillingDateWasSeededThisRequest:
+  //     !hadNextBillingDateBefore && !!siteDoc.rentalPayment?.nextBillingDate,
+  // });
 }
 
     const monthOrCondition = {
@@ -4034,7 +4034,7 @@ const filteredAgreementDocVerificationHistory = (
 
     return res.status(200).json({
       success: true,
-      sweepDebugLog,
+      // sweepDebugLog,
       value: {
         totalSites,
         dueThisMonth,

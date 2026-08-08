@@ -1242,25 +1242,17 @@ const landOwnerList = async (req, res) => {
         { aadharCardNumber: searchRegex },
       ];
     }
-
-    // Filter for landOwnerName autocomplete suggestions
-    const nameFilter = {};
     if (landOwnerName && landOwnerName.trim() !== "") {
       const nameRegex = new RegExp(landOwnerName.trim(), "i");
-      nameFilter.name = nameRegex;
+      if (!filter.$and) filter.$and = [];
+      filter.$and.push({ name: nameRegex });
     }
 
-    // Get distinct landowner names for autocomplete
-    const landOwnerNameFilter = await LandOwnerMaster.distinct("name", nameFilter);
+    const landOwnerNameFilter = await LandOwnerMaster.distinct("name", {});
 
-    // Get paginated list with main search filter
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
     const landOwnerListRaw = await LandOwnerMaster.find(filter)
-      // ✅ exclude the 4 file fields from the LIST response — never
-      // even fetched from the DB for this endpoint, keeps the
-      // payload light. (Full file objects are still available via
-      // the single-owner fetch/detail endpoint if you have one.)
       .sort({ updatedAt: -1 })
       .skip((pageNumbers - 1) * pageSize)
       .limit(pageSize)
