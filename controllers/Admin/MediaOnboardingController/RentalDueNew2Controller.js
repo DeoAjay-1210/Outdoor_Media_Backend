@@ -25,10 +25,44 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 // ═════════════════════════════════════════════════════════════
 // UNCHANGED HELPERS — copied verbatim from the existing file
 // ═════════════════════════════════════════════════════════════
+function ensureApprovalStepsPopulated(entry) {
+  if (Array.isArray(entry.approvalSteps) && entry.approvalSteps.length > 0) {
+    return false; // already fine
+  }
 
+  const rebuiltSteps = buildApprovalSteps(entry.approvalFlow || 2);
+
+  // Preserve remarks note so it's visible this was a repair, not an
+  // original auto-generated entry.
+  if (rebuiltSteps[0]) {
+    rebuiltSteps[0].remarks = "Auto-generated for missed cycle (steps repaired)";
+  }
+
+  entry.approvalSteps = rebuiltSteps;
+  entry.currentPendingRole = rebuiltSteps[0]?.role ?? ROLE.STAFF;
+  if (entry.approvalStatus === 3 || entry.status === 3) {
+    // don't reopen an already-fully-approved entry — leave status alone
+  } else if (!entry.approvalStatus || entry.approvalStatus === 0) {
+    entry.approvalStatus = 1;
+    entry.status = 1;
+  }
+
+  return true;
+}
 const buildApprovalSteps = (approvalFlow) => {
   const chain = FLOW_CHAIN[approvalFlow] || FLOW_CHAIN[1];
-  return chain.map((role) => ({
+
+  // ✅ ADDED — hard safety net. If FLOW_CHAIN[approvalFlow] AND
+  // FLOW_CHAIN[1] are both missing/empty, fall back to the standard
+  // 3-role chain instead of silently returning []. An empty
+  // approvalSteps array is what caused entries to save with no
+  // steps at all — nothing to approve, nothing to verify against.
+  const safeChain =
+    Array.isArray(chain) && chain.length > 0
+      ? chain
+      : [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER];
+
+  return safeChain.map((role) => ({
     role,
     userId: null,
     userName: "",
@@ -160,6 +194,213 @@ function ensureNextBillingDateSeed(media) {
   return true;
 }
 
+// async function generateMissedEntriesForMedia(media, userName) {
+//   if (Number(media.status) !== 1) {
+//     return { generatedEntries: [] };
+//   }
+
+//   const today = new Date();
+
+//   if (!Array.isArray(media.rentalDue)) {
+//     media.rentalDue = [];
+//   }
+//   if (!Array.isArray(media.rentalDueHistory)) {
+//     media.rentalDueHistory = [];
+//   }
+
+//   const cycleMonths = getCycleMonthsForFrequency(media);
+//   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
+
+//   const existingDueDateKeys = new Set(
+//     media.rentalDue
+//       .filter((e) => e.dueDate)
+//       .map((e) => new Date(e.dueDate).getTime()),
+//   );
+
+//   const sortedExistingEntries = [...media.rentalDue]
+//   .filter((e) => e.dueDate)
+//   .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+
+// // ✅ ADDED — figure out the TRUE genesis cycle independent of
+// // whatever's already in rentalDue[], so we can detect (and backfill)
+// // a gap sitting BEFORE the earliest existing entry. This is what
+// // self-heals a site that was corrupted by an earlier buggy run
+// // (e.g. an "August-only" entry created while July was skipped).
+// const nextBillingDate = media.rentalPayment?.nextBillingDate;
+// const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
+
+// let genesisCandidate = null;
+// if (
+//   lastBillPaidDate &&
+//   (!nextBillingDate || new Date(lastBillPaidDate) < new Date(nextBillingDate))
+// ) {
+//   genesisCandidate = addMonthsLocal(new Date(lastBillPaidDate), cycleMonths);
+// } else if (nextBillingDate) {
+//   genesisCandidate = new Date(nextBillingDate);
+// }
+
+// let candidateDate;
+// if (sortedExistingEntries.length > 0) {
+//   const earliestExisting = sortedExistingEntries[0];
+//   const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
+
+//   // ✅ ADDED — if the true genesis cycle is EARLIER than the
+//   // earliest entry we already have, start there instead — this
+//   // backfills the gap (e.g. July) instead of only ever walking
+//   // forward from whatever entry happens to exist already.
+//   if (genesisCandidate && genesisCandidate < new Date(earliestExisting.dueDate)) {
+//     candidateDate = genesisCandidate;
+//   } else {
+//     candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
+//   }
+// } else {
+//   if (!genesisCandidate) return { generatedEntries: [] };
+//   candidateDate = genesisCandidate;
+// }
+//   const generatedEntries = [];
+//   let safety = 0;
+
+//   // previousCycleDate tracks the cycle just before candidateDate, so
+//   // lastBillPaidDate/nextBillingDate get updated to match wherever
+//   // the walk actually lands — self-correcting any prior drift.
+//   let previousCycleDate = new Date(candidateDate);
+
+//   // ✅ compare against the END of the CURRENT CALENDAR MONTH — any
+//   // cycle date within or before the current month generates
+//   // immediately, matching "monthly" auto-generation rather than
+//   // waiting for the exact billing day to pass.
+//   const currentMonthEnd = new Date(
+//     today.getFullYear(),
+//     today.getMonth() + 1,
+//     0,
+//     23,
+//     59,
+//     59,
+//   );
+
+//   while (candidateDate <= currentMonthEnd && safety < 60) {
+//     safety++;
+//     const candidateKey = candidateDate.getTime();
+
+//     if (!existingDueDateKeys.has(candidateKey)) {
+//       const chainSteps = buildApprovalSteps(2);
+//       const steps = [
+//         {
+//           role: ROLE.STAFF,
+//           userId: null,
+//           userName: "",
+//           approvedAt: null,
+//           status: 1,
+//           docVerified: false,
+//           remarks: "Auto-generated for missed cycle",
+//         },
+//         ...chainSteps,
+//       ];
+
+//       const gstSplit = computeGstSplit(media, 0);
+
+//       const newEntry = {
+//         dueMonth: getDueMonthLabel(candidateDate),
+//         dueDate: new Date(candidateDate),
+//         netPayable: Number(gstSplit.netPayable) || 0,
+//         paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
+//         customPaymentFrequency:
+//           media.rentalPayment?.paymentFrequency === 6
+//             ? media.rentalPayment?.customPaymentFrequency || 1
+//             : undefined,
+//         ownerApprovalDate: null,
+//         mailSent: false,
+//         gstAddedToBalance: false,
+//         campaignName: "",
+//         proofOfCampaign: null,
+//         savedBy: {
+//           userId: null,
+//           userName: "System (auto-generated)",
+//           role: null,
+//           savedAt: nowIST(),
+//         },
+//         approvalFlow: 2,
+//         approvalSteps: steps,
+//         approvalStatus: 1,
+//         currentPendingRole: ROLE.STAFF,
+//         agreementDocVerified: false,
+//         status: 1,
+//         withGst: 0,
+//         gstAmount: Number(gstSplit.gstAmount) || 0,
+//         baseAmount: Number(gstSplit.baseAmount) || 0,
+//         updatedBy: userName || "",
+//         updatedAt: nowIST(),
+//       };
+
+//       // ✅ FIXED — push directly onto the real schema field.
+//       media.rentalDue.push(newEntry);
+//       const savedEntry = media.rentalDue[media.rentalDue.length - 1];
+
+//       const yearLabel = getYearLabel(candidateDate);
+//       const monthLabel = getMonthLabel(candidateDate);
+
+//       let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+//       if (!yearBucket) {
+//         media.rentalDueHistory.push({ year: yearLabel, months: [] });
+//         yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
+//       }
+//       let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
+//       if (!monthBucket) {
+//         yearBucket.months.push({ month: monthLabel, entries: [] });
+//         monthBucket = yearBucket.months[yearBucket.months.length - 1];
+//       }
+//       monthBucket.entries.push({
+//         rentalDueId: savedEntry._id,
+//         siteName: media.mediaName,
+//         campaignName: "",
+//         dueDate: new Date(candidateDate),
+//         netPayable: Number(newEntry.netPayable) || 0,
+//         approvalStatus: newEntry.approvalStatus,
+//         savedBy: "System (auto-generated)",
+//         savedByRole: null,
+//         updatedAt: nowIST(),
+//         updatedBy: userName || "",
+//       });
+
+//       generatedEntries.push({
+//         rentalDueId: savedEntry._id,
+//         dueMonth: newEntry.dueMonth,
+//         dueDate: newEntry.dueDate,
+//         netPayable: newEntry.netPayable,
+//         approvalStatus: newEntry.approvalStatus,
+//         currentPendingRole: newEntry.currentPendingRole,
+//       });
+
+//       existingDueDateKeys.add(candidateKey);
+//     }
+
+//     previousCycleDate = candidateDate;
+//     candidateDate = addMonthsLocal(candidateDate, cycleMonths);
+//   }
+
+//   // ✅ ADDED — auto-advance the real billing dates on the document,
+//   // to match wherever the schedule walk landed. This is the scrapped-
+//   // Rule-1 behavior: lastBillPaidDate/nextBillingDate move forward on
+//   // schedule regardless of whether any bill was ever approved.
+//   if (generatedEntries.length > 0) {
+//     media.rentalPayment.lastBillPaidDate = previousCycleDate;
+//     media.rentalPayment.nextBillingDate = candidateDate;
+//     media.markModified("rentalPayment");
+//   }
+
+//   if (generatedEntries.length > 0) {
+//     // ✅ FIXED — markModified the REAL schema path ("rentalDue"), not
+//     // the fake "rentalDueEntries" path that doesn't exist in the
+//     // schema and was never actually doing anything.
+//     media.markModified("rentalDue");
+//     media.markModified("rentalDueHistory");
+//     media.updatedBy = userName || "";
+//     media.updatedAt = nowIST();
+//     await media.save();
+//   }
+
+//   return { generatedEntries };
+// }
 async function generateMissedEntriesForMedia(media, userName) {
   if (Number(media.status) !== 1) {
     return { generatedEntries: [] };
@@ -167,12 +408,8 @@ async function generateMissedEntriesForMedia(media, userName) {
 
   const today = new Date();
 
-  if (!Array.isArray(media.rentalDue)) {
-    media.rentalDue = [];
-  }
-  if (!Array.isArray(media.rentalDueHistory)) {
-    media.rentalDueHistory = [];
-  }
+  if (!Array.isArray(media.rentalDue)) media.rentalDue = [];
+  if (!Array.isArray(media.rentalDueHistory)) media.rentalDueHistory = [];
 
   const cycleMonths = getCycleMonthsForFrequency(media);
   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
@@ -184,70 +421,44 @@ async function generateMissedEntriesForMedia(media, userName) {
   );
 
   const sortedExistingEntries = [...media.rentalDue]
-  .filter((e) => e.dueDate)
-  .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+    .filter((e) => e.dueDate)
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
 
-// ✅ ADDED — figure out the TRUE genesis cycle independent of
-// whatever's already in rentalDue[], so we can detect (and backfill)
-// a gap sitting BEFORE the earliest existing entry. This is what
-// self-heals a site that was corrupted by an earlier buggy run
-// (e.g. an "August-only" entry created while July was skipped).
-const nextBillingDate = media.rentalPayment?.nextBillingDate;
-const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
+  const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
+  if (!lastBillPaidDate) return { generatedEntries: [] };
 
-let genesisCandidate = null;
-if (
-  lastBillPaidDate &&
-  (!nextBillingDate || new Date(lastBillPaidDate) < new Date(nextBillingDate))
-) {
-  genesisCandidate = addMonthsLocal(new Date(lastBillPaidDate), cycleMonths);
-} else if (nextBillingDate) {
-  genesisCandidate = new Date(nextBillingDate);
-}
+  const anchorDateObj = new Date(lastBillPaidDate);
+  const anchorAfterOneCycle = addMonthsLocal(anchorDateObj, cycleMonths);
 
-let candidateDate;
-if (sortedExistingEntries.length > 0) {
-  const earliestExisting = sortedExistingEntries[0];
-  const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
-
-  // ✅ ADDED — if the true genesis cycle is EARLIER than the
-  // earliest entry we already have, start there instead — this
-  // backfills the gap (e.g. July) instead of only ever walking
-  // forward from whatever entry happens to exist already.
-  if (genesisCandidate && genesisCandidate < new Date(earliestExisting.dueDate)) {
-    candidateDate = genesisCandidate;
+  let candidateDate;
+  if (sortedExistingEntries.length > 0) {
+    const earliestExisting = sortedExistingEntries[0];
+    const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
+    candidateDate =
+      anchorAfterOneCycle < new Date(earliestExisting.dueDate)
+        ? anchorAfterOneCycle
+        : addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
   } else {
-    candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
+    candidateDate = anchorAfterOneCycle;
   }
-} else {
-  if (!genesisCandidate) return { generatedEntries: [] };
-  candidateDate = genesisCandidate;
-}
+
   const generatedEntries = [];
   let safety = 0;
-
-  // previousCycleDate tracks the cycle just before candidateDate, so
-  // lastBillPaidDate/nextBillingDate get updated to match wherever
-  // the walk actually lands — self-correcting any prior drift.
   let previousCycleDate = new Date(candidateDate);
 
-  // ✅ compare against the END of the CURRENT CALENDAR MONTH — any
-  // cycle date within or before the current month generates
-  // immediately, matching "monthly" auto-generation rather than
-  // waiting for the exact billing day to pass.
   const currentMonthEnd = new Date(
     today.getFullYear(),
     today.getMonth() + 1,
-    0,
-    23,
-    59,
-    59,
+    0, 23, 59, 59,
   );
 
   while (candidateDate <= currentMonthEnd && safety < 60) {
     safety++;
     const candidateKey = candidateDate.getTime();
 
+    // ✅ RESTORED — this whole block was missing (only a comment
+    // remained), so nothing was ever pushed into media.rentalDue
+    // regardless of the anchor date being correct.
     if (!existingDueDateKeys.has(candidateKey)) {
       const chainSteps = buildApprovalSteps(2);
       const steps = [
@@ -298,7 +509,6 @@ if (sortedExistingEntries.length > 0) {
         updatedAt: nowIST(),
       };
 
-      // ✅ FIXED — push directly onto the real schema field.
       media.rentalDue.push(newEntry);
       const savedEntry = media.rentalDue[media.rentalDue.length - 1];
 
@@ -344,10 +554,6 @@ if (sortedExistingEntries.length > 0) {
     candidateDate = addMonthsLocal(candidateDate, cycleMonths);
   }
 
-  // ✅ ADDED — auto-advance the real billing dates on the document,
-  // to match wherever the schedule walk landed. This is the scrapped-
-  // Rule-1 behavior: lastBillPaidDate/nextBillingDate move forward on
-  // schedule regardless of whether any bill was ever approved.
   if (generatedEntries.length > 0) {
     media.rentalPayment.lastBillPaidDate = previousCycleDate;
     media.rentalPayment.nextBillingDate = candidateDate;
@@ -355,9 +561,6 @@ if (sortedExistingEntries.length > 0) {
   }
 
   if (generatedEntries.length > 0) {
-    // ✅ FIXED — markModified the REAL schema path ("rentalDue"), not
-    // the fake "rentalDueEntries" path that doesn't exist in the
-    // schema and was never actually doing anything.
     media.markModified("rentalDue");
     media.markModified("rentalDueHistory");
     media.updatedBy = userName || "";
@@ -367,7 +570,6 @@ if (sortedExistingEntries.length > 0) {
 
   return { generatedEntries };
 }
-
 function getAgreementVerificationStatus(item) {
   const history = item.agreementDocVerification || [];
   const currentFile = item.agreement?.agreementPDF?.fileName;
@@ -1070,7 +1272,9 @@ async function processSingleRentalDue({
       message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
     };
   }
-
+if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
+  media.markModified("rentalDue");
+}
   // Note: when pendingEntry is null (nothing pending — this request
   // will go through the CREATE branch further down), the fallback
   // below correctly verifies against nextBillingDate's cycle instead,
@@ -1766,6 +1970,10 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
         message: `No rentalDue entry found with id ${rentalDueId} on this site`,
       };
     }
+     if (ensureApprovalStepsPopulated(targetEntry)) {
+    media.markModified("rentalDue");
+    await media.save();
+  }
     currentCycle = getCurrentCycle(targetEntry.dueDate);
   } else {
     currentCycle = getCurrentCycle(media.rentalPayment?.nextBillingDate);
