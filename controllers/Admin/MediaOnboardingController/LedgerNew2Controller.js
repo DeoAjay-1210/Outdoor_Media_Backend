@@ -2231,103 +2231,205 @@ async function runBulkLedgerEntry(req, res) {
 
         let amount = 0;
 
+        // if (entryType === "rental" && targetType === "current") {
+        //   if (!item.rentalDueId)
+        //     throw new Error("rentalDueId is required for rental+current");
+        //   const rentalDue = media.rentalDue?.find(
+        //     (d) => String(d._id) === String(item.rentalDueId),
+        //   );
+        //   if (!rentalDue)
+        //     throw new Error(
+        //       "rentalDueId does not match any rentalDue record on this media",
+        //     );
+
+        //   const isSharedDue =
+        //     (rentalDueIdCounts[String(item.rentalDueId)] || 0) > 1;
+        //   amount = isSharedDue
+        //     ? Number(owner.netPayable || owner.shareAmount || 0)
+        //     : Number(
+        //         rentalDue.netPayable || media.rentalPayment?.netPayable || 0,
+        //       );
+
+        //   const ledgerEntryPayload = {
+        //     landOwnerId: owner._id,
+        //     landOwnerName: owner.name,
+        //     paymentMode: item.paymentMode,
+        //     utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+        //     date: entryDate,
+        //     status: 1,
+        //     month: rentalDue.dueMonth,
+        //     cycle: rentalDue.dueDate,
+        //     rentalDueId: item.rentalDueId,
+        //     amount,
+        //     updatedBy,
+        //     updatedAt: nowIST(),
+        //   };
+
+        //   media.ledger.push({
+        //     ...ledgerEntryPayload,
+        //     index: media.ledger.length,
+        //   });
+        //   media.markModified("ledger");
+
+        //   // Also update ledgerHistory
+        //   const parsedCurrent = parseDueMonthLabel(rentalDue.dueMonth);
+        //   const bucketYear = parsedCurrent
+        //     ? String(parsedCurrent.year)
+        //     : String(new Date(rentalDue.dueDate).getUTCFullYear());
+        //   const bucketMonthName = parsedCurrent
+        //     ? MONTH_NAMES[parsedCurrent.monthIdx]
+        //     : MONTH_NAMES[new Date(rentalDue.dueDate).getUTCMonth()];
+
+        //   if (!Array.isArray(media.ledgerHistory)) media.ledgerHistory = [];
+        //   let yearBucket = media.ledgerHistory.find((y) => y.year === bucketYear);
+        //   if (!yearBucket) {
+        //     media.ledgerHistory.push({ year: bucketYear, months: [] });
+        //     yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
+        //   }
+        //   let monthBucket = yearBucket.months.find((m) => m.month === bucketMonthName);
+        //   if (!monthBucket) {
+        //     yearBucket.months.push({ month: bucketMonthName, entries: [] });
+        //     monthBucket = yearBucket.months[yearBucket.months.length - 1];
+        //   }
+
+        //   // ✅ CHANGED — match by dueMonth + landOwnerId + paymentMode
+        //   // (works whether or not a real rentalDue exists), instead of
+        //   // requiring rentalDueId.
+        //   let target = monthBucket.entries.find(
+        //     (e) =>
+        //       e.month === dueMonthLabel &&
+        //       String(e.landOwnerId) === String(owner._id) &&
+        //       e.paymentMode === item.paymentMode,
+        //   );
+        //   if (!target) {
+        //     monthBucket.entries.push({
+        //       landOwnerId: owner._id,
+        //       landOwnerName: owner.name,
+        //       mediaName: media.mediaName,
+        //       paymentFrequency: media.rentalPayment.paymentFrequency,
+        //       netPayable: rentalDue?.netPayable || Number(media.rentalPayment?.totalRentalAmount || 0),
+        //       rentalDueId: item.rentalDueId || null,
+        //       withGst: 2,
+        //       month: dueMonthLabel,
+        //       cycle: dueDate,
+        //     });
+        //     target = monthBucket.entries[monthBucket.entries.length - 1];
+        //   }
+
+        //   target.paymentMode = item.paymentMode;
+        //   target.utrNumber = item.paymentMode === "Online" ? item.utrNumber : null;
+        //   target.status = 1;
+        //   target.date = entryDate;
+        //   target.amount = amount;
+        //   target.updatedBy = updatedBy;
+        //   target.updatedAt = nowIST();
+        //   media.markModified("ledgerHistory");
+        //   result.dueMonth = dueMonthLabel;
+        //   result.rentalDueId = item.rentalDueId || null;
+        //   result.ledgerHistoryId = target._id || null;
+        // }
         if (entryType === "rental" && targetType === "current") {
-          if (!item.rentalDueId)
-            throw new Error("rentalDueId is required for rental+current");
-          const rentalDue = media.rentalDue?.find(
-            (d) => String(d._id) === String(item.rentalDueId),
-          );
-          if (!rentalDue)
-            throw new Error(
-              "rentalDueId does not match any rentalDue record on this media",
-            );
+  if (!item.rentalDueId)
+    throw new Error("rentalDueId is required for rental+current");
+  const rentalDue = media.rentalDue?.find(
+    (d) => String(d._id) === String(item.rentalDueId),
+  );
+  if (!rentalDue)
+    throw new Error(
+      "rentalDueId does not match any rentalDue record on this media",
+    );
 
-          const isSharedDue =
-            (rentalDueIdCounts[String(item.rentalDueId)] || 0) > 1;
-          amount = isSharedDue
-            ? Number(owner.netPayable || owner.shareAmount || 0)
-            : Number(
-                rentalDue.netPayable || media.rentalPayment?.netPayable || 0,
-              );
+  const isSharedDue =
+    (rentalDueIdCounts[String(item.rentalDueId)] || 0) > 1;
+  amount = isSharedDue
+    ? Number(owner.netPayable || owner.shareAmount || 0)
+    : Number(
+        rentalDue.netPayable || media.rentalPayment?.netPayable || 0,
+      );
 
-          const ledgerEntryPayload = {
-            landOwnerId: owner._id,
-            landOwnerName: owner.name,
-            paymentMode: item.paymentMode,
-            utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
-            date: entryDate,
-            status: 1,
-            month: rentalDue.dueMonth,
-            cycle: rentalDue.dueDate,
-            rentalDueId: item.rentalDueId,
-            amount,
-            updatedBy,
-            updatedAt: nowIST(),
-          };
+  const ledgerEntryPayload = {
+    landOwnerId: owner._id,
+    landOwnerName: owner.name,
+    paymentMode: item.paymentMode,
+    utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+    date: entryDate,
+    status: 1,
+    month: rentalDue.dueMonth,
+    cycle: rentalDue.dueDate,
+    rentalDueId: item.rentalDueId,
+    amount,
+    updatedBy,
+    updatedAt: nowIST(),
+  };
 
-          media.ledger.push({
-            ...ledgerEntryPayload,
-            index: media.ledger.length,
-          });
-          media.markModified("ledger");
+  media.ledger.push({
+    ...ledgerEntryPayload,
+    index: media.ledger.length,
+  });
+  media.markModified("ledger");
 
-          // Also update ledgerHistory
-          const parsedCurrent = parseDueMonthLabel(rentalDue.dueMonth);
-          const bucketYear = parsedCurrent
-            ? String(parsedCurrent.year)
-            : String(new Date(rentalDue.dueDate).getUTCFullYear());
-          const bucketMonthName = parsedCurrent
-            ? MONTH_NAMES[parsedCurrent.monthIdx]
-            : MONTH_NAMES[new Date(rentalDue.dueDate).getUTCMonth()];
+  // Also update ledgerHistory
+  const parsedCurrent = parseDueMonthLabel(rentalDue.dueMonth);
+  const bucketYear = parsedCurrent
+    ? String(parsedCurrent.year)
+    : String(new Date(rentalDue.dueDate).getUTCFullYear());
+  const bucketMonthName = parsedCurrent
+    ? MONTH_NAMES[parsedCurrent.monthIdx]
+    : MONTH_NAMES[new Date(rentalDue.dueDate).getUTCMonth()];
 
-          if (!Array.isArray(media.ledgerHistory)) media.ledgerHistory = [];
-          let yearBucket = media.ledgerHistory.find((y) => y.year === bucketYear);
-          if (!yearBucket) {
-            media.ledgerHistory.push({ year: bucketYear, months: [] });
-            yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
-          }
-          let monthBucket = yearBucket.months.find((m) => m.month === bucketMonthName);
-          if (!monthBucket) {
-            yearBucket.months.push({ month: bucketMonthName, entries: [] });
-            monthBucket = yearBucket.months[yearBucket.months.length - 1];
-          }
+  if (!Array.isArray(media.ledgerHistory)) media.ledgerHistory = [];
+  let yearBucket = media.ledgerHistory.find((y) => y.year === bucketYear);
+  if (!yearBucket) {
+    media.ledgerHistory.push({ year: bucketYear, months: [] });
+    yearBucket = media.ledgerHistory[media.ledgerHistory.length - 1];
+  }
+  let monthBucket = yearBucket.months.find((m) => m.month === bucketMonthName);
+  if (!monthBucket) {
+    yearBucket.months.push({ month: bucketMonthName, entries: [] });
+    monthBucket = yearBucket.months[yearBucket.months.length - 1];
+  }
 
-          // ✅ CHANGED — match by dueMonth + landOwnerId + paymentMode
-          // (works whether or not a real rentalDue exists), instead of
-          // requiring rentalDueId.
-          let target = monthBucket.entries.find(
-            (e) =>
-              e.month === dueMonthLabel &&
-              String(e.landOwnerId) === String(owner._id) &&
-              e.paymentMode === item.paymentMode,
-          );
-          if (!target) {
-            monthBucket.entries.push({
-              landOwnerId: owner._id,
-              landOwnerName: owner.name,
-              mediaName: media.mediaName,
-              paymentFrequency: media.rentalPayment.paymentFrequency,
-              netPayable: rentalDue?.netPayable || Number(media.rentalPayment?.totalRentalAmount || 0),
-              rentalDueId: item.rentalDueId || null,
-              withGst: 2,
-              month: dueMonthLabel,
-              cycle: dueDate,
-            });
-            target = monthBucket.entries[monthBucket.entries.length - 1];
-          }
+  // ✅ FIXED — dueMonthLabel and dueDate were never declared anywhere
+  // in this function (leftover names from an earlier draft), which
+  // threw "dueMonthLabel is not defined" on every single payment and
+  // failed the whole batch. The real values were already computed
+  // just above: rentalDue.dueMonth / rentalDue.dueDate (matched via
+  // item.rentalDueId), and bucketMonthName (the normalized month
+  // name used for the ledgerHistory bucket). Using those instead.
+  let target = monthBucket.entries.find(
+    (e) =>
+      e.month === rentalDue.dueMonth &&
+      String(e.landOwnerId) === String(owner._id) &&
+      e.paymentMode === item.paymentMode,
+  );
+  if (!target) {
+    monthBucket.entries.push({
+      landOwnerId: owner._id,
+      landOwnerName: owner.name,
+      mediaName: media.mediaName,
+      paymentFrequency: media.rentalPayment.paymentFrequency,
+      netPayable: rentalDue?.netPayable || Number(media.rentalPayment?.totalRentalAmount || 0),
+      rentalDueId: item.rentalDueId || null,
+      withGst: 2,
+      month: rentalDue.dueMonth,
+      cycle: rentalDue.dueDate,
+    });
+    target = monthBucket.entries[monthBucket.entries.length - 1];
+  }
 
-          target.paymentMode = item.paymentMode;
-          target.utrNumber = item.paymentMode === "Online" ? item.utrNumber : null;
-          target.status = 1;
-          target.date = entryDate;
-          target.amount = amount;
-          target.updatedBy = updatedBy;
-          target.updatedAt = nowIST();
-          media.markModified("ledgerHistory");
-          result.dueMonth = dueMonthLabel;
-          result.rentalDueId = item.rentalDueId || null;
-          result.ledgerHistoryId = target._id || null;
-        }else if (entryType === "rental" && targetType === "pastCycle") {
+  target.paymentMode = item.paymentMode;
+  target.utrNumber = item.paymentMode === "Online" ? item.utrNumber : null;
+  target.status = 1;
+  target.date = entryDate;
+  target.amount = amount;
+  target.updatedBy = updatedBy;
+  target.updatedAt = nowIST();
+  media.markModified("ledgerHistory");
+  result.dueMonth = rentalDue.dueMonth;
+  result.rentalDueId = item.rentalDueId || null;
+  result.ledgerHistoryId = target._id || null;
+}
+        else if (entryType === "rental" && targetType === "pastCycle") {
           if (!item.rentalDueId) throw new Error("rentalDueId is required for rental+pastCycle");
           const rentalDue = media.rentalDue?.find((d) => String(d._id) === String(item.rentalDueId));
           if (!rentalDue) throw new Error("rentalDueId does not match any rentalDue record on this media");
