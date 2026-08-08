@@ -1200,13 +1200,14 @@ const ROLE_RANK = {
   [ROLE.OWNER]: 3,
 };
 
-function saveVerificationProgressSnapshot(media, cycle, progress, userName) {
+function saveVerificationProgressSnapshot(media, cycle, progress, userName, rentalDueId) {
   if (!Array.isArray(media.verificationProgressHistory)) {
     media.verificationProgressHistory = [];
   }
 
   const snapshot = {
     cycle,
+    rentalDueId: rentalDueId || null, // ✅ ADDED
     currentCycleLabel: formatDate(cycle),
     staffVerified: progress.staffVerified,
     teamLeadVerified: progress.teamLeadVerified,
@@ -2189,7 +2190,13 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
     highestVerifiedRole: finalHighestVerifiedRole,
   };
 
-  saveVerificationProgressSnapshot(media, currentCycle, verificationProgress, userName);
+saveVerificationProgressSnapshot(
+  media,
+  currentCycle,
+  verificationProgress,
+  userName,
+  targetEntry ? targetEntry._id : null,
+);
   await media.save();
 
   return {
@@ -3639,15 +3646,18 @@ if (Number(isPastPending) === 1) {
     // ✅ SAME buildVerificationProgress as the site-based list — reused
     // as-is so verificationProgress inside each site entry matches
     // exactly what the original site-based response produced.
-    const buildVerificationProgress = (item, targetCycleDate) => {
-      const targetCycleStr = getCurrentCycle(targetCycleDate);
+  const buildVerificationProgress = (item, targetCycleDate, targetRentalDueId) => {
+  const targetCycleStr = getCurrentCycle(targetCycleDate);
 
-      const historyForMonth = (item.verificationProgressHistory || []).filter(
-        (v) => {
-          if (!v.cycle || !targetCycleStr) return false;
-          return getCurrentCycle(v.cycle) === targetCycleStr;
-        },
-      );
+  const historyForMonth = (item.verificationProgressHistory || []).filter(
+    (v) => {
+      if (targetRentalDueId && v.rentalDueId) {
+        return String(v.rentalDueId) === String(targetRentalDueId);
+      }
+      if (!v.cycle || !targetCycleStr) return false;
+      return getCurrentCycle(v.cycle) === targetCycleStr;
+    },
+  );
 
       if (historyForMonth.length > 0) {
         const latest = historyForMonth[historyForMonth.length - 1];
@@ -3750,53 +3760,58 @@ if (Number(isPastPending) === 1) {
       // inside each rentalDueEntries[] item, scoped to that specific
       // pending month.
       const filteredRentalDueEntries = pendingEntriesUpToMonth.map((entry) => {
-        const entryCycleKey = entry.dueDate
-          ? new Date(entry.dueDate).getTime()
-          : null;
+      const entryCycleKey = entry.dueDate ? getCurrentCycle(entry.dueDate) : null;
 
-        const entryVerificationProgressHistory = (
-          item.verificationProgressHistory || []
-        ).filter((v) => {
-          if (!v.cycle || entryCycleKey === null) return false;
-          return new Date(v.cycle).getTime() === entryCycleKey;
-        });
+const entryVerificationProgressHistory = (
+  item.verificationProgressHistory || []
+).filter((v) => {
+  if (v.rentalDueId) {
+    return String(v.rentalDueId) === String(entry._id);
+  }
+  if (!v.cycle || !entryCycleKey) return false;
+  const vCycleKey =
+    typeof v.cycle === "string" && v.cycle.match(/^\d{4}-\d{2}-\d{2}$/)
+      ? v.cycle
+      : getCurrentCycle(v.cycle);
+  return vCycleKey === entryCycleKey;
+});
 
-        // ✅ NEW — entry.gstAmount is 0 for auto-generated entries
-        // (never computed against owner/site GST config). Fall back the
-        // same way gstApplicableDisplay already resolves it: check
-        // gstApplicableFlag to pick site-level vs owner-level GST.
-        let resolvedEntryGstAmount = Number(entry.gstAmount || 0);
-        if (resolvedEntryGstAmount === 0) {
-          const gstFlag = Number(item.gstApplicableFlag || entry.gstApplicableFlag || 0);
-          if (gstFlag === 1 && Number(item.rentalPayment?.gstApplicable) === 1) {
-            resolvedEntryGstAmount = Number(item.rentalPayment?.gstAmount || 0);
-          } else if (gstFlag === 2) {
-            resolvedEntryGstAmount = (item.landOwners || [])
-              .filter((o) => Number(o.gstApplicable) === 1)
-              .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-          }
-        }
+  let resolvedEntryGstAmount = Number(entry.gstAmount || 0);
+  if (resolvedEntryGstAmount === 0) {
+    const gstFlag = Number(item.gstApplicableFlag || entry.gstApplicableFlag || 0);
+    if (gstFlag === 1 && Number(item.rentalPayment?.gstApplicable) === 1) {
+      resolvedEntryGstAmount = Number(item.rentalPayment?.gstAmount || 0);
+    } else if (gstFlag === 2) {
+      resolvedEntryGstAmount = (item.landOwners || [])
+        .filter((o) => Number(o.gstApplicable) === 1)
+        .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+    }
+  }
 
-        return {
-          ...entry,
-          gstAmount: resolvedEntryGstAmount, // ✅ CHANGED — was raw entry.gstAmount (often 0)
-          verificationProgress: buildVerificationProgress(item, entry.dueDate),
-          verificationProgressHistory: entryVerificationProgressHistory,
-          gstApplicableDisplay: resolveGstApplicable(item, entry.gstApplicableFlag, entry.pastgstApplicableFlag),
-        };
-      });
+  return {
+    ...entry,
+    gstAmount: resolvedEntryGstAmount,
+    verificationProgress: buildVerificationProgress(item, entry.dueDate, entry._id),
+    verificationProgressHistory: entryVerificationProgressHistory,
+    gstApplicableDisplay: resolveGstApplicable(item, entry.gstApplicableFlag, entry.pastgstApplicableFlag),
+  };
+});
 
       // verification history across every still-pending cycle shown above
       const pendingCycleKeys = new Set(
-        pendingEntriesUpToMonth.map((e) => new Date(e.dueDate).getTime()),
-      );
+  pendingEntriesUpToMonth.map((e) => getCurrentCycle(e.dueDate)),
+);
 
-      const filteredAgreementDocVerificationHistory = (
-        item.agreementDocVerification || []
-      ).filter((h) => {
-        if (!h.cycle) return false;
-        return pendingCycleKeys.has(new Date(h.cycle).getTime());
-      });
+const filteredAgreementDocVerificationHistory = (
+  item.agreementDocVerification || []
+).filter((h) => {
+  if (!h.cycle) return false;
+  const hCycleKey =
+    typeof h.cycle === "string" && h.cycle.match(/^\d{4}-\d{2}-\d{2}$/)
+      ? h.cycle
+      : getCurrentCycle(h.cycle);
+  return pendingCycleKeys.has(hCycleKey);
+});
 
       return {
         _id: item._id,
