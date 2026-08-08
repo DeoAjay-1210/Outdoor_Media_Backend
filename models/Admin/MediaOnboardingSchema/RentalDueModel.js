@@ -168,6 +168,9 @@ const rentalDueEntrySchema = new mongoose.Schema(
     gstAmount: { type: Number, default: 0, min: 0 },
     baseAmount: { type: Number, default: 0, min: 0 },
     gstAddedToBalance: { type: Boolean, default: false },
+    gstApplicableFlag: { type: Number, default: 0 },
+pastgstApplicableFlag: { type: Number, default: 0 },
+
     remarks: { type: String, trim: true },
     updatedBy: { type: String, trim: true },
     updatedAt: { type: Date, default: null },

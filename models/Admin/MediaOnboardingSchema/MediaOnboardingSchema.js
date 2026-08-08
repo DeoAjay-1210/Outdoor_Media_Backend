@@ -644,6 +644,7 @@ const MediaSchema = new mongoose.Schema(
           enum: [0, 1], // 0 no  1 yes
           default: 0,
         },
+        
         gstPercentage: {
           type: Number,
           min: 0,
@@ -869,6 +870,10 @@ const MediaSchema = new mongoose.Schema(
       enum: [0, 1, 2], // 0 = not set yet (default) | 1 = rentalPayment.gstApplicable is authoritative | 2 = landOwners[].gstApplicable is authoritative
       default: 0,
     },
+    pastgstApplicableFlag: {
+  type: Number,
+  default: 0,
+},
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],

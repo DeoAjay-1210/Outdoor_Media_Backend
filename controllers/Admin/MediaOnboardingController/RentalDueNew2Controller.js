@@ -505,6 +505,9 @@ async function generateMissedEntriesForMedia(media, userName) {
         withGst: 0,
         gstAmount: Number(gstSplit.gstAmount) || 0,
         baseAmount: Number(gstSplit.baseAmount) || 0,
+        gstApplicableFlag: media.gstApplicableFlag || 0,
+pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
+
         updatedBy: userName || "",
         updatedAt: nowIST(),
       };
@@ -1109,18 +1112,27 @@ function syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName) {
   recomputeBalanceGstAmount(media);
 }
 
-function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag) {
+function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, pastgstApplicableFlag) {
   if (userType !== ROLE.OWNER) return;
-  if (![0, 1, 2].includes(Number(gstApplicableFlag))) return;
-  media.gstApplicableFlag = Number(gstApplicableFlag);
+  if ([0, 1, 2].includes(Number(gstApplicableFlag))) {
+    media.gstApplicableFlag = Number(gstApplicableFlag);
+  }
+
+  // Ensure we don't save null if a value is provided
+  const parsedPastFlag = Number(pastgstApplicableFlag);
+  if ([0, 1, 2].includes(parsedPastFlag)) {
+    media.pastgstApplicableFlag = parsedPastFlag;
+  }
 }
 
-const resolveGstApplicable = (item) => {
-  const flag = Number(item.gstApplicableFlag) || 0;
+const resolveGstApplicable = (item, entryGstFlag, entryPastFlag) => {
+  const flag = entryGstFlag !== undefined ? Number(entryGstFlag) : (Number(item.gstApplicableFlag) || 0);
+  const pastgstApplicableFlag = entryPastFlag !== undefined ? Number(entryPastFlag) : (Number(item.pastgstApplicableFlag) || 0);
 
   if (flag === 0) {
     return {
       gstApplicableFlag: 0,
+      pastgstApplicableFlag,
       source: null,
       gstApplicable: 0,
       message:
@@ -1131,6 +1143,7 @@ const resolveGstApplicable = (item) => {
   if (flag === 1) {
     return {
       gstApplicableFlag: flag,
+      pastgstApplicableFlag,
       source: "rentalPayment",
       gstApplicable: Number(item.rentalPayment?.gstApplicable) || 0,
       gstPercentage: item.rentalPayment?.gstPercentage || 0,
@@ -1144,6 +1157,7 @@ const resolveGstApplicable = (item) => {
 
   return {
     gstApplicableFlag: flag,
+     pastgstApplicableFlag,
     source: "landOwners",
     gstApplicable: gstOwners.length > 0 ? 1 : 0,
     owners: gstOwners.map((o) => ({
@@ -1207,6 +1221,7 @@ async function processSingleRentalDue({
   campaignName,
   withGst,
   gstApplicableFlag,
+  pastgstApplicableFlag: requestedPastFlag,
   proofOfCampaign,
   userType,
   userId,
@@ -1361,7 +1376,12 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 
     if (campaignName) entry.campaignName = campaignName;
     if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
-
+if ([0, 1, 2].includes(Number(gstApplicableFlag))) {
+  entry.gstApplicableFlag = Number(gstApplicableFlag);
+}
+if ([0, 1, 2].includes(Number(requestedPastFlag))) {
+  entry.pastgstApplicableFlag = Number(requestedPastFlag);
+}
     if ([1, 2].includes(Number(withGst))) {
       const newWithGst = Number(withGst);
       if (entry.withGst !== newWithGst) {
@@ -1400,7 +1420,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
 
       markRoleVerified(media, entry, ROLE.OWNER, userName);
-      applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
+      applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
       addGstToBalanceIfApplicable(media, entry, userName);
       addOwnerGstToBalanceIfApplicable(media, entry, userName);
 
@@ -1448,7 +1468,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 
           if (userType === ROLE.OWNER) {
             entry.ownerApprovalDate = nowIST();
-            applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
+            applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
             addGstToBalanceIfApplicable(media, entry, userName);
             addOwnerGstToBalanceIfApplicable(media, entry, userName);
             // ✅ CHANGED — date advancement removed, same reason as above.
@@ -1494,7 +1514,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       mailSentFlag = entry.mailSent;
       await media.save();
     }
-
+const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
     return {
       success: true,
       mediaId: media._id,
@@ -1521,6 +1541,8 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       rentalPayment: media.rentalPayment,
       ledger: media.ledger,
       mailSent: mailSentFlag,
+      gstApplicableDisplay: resolvedGst,
+
     };
   }
 
@@ -1654,6 +1676,8 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     agreementDocVerified: allApproved,
     status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
     withGst: resolvedWithGst,
+    gstApplicableFlag: Number(gstApplicableFlag) || 0,
+pastgstApplicableFlag: Number(requestedPastFlag) || 0,
     gstAmount: Number(gstSplit.gstAmount) || 0,
     baseAmount: Number(gstSplit.baseAmount) || 0,
     updatedBy: userName,
@@ -1671,7 +1695,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
   }
 
   if (isOwnerOverride) {
-    applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
+    applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
     addGstToBalanceIfApplicable(media, savedEntry, userName);
     addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
     // ✅ CHANGED — date advancement removed, same reason as above.
@@ -1723,7 +1747,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     mailSentFlag = savedEntry.mailSent;
     await media.save();
   }
-
+const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
   return {
     success: true,
     isNew: true,
@@ -1752,6 +1776,8 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     rentalPayment: media.rentalPayment,
     ledger: media.ledger,
     mailSent: mailSentFlag,
+    gstApplicableDisplay: resolvedGst,
+
   };
 }
 
@@ -1761,7 +1787,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
-    const { mediaId, rentalDueId, campaignName, withGst, gstApplicableFlag, entries } =
+    const { mediaId, rentalDueId, campaignName, withGst, gstApplicableFlag,pastgstApplicableFlag, entries } =
       req.body;
 
     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
@@ -1828,6 +1854,7 @@ exports.saveRentalDue = async (req, res) => {
           campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
           withGst: item.withGst,
           gstApplicableFlag: item.gstApplicableFlag,
+          pastgstApplicableFlag: item.pastgstApplicableFlag, // ✅ NEW
           proofOfCampaign: entryProofOfCampaign, // ✅ CHANGED — was hardcoded null
           userType,
           userId,
@@ -1912,6 +1939,7 @@ exports.saveRentalDue = async (req, res) => {
       campaignName: typeof campaignName === "string" ? campaignName.trim() : campaignName,
       withGst,
       gstApplicableFlag,
+      pastgstApplicableFlag,
       proofOfCampaign,
       userType,
       userId,
@@ -3715,7 +3743,7 @@ if (Number(isPastPending) === 1) {
         // gstApplicableFlag to pick site-level vs owner-level GST.
         let resolvedEntryGstAmount = Number(entry.gstAmount || 0);
         if (resolvedEntryGstAmount === 0) {
-          const gstFlag = Number(item.gstApplicableFlag || 0);
+          const gstFlag = Number(item.gstApplicableFlag || entry.gstApplicableFlag || 0);
           if (gstFlag === 1 && Number(item.rentalPayment?.gstApplicable) === 1) {
             resolvedEntryGstAmount = Number(item.rentalPayment?.gstAmount || 0);
           } else if (gstFlag === 2) {
@@ -3730,6 +3758,7 @@ if (Number(isPastPending) === 1) {
           gstAmount: resolvedEntryGstAmount, // ✅ CHANGED — was raw entry.gstAmount (often 0)
           verificationProgress: buildVerificationProgress(item, entry.dueDate),
           verificationProgressHistory: entryVerificationProgressHistory,
+          gstApplicableDisplay: resolveGstApplicable(item, entry.gstApplicableFlag, entry.pastgstApplicableFlag),
         };
       });
 
@@ -3780,7 +3809,19 @@ if (Number(isPastPending) === 1) {
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
         dueStatus: item.rentalPayment?.status,
         dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
-        gstApplicableDisplay: resolveGstApplicable(item),
+       gstApplicableDisplay: (() => {
+  // Find the entry for the current requested month to get its specific flags
+  const currentEntry = (item.rentalDue || []).find((e) => {
+    if (!e.dueDate) return false;
+    const d = new Date(e.dueDate);
+    return d >= monthStart && d <= monthEnd;
+  });
+  if (currentEntry) {
+    return resolveGstApplicable(item, currentEntry.gstApplicableFlag, currentEntry.pastgstApplicableFlag);
+  }
+  return resolveGstApplicable(item);
+})(),
+
         agreementPeriod: {
           startDate: item.agreement?.startDate,
           endDate: item.agreement?.endDate,
