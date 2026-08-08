@@ -1493,7 +1493,11 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
   // approve it — no exceptions, no "2 others already verified"
   // bypass. Previously only Owner had any gate, and even that had a
   // bypass; both are removed.
-  if (!hasVerifiedThisCycle) {
+   const twoOtherRolesAlreadyVerified = verifiedRolesThisCycle.size >= 2;
+  const ownerVerificationIsOptional =
+    userType === ROLE.OWNER && twoOtherRolesAlreadyVerified;
+
+  if (!hasVerifiedThisCycle && !ownerVerificationIsOptional) {
     return {
       success: false,
       mediaId,
@@ -1619,10 +1623,17 @@ if ([0, 1, 2].includes(Number(requestedPastFlag))) {
         step.userId = userId;
         step.userName = userName;
         step.approvedAt = nowIST();
-        step.docVerified = true;
+                step.docVerified = hasVerifiedThisCycle;
         media.rentalStatus = RENTAL_STATUS_MAP[userType];
 
-        markRoleVerified(media, entry, userType, userName);
+        // ✅ CHANGED — only log a verification record if this role
+        // actually verified. Previously this ran unconditionally,
+        // which would falsely record Owner as having verified the
+        // doc even when they used the new optional-verification path
+        // and never called verifyAgreementDoc at all.
+        if (hasVerifiedThisCycle) {
+          markRoleVerified(media, entry, userType, userName);
+        }
 
         const roleIndex = chain.indexOf(userType);
         const nextRole = chain[roleIndex + 1];
