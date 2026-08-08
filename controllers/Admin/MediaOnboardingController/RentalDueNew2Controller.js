@@ -184,20 +184,45 @@ async function generateMissedEntriesForMedia(media, userName) {
   );
 
   const sortedExistingEntries = [...media.rentalDue]
-    .filter((e) => e.dueDate)
-    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+  .filter((e) => e.dueDate)
+  .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
 
-  let candidateDate;
-  if (sortedExistingEntries.length > 0) {
-    const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
-    candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
+// ✅ ADDED — figure out the TRUE genesis cycle independent of
+// whatever's already in rentalDue[], so we can detect (and backfill)
+// a gap sitting BEFORE the earliest existing entry. This is what
+// self-heals a site that was corrupted by an earlier buggy run
+// (e.g. an "August-only" entry created while July was skipped).
+const nextBillingDate = media.rentalPayment?.nextBillingDate;
+const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
+
+let genesisCandidate = null;
+if (
+  lastBillPaidDate &&
+  (!nextBillingDate || new Date(lastBillPaidDate) < new Date(nextBillingDate))
+) {
+  genesisCandidate = addMonthsLocal(new Date(lastBillPaidDate), cycleMonths);
+} else if (nextBillingDate) {
+  genesisCandidate = new Date(nextBillingDate);
+}
+
+let candidateDate;
+if (sortedExistingEntries.length > 0) {
+  const earliestExisting = sortedExistingEntries[0];
+  const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
+
+  // ✅ ADDED — if the true genesis cycle is EARLIER than the
+  // earliest entry we already have, start there instead — this
+  // backfills the gap (e.g. July) instead of only ever walking
+  // forward from whatever entry happens to exist already.
+  if (genesisCandidate && genesisCandidate < new Date(earliestExisting.dueDate)) {
+    candidateDate = genesisCandidate;
   } else {
-    // ✅ CHANGED — self-seed instead of silently bailing out.
-    ensureNextBillingDateSeed(media);
-    const anchorDate = media.rentalPayment?.nextBillingDate;
-    if (!anchorDate) return { generatedEntries: [] }; // only if agreement.startDate is ALSO missing
-    candidateDate = new Date(anchorDate);
+    candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
   }
+} else {
+  if (!genesisCandidate) return { generatedEntries: [] };
+  candidateDate = genesisCandidate;
+}
   const generatedEntries = [];
   let safety = 0;
 
