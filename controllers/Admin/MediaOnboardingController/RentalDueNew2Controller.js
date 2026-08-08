@@ -473,7 +473,131 @@ async function generateMissedEntriesForMedia(media, userName) {
       .map((e) => new Date(e.dueDate).getTime()),
   );
 
-  const generatedEntries = [];
+//   const generatedEntries = [];
+//   let latestCycleDate = null;
+
+//   for (const candidateDate of dueCycles) {
+//     latestCycleDate = candidateDate;
+//     const candidateKey = candidateDate.getTime();
+//     if (existingDueDateKeys.has(candidateKey)) continue; // already saved — skip, never overwrite
+
+//     const chainSteps = buildApprovalSteps(2);
+//     const steps = [
+//       {
+//         role: ROLE.STAFF,
+//         userId: null,
+//         userName: "",
+//         approvedAt: null,
+//         status: 1,
+//         docVerified: false,
+//         remarks: "Auto-generated for missed cycle",
+//       },
+//       ...chainSteps,
+//     ];
+
+//     const gstSplit = computeGstSplit(media, 0);
+
+//     const newEntry = {
+//       dueMonth: getDueMonthLabel(candidateDate),
+//       dueDate: new Date(candidateDate),
+//       netPayable: Number(gstSplit.netPayable) || 0,
+//       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
+//       customPaymentFrequency:
+//         media.rentalPayment?.paymentFrequency === 6
+//           ? media.rentalPayment?.customPaymentFrequency || 1
+//           : undefined,
+//       ownerApprovalDate: null,
+//       mailSent: false,
+//       gstAddedToBalance: false,
+//       campaignName: "",
+//       proofOfCampaign: null,
+//       savedBy: {
+//         userId: null,
+//         userName: "System (auto-generated)",
+//         role: null,
+//         savedAt: nowIST(),
+//       },
+//       approvalFlow: 2,
+//       approvalSteps: steps,
+//       approvalStatus: 1,
+//       currentPendingRole: ROLE.STAFF,
+//       agreementDocVerified: false,
+//       status: 1,
+//       withGst: 0,
+//       gstAmount: Number(gstSplit.gstAmount) || 0,
+//       baseAmount: Number(gstSplit.baseAmount) || 0,
+//       gstApplicableFlag: media.gstApplicableFlag || 0,
+//       pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
+//       updatedBy: userName || "",
+//       updatedAt: nowIST(),
+//     };
+
+//     media.rentalDue.push(newEntry);
+//     const savedEntry = media.rentalDue[media.rentalDue.length - 1];
+
+//     const yearLabel = getYearLabel(candidateDate);
+//     const monthLabel = getMonthLabel(candidateDate);
+
+//     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+//     if (!yearBucket) {
+//       media.rentalDueHistory.push({ year: yearLabel, months: [] });
+//       yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
+//     }
+//     let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
+//     if (!monthBucket) {
+//       yearBucket.months.push({ month: monthLabel, entries: [] });
+//       monthBucket = yearBucket.months[yearBucket.months.length - 1];
+//     }
+//     monthBucket.entries.push({
+//       rentalDueId: savedEntry._id,
+//       siteName: media.mediaName,
+//       campaignName: "",
+//       dueDate: new Date(candidateDate),
+//       netPayable: Number(newEntry.netPayable) || 0,
+//       approvalStatus: newEntry.approvalStatus,
+//       savedBy: "System (auto-generated)",
+//       savedByRole: null,
+//       updatedAt: nowIST(),
+//       updatedBy: userName || "",
+//     });
+
+//     generatedEntries.push({
+//       rentalDueId: savedEntry._id,
+//       dueMonth: newEntry.dueMonth,
+//       dueDate: newEntry.dueDate,
+//       netPayable: newEntry.netPayable,
+//       approvalStatus: newEntry.approvalStatus,
+//       currentPendingRole: newEntry.currentPendingRole,
+//     });
+
+//     existingDueDateKeys.add(candidateKey);
+//   }
+
+//   // ✅ advance lastBillPaidDate/nextBillingDate to match the latest
+//   // cycle this walk covered, regardless of whether it created a new
+//   // entry (self-corrects drift either way).
+//   if (latestCycleDate) {
+//     media.rentalPayment.lastBillPaidDate = latestCycleDate;
+//     media.rentalPayment.nextBillingDate = addMonthsLocal(latestCycleDate, cycleMonths);
+//     media.markModified("rentalPayment");
+//   }
+
+//   if (generatedEntries.length > 0) {
+//     media.markModified("rentalDue");
+//     media.markModified("rentalDueHistory");
+//     media.updatedBy = userName || "";
+//     media.updatedAt = nowIST();
+//     await media.save();
+//   } else if (latestCycleDate) {
+//     // rentalPayment dates may have been corrected even with no new entries
+//     media.updatedBy = userName || "";
+//     media.updatedAt = nowIST();
+//     await media.save();
+//   }
+
+//   return { generatedEntries };
+// }
+const generatedEntries = [];
   let latestCycleDate = null;
 
   for (const candidateDate of dueCycles) {
@@ -532,7 +656,30 @@ async function generateMissedEntriesForMedia(media, userName) {
       updatedAt: nowIST(),
     };
 
-    media.rentalDue.push(newEntry);
+    // ✅ CHANGED — atomic DB-level check-and-push instead of an
+    // in-memory push + later media.save(). Two requests (e.g.
+    // rental-list + ledger-list, or two concurrent rental-list calls)
+    // hitting the same mediaId close together could both load the
+    // document BEFORE either saved, both see no entry for this cycle
+    // in their in-memory copy, and both push — producing two separate
+    // rentalDue entries with the identical dueDate (confirmed by the
+    // near-identical savedAt timestamps on the duplicate pairs). The
+    // atomic $elemMatch guard below makes MongoDB itself the single
+    // source of truth: the push only applies if no entry with this
+    // exact dueDate exists in the database at that instant, so only
+    // one of two racing requests can ever win.
+    const atomicResult = await atomicallyEnsureRentalDueEntry(media._id, newEntry);
+
+    if (!atomicResult) {
+      // another concurrent request already created this exact cycle
+      // first — don't duplicate, just record the cycle as covered.
+      existingDueDateKeys.add(candidateKey);
+      continue;
+    }
+
+    // re-sync this in-memory document with what's now actually in the
+    // DB (includes the just-pushed entry with its real _id).
+    media.rentalDue = atomicResult.rentalDue;
     const savedEntry = media.rentalDue[media.rentalDue.length - 1];
 
     const yearLabel = getYearLabel(candidateDate);
@@ -583,7 +730,6 @@ async function generateMissedEntriesForMedia(media, userName) {
   }
 
   if (generatedEntries.length > 0) {
-    media.markModified("rentalDue");
     media.markModified("rentalDueHistory");
     media.updatedBy = userName || "";
     media.updatedAt = nowIST();
@@ -2862,7 +3008,30 @@ exports.revertRentalApproval = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
+async function atomicallyEnsureRentalDueEntry(mediaId, newEntry) {
+  const updated = await Media.findOneAndUpdate(
+    {
+      _id: mediaId,
+      // the atomic guard — MongoDB only applies this update if NO
+      // existing rentalDue entry already has this exact dueDate
+      rentalDue: {
+        $not: {
+          $elemMatch: { dueDate: newEntry.dueDate },
+        },
+      },
+    },
+    {
+      $push: { rentalDue: newEntry },
+      $set: { updatedAt: nowIST() },
+    },
+    { new: true },
+  );
 
+  // updated === null means another concurrent request already won
+  // the race and created this cycle's entry first — that's fine,
+  // just means we don't create a duplicate.
+  return updated;
+}
 // ═════════════════════════════════════════════════════════════
 // NEW ENDPOINT — landowner-grouped rental due list
 // SAME full filter set as getRentalDueListWithStats:
