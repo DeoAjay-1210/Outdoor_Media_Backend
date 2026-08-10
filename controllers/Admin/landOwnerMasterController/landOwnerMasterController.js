@@ -1,602 +1,4 @@
 
-// const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
-// const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
-// const { successResponse, errorResponse } = require("../../../utils/response");
-// const mongoose = require("mongoose");
-
-// // ─────────────────────────────────────────────────────────────
-// // IST HELPER — same pattern as mediaOnboardingController.js.
-// // updatedAt is stamped manually with this, NOT mongoose's
-// // { timestamps: true } (which stores UTC).
-// // ─────────────────────────────────────────────────────────────
-// const IST_OFFSET_MS = 330 * 60000; // 5h30m
-// const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
-
-// // ─────────────────────────────────────────────────────────────
-// // FIND MASTER BY PRIORITY — phone, then panNumber, then aadhaar.
-// // Only used on CREATE (no id in owner payload) to avoid creating
-// // a duplicate Master when the same owner is being saved again.
-// // ─────────────────────────────────────────────────────────────
-// const findMasterByPriority = async (owner, session) => {
-//   if (owner.phone && owner.phone.trim() !== "") {
-//     const byPhone = await LandOwnerMaster.findOne({
-//       phone: owner.phone.trim(),
-//       // isDeleted: false,
-//     }).session(session || null);
-//     if (byPhone) return byPhone;
-//   }
-
-//   if (owner.panNumber && owner.panNumber.trim() !== "") {
-//     const byPan = await LandOwnerMaster.findOne({
-//       panNumber: owner.panNumber.trim().toUpperCase(),
-//       // isDeleted: false,
-//     }).session(session || null);
-//     if (byPan) return byPan;
-//   }
-
-//   if (owner.aadharCardNumber && owner.aadharCardNumber.trim() !== "") {
-//     const byAadhar = await LandOwnerMaster.findOne({
-//       aadharCardNumber: owner.aadharCardNumber.trim(),
-//       isDeleted: false,
-//     }).session(session || null);
-//     if (byAadhar) return byAadhar;
-//   }
-
-//   return null;
-// };
-
-// // ─────────────────────────────────────────────────────────────
-// // PUSH UPDATED PROFILE FIELDS INTO EVERY MEDIA DOC THAT
-// // REFERENCES THIS MASTER — matched via
-// // media.landOwners[].landOwnerMasterId === landOwner._id
-// // ─────────────────────────────────────────────────────────────
-// const syncLandOwnerToMedia = async (landOwner, session) => {
-//   const mediaDocs = await MediaOnboarding.find({
-//     landOwnerMasterIds: landOwner._id,
-//   }).session(session || null);
-
-//   for (const media of mediaDocs) {
-//     let changed = false;
-
-//     media.landOwners.forEach((owner) => {
-//       if (
-//         owner.landOwnerMasterId &&
-//         String(owner.landOwnerMasterId) === String(landOwner._id)
-//       ) {
-//         owner.name = landOwner.name;
-//         owner.phone = landOwner.phone;
-//         owner.bankName = landOwner.bankName;
-//         owner.ifsc = landOwner.ifsc;
-//         owner.accountNumber = landOwner.accountNumber;
-//         owner.upiId = landOwner.upiId;
-//         owner.panNumber = landOwner.panNumber;
-//         owner.panCardImage = landOwner.panCardImage;
-//         owner.aadharCardNumber = landOwner.aadharCardNumber;
-//         owner.aadharCardImage = landOwner.aadharCardImage;
-//         owner.paymentCategory = landOwner.paymentCategory;
-//         owner.bankPassbook = landOwner.bankPassbook;
-//         owner.cancelCheckLeaf = landOwner.cancelCheckLeaf;
-//         owner.onlineMode = landOwner.onlineMode;
-//         changed = true;
-//       }
-//     });
-
-//     if (changed) {
-//       await media.save({ session });
-//     }
-//   }
-// };
-
-// const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
-//   if (!mediaInfo || !mediaInfo.mediaId) return; // no site context — nothing to record
-
-//   if (!Array.isArray(landOwnerMaster.linkedSites)) {
-//     landOwnerMaster.linkedSites = [];
-//   }
-
-//   let existingIdx = landOwnerMaster.linkedSites.findIndex(
-//     (site) => String(site.mediaId) === String(mediaInfo.mediaId),
-//   );
-
-//   if (existingIdx === -1 && mediaInfo.mediaCode) {
-//     existingIdx = landOwnerMaster.linkedSites.findIndex(
-//       (site) => site.mediaCode && site.mediaCode === mediaInfo.mediaCode,
-//     );
-//   }
-
-//   const now = nowIST();
-
-//   if (existingIdx !== -1) {
-//     const site = landOwnerMaster.linkedSites[existingIdx];
-//     site.mediaCode = mediaInfo.mediaCode ?? site.mediaCode;
-//     site.mediaName = mediaInfo.mediaName ?? site.mediaName;
-//     site.paymentCategory = Number(owner.paymentCategory || site.paymentCategory || 1);
-//     site.shareAmount = Number(owner.shareAmount ?? site.shareAmount ?? 0);
-//     site.cashAmount = Number(owner.cashAmount ?? site.cashAmount ?? 0);
-//     site.onlineAmount = Number(owner.onlineAmount ?? site.onlineAmount ?? 0);
-//     site.updatedAt = now;
-//   } else {
-//     landOwnerMaster.linkedSites.push({
-//       mediaId: mediaInfo.mediaId,
-//       mediaCode: mediaInfo.mediaCode || "",
-//       mediaName: mediaInfo.mediaName || "",
-//       paymentCategory: Number(owner.paymentCategory || 1),
-//       shareAmount: Number(owner.shareAmount || 0),
-//       cashAmount: Number(owner.cashAmount || 0),
-//       onlineAmount: Number(owner.onlineAmount || 0),
-//       updatedAt: now,
-//     });
-//   }
-
-//   landOwnerMaster.linkedMediaCount = landOwnerMaster.linkedSites.length;
-// };
-
-// const syncOrLinkMediaOwnerToMaster = async (owner, userName, session, mediaInfo) => {
-//   sanitizeOwnerFileFields(owner);
-
-//   let landOwnerMaster = null;
-
-//   if (owner.landOwnerMasterId) {
-//     landOwnerMaster = await LandOwnerMaster.findOne({
-//       _id: owner.landOwnerMasterId,
-//       // isDeleted: false,
-//     }).session(session || null);
-//   }
-
-//   // First-time onboarding — no id sent (or it pointed at nothing
-//   // valid). Try to find an existing Master by phone/pan/aadhaar
-//   // before creating a new one, so the same real-world person doesn't
-//   // get duplicated just because they were re-typed on a new site.
-//   if (!landOwnerMaster) {
-//     landOwnerMaster = await findMasterByPriority(owner, session);
-//   }
-
-//   if (!landOwnerMaster) {
-//     landOwnerMaster = new LandOwnerMaster({
-//       name: owner.name,
-//       phone: owner.phone,
-//       bankName: owner.bankName,
-//       ifsc: owner.ifsc,
-//       accountNumber: owner.accountNumber,
-//       upiId: owner.upiId,
-//       panNumber: owner.panNumber,
-//       panCardImage: owner.panCardImage,
-//       aadharCardNumber: owner.aadharCardNumber,
-//       aadharCardImage: owner.aadharCardImage,
-//       paymentCategory: owner.paymentCategory,
-//       eligibleMode: owner.eligibleMode,
-//       bankPassbook: owner.bankPassbook,
-//       cancelCheckLeaf: owner.cancelCheckLeaf,
-//       onlineMode: owner.onlineMode,
-//     });
-//   } else {
-//     // reuse the same complete field list as landOwnerSave's UPDATE
-//     // branch — guarantees this stays in sync with that logic.
-//     OWNER_UPDATABLE_FIELDS.forEach((field) => {
-//       if (owner[field] !== undefined) {
-//         landOwnerMaster[field] = owner[field];
-//       }
-//     });
-//   }
-
-//   // ✅ per-site record — THIS is what lets one landowner have
-//   // Cash on Site A, Online on Site B, Cash+Online on Site C.
-//   upsertLinkedSite(landOwnerMaster, mediaInfo, owner);
-
-//   // ✅ same GST/TDS/netPayable calculation as landOwnerSave() —
-//   // paymentCategory-driven base amount, .env-priority percentages.
-//   computeFinancialFields(landOwnerMaster);
-
-//   landOwnerMaster.updatedBy = userName;
-//   landOwnerMaster.updatedAt = nowIST();
-
-//   await landOwnerMaster.save({ session });
-
-//   // ── OPTION B would go here if you want full cascade instead ──
-//   // await syncLandOwnerToMedia(landOwnerMaster, session);
-
-//   // write the resolved id back onto the Media-side owner object so
-//   // the caller can persist it onto landOwners[i].landOwnerMasterId
-//   owner.landOwnerMasterId = landOwnerMaster._id;
-
-//   return landOwnerMaster;
-// };
-
-// const correctLinkedSiteAmounts = async (masterId, mediaId, savedOwner, session) => {
-//   if (!masterId || !mediaId) return null;
-
-//   const landOwnerMaster = await LandOwnerMaster.findOne({
-//     _id: masterId,
-//     // isDeleted: false,
-//   }).session(session || null);
-
-//   if (!landOwnerMaster) return null;
-
-//   if (!Array.isArray(landOwnerMaster.linkedSites)) {
-//     landOwnerMaster.linkedSites = [];
-//   }
-
-//   const site = landOwnerMaster.linkedSites.find(
-//     (s) => String(s.mediaId) === String(mediaId),
-//   );
-
-//   if (site) {
-//     site.shareAmount = Number(savedOwner.shareAmount || 0);
-//     site.cashAmount = Number(savedOwner.cashAmount || 0);
-//     site.onlineAmount = Number(savedOwner.onlineAmount || 0);
-//     site.paymentCategory = Number(
-//       savedOwner.paymentCategory || site.paymentCategory || 1,
-//     );
-//     site.updatedAt = nowIST();
-//   }
-
-//   // also refresh the Master's own "last known" amount snapshot with
-//   // the same final figures, then recompute GST/TDS/netPayable so
-//   // those aren't stuck at the stale pre-save values either.
-//   landOwnerMaster.shareAmount = Number(savedOwner.shareAmount || 0);
-//   landOwnerMaster.cashAmount = Number(savedOwner.cashAmount || 0);
-//   landOwnerMaster.onlineAmount = Number(savedOwner.onlineAmount || 0);
-//   landOwnerMaster.paymentCategory = Number(
-//     savedOwner.paymentCategory || landOwnerMaster.paymentCategory || 1,
-//   );
-
-//   computeFinancialFields(landOwnerMaster);
-//   landOwnerMaster.updatedAt = nowIST();
-
-//   await landOwnerMaster.save({ session });
-
-//   return landOwnerMaster;
-// };
-
-// const computeFinancialFields = (landOwner) => {
-//   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
-//   const envTdsPercent = parseFloat(process.env.TDS_PERCENTAGE || "0");
-
-//   const shareAmount = Number(landOwner.shareAmount || 0);
-//   const onlineAmount = Number(landOwner.onlineAmount || 0);
-//   const paymentCategory = Number(landOwner.paymentCategory || 1);
-
-//   // ── TDS base amount — same paymentCategory rule as MediaSchema ──
-//   let tdsBaseAmount = 0;
-//   if (paymentCategory === 1) {
-//     tdsBaseAmount = 0; // cash only — no TDS
-//   } else if (paymentCategory === 2) {
-//     tdsBaseAmount = shareAmount; // online only — full share
-//   } else if (paymentCategory === 3) {
-//     tdsBaseAmount = onlineAmount; // split — ONLY the online portion
-//   }
-
-//   const tdsApplicable = Number(landOwner.tdsApplicable || 0);
-//   const tdsPercentage =
-//     tdsApplicable === 1
-//       ? envTdsPercent > 0
-//         ? envTdsPercent
-//         : Number(landOwner.tdsPercentage || 0)
-//       : 0;
-//   landOwner.tdsPercentage = tdsPercentage;
-
-//   landOwner.tdsAmount =
-//     tdsApplicable === 1 && tdsPercentage > 0
-//       ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
-//       : 0;
-
-//   // ── GST base amount — same paymentCategory rule as MediaSchema ──
-//   let gstBaseAmount = 0;
-//   if (paymentCategory === 1) {
-//     gstBaseAmount = 0;
-//   } else if (paymentCategory === 2) {
-//     gstBaseAmount = shareAmount;
-//   } else if (paymentCategory === 3) {
-//     gstBaseAmount = onlineAmount;
-//   }
-
-//   const gstApplicable = Number(landOwner.gstApplicable || 0);
-//   const gstPct = Number(landOwner.gstPercentage || 0) || envGstPct;
-
-//   const gstAmount =
-//     gstApplicable === 1 && gstBaseAmount > 0
-//       ? Math.round((gstBaseAmount * gstPct) / 100)
-//       : 0;
-
-//   landOwner.gstPercentage =
-//     gstApplicable === 1 && gstBaseAmount > 0 ? gstPct : 0;
-//   landOwner.gstAmount = gstAmount;
-
-//   // ── NET PAYABLE ──────────────────────────────────────────
-//   // owner.totalAmountWithGst / netPayableToOwner / netPayable are
-//   // ALWAYS derived here now — they no longer silently stay 0 just
-//   // because the client didn't send them.
-//   landOwner.totalAmountWithGst = shareAmount + gstAmount;
-//   landOwner.netPayableToOwner = landOwner.totalAmountWithGst;
-//   landOwner.netPayable = landOwner.totalAmountWithGst;
-// };
-
-// // ─────────────────────────────────────────────────────────────
-// // ATTACH UPLOADED FILES FOR THE (single) OWNER FROM req.files.
-// // Supports plain, flat fieldnames only, e.g. "panCardImage".
-// // ─────────────────────────────────────────────────────────────
-// const OWNER_FILE_FIELDS = [
-//   "panCardImage",
-//   "bankPassbook",
-//   "cancelCheckLeaf",
-//   "aadharCardImage",
-// ];
-
-// const attachFilesToOwner = (owner, files, processFile) => {
-//   OWNER_FILE_FIELDS.forEach((field) => {
-//     const matchedFile = files.find((f) => f.fieldname === field);
-//     if (matchedFile) {
-//       owner[field] = processFile(matchedFile);
-//     }
-//   });
-// };
-
-// const sanitizeOwnerFileFields = (owner) => {
-//   OWNER_FILE_FIELDS.forEach((field) => {
-//     if (owner[field] === undefined) return;
-
-//     const val = owner[field];
-
-//     // ✅ RELAXED — don't assume the uploaded-file object always has
-//     // exactly `fileName`/`filePath` as property names (your actual
-//     // req.processFile implementation may name them differently). A
-//     // value counts as a valid file object if it's a plain, non-empty
-//     // object containing AT LEAST ONE non-empty string value anywhere
-//     // in it. Only real junk (empty string "", null, {}, []) gets
-//     // stripped — a legitimately uploaded file object is never lost
-//     // here regardless of its exact key names.
-//     const isPlainNonEmptyObject =
-//       val &&
-//       typeof val === "object" &&
-//       !Array.isArray(val) &&
-//       Object.keys(val).length > 0;
-
-//     const hasAnyNonEmptyStringValue =
-//       isPlainNonEmptyObject &&
-//       Object.values(val).some(
-//         (v) => typeof v === "string" && v.trim() !== "",
-//       );
-
-//     const isValidFileObject = isPlainNonEmptyObject && hasAnyNonEmptyStringValue;
-
-//     if (!isValidFileObject) {
-//       delete owner[field];
-//     }
-//   });
-// };
-
-// const OWNER_UPDATABLE_FIELDS = [
-//   // profile
-//   "name",
-//   "phone",
-//   "bankName",
-//   "ifsc",
-//   "accountNumber",
-//   "upiId",
-//   "panNumber",
-//   "aadharCardNumber",
-//   "paymentCategory",
-//   "eligibleMode",
-//   "onlineMode",
-//   // files
-//   "panCardImage",
-//   "bankPassbook",
-//   "cancelCheckLeaf",
-//   "aadharCardImage",
-//   // financial inputs
-//   "typeShare",
-//   "sharePercentage",
-//   "shareAmount",
-//   "onlineAmount",
-//   "cashAmount",
-//   "gstApplicable",
-//   "gstNumber",
-//   "gstPercentage", // used as fallback input inside computeFinancialFields
-//   "tdsApplicable",
-//   "tdsPercentage", // used as fallback input inside computeFinancialFields
-// ];
-
-// // ─────────────────────────────────────────────────────────────
-// // SAVE OR UPDATE THE (single) OWNER PAYLOAD.
-// // Returns the saved LandOwnerMaster document.
-// // ─────────────────────────────────────────────────────────────
-// const saveSingleLandOwner = async (owner, userName, session) => {
-//   // ✅ safety net — strips empty-string/junk values from the 4 file
-//   // fields BEFORE anything is assigned onto a Mongoose document.
-//   // Fixes "fileType: `` is not a valid enum value" when a file field
-//   // is sent but no actual file was uploaded for it.
-//   sanitizeOwnerFileFields(owner);
-
-//   let landOwner;
-
-//   if (owner.id) {
-//     // ── UPDATE ──────────────────────────────────────────────
-//     landOwner = await LandOwnerMaster.findOne({
-//       _id: owner.id,
-//       // isDeleted: false,
-//     }).session(session);
-
-//     if (!landOwner) {
-//       const err = new Error(`LandOwner not found with id ${owner.id}`);
-//       err.statusCode = 404;
-//       throw err;
-//     }
-
-//     // ✅ ALL updatable owner fields, copied generically from a single
-//     // list — every field in the schema is guaranteed to be
-//     // updatable, and adding a new schema field later only requires
-//     // adding it here once.
-//     //
-//     // EXCLUDED on purpose (always DERIVED by computeFinancialFields()
-//     // below, never taken from the client): gstAmount,
-//     // totalAmountWithGst, tdsAmount, netPayableToOwner, netPayable.
-//     OWNER_UPDATABLE_FIELDS.forEach((field) => {
-//       if (owner[field] !== undefined) {
-//         landOwner[field] = owner[field];
-//       }
-//     });
-
-//     // client-sent gstPercentage/tdsPercentage above are used only as
-//     // FALLBACK inputs inside computeFinancialFields() — see that
-//     // function for the exact .env-priority logic.
-
-//     // ✅ gstPercentage/gstAmount/totalAmountWithGst/tdsAmount/
-//     // netPayableToOwner/netPayable are ALL derived here.
-//     computeFinancialFields(landOwner);
-
-//     // ✅ IST audit stamp — same nowIST() pattern as
-//     // mediaOnboardingController.js. Set on EVERY update.
-//     landOwner.updatedBy = userName;
-//     landOwner.updatedAt = nowIST();
-
-//     await landOwner.save({ session });
-
-//     // ✅ CASCADE — push the same profile fields into every Media
-//     // document's embedded landOwners[] that references this Master.
-//     await syncLandOwnerToMedia(landOwner, session);
-//   } else {
-//     // ── CREATE ──────────────────────────────────────────────
-//     const existing = await findMasterByPriority(owner, session);
-//     if (existing) {
-//       const err = new Error(
-//         `LandOwner already exists with this phone/PAN/Aadhaar (id: ${existing._id})`,
-//       );
-//       err.statusCode = 400;
-//       throw err;
-//     }
-
-//     landOwner = new LandOwnerMaster(owner);
-
-//     // ✅ same paymentCategory-based GST + TDS + netPayable computation
-//     // as UPDATE — mirrors MediaSchema.pre("save") owner block exactly.
-//     computeFinancialFields(landOwner);
-
-//     // ✅ IST audit stamp on first-ever save too, so updatedBy/updatedAt
-//     // are never null right after create.
-//     landOwner.updatedBy = userName;
-//     landOwner.updatedAt = nowIST();
-
-//     await landOwner.save({ session });
-//   }
-
-//   return landOwner;
-// };
-
-// // ─────────────────────────────────────────────────────────────
-// // SINGLE-OBJECT ONLY. req.body IS the owner payload directly.
-// // No landOwners[] array, no multi-owner branch, no dot/bracket
-// // key normalization.
-// // ─────────────────────────────────────────────────────────────
-// const landOwnerSave = async (req, res) => {
-//   const session = await mongoose.startSession();
-//   try {
-//     session.startTransaction();
-
-//     const owner = req.body;
-//     const files = req.files || [];
-//     const processFile =
-//       typeof req.processFile === "function" ? req.processFile : null;
-
-//     // same pattern as mediaOnboardingController.js
-//     const userName = req.user?.userName || "Admin";
-
-//     const isNew = !owner.id;
-
-//     if (processFile) {
-//       attachFilesToOwner(owner, files, processFile);
-//     }
-
-//     const savedOwner = await saveSingleLandOwner(owner, userName, session);
-
-//     await session.commitTransaction();
-
-//     const message = isNew
-//       ? "LandOwner created successfully"
-//       : "LandOwner updated successfully";
-
-//     return successResponse(res, message, savedOwner, isNew ? 201 : 200);
-//   } catch (error) {
-//     await session.abortTransaction();
-//     return errorResponse(res, error.message, null, error.statusCode || 400);
-//   } finally {
-//     session.endSession();
-//   }
-// };
-
-// const landOwnerList = async (req, res) => {
-//   try {
-//     const { pageNumber = 1, count = 10, search, landOwnerName } = req.body;
-
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
-
-//     const filter = {};
-
-//     // Main search filter for the list
-//     if (search && search.trim() !== "") {
-//       const searchRegex = new RegExp(search.trim(), "i");
-//       filter.$or = [
-//         { name: searchRegex },
-//         { phone: searchRegex },
-//         { panNumber: searchRegex },
-//         { aadharCardNumber: searchRegex },
-//       ];
-//     }
-
-//     // Filter for landOwnerName autocomplete suggestions
-//     const nameFilter = {};
-//     if (landOwnerName && landOwnerName.trim() !== "") {
-//       const nameRegex = new RegExp(landOwnerName.trim(), "i");
-//       nameFilter.name = nameRegex;
-//     }
-
-//     // Get distinct landowner names for autocomplete
-//     const landOwnerNameFilter = await LandOwnerMaster.distinct("name", nameFilter);
-
-//     // Get paginated list with main search filter
-//     const totalCount = await LandOwnerMaster.countDocuments(filter);
-
-//     const landOwnerListRaw = await LandOwnerMaster.find(filter)
-//       .sort({ updatedAt: -1 })
-//       .skip((pageNumbers - 1) * pageSize)
-//       .limit(pageSize)
-//       .lean();
-
-//     const landOwnerListData = landOwnerListRaw.map((owner) => ({
-//       ...owner,
-//       totalSites: Array.isArray(owner.linkedSites)
-//         ? owner.linkedSites.length
-//         : 0,
-//     }));
-
-//     return successResponse(
-//       res,
-//       "LandOwner list fetched successfully",
-//       {
-//         pageNumber: pageNumbers,
-//         count: pageSize,
-//         totalCount,
-//         totalPages: Math.ceil(totalCount / pageSize),
-//         landOwnerList: landOwnerListData,
-//         landOwnerNameFilter,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     return errorResponse(res, error.message, null, 400);
-//   }
-// };
-
-// module.exports = {
-//   landOwnerSave,
-//   landOwnerList,
-//   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
-//   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
-// };
-
-
-
-
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
@@ -1020,21 +422,7 @@ const OWNER_UPDATABLE_FIELDS = [
   // re-sending a file on update never wipes out the existing one.
 ];
 
-// ─────────────────────────────────────────────────────────────
-// APPLY FILE FIELDS ON UPDATE ONLY.
-//
-// If a NEW valid file was sent this request (owner[field] is
-// already sanitized by sanitizeOwnerFileFields() before this runs,
-// so junk/empty values were already stripped off `owner`) —
-// overwrite it.
-//
-// If a file field is MISSING from `owner` this request (e.g.
-// bankPassbook wasn't re-uploaded on this update) — it is REMOVED
-// from the DB entirely (landOwner[field] = undefined → mongoose
-// $unsets that path on save). So an update that resends only 3 of
-// the 4 files will delete the 4th one from the document, and it
-// will no longer appear anywhere (list API, detail response, DB).
-// ─────────────────────────────────────────────────────────────
+
 const applyOwnerFileFields = (landOwner, owner) => {
   OWNER_FILE_FIELDS.forEach((field) => {
     if (owner[field] !== undefined) {
@@ -1136,30 +524,7 @@ const saveSingleLandOwner = async (owner, userName, session) => {
   return landOwner;
 };
 
-// ─────────────────────────────────────────────────────────────
-// BUILD RESPONSE PAYLOAD — RESPONSE-ONLY, DOES NOT TOUCH THE DB.
-//
-// On UPDATE: any file field (panCardImage/bankPassbook/
-// cancelCheckLeaf/aadharCardImage) that was NOT sent in THIS
-// request is removed from the object we send back, even though it
-// is still safely preserved in the database (via
-// applyOwnerFileFields in saveSingleLandOwner).
-//
-// On CREATE: nothing is stripped — every file that was uploaded is
-// returned as normal.
-// ─────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────
-// BUILD RESPONSE PAYLOAD — RESPONSE-ONLY SAFETY NET.
-//
-// applyOwnerFileFields() above now actually REMOVES a file field
-// from the DB when it isn't resent on update, so savedOwner.toObject()
-// normally won't include it anyway. This just guarantees the
-// response never echoes back a file field that wasn't part of THIS
-// request, even if some future change makes DB removal optional again.
-//
-// On CREATE: nothing is stripped — every file that was uploaded is
-// returned as normal.
-// ─────────────────────────────────────────────────────────────
+
 const buildResponsePayload = (savedOwner, owner, isNew) => {
   const responseData =
     typeof savedOwner.toObject === "function"
@@ -1177,11 +542,7 @@ const buildResponsePayload = (savedOwner, owner, isNew) => {
   return responseData;
 };
 
-// ─────────────────────────────────────────────────────────────
-// SINGLE-OBJECT ONLY. req.body IS the owner payload directly.
-// No landOwners[] array, no multi-owner branch, no dot/bracket
-// key normalization.
-// ─────────────────────────────────────────────────────────────
+
 const landOwnerSave = async (req, res) => {
   const session = await mongoose.startSession();
   try {
@@ -1252,11 +613,31 @@ const landOwnerList = async (req, res) => {
 
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
-    const landOwnerListRaw = await LandOwnerMaster.find(filter)
-      .sort({ updatedAt: -1 })
-      .skip((pageNumbers - 1) * pageSize)
-      .limit(pageSize)
-      .lean();
+   const landOwnerListRaw = await LandOwnerMaster.aggregate([
+      { $match: filter },
+      {
+        $addFields: {
+          latestActivityAt: {
+            $max: [
+              "$updatedAt",
+              {
+                $max: {
+                  $map: {
+                    input: { $ifNull: ["$linkedSites", []] },
+                    as: "site",
+                    in: "$$site.updatedAt",
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+      { $sort: { latestActivityAt: -1 } },
+      { $skip: (pageNumbers - 1) * pageSize },
+      { $limit: pageSize },
+    ]);
+
 
     const landOwnerListData = landOwnerListRaw.map((owner) => ({
       ...owner,
@@ -1285,322 +666,6 @@ const landOwnerList = async (req, res) => {
 
 
 
-const landOwnerSiteFilter = async (req, res) => {
-  try {
-    const {
-      landOwnerMasterIds,
-      search,
-      pageNumber = 1,
-      count = 10,
-    } = req.body || {};
- 
-    const pageNumbers = parseInt(pageNumber) || 1;
-    const pageSize = parseInt(count) || 10;
- 
-    let ownerFilter = {};
-    if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
-      ownerFilter._id = { $in: landOwnerMasterIds };
-    } else if (search && search.trim() !== "") {
-      const searchRegex = new RegExp(search.trim(), "i");
-      ownerFilter.$or = [
-        { name: searchRegex },
-        { panNumber: searchRegex },
-        { aadharCardNumber: searchRegex },
-      ];
-    }
-    // no landOwnerMasterIds/search → empty filter → every landowner
- 
-    const requestedOwners = await LandOwnerMaster.find(ownerFilter)
-      .select("name phone")
-      .lean();
- 
-    if (requestedOwners.length === 0) {
-      return successResponse(
-        res,
-        "No landowners found",
-        {
-          pagination: { count: pageSize, pageNumber: pageNumbers, totalCount: 0, totalPages: 0 },
-          entries: [],
-        },
-        200,
-      );
-    }
- 
-    const requestedOwnerIds = requestedOwners.map((o) => String(o._id));
-    const ownerNameById = {};
-    requestedOwners.forEach((o) => {
-      ownerNameById[String(o._id)] = o.name;
-    });
- 
-    // ── ground truth — every Media property any of these owners is
-    // actually on, straight from MediaOnboarding (NOT the
-    // LandOwnerMaster.linkedSites cache, which can go stale) ──
- const relatedMediaDocs = await MediaOnboarding.find(
-      { "landOwners.landOwnerMasterId": { $in: requestedOwnerIds } },
-      "mediaCode mediaName rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount",
-    ).lean();
-   const allOwnerIdsFromMedia = new Set();
-    relatedMediaDocs.forEach((mediaDoc) => {
-      (mediaDoc.landOwners || []).forEach((o) => {
-        if (o.landOwnerMasterId) {
-          allOwnerIdsFromMedia.add(String(o.landOwnerMasterId));
-        }
-      });
-    });
-
-    // 🔥 FIX: Fetch names for ALL landowners found in media docs
-    const allOwnersFromMedia = await LandOwnerMaster.find(
-      { _id: { $in: Array.from(allOwnerIdsFromMedia) } },
-      "name"
-    ).lean();
-
-    // 🔥 FIX: Merge names into ownerNameById (preserve existing, add missing ones)
-    allOwnersFromMedia.forEach((o) => {
-      const id = String(o._id);
-      if (!ownerNameById[id]) {
-        ownerNameById[id] = o.name;
-      }
-    });
- 
-    // site map: mediaId -> { mediaCode, mediaName, amounts, ownerIds: [], ownersDetail: [] }
-    const siteMap = new Map();
-    relatedMediaDocs.forEach((mediaDoc) => {
-      const ownersOnThisSite = (mediaDoc.landOwners || []).filter(
-        (o) => o.landOwnerMasterId,
-      );
-      const ownerIdsOnThisSite = ownersOnThisSite.map((o) =>
-        String(o.landOwnerMasterId),
-      );
- 
-      siteMap.set(String(mediaDoc._id), {
-        mediaId: mediaDoc._id,
-        mediaCode: mediaDoc.mediaCode,
-        mediaName: mediaDoc.mediaName,
-        totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
-        gstAmount: mediaDoc.rentalPayment?.gstAmount || 0,
-        gstApplicable: Number(mediaDoc.rentalPayment?.gstApplicable) || 0,
-        ownerIds: ownerIdsOnThisSite,
-        ownersDetail: ownersOnThisSite.map((o) => ({
-          landOwnerMasterId: String(o.landOwnerMasterId),
-          paymentCategory: o.paymentCategory,
-          shareAmount: o.shareAmount || 0,
-          gstAmount: o.gstAmount || 0,
-          netPayableToOwner: o.netPayableToOwner || 0,
-          onlineAmount: o.onlineAmount || 0,
-          cashAmount: o.cashAmount || 0,
-          tdsAmount: o.tdsAmount || 0,
-        })),
-      });
-    });
- 
-const toSiteResponseShape = (site, ownerIdForGst) => {
-      if (ownerIdForGst) {
-        const ownerDetail = site.ownersDetail?.find(
-          (od) => od.landOwnerMasterId === ownerIdForGst,
-        );
-        return {
-          mediaId: site.mediaId,
-          mediaCode: site.mediaCode,
-          mediaName: site.mediaName,
-          baseRent: site.totalRentalAmount,
-          gstAmount: ownerDetail?.gstAmount || 0,
-          gstApplicable: ownerDetail?.paymentCategory ? (ownerDetail.gstAmount > 0 ? 1 : 0) : 0,
-        };
-      }
-
-      const combinedGstAmount = (site.ownersDetail || []).reduce(
-        (sum, od) => sum + Number(od.gstAmount || 0),
-        0,
-      );
-      const anyOwnerGstApplicable = (site.ownersDetail || []).some(
-        (od) => Number(od.gstAmount || 0) > 0,
-      );
-      return {
-        mediaId: site.mediaId,
-        mediaCode: site.mediaCode,
-        mediaName: site.mediaName,
-        baseRent: site.totalRentalAmount,
-        gstAmount: combinedGstAmount,
-        gstApplicable: anyOwnerGstApplicable ? 1 : 0,
-      };
-    };
- 
-    const buildAmounts = (sites) => {
-      const totalBaseRent = sites.reduce((s, site) => s + site.totalRentalAmount, 0);
-      const gstHoldTotal = sites.reduce((s, site) => s + site.gstAmount, 0);
-      return {
-        totalBaseRent,
-        gstHoldTotal,
-        consolidatedPayable: totalBaseRent + gstHoldTotal,
-      };
-    };
- 
-    // ── split sites: sole-owned (exactly 1 owner) vs multi-owned (2+) ──
-    const soleOwnedSitesByOwner = new Map(); // ownerId -> [site, ...]
-    const multiOwnerSites = []; // [site, ...]
- 
-    siteMap.forEach((site) => {
-      if (site.ownerIds.length <= 1) {
-        const soloOwnerId = site.ownerIds[0];
-        if (soloOwnerId) {
-          if (!soleOwnedSitesByOwner.has(soloOwnerId)) {
-            soleOwnedSitesByOwner.set(soloOwnerId, []);
-          }
-          soleOwnedSitesByOwner.get(soloOwnerId).push(site);
-        }
-      } else {
-        multiOwnerSites.push(site);
-      }
-    });
- 
-    // ── group multi-owner sites by EXACT owner-set signature ──
-    // (sorted, joined owner ids) — same signature repeated on 2+
-    // sites becomes "sharedGroup"; a signature appearing on only 1
-    // site stays "shared".
-    const signatureGroups = new Map(); // signature -> { ownerIds: [...], sites: [...] }
- 
-    multiOwnerSites.forEach((site) => {
-      const signature = [...site.ownerIds].sort().join(",");
-      if (!signatureGroups.has(signature)) {
-        signatureGroups.set(signature, { ownerIds: site.ownerIds, sites: [] });
-      }
-      signatureGroups.get(signature).sites.push(site);
-    });
- 
-    const entries = [];
- 
-    // ── "single" entries — one per owner with 1+ sole-owned sites ──
-    requestedOwnerIds.forEach((ownerId) => {
-      const sites = soleOwnedSitesByOwner.get(ownerId);
-      if (!sites || sites.length === 0) return;
- 
-      let totalShareAmount = 0;
-      let totalGstAmount = 0;
-      let totalNetPayableToOwner = 0;
-      let totalOnlineAmount = 0;
-      let totalCashAmount = 0;
-      let totalTdsAmount = 0;
-      let lastPaymentCategory = null;
-
-      sites.forEach((site) => {
-        const ownerDetail = site.ownersDetail?.find(
-          (od) => od.landOwnerMasterId === ownerId,
-        );
-        if (ownerDetail) {
-          totalShareAmount += ownerDetail.shareAmount;
-          totalGstAmount += ownerDetail.gstAmount;
-          totalNetPayableToOwner += ownerDetail.netPayableToOwner;
-          totalOnlineAmount += ownerDetail.onlineAmount;
-          totalCashAmount += ownerDetail.cashAmount;
-          totalTdsAmount += ownerDetail.tdsAmount;
-          lastPaymentCategory = ownerDetail.paymentCategory; // may differ per site; last one wins
-        }
-      });
-
-      entries.push({
-        entryType: "single",
-        landOwnerMasterId: ownerId,
-        // name: ownerNameById[ownerId] || "Unknown",
-        totalSites: sites.length,
-         totalLandOwners: 1,
-        ...buildAmounts(sites),
-        landOwners: [
-          {
-            landOwnerMasterId: ownerId,
-            name: ownerNameById[ownerId] || "Unknown",
-            paymentCategory: lastPaymentCategory,
-            totalShareAmount,
-            totalGstAmount,
-            totalNetPayableToOwner,
-            totalOnlineAmount,
-            totalCashAmount,
-            totalTdsAmount,
-          },
-        ],
-        sites: sites.map((site) => toSiteResponseShape(site, ownerId)), // ✅ CHANGED — pass ownerId
-      });
-    });
- 
-    // ── "shared" (1 site) vs "sharedGroup" (2+ sites, same owner-set) ──
-    signatureGroups.forEach((group) => {
-      // sum each owner's OWN shareAmount/gstAmount/netPayableToOwner
-      // across every site in this group (not the site's total rent —
-      // this owner's actual slice of it).
-      const landOwners = group.ownerIds.map((id) => {
-        let totalShareAmount = 0;
-        let totalGstAmount = 0;
-        let totalNetPayableToOwner = 0;
-        let totalOnlineAmount = 0;
-        let totalCashAmount = 0;
-        let totalTdsAmount = 0;
-        let lastPaymentCategory = null;
-
-        group.sites.forEach((site) => {
-          const ownerDetail = site.ownersDetail?.find(
-            (od) => od.landOwnerMasterId === id,
-          );
-          if (ownerDetail) {
-            totalShareAmount += ownerDetail.shareAmount;
-            totalGstAmount += ownerDetail.gstAmount;
-            totalNetPayableToOwner += ownerDetail.netPayableToOwner;
-            totalOnlineAmount += ownerDetail.onlineAmount;
-            totalCashAmount += ownerDetail.cashAmount;
-            totalTdsAmount += ownerDetail.tdsAmount;
-            lastPaymentCategory = ownerDetail.paymentCategory; // may differ per site; last one wins
-          }
-        });
-
-        return {
-          landOwnerMasterId: id,
-          name: ownerNameById[id] || "Unknown",
-          paymentCategory: lastPaymentCategory,
-          totalShareAmount,
-          totalGstAmount,
-          totalNetPayableToOwner,
-          totalOnlineAmount,
-          totalCashAmount,
-          totalTdsAmount,
-        };
-      });
- 
-      const amounts = buildAmounts(group.sites);
-      const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
- 
-            entries.push({
-        entryType: "shared",
-        totalLandOwners: landOwners.length,
-        totalSites: group.sites.length, // ✅ dynamic, not hardcoded
-        gstApplicable: anyGstApplicable ? 1 : 0,
-        ...amounts,
-        landOwners,
-        sites: group.sites.map((site) => toSiteResponseShape(site)), // ✅ CHANGED — no ownerId, combined across all owners on this site
-      });
-    });
- 
-    // ── paginate the ENTRIES (not the raw owners) ──
-    const totalCount = entries.length;
-    const startIdx = (pageNumbers - 1) * pageSize;
-    const pagedEntries = entries.slice(startIdx, startIdx + pageSize);
- 
-    return successResponse(
-      res,
-      "Billing summary fetched successfully",
-      {
-        pagination: {
-          count: pageSize,
-          pageNumber: pageNumbers,
-          totalCount,
-          totalPages: Math.ceil(totalCount / pageSize),
-        },
-        entries: pagedEntries,
-      },
-      200,
-    );
-  } catch (error) {
-    return errorResponse(res, error.message, null, 400);
-  }
-};
-
 // const landOwnerSiteFilter = async (req, res) => {
 //   try {
 //     const {
@@ -1608,34 +673,10 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //       search,
 //       pageNumber = 1,
 //       count = 10,
-//       // ✅ ADDED — new request params
-//       monthFilter,
-//       currentMonthLedgerEntries: wantCurrentMonthLedger,
-//       pastMonthLedgerEntries: wantPastMonthLedger,
-//       currentGst: wantCurrentGst,
-//       pastGst: wantPastGst,
 //     } = req.body || {};
  
 //     const pageNumbers = parseInt(pageNumber) || 1;
 //     const pageSize = parseInt(count) || 10;
-
-//     // ✅ ADDED — resolve the target month (defaults to "now")
-//     const parsedMonthFilter = parseSiteFilterMonthParam(monthFilter);
-//     const referenceDate = parsedMonthFilter
-//       ? new Date(parsedMonthFilter.year, parsedMonthFilter.month - 1, 1)
-//       : new Date();
-//     const referenceYear = referenceDate.getFullYear();
-//     const referenceMonthIdx = referenceDate.getMonth();
-//     const monthFilterApplied = parsedMonthFilter
-//       ? monthFilter
-//       : `${String(referenceMonthIdx + 1).padStart(2, "0")}-${referenceYear}`;
-
-//     const includeCurrentLedger = Number(wantCurrentMonthLedger) === 1;
-//     const includePastLedger = Number(wantPastMonthLedger) === 1;
-//     const includeCurrentGst = Number(wantCurrentGst) === 1;
-//     const includePastGst = Number(wantPastGst) === 1;
-//     const needsLedgerFields =
-//       includeCurrentLedger || includePastLedger || includeCurrentGst || includePastGst;
  
 //     let ownerFilter = {};
 //     if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
@@ -1648,6 +689,7 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //         { aadharCardNumber: searchRegex },
 //       ];
 //     }
+//     // no landOwnerMasterIds/search → empty filter → every landowner
  
 //     const requestedOwners = await LandOwnerMaster.find(ownerFilter)
 //       .select("name phone")
@@ -1670,23 +712,15 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //     requestedOwners.forEach((o) => {
 //       ownerNameById[String(o._id)] = o.name;
 //     });
-
-//     // ✅ CHANGED — project the extra fields needed for ledger/GST
-//     // computation ONLY when at least one of the new flags was
-//     // requested, so the query stays light for callers who don't ask
-//     // for any of this.
-//    const mediaProjection =
-//   "mediaCode mediaName rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount" +
-//   (needsLedgerFields
-//     ? " ledger ledgerHistory gstBalanceHistory rentalDue"
-//     : "");
  
-//     const relatedMediaDocs = await MediaOnboarding.find(
+//     // ── ground truth — every Media property any of these owners is
+//     // actually on, straight from MediaOnboarding (NOT the
+//     // LandOwnerMaster.linkedSites cache, which can go stale) ──
+//  const relatedMediaDocs = await MediaOnboarding.find(
 //       { "landOwners.landOwnerMasterId": { $in: requestedOwnerIds } },
-//       mediaProjection,
+//       "mediaCode mediaName rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount",
 //     ).lean();
-
-//     const allOwnerIdsFromMedia = new Set();
+//    const allOwnerIdsFromMedia = new Set();
 //     relatedMediaDocs.forEach((mediaDoc) => {
 //       (mediaDoc.landOwners || []).forEach((o) => {
 //         if (o.landOwnerMasterId) {
@@ -1695,229 +729,21 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //       });
 //     });
 
+//     // 🔥 FIX: Fetch names for ALL landowners found in media docs
 //     const allOwnersFromMedia = await LandOwnerMaster.find(
 //       { _id: { $in: Array.from(allOwnerIdsFromMedia) } },
 //       "name"
 //     ).lean();
 
+//     // 🔥 FIX: Merge names into ownerNameById (preserve existing, add missing ones)
 //     allOwnersFromMedia.forEach((o) => {
 //       const id = String(o._id);
 //       if (!ownerNameById[id]) {
 //         ownerNameById[id] = o.name;
 //       }
 //     });
-
-//     // ✅ ADDED — per-owner, per-media ledger/GST buckets, computed
-//     // ONCE up front (keyed by "mediaId_ownerId") and reused wherever
-//     // an owner appears (sole-owned or shared sites), instead of
-//     // recomputing per entry.
-//     const ledgerDataByMediaOwner = new Map();
-
-//     if (needsLedgerFields) {
-//       relatedMediaDocs.forEach((mediaDoc) => {
-//         const mediaId = String(mediaDoc._id);
-
-//         // real ledger rows saved this cycle (live "ledger" array,
-//         // withGst:2 rows = rental Cash/Online payments)
-//         const liveLedgerEntries = Array.isArray(mediaDoc.ledger) ? mediaDoc.ledger : [];
-
-//         // historical ledger rows, bucketed by year/month
-//         const historyEntries = [];
-//         (mediaDoc.ledgerHistory || []).forEach((yearBucket) => {
-//           (yearBucket.months || []).forEach((monthBucket) => {
-//             (monthBucket.entries || []).forEach((entry) => {
-//               if (entry.withGst === 2 && entry.paymentMode) {
-//                 historyEntries.push({
-//                   ...entry,
-//                   dueMonth: entry.month,
-//                   yearFromBucket: yearBucket.year,
-//                 });
-//               }
-//             });
-//           });
-//         });
-
-//         const allLedgerEntries = [...liveLedgerEntries, ...historyEntries];
-
-//         allLedgerEntries.forEach((entry) => {
-//           if (!entry.landOwnerId) return;
-//           const ownerId = String(entry.landOwnerId);
-//           const key = `${mediaId}_${ownerId}`;
-//           if (!ledgerDataByMediaOwner.has(key)) {
-//             ledgerDataByMediaOwner.set(key, {
-//               currentMonthEntries: [],
-//               pastMonthEntries: [],
-//               currentGst: 0,
-//               pastGst: 0,
-//             });
-//           }
-//           const bucket = ledgerDataByMediaOwner.get(key);
-
-//           // classify this entry's month against referenceYear/referenceMonthIdx
-//           let entryYear = null;
-//           let entryMonthIdx = null;
-//           const entryCycle = entry.cycle || entry.date;
-//           if (entry.dueMonth) {
-//             const parsed = parseSiteFilterDueMonthLabel(entry.dueMonth);
-//             if (parsed) {
-//               entryYear = parsed.year;
-//               entryMonthIdx = parsed.monthIdx;
-//             }
-//           }
-//           if (entryYear === null && entryCycle) {
-//             const d = new Date(entryCycle);
-//             if (!Number.isNaN(d.getTime())) {
-//               entryYear = d.getFullYear();
-//               entryMonthIdx = d.getMonth();
-//             }
-//           }
-//           if (entryYear === null) return; // can't classify — skip
-
-//           const isCurrentMonth =
-//             entryYear === referenceYear && entryMonthIdx === referenceMonthIdx;
-//           const isPastMonth =
-//             entryYear < referenceYear ||
-//             (entryYear === referenceYear && entryMonthIdx < referenceMonthIdx);
-
-//           const shapedEntry = {
-//             mediaId: mediaDoc._id,
-//             mediaName: mediaDoc.mediaName,
-//             landOwnerMasterId: ownerId,
-//             paymentMode: entry.paymentMode,
-//             amount: Number(entry.amount || 0),
-//             status: entry.status,
-//             date: entry.date,
-//             dueMonth: entry.dueMonth || entry.month || null,
-//           };
-
-//           if (isCurrentMonth) {
-//             bucket.currentMonthEntries.push(shapedEntry);
-//           } else if (isPastMonth) {
-//             bucket.pastMonthEntries.push(shapedEntry);
-//           }
-//         });
-
-//         // GST — currentGst from rentalDue's cycle matching referenceMonth,
-//         // pastGst from unpaid gstBalanceHistory rows before referenceMonth
-//         // PLUS legacy rentalPayment.gstOutstandingHistory (merged, per
-//         // your instruction — same key, summed together, not separated).
-//         const gstBalanceHistory = Array.isArray(mediaDoc.gstBalanceHistory)
-//           ? mediaDoc.gstBalanceHistory
-//           : [];
-//         const gstOutstandingHistory = Array.isArray(
-//           mediaDoc.rentalPayment?.gstOutstandingHistory,
-//         )
-//           ? mediaDoc.rentalPayment.gstOutstandingHistory
-//           : [];
-//         const rentalDueEntries = Array.isArray(mediaDoc.rentalDue)
-//           ? mediaDoc.rentalDue
-//           : [];
-
-//         // group GST rows by owner where possible (source:"owner" rows
-//         // carry ownerId; source:"rental"/legacy rows are site-level and
-//         // get attributed to every owner on this site)
-//         const ownerIdsOnSite = (mediaDoc.landOwners || [])
-//           .map((o) => o.landOwnerMasterId && String(o.landOwnerMasterId))
-//           .filter(Boolean);
-
-//         gstBalanceHistory.forEach((row) => {
-//           const parsed = parseSiteFilterDueMonthLabel(row.dueMonth);
-//           if (!parsed) return;
-//           const isCurrentMonth =
-//             parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx;
-//           const isPastMonth =
-//             parsed.year < referenceYear ||
-//             (parsed.year === referenceYear && parsed.monthIdx < referenceMonthIdx);
-//           if (!isCurrentMonth && !isPastMonth) return;
-
-//           const rowOwnerId = row.ownerId ? String(row.ownerId) : null;
-//           const targetOwnerIds = rowOwnerId ? [rowOwnerId] : ownerIdsOnSite;
-
-//           targetOwnerIds.forEach((ownerId) => {
-//             const key = `${mediaId}_${ownerId}`;
-//             if (!ledgerDataByMediaOwner.has(key)) {
-//               ledgerDataByMediaOwner.set(key, {
-//                 currentMonthEntries: [],
-//                 pastMonthEntries: [],
-//                 currentGst: 0,
-//                 pastGst: 0,
-//               });
-//             }
-//             const bucket = ledgerDataByMediaOwner.get(key);
-//             const amt = Number(row.gstAmount || 0);
-//             if (isCurrentMonth) {
-//               bucket.currentGst += amt;
-//             } else if (isPastMonth && !row.isPaid) {
-//               // ✅ pastGst = unpaid past-cycle ledger GST only
-//               bucket.pastGst += amt;
-//             }
-//           });
-//         });
-
-//         // legacy pre-onboarding outstanding GST — merged into the SAME
-//         // pastGst key, attributed to every owner on this site, unpaid rows only
-//         gstOutstandingHistory.forEach((row) => {
-//           if (row.isPaid) return;
-//           const amt = Number(row.gstOutStandingAmount || 0);
-//           ownerIdsOnSite.forEach((ownerId) => {
-//             const key = `${mediaId}_${ownerId}`;
-//             if (!ledgerDataByMediaOwner.has(key)) {
-//               ledgerDataByMediaOwner.set(key, {
-//                 currentMonthEntries: [],
-//                 pastMonthEntries: [],
-//                 currentGst: 0,
-//                 pastGst: 0,
-//               });
-//             }
-//             ledgerDataByMediaOwner.get(key).pastGst += amt;
-//           });
-//         });
-
-//         // fallback — if no gstBalanceHistory row exists yet for the
-//         // current cycle, derive currentGst from rentalDue directly
-//         rentalDueEntries.forEach((due) => {
-//           const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
-//           if (!parsed) return;
-//           const isCurrentMonth =
-//             parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx;
-//           if (!isCurrentMonth) return;
-//           const hasGstRowAlready = gstBalanceHistory.some(
-//             (g) => g.dueMonth === due.dueMonth,
-//           );
-//           if (hasGstRowAlready) return; // already counted above
-
-//           ownerIdsOnSite.forEach((ownerId) => {
-//             const key = `${mediaId}_${ownerId}`;
-//             if (!ledgerDataByMediaOwner.has(key)) {
-//               ledgerDataByMediaOwner.set(key, {
-//                 currentMonthEntries: [],
-//                 pastMonthEntries: [],
-//                 currentGst: 0,
-//                 pastGst: 0,
-//               });
-//             }
-//             ledgerDataByMediaOwner.get(key).currentGst += Number(due.gstAmount || 0);
-//           });
-//         });
-//       });
-//     }
-
-//     // ✅ ADDED — aggregate a site's ledger data across all its owners,
-//     // used for "shared" entries where multiple owners split one site.
-//     const getLedgerBucketsForSite = (mediaId, ownerIds) => {
-//       const merged = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
-//       ownerIds.forEach((ownerId) => {
-//         const key = `${mediaId}_${ownerId}`;
-//         const bucket = ledgerDataByMediaOwner.get(key);
-//         if (!bucket) return;
-//         merged.currentMonthEntries.push(...bucket.currentMonthEntries);
-//         merged.pastMonthEntries.push(...bucket.pastMonthEntries);
-//         merged.currentGst += bucket.currentGst;
-//         merged.pastGst += bucket.pastGst;
-//       });
-//       return merged;
-//     };
  
+//     // site map: mediaId -> { mediaCode, mediaName, amounts, ownerIds: [], ownersDetail: [] }
 //     const siteMap = new Map();
 //     relatedMediaDocs.forEach((mediaDoc) => {
 //       const ownersOnThisSite = (mediaDoc.landOwners || []).filter(
@@ -1948,7 +774,7 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //       });
 //     });
  
-//     const toSiteResponseShape = (site, ownerIdForGst) => {
+// const toSiteResponseShape = (site, ownerIdForGst) => {
 //       if (ownerIdForGst) {
 //         const ownerDetail = site.ownersDetail?.find(
 //           (od) => od.landOwnerMasterId === ownerIdForGst,
@@ -1990,8 +816,9 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //       };
 //     };
  
-//     const soleOwnedSitesByOwner = new Map();
-//     const multiOwnerSites = [];
+//     // ── split sites: sole-owned (exactly 1 owner) vs multi-owned (2+) ──
+//     const soleOwnedSitesByOwner = new Map(); // ownerId -> [site, ...]
+//     const multiOwnerSites = []; // [site, ...]
  
 //     siteMap.forEach((site) => {
 //       if (site.ownerIds.length <= 1) {
@@ -2007,7 +834,11 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //       }
 //     });
  
-//     const signatureGroups = new Map();
+//     // ── group multi-owner sites by EXACT owner-set signature ──
+//     // (sorted, joined owner ids) — same signature repeated on 2+
+//     // sites becomes "sharedGroup"; a signature appearing on only 1
+//     // site stays "shared".
+//     const signatureGroups = new Map(); // signature -> { ownerIds: [...], sites: [...] }
  
 //     multiOwnerSites.forEach((site) => {
 //       const signature = [...site.ownerIds].sort().join(",");
@@ -2019,6 +850,7 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
  
 //     const entries = [];
  
+//     // ── "single" entries — one per owner with 1+ sole-owned sites ──
 //     requestedOwnerIds.forEach((ownerId) => {
 //       const sites = soleOwnedSitesByOwner.get(ownerId);
 //       if (!sites || sites.length === 0) return;
@@ -2031,9 +863,6 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //       let totalTdsAmount = 0;
 //       let lastPaymentCategory = null;
 
-//       // ✅ ADDED — accumulate ledger/GST data across this owner's sole-owned sites
-//       const combinedLedger = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
-
 //       sites.forEach((site) => {
 //         const ownerDetail = site.ownersDetail?.find(
 //           (od) => od.landOwnerMasterId === ownerId,
@@ -2045,21 +874,14 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //           totalOnlineAmount += ownerDetail.onlineAmount;
 //           totalCashAmount += ownerDetail.cashAmount;
 //           totalTdsAmount += ownerDetail.tdsAmount;
-//           lastPaymentCategory = ownerDetail.paymentCategory;
-//         }
-
-//         if (needsLedgerFields) {
-//           const siteBucket = getLedgerBucketsForSite(String(site.mediaId), [ownerId]);
-//           combinedLedger.currentMonthEntries.push(...siteBucket.currentMonthEntries);
-//           combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
-//           combinedLedger.currentGst += siteBucket.currentGst;
-//           combinedLedger.pastGst += siteBucket.pastGst;
+//           lastPaymentCategory = ownerDetail.paymentCategory; // may differ per site; last one wins
 //         }
 //       });
 
-//       const entryPayload = {
+//       entries.push({
 //         entryType: "single",
 //         landOwnerMasterId: ownerId,
+//         // name: ownerNameById[ownerId] || "Unknown",
 //         totalSites: sites.length,
 //          totalLandOwners: 1,
 //         ...buildAmounts(sites),
@@ -2076,26 +898,15 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //             totalTdsAmount,
 //           },
 //         ],
-//         sites: sites.map((site) => toSiteResponseShape(site, ownerId)),
-//       };
-
-//       // ✅ ADDED — attach requested ledger/GST fields, conditionally
-//       if (includeCurrentLedger) {
-//         entryPayload.currentMonthLedgerEntries = combinedLedger.currentMonthEntries;
-//       }
-//       if (includePastLedger) {
-//         entryPayload.pastMonthLedgerEntries = combinedLedger.pastMonthEntries;
-//       }
-//       if (includeCurrentGst || includePastGst) {
-//         entryPayload.gstSummary = {};
-//         if (includeCurrentGst) entryPayload.gstSummary.currentGst = combinedLedger.currentGst;
-//         if (includePastGst) entryPayload.gstSummary.pastGst = combinedLedger.pastGst;
-//       }
-
-//       entries.push(entryPayload);
+//         sites: sites.map((site) => toSiteResponseShape(site, ownerId)), // ✅ CHANGED — pass ownerId
+//       });
 //     });
  
+//     // ── "shared" (1 site) vs "sharedGroup" (2+ sites, same owner-set) ──
 //     signatureGroups.forEach((group) => {
+//       // sum each owner's OWN shareAmount/gstAmount/netPayableToOwner
+//       // across every site in this group (not the site's total rent —
+//       // this owner's actual slice of it).
 //       const landOwners = group.ownerIds.map((id) => {
 //         let totalShareAmount = 0;
 //         let totalGstAmount = 0;
@@ -2116,7 +927,7 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //             totalOnlineAmount += ownerDetail.onlineAmount;
 //             totalCashAmount += ownerDetail.cashAmount;
 //             totalTdsAmount += ownerDetail.tdsAmount;
-//             lastPaymentCategory = ownerDetail.paymentCategory;
+//             lastPaymentCategory = ownerDetail.paymentCategory; // may differ per site; last one wins
 //           }
 //         });
 
@@ -2135,45 +946,19 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
  
 //       const amounts = buildAmounts(group.sites);
 //       const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
-
-//       // ✅ ADDED — accumulate ledger/GST across ALL owners + ALL sites in this group
-//       const combinedLedger = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
-//       if (needsLedgerFields) {
-//         group.sites.forEach((site) => {
-//           const siteBucket = getLedgerBucketsForSite(String(site.mediaId), group.ownerIds);
-//           combinedLedger.currentMonthEntries.push(...siteBucket.currentMonthEntries);
-//           combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
-//           combinedLedger.currentGst += siteBucket.currentGst;
-//           combinedLedger.pastGst += siteBucket.pastGst;
-//         });
-//       }
  
-//       const entryPayload = {
+//             entries.push({
 //         entryType: "shared",
 //         totalLandOwners: landOwners.length,
-//         totalSites: group.sites.length,
+//         totalSites: group.sites.length, // ✅ dynamic, not hardcoded
 //         gstApplicable: anyGstApplicable ? 1 : 0,
 //         ...amounts,
 //         landOwners,
-//         sites: group.sites.map((site) => toSiteResponseShape(site)),
-//       };
-
-//       // ✅ ADDED — attach requested ledger/GST fields, conditionally
-//       if (includeCurrentLedger) {
-//         entryPayload.currentMonthLedgerEntries = combinedLedger.currentMonthEntries;
-//       }
-//       if (includePastLedger) {
-//         entryPayload.pastMonthLedgerEntries = combinedLedger.pastMonthEntries;
-//       }
-//       if (includeCurrentGst || includePastGst) {
-//         entryPayload.gstSummary = {};
-//         if (includeCurrentGst) entryPayload.gstSummary.currentGst = combinedLedger.currentGst;
-//         if (includePastGst) entryPayload.gstSummary.pastGst = combinedLedger.pastGst;
-//       }
-
-//       entries.push(entryPayload);
+//         sites: group.sites.map((site) => toSiteResponseShape(site)), // ✅ CHANGED — no ownerId, combined across all owners on this site
+//       });
 //     });
  
+//     // ── paginate the ENTRIES (not the raw owners) ──
 //     const totalCount = entries.length;
 //     const startIdx = (pageNumbers - 1) * pageSize;
 //     const pagedEntries = entries.slice(startIdx, startIdx + pageSize);
@@ -2188,8 +973,6 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //           totalCount,
 //           totalPages: Math.ceil(totalCount / pageSize),
 //         },
-//         // ✅ ADDED — echo back which month was actually applied
-//         ...(needsLedgerFields ? { monthFilterApplied } : {}),
 //         entries: pagedEntries,
 //       },
 //       200,
@@ -2198,6 +981,678 @@ const toSiteResponseShape = (site, ownerIdForGst) => {
 //     return errorResponse(res, error.message, null, 400);
 //   }
 // };
+const SITE_FILTER_MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+function parseSiteFilterMonthParam(monthYearStr) {
+  if (!monthYearStr) return null;
+  const match = /^(0[1-9]|1[0-2])-([0-9]{4})$/.exec(monthYearStr);
+  if (!match) return null;
+  return { month: Number(match[1]), year: Number(match[2]) };
+}
+
+function parseSiteFilterDueMonthLabel(label) {
+  if (!label) return null;
+  const parts = String(label).trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  const monthIdx = SITE_FILTER_MONTH_NAMES.findIndex(
+    (m) => m.toLowerCase() === parts[0].toLowerCase(),
+  );
+  const year = Number(parts[1]);
+  if (monthIdx === -1 || Number.isNaN(year)) return null;
+  return { monthIdx, year };
+}
+const landOwnerSiteFilter = async (req, res) => {
+  try {
+    const {
+      landOwnerMasterIds,
+      search,
+      pageNumber = 1,
+      count = 10,
+      // ✅ ADDED — new request params
+      monthFilter,
+      currentMonthLedgerEntries: wantCurrentMonthLedger,
+      pastMonthLedgerEntries: wantPastMonthLedger,
+      currentGst: wantCurrentGst,
+      pastGst: wantPastGst,
+    } = req.body || {};
+ 
+    const pageNumbers = parseInt(pageNumber) || 1;
+    const pageSize = parseInt(count) || 10;
+
+    // ✅ ADDED — resolve the target month (defaults to "now")
+    const parsedMonthFilter = parseSiteFilterMonthParam(monthFilter);
+    const referenceDate = parsedMonthFilter
+      ? new Date(parsedMonthFilter.year, parsedMonthFilter.month - 1, 1)
+      : new Date();
+    const referenceYear = referenceDate.getFullYear();
+    const referenceMonthIdx = referenceDate.getMonth();
+    const monthFilterApplied = parsedMonthFilter
+      ? monthFilter
+      : `${String(referenceMonthIdx + 1).padStart(2, "0")}-${referenceYear}`;
+
+    const includeCurrentLedger = Number(wantCurrentMonthLedger) === 1;
+    const includePastLedger = Number(wantPastMonthLedger) === 1;
+    const includeCurrentGst = Number(wantCurrentGst) === 1;
+    const includePastGst = Number(wantPastGst) === 1;
+    const needsLedgerFields =
+      includeCurrentLedger || includePastLedger || includeCurrentGst || includePastGst;
+ 
+    let ownerFilter = {};
+    if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
+      ownerFilter._id = { $in: landOwnerMasterIds };
+    } else if (search && search.trim() !== "") {
+      const searchRegex = new RegExp(search.trim(), "i");
+      ownerFilter.$or = [
+        { name: searchRegex },
+        { panNumber: searchRegex },
+        { aadharCardNumber: searchRegex },
+      ];
+    }
+ 
+     const requestedOwners = await LandOwnerMaster.find(ownerFilter)
+      .select("name phone updatedAt")
+      .lean();
+ 
+    if (requestedOwners.length === 0) {
+      return successResponse(
+        res,
+        "No landowners found",
+        {
+          pagination: { count: pageSize, pageNumber: pageNumbers, totalCount: 0, totalPages: 0 },
+          entries: [],
+        },
+        200,
+      );
+    }
+ 
+    const requestedOwnerIds = requestedOwners.map((o) => String(o._id));
+    const ownerNameById = {};
+    // ✅ ADDED — lookup for each owner's own updatedAt, used by the
+    // latestActivityAt sort below.
+    const ownerUpdatedAtById = {};
+    requestedOwners.forEach((o) => {
+      ownerNameById[String(o._id)] = o.name;
+      ownerUpdatedAtById[String(o._id)] = o.updatedAt;
+    });
+
+    // ✅ CHANGED — project the extra fields needed for ledger/GST
+    // computation ONLY when at least one of the new flags was
+    // requested, so the query stays light for callers who don't ask
+    // for any of this.
+   const mediaProjection =
+  "mediaCode mediaName updatedAt rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount" +
+  (needsLedgerFields
+    ? " ledger ledgerHistory gstBalanceHistory rentalDue"
+    : "");
+ 
+    const relatedMediaDocs = await MediaOnboarding.find(
+      { "landOwners.landOwnerMasterId": { $in: requestedOwnerIds } },
+      mediaProjection,
+    ).lean();
+
+    const allOwnerIdsFromMedia = new Set();
+    relatedMediaDocs.forEach((mediaDoc) => {
+      (mediaDoc.landOwners || []).forEach((o) => {
+        if (o.landOwnerMasterId) {
+          allOwnerIdsFromMedia.add(String(o.landOwnerMasterId));
+        }
+      });
+    });
+
+    const allOwnersFromMedia = await LandOwnerMaster.find(
+      { _id: { $in: Array.from(allOwnerIdsFromMedia) } },
+      "name"
+    ).lean();
+
+    allOwnersFromMedia.forEach((o) => {
+      const id = String(o._id);
+      if (!ownerNameById[id]) {
+        ownerNameById[id] = o.name;
+      }
+    });
+
+    // ✅ ADDED — per-owner, per-media ledger/GST buckets, computed
+    // ONCE up front (keyed by "mediaId_ownerId") and reused wherever
+    // an owner appears (sole-owned or shared sites), instead of
+    // recomputing per entry.
+    const ledgerDataByMediaOwner = new Map();
+
+    if (needsLedgerFields) {
+      relatedMediaDocs.forEach((mediaDoc) => {
+        const mediaId = String(mediaDoc._id);
+
+        // real ledger rows saved this cycle (live "ledger" array,
+        // withGst:2 rows = rental Cash/Online payments)
+        const liveLedgerEntries = Array.isArray(mediaDoc.ledger) ? mediaDoc.ledger : [];
+
+        // historical ledger rows, bucketed by year/month
+        const historyEntries = [];
+        (mediaDoc.ledgerHistory || []).forEach((yearBucket) => {
+          (yearBucket.months || []).forEach((monthBucket) => {
+            (monthBucket.entries || []).forEach((entry) => {
+              if (entry.withGst === 2 && entry.paymentMode) {
+                historyEntries.push({
+                  ...entry,
+                  dueMonth: entry.month,
+                  yearFromBucket: yearBucket.year,
+                });
+              }
+            });
+          });
+        });
+
+        const allLedgerEntries = [...liveLedgerEntries, ...historyEntries];
+
+        allLedgerEntries.forEach((entry) => {
+          if (!entry.landOwnerId) return;
+          const ownerId = String(entry.landOwnerId);
+          const key = `${mediaId}_${ownerId}`;
+          if (!ledgerDataByMediaOwner.has(key)) {
+            ledgerDataByMediaOwner.set(key, {
+              currentMonthEntries: [],
+              pastMonthEntries: [],
+              currentGst: 0,
+              pastGst: 0,
+            });
+          }
+          const bucket = ledgerDataByMediaOwner.get(key);
+
+          // classify this entry's month against referenceYear/referenceMonthIdx
+          let entryYear = null;
+          let entryMonthIdx = null;
+          const entryCycle = entry.cycle || entry.date;
+          if (entry.dueMonth) {
+            const parsed = parseSiteFilterDueMonthLabel(entry.dueMonth);
+            if (parsed) {
+              entryYear = parsed.year;
+              entryMonthIdx = parsed.monthIdx;
+            }
+          }
+          if (entryYear === null && entryCycle) {
+            const d = new Date(entryCycle);
+            if (!Number.isNaN(d.getTime())) {
+              entryYear = d.getFullYear();
+              entryMonthIdx = d.getMonth();
+            }
+          }
+          if (entryYear === null) return; // can't classify — skip
+
+          const isCurrentMonth =
+            entryYear === referenceYear && entryMonthIdx === referenceMonthIdx;
+          const isPastMonth =
+            entryYear < referenceYear ||
+            (entryYear === referenceYear && entryMonthIdx < referenceMonthIdx);
+
+          const shapedEntry = {
+            mediaId: mediaDoc._id,
+            mediaName: mediaDoc.mediaName,
+            landOwnerMasterId: ownerId,
+            paymentMode: entry.paymentMode,
+            amount: Number(entry.amount || 0),
+            status: entry.status,
+            date: entry.date,
+            dueMonth: entry.dueMonth || entry.month || null,
+          };
+
+          if (isCurrentMonth) {
+            bucket.currentMonthEntries.push(shapedEntry);
+          } else if (isPastMonth) {
+            bucket.pastMonthEntries.push(shapedEntry);
+          }
+        });
+
+        // GST — currentGst from rentalDue's cycle matching referenceMonth,
+        // pastGst from unpaid gstBalanceHistory rows before referenceMonth
+        // PLUS legacy rentalPayment.gstOutstandingHistory (merged, per
+        // your instruction — same key, summed together, not separated).
+        const gstBalanceHistory = Array.isArray(mediaDoc.gstBalanceHistory)
+          ? mediaDoc.gstBalanceHistory
+          : [];
+        const gstOutstandingHistory = Array.isArray(
+          mediaDoc.rentalPayment?.gstOutstandingHistory,
+        )
+          ? mediaDoc.rentalPayment.gstOutstandingHistory
+          : [];
+        const rentalDueEntries = Array.isArray(mediaDoc.rentalDue)
+          ? mediaDoc.rentalDue
+          : [];
+
+        // group GST rows by owner where possible (source:"owner" rows
+        // carry ownerId; source:"rental"/legacy rows are site-level and
+        // get attributed to every owner on this site)
+        const ownerIdsOnSite = (mediaDoc.landOwners || [])
+          .map((o) => o.landOwnerMasterId && String(o.landOwnerMasterId))
+          .filter(Boolean);
+
+        gstBalanceHistory.forEach((row) => {
+          const parsed = parseSiteFilterDueMonthLabel(row.dueMonth);
+          if (!parsed) return;
+          const isCurrentMonth =
+            parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx;
+          const isPastMonth =
+            parsed.year < referenceYear ||
+            (parsed.year === referenceYear && parsed.monthIdx < referenceMonthIdx);
+          if (!isCurrentMonth && !isPastMonth) return;
+
+          const rowOwnerId = row.ownerId ? String(row.ownerId) : null;
+          const targetOwnerIds = rowOwnerId ? [rowOwnerId] : ownerIdsOnSite;
+
+          targetOwnerIds.forEach((ownerId) => {
+            const key = `${mediaId}_${ownerId}`;
+            if (!ledgerDataByMediaOwner.has(key)) {
+              ledgerDataByMediaOwner.set(key, {
+                currentMonthEntries: [],
+                pastMonthEntries: [],
+                currentGst: 0,
+                pastGst: 0,
+              });
+            }
+            const bucket = ledgerDataByMediaOwner.get(key);
+            const amt = Number(row.gstAmount || 0);
+            if (isCurrentMonth) {
+              bucket.currentGst += amt;
+            } else if (isPastMonth && !row.isPaid) {
+              // ✅ pastGst = unpaid past-cycle ledger GST only
+              bucket.pastGst += amt;
+            }
+          });
+        });
+
+        // legacy pre-onboarding outstanding GST — merged into the SAME
+        // pastGst key, attributed to every owner on this site, unpaid rows only
+        gstOutstandingHistory.forEach((row) => {
+          if (row.isPaid) return;
+          const amt = Number(row.gstOutStandingAmount || 0);
+          ownerIdsOnSite.forEach((ownerId) => {
+            const key = `${mediaId}_${ownerId}`;
+            if (!ledgerDataByMediaOwner.has(key)) {
+              ledgerDataByMediaOwner.set(key, {
+                currentMonthEntries: [],
+                pastMonthEntries: [],
+                currentGst: 0,
+                pastGst: 0,
+              });
+            }
+            ledgerDataByMediaOwner.get(key).pastGst += amt;
+          });
+        });
+
+        // fallback — if no gstBalanceHistory row exists yet for the
+        // current cycle, derive currentGst from rentalDue directly
+        rentalDueEntries.forEach((due) => {
+          const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+          if (!parsed) return;
+          const isCurrentMonth =
+            parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx;
+          if (!isCurrentMonth) return;
+          const hasGstRowAlready = gstBalanceHistory.some(
+            (g) => g.dueMonth === due.dueMonth,
+          );
+          if (hasGstRowAlready) return; // already counted above
+
+          ownerIdsOnSite.forEach((ownerId) => {
+            const key = `${mediaId}_${ownerId}`;
+            if (!ledgerDataByMediaOwner.has(key)) {
+              ledgerDataByMediaOwner.set(key, {
+                currentMonthEntries: [],
+                pastMonthEntries: [],
+                currentGst: 0,
+                pastGst: 0,
+              });
+            }
+            ledgerDataByMediaOwner.get(key).currentGst += Number(due.gstAmount || 0);
+          });
+        });
+      });
+    }
+
+    // ✅ ADDED — aggregate a site's ledger data across all its owners,
+    // used for "shared" entries where multiple owners split one site.
+    const getLedgerBucketsForSite = (mediaId, ownerIds) => {
+      const merged = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
+      ownerIds.forEach((ownerId) => {
+        const key = `${mediaId}_${ownerId}`;
+        const bucket = ledgerDataByMediaOwner.get(key);
+        if (!bucket) return;
+        merged.currentMonthEntries.push(...bucket.currentMonthEntries);
+        merged.pastMonthEntries.push(...bucket.pastMonthEntries);
+        merged.currentGst += bucket.currentGst;
+        merged.pastGst += bucket.pastGst;
+      });
+      return merged;
+    };
+ 
+    const siteMap = new Map();
+    relatedMediaDocs.forEach((mediaDoc) => {
+      const ownersOnThisSite = (mediaDoc.landOwners || []).filter(
+        (o) => o.landOwnerMasterId,
+      );
+      const ownerIdsOnThisSite = ownersOnThisSite.map((o) =>
+        String(o.landOwnerMasterId),
+      );
+ 
+      siteMap.set(String(mediaDoc._id), {
+        mediaId: mediaDoc._id,
+        mediaCode: mediaDoc.mediaCode,
+        mediaName: mediaDoc.mediaName,
+        totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
+        gstAmount: mediaDoc.rentalPayment?.gstAmount || 0,
+        gstApplicable: Number(mediaDoc.rentalPayment?.gstApplicable) || 0,
+        updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
+        ownerIds: ownerIdsOnThisSite,
+        ownersDetail: ownersOnThisSite.map((o) => ({
+          landOwnerMasterId: String(o.landOwnerMasterId),
+          paymentCategory: o.paymentCategory,
+          shareAmount: o.shareAmount || 0,
+          gstAmount: o.gstAmount || 0,
+          netPayableToOwner: o.netPayableToOwner || 0,
+          onlineAmount: o.onlineAmount || 0,
+          cashAmount: o.cashAmount || 0,
+          tdsAmount: o.tdsAmount || 0,
+        })),
+      });
+    });
+ 
+    const toSiteResponseShape = (site, ownerIdForGst) => {
+      if (ownerIdForGst) {
+        const ownerDetail = site.ownersDetail?.find(
+          (od) => od.landOwnerMasterId === ownerIdForGst,
+        );
+        return {
+          mediaId: site.mediaId,
+          mediaCode: site.mediaCode,
+          mediaName: site.mediaName,
+          baseRent: site.totalRentalAmount,
+          gstAmount: ownerDetail?.gstAmount || 0,
+          gstApplicable: ownerDetail?.paymentCategory ? (ownerDetail.gstAmount > 0 ? 1 : 0) : 0,
+        };
+      }
+
+      const combinedGstAmount = (site.ownersDetail || []).reduce(
+        (sum, od) => sum + Number(od.gstAmount || 0),
+        0,
+      );
+      const anyOwnerGstApplicable = (site.ownersDetail || []).some(
+        (od) => Number(od.gstAmount || 0) > 0,
+      );
+      return {
+        mediaId: site.mediaId,
+        mediaCode: site.mediaCode,
+        mediaName: site.mediaName,
+        baseRent: site.totalRentalAmount,
+        gstAmount: combinedGstAmount,
+        gstApplicable: anyOwnerGstApplicable ? 1 : 0,
+      };
+    };
+ 
+    const buildAmounts = (sites) => {
+      const totalBaseRent = sites.reduce((s, site) => s + site.totalRentalAmount, 0);
+      const gstHoldTotal = sites.reduce((s, site) => s + site.gstAmount, 0);
+      return {
+        totalBaseRent,
+        gstHoldTotal,
+        consolidatedPayable: totalBaseRent + gstHoldTotal,
+      };
+    };
+ 
+    const soleOwnedSitesByOwner = new Map();
+    const multiOwnerSites = [];
+ 
+    siteMap.forEach((site) => {
+      if (site.ownerIds.length <= 1) {
+        const soloOwnerId = site.ownerIds[0];
+        if (soloOwnerId) {
+          if (!soleOwnedSitesByOwner.has(soloOwnerId)) {
+            soleOwnedSitesByOwner.set(soloOwnerId, []);
+          }
+          soleOwnedSitesByOwner.get(soloOwnerId).push(site);
+        }
+      } else {
+        multiOwnerSites.push(site);
+      }
+    });
+ 
+    const signatureGroups = new Map();
+ 
+    multiOwnerSites.forEach((site) => {
+      const signature = [...site.ownerIds].sort().join(",");
+      if (!signatureGroups.has(signature)) {
+        signatureGroups.set(signature, { ownerIds: site.ownerIds, sites: [] });
+      }
+      signatureGroups.get(signature).sites.push(site);
+    });
+ 
+     const entries = [];
+ 
+    requestedOwnerIds.forEach((ownerId) => {
+      const sites = soleOwnedSitesByOwner.get(ownerId);
+      if (!sites || sites.length === 0) return;
+ 
+      let totalShareAmount = 0;
+      let totalGstAmount = 0;
+      let totalNetPayableToOwner = 0;
+      let totalOnlineAmount = 0;
+      let totalCashAmount = 0;
+      let totalTdsAmount = 0;
+      let lastPaymentCategory = null;
+      // ✅ ADDED — tracks max(owner.updatedAt, every site.updatedAt),
+      // used to sort entries by most-recent activity before pagination.
+      let latestActivityAt = ownerUpdatedAtById[ownerId] || null;
+
+      // ✅ ADDED — accumulate ledger/GST data across this owner's sole-owned sites
+      const combinedLedger = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
+
+      sites.forEach((site) => {
+        const ownerDetail = site.ownersDetail?.find(
+          (od) => od.landOwnerMasterId === ownerId,
+        );
+        if (ownerDetail) {
+          totalShareAmount += ownerDetail.shareAmount;
+          totalGstAmount += ownerDetail.gstAmount;
+          totalNetPayableToOwner += ownerDetail.netPayableToOwner;
+          totalOnlineAmount += ownerDetail.onlineAmount;
+          totalCashAmount += ownerDetail.cashAmount;
+          totalTdsAmount += ownerDetail.tdsAmount;
+          lastPaymentCategory = ownerDetail.paymentCategory;
+        }
+        // ✅ ADDED
+        if (
+          site.updatedAt &&
+          (!latestActivityAt || new Date(site.updatedAt) > new Date(latestActivityAt))
+        ) {
+          latestActivityAt = site.updatedAt;
+        }
+
+        if (needsLedgerFields) {
+          const siteBucket = getLedgerBucketsForSite(String(site.mediaId), [ownerId]);
+          combinedLedger.currentMonthEntries.push(...siteBucket.currentMonthEntries);
+          combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
+          combinedLedger.currentGst += siteBucket.currentGst;
+          combinedLedger.pastGst += siteBucket.pastGst;
+        }
+      });
+
+      const entryPayload = {
+        entryType: "single",
+        landOwnerMasterId: ownerId,
+        totalSites: sites.length,
+         totalLandOwners: 1,
+        ...buildAmounts(sites),
+        landOwners: [
+          {
+            landOwnerMasterId: ownerId,
+            name: ownerNameById[ownerId] || "Unknown",
+            paymentCategory: lastPaymentCategory,
+            totalShareAmount,
+            totalGstAmount,
+            totalNetPayableToOwner,
+            totalOnlineAmount,
+            totalCashAmount,
+            totalTdsAmount,
+          },
+        ],
+        sites: sites.map((site) => toSiteResponseShape(site, ownerId)),
+        latestActivityAt, // ✅ ADDED — internal sort key, stripped before response
+      };
+
+      // ✅ ADDED — attach requested ledger/GST fields, conditionally
+      if (includeCurrentLedger) {
+        entryPayload.currentMonthLedgerEntries = combinedLedger.currentMonthEntries;
+      }
+      if (includePastLedger) {
+        entryPayload.pastMonthLedgerEntries = combinedLedger.pastMonthEntries;
+      }
+      if (includeCurrentGst || includePastGst) {
+        entryPayload.gstSummary = {};
+        if (includeCurrentGst) entryPayload.gstSummary.currentGst = combinedLedger.currentGst;
+        if (includePastGst) entryPayload.gstSummary.pastGst = combinedLedger.pastGst;
+      }
+
+      entries.push(entryPayload);
+    });
+ 
+    signatureGroups.forEach((group) => {
+      // ✅ ADDED — same latest-activity tracking across all owners +
+      // all sites in this group.
+      let latestActivityAt = null;
+      group.ownerIds.forEach((id) => {
+        const ownerUpdatedAt = ownerUpdatedAtById[id];
+        if (
+          ownerUpdatedAt &&
+          (!latestActivityAt || new Date(ownerUpdatedAt) > new Date(latestActivityAt))
+        ) {
+          latestActivityAt = ownerUpdatedAt;
+        }
+      });
+
+      const landOwners = group.ownerIds.map((id) => {
+        let totalShareAmount = 0;
+        let totalGstAmount = 0;
+        let totalNetPayableToOwner = 0;
+        let totalOnlineAmount = 0;
+        let totalCashAmount = 0;
+        let totalTdsAmount = 0;
+        let lastPaymentCategory = null;
+
+        group.sites.forEach((site) => {
+          const ownerDetail = site.ownersDetail?.find(
+            (od) => od.landOwnerMasterId === id,
+          );
+          if (ownerDetail) {
+            totalShareAmount += ownerDetail.shareAmount;
+            totalGstAmount += ownerDetail.gstAmount;
+            totalNetPayableToOwner += ownerDetail.netPayableToOwner;
+            totalOnlineAmount += ownerDetail.onlineAmount;
+            totalCashAmount += ownerDetail.cashAmount;
+            totalTdsAmount += ownerDetail.tdsAmount;
+            lastPaymentCategory = ownerDetail.paymentCategory;
+          }
+        });
+
+        return {
+          landOwnerMasterId: id,
+          name: ownerNameById[id] || "Unknown",
+          paymentCategory: lastPaymentCategory,
+          totalShareAmount,
+          totalGstAmount,
+          totalNetPayableToOwner,
+          totalOnlineAmount,
+          totalCashAmount,
+          totalTdsAmount,
+        };
+      });
+
+      // ✅ ADDED — fold in every site's own updatedAt too
+      group.sites.forEach((site) => {
+        if (
+          site.updatedAt &&
+          (!latestActivityAt || new Date(site.updatedAt) > new Date(latestActivityAt))
+        ) {
+          latestActivityAt = site.updatedAt;
+        }
+      });
+ 
+      const amounts = buildAmounts(group.sites);
+      const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
+
+      // ✅ ADDED — accumulate ledger/GST across ALL owners + ALL sites in this group
+      const combinedLedger = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
+      if (needsLedgerFields) {
+        group.sites.forEach((site) => {
+          const siteBucket = getLedgerBucketsForSite(String(site.mediaId), group.ownerIds);
+          combinedLedger.currentMonthEntries.push(...siteBucket.currentMonthEntries);
+          combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
+          combinedLedger.currentGst += siteBucket.currentGst;
+          combinedLedger.pastGst += siteBucket.pastGst;
+        });
+      }
+ 
+      const entryPayload = {
+        entryType: "shared",
+        totalLandOwners: landOwners.length,
+        totalSites: group.sites.length,
+        gstApplicable: anyGstApplicable ? 1 : 0,
+        ...amounts,
+        landOwners,
+        sites: group.sites.map((site) => toSiteResponseShape(site)),
+        latestActivityAt, // ✅ ADDED — internal sort key, stripped before response
+      };
+
+      // ✅ ADDED — attach requested ledger/GST fields, conditionally
+      if (includeCurrentLedger) {
+        entryPayload.currentMonthLedgerEntries = combinedLedger.currentMonthEntries;
+      }
+      if (includePastLedger) {
+        entryPayload.pastMonthLedgerEntries = combinedLedger.pastMonthEntries;
+      }
+      if (includeCurrentGst || includePastGst) {
+        entryPayload.gstSummary = {};
+        if (includeCurrentGst) entryPayload.gstSummary.currentGst = combinedLedger.currentGst;
+        if (includePastGst) entryPayload.gstSummary.pastGst = combinedLedger.pastGst;
+      }
+
+      entries.push(entryPayload);
+    });
+
+    // ✅ ADDED — sort by latestActivityAt descending (most recently
+    // touched — owner OR any of their sites — first). Previously
+    // entries had no sort at all; order was purely insertion order.
+    entries.sort((a, b) => {
+      const aTime = a.latestActivityAt ? new Date(a.latestActivityAt).getTime() : 0;
+      const bTime = b.latestActivityAt ? new Date(b.latestActivityAt).getTime() : 0;
+      return bTime - aTime;
+    });
+
+    // ✅ ADDED — strip the internal sort key before sending the response
+    const entriesForResponse = entries.map(({ latestActivityAt, ...rest }) => rest);
+ 
+    const totalCount = entriesForResponse.length;
+    const startIdx = (pageNumbers - 1) * pageSize;
+    const pagedEntries = entriesForResponse.slice(startIdx, startIdx + pageSize);
+ 
+    return successResponse(
+      res,
+      "Billing summary fetched successfully",
+      {
+        pagination: {
+          count: pageSize,
+          pageNumber: pageNumbers,
+          totalCount,
+          totalPages: Math.ceil(totalCount / pageSize),
+        },
+        // ✅ ADDED — echo back which month was actually applied
+        ...(needsLedgerFields ? { monthFilterApplied } : {}),
+        entries: pagedEntries,
+      },
+      200,
+    );
+  } catch (error) {
+    return errorResponse(res, error.message, null, 400);
+  }
+};
 module.exports = {
   landOwnerSave,
   landOwnerList,

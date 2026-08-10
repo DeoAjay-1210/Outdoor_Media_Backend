@@ -3480,9 +3480,25 @@ for (const media of results) {
           matchedOwnerForAmt?.paymentCategory || 1,
         );
 
+        // ✅ ADDED — rentalDueApprovalStatus must ALWAYS be present on
+        // every ledger entry, real or virtual — this line was the gap.
+        // dueVirtualEntries (below) and the history-matched branch
+        // already set this field, but entries sourced straight from
+        // the live mediaObj.ledger array (the most common case — this
+        // is the FIRST place any entry gets shaped) never had it
+        // attached at all, so the key silently disappeared depending
+        // on which code path produced a given row. Resolved the same
+        // way those other two spots do: match this entry's own
+        // dueMonth against mediaObj.rentalDue[] and read
+        // approvalStatus from there, defaulting to 0 if no match.
+        const dueMonthForMatch = entry.dueMonth || entry.month || null;
+        const matchedDueForApproval = (mediaObj.rentalDue || []).find(
+          (d) => d.dueMonth === dueMonthForMatch,
+        );
+
         return {
           ...entry,
-          dueMonth: entry.dueMonth || entry.month || null,
+          dueMonth: dueMonthForMatch,
           paymentCategory, // ✅ NEW — was missing on real/live ledger rows
           cashAmount:
             entry.paymentMode === "Cash"
@@ -3492,6 +3508,14 @@ for (const media of results) {
             entry.paymentMode === "Online"
               ? Number(matchedOwnerForAmt?.onlineAmount ?? 0)
               : entry.onlineAmount,
+          // ✅ ADDED — always present now, on every entry regardless
+          // of source. Preserves an already-set value on the entry
+          // (e.g. if it came from a source that already computed it)
+          // before falling back to the freshly matched rentalDue.
+          rentalDueApprovalStatus:
+            entry.rentalDueApprovalStatus ??
+            matchedDueForApproval?.approvalStatus ??
+            0,
         };
       });
 
@@ -4400,8 +4424,7 @@ latestLedger = latestLedger.sort((a, b) => {
 
 exports.getLedgerHistory = async (req, res) => {
   try {
-    const { mediaId, landOwnerMasterId, year, month } = req.body;
-
+    const { mediaId, landOwnerMasterId, year, month, currentMonth } = req.body;
     if (!Array.isArray(mediaId) || mediaId.length === 0) {
       return errorResponse(res, "mediaId must be a non-empty array", null, 400);
     }
@@ -4444,10 +4467,25 @@ exports.getLedgerHistory = async (req, res) => {
       }
       ownerMasterIdFilter = validOwnerIds.map(String);
     }
+   let requestedMonthYearParsed = currentMonth
+      ? parseMonthYearParam(currentMonth)
+      : null;
 
-    const mediaDocs = await Media.find({ _id: { $in: validMediaIds } })
+    if (!requestedMonthYearParsed && year && month) {
+      const parsedYear = Number(year);
+      const parsedMonth = Number(month);
+      if (
+        !Number.isNaN(parsedYear) &&
+        !Number.isNaN(parsedMonth) &&
+        parsedMonth >= 1 &&
+        parsedMonth <= 12
+      ) {
+        requestedMonthYearParsed = { year: parsedYear, month: parsedMonth };
+      }
+    }
+       const mediaDocs = await Media.find({ _id: { $in: validMediaIds } })
       .select(
-        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths",
+        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths",
       )
       .lean();
 
@@ -4455,7 +4493,7 @@ exports.getLedgerHistory = async (req, res) => {
     const notFoundIds = validMediaIds.filter((id) => !foundIds.has(String(id)));
 
     const mediaHistoryList = mediaDocs.map((media) =>
-      buildSingleMediaHistoryBlock(media, { year, month, ownerMasterIdFilter }),
+      buildSingleMediaHistoryBlock(media, { year, month, ownerMasterIdFilter,requestedMonthYear: requestedMonthYearParsed, }),
     );
 
     const summary = mediaHistoryList.reduce(
@@ -4585,16 +4623,11 @@ exports.getLedgerHistory = async (req, res) => {
     );
   }
 };
-exports.computeOutstandingSummary = computeOutstandingSummary;
-/* ═══════════════════════════════════════════════════════════════════════
- * buildSingleMediaHistoryBlock — the ENTIRE original per-media getLedgerHistory
- * body, unchanged in its internal logic, wrapped as a reusable function and
- * extended with landOwnerMasterId filtering at every array that carries a
- * landOwnerId.
- * ═══════════════════════════════════════════════════════════════════════*/
+
+
 function buildSingleMediaHistoryBlock(
   media,
-  { year, month, ownerMasterIdFilter },
+  { year, month, ownerMasterIdFilter,requestedMonthYear  },
 ) {
   // ── landOwnerMasterId -> matching embedded landOwners._id set ──
   const allLandOwners = media.landOwners || [];
@@ -4627,7 +4660,7 @@ function buildSingleMediaHistoryBlock(
       city: media.city,
       landOwners: [],
       ledgerHistory: [],
-      rentalDueEntries: buildAutoRentalDueEntries(mediaObj, requestedMonthYearParsed),
+       rentalDueEntries: buildAutoRentalDueEntries(media, requestedMonthYear || null),
       gstPayment: false,
       tdsPayment: false,
       outstanding: emptyOutstanding,
@@ -4681,21 +4714,30 @@ function buildSingleMediaHistoryBlock(
     media.ledgerHistory,
   );
 
-  // ✅ CHANGED — normalize both sides to trimmed strings before comparing.
-  // `item.year` can arrive as a Number from one merged source and a String
-  // from the other; strict === was silently matching nothing.
-  if (year) {
+ const effectiveYear = year
+    ? year
+    : requestedMonthYear
+      ? String(requestedMonthYear.year)
+      : null;
+  const effectiveMonth = month
+    ? month
+    : requestedMonthYear
+      ? String(requestedMonthYear.month)
+      : null;
+const effectiveMonthYear =
+    effectiveYear && effectiveMonth
+      ? { year: Number(effectiveYear), month: Number(effectiveMonth) }
+      : requestedMonthYear || null;
+  if (effectiveYear) {
     ledgerHistory = ledgerHistory.filter(
-      (item) => String(item.year).trim() === String(year).trim(),
+      (item) => String(item.year).trim() === String(effectiveYear).trim(),
     );
   }
 
-  if (month) {
-    const monthIdx = Number(month) - 1;
+  if (effectiveMonth) {
+    const monthIdx = Number(effectiveMonth) - 1;
     const monthName = MONTH_NAMES[monthIdx];
     if (!monthName) {
-      // invalid month number (e.g. "13", "0", non-numeric) — don't silently
-      // fall through to "no filter", make it explicit
       ledgerHistory = [];
     } else {
       ledgerHistory = ledgerHistory
@@ -5282,54 +5324,58 @@ function buildSingleMediaHistoryBlock(
   // builder uses. Ensures EVERY elapsed billing cycle (not just months
   // that already have a real ledgerHistory bucket) shows up here too —
   // e.g. August, even though only July has a real saved payment.
-  const autoCyclesForHistory = getAllDueCycles(media, null);
-  autoCyclesForHistory.forEach((cycleDate) => {
-    const cycleYear = String(cycleDate.getUTCFullYear());
-    const cycleMonthName = MONTH_NAMES_LOCAL[cycleDate.getUTCMonth()];
-    const bucketKey = `${cycleYear}-${cycleMonthName.toLowerCase()}`;
-    if (existingBucketKeys.has(bucketKey)) return; // already has a real or pending-derived bucket
+  const hasExplicitMonthFilter = !!(effectiveYear && effectiveMonth);
 
-    const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(cycleMonthName);
-    const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(cycleMonthName, cycleYear, cycleDate);
-    const ledgerFinal = buildModeSplitLedger([], 2, cycleMonthName, cycleDate);
+  if (!hasExplicitMonthFilter) {
+    const autoCyclesForHistory = getAllDueCycles(media, effectiveMonthYear);
+    autoCyclesForHistory.forEach((cycleDate) => {
+      const cycleYear = String(cycleDate.getUTCFullYear());
+      const cycleMonthName = MONTH_NAMES_LOCAL[cycleDate.getUTCMonth()];
+      const bucketKey = `${cycleYear}-${cycleMonthName.toLowerCase()}`;
+      if (existingBucketKeys.has(bucketKey)) return;
 
-    const withGst1Final = matchingLandOwners.map((owner) => ({
-      landOwnerId: owner._id,
-      landOwnerName: owner.name,
-      utrNumber: "",
-      date: null,
-      status: 0,
-      withGst: 1,
-      month: cycleMonthName,
-      cycle: cycleDate,
-      rentalDueId: null,
-      index: null,
-      updatedBy: "",
-      updatedAt: null,
-      isPaid: false,
-      gstAmount: 0,
-      isVirtual: true,
-    }));
+      const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(cycleMonthName);
+      const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(cycleMonthName, cycleYear, cycleDate);
+      const ledgerFinal = buildModeSplitLedger([], 2, cycleMonthName, cycleDate);
 
-    const syntheticCycleBucket = {
-      month: cycleMonthName,
-      ledger: ledgerFinal,
-      withGst1Ledger: withGst1Final,
-      allEntries: [],
-      gstBalanceHistory: gstBalanceHistoryForMonth,
-      tdsBalanceHistory: tdsBalanceHistoryForMonth,
-      pendingLedgerHistory: [],
-      isSyntheticMonth: true,
-    };
+      const withGst1Final = matchingLandOwners.map((owner) => ({
+        landOwnerId: owner._id,
+        landOwnerName: owner.name,
+        utrNumber: "",
+        date: null,
+        status: 0,
+        withGst: 1,
+        month: cycleMonthName,
+        cycle: cycleDate,
+        rentalDueId: null,
+        index: null,
+        updatedBy: "",
+        updatedAt: null,
+        isPaid: false,
+        gstAmount: 0,
+        isVirtual: true,
+      }));
 
-    let cycleYearEntry = transformedLedgerHistory.find((y) => y.year === cycleYear);
-    if (!cycleYearEntry) {
-      cycleYearEntry = { year: cycleYear, months: [] };
-      transformedLedgerHistory.push(cycleYearEntry);
-    }
-    cycleYearEntry.months.push(syntheticCycleBucket);
-    existingBucketKeys.add(bucketKey);
-  });
+      const syntheticCycleBucket = {
+        month: cycleMonthName,
+        ledger: ledgerFinal,
+        withGst1Ledger: withGst1Final,
+        allEntries: [],
+        gstBalanceHistory: gstBalanceHistoryForMonth,
+        tdsBalanceHistory: tdsBalanceHistoryForMonth,
+        pendingLedgerHistory: [],
+        isSyntheticMonth: true,
+      };
+
+      let cycleYearEntry = transformedLedgerHistory.find((y) => y.year === cycleYear);
+      if (!cycleYearEntry) {
+        cycleYearEntry = { year: cycleYear, months: [] };
+        transformedLedgerHistory.push(cycleYearEntry);
+      }
+      cycleYearEntry.months.push(syntheticCycleBucket);
+      existingBucketKeys.add(bucketKey);
+    });
+  }
 
   transformedLedgerHistory.sort((a, b) => Number(a.year) - Number(b.year));
   transformedLedgerHistory.forEach((yearEntry) => {
@@ -5349,7 +5395,7 @@ function buildSingleMediaHistoryBlock(
     // and nothing was found for it, return genuinely empty (no fabricated
     // virtual placeholder entries). The synthetic "today's month" fallback
     // below is ONLY for when no year/month filter was given at all.
-    if (year || month) {
+    if (hasExplicitMonthFilter || year || month) {
       transformedLedgerHistory = [];
     } else {
       const targetYear = String(new Date().getUTCFullYear());
@@ -5441,8 +5487,8 @@ function buildSingleMediaHistoryBlock(
 
   // ✅ currentMonth removed — outstanding/currentBillDate now always
   // reflect the site's actual live cycle ("now"), not a requested month
-  const outstanding = computeOutstandingSummary(media, null);
-  const currentBillDate = getCurrentBillDate(media, null);
+const outstanding = computeOutstandingSummary(media, effectiveMonthYear);
+  const currentBillDate = getCurrentBillDate(media, effectiveMonthYear);
 
   return {
     mediaId: media._id,
@@ -5475,3 +5521,4 @@ function buildSingleMediaHistoryBlock(
       media.rentalPayment?.rentalOutstandingHistory || [],
   };
 }
+exports.computeOutstandingSummary = computeOutstandingSummary;
