@@ -357,20 +357,37 @@ const attachFilesToOwner = (owner, files, processFile) => {
   });
 };
 
+// ✅ ADDED — infers a fileType from a raw URL/path's extension, so a
+// string value gets normalized into the same object shape the rest
+// of the codebase (and the schema's fileType enum) expects.
+const inferFileTypeFromPath = (pathOrUrl) => {
+  const ext = String(pathOrUrl).split(".").pop()?.toLowerCase().split("?")[0];
+  if (ext === "pdf") return "pdf";
+  return "image";
+};
+
 const sanitizeOwnerFileFields = (owner) => {
   OWNER_FILE_FIELDS.forEach((field) => {
     if (owner[field] === undefined) return;
 
     const val = owner[field];
 
-    // ✅ RELAXED — don't assume the uploaded-file object always has
-    // exactly `fileName`/`filePath` as property names (your actual
-    // req.processFile implementation may name them differently). A
-    // value counts as a valid file object if it's a plain, non-empty
-    // object containing AT LEAST ONE non-empty string value anywhere
-    // in it. Only real junk (empty string "", null, {}, []) gets
-    // stripped — a legitimately uploaded file object is never lost
-    // here regardless of its exact key names.
+
+    if (typeof val === "string") {
+      const trimmed = val.trim();
+      if (trimmed === "") {
+        delete owner[field];
+        return;
+      }
+      owner[field] = {
+        fileType: inferFileTypeFromPath(trimmed),
+        filePath: trimmed,
+        uploadedAt: nowIST(),
+      };
+      return; // already normalized + guaranteed valid — skip the object checks below
+    }
+
+  
     const isPlainNonEmptyObject =
       val &&
       typeof val === "object" &&
