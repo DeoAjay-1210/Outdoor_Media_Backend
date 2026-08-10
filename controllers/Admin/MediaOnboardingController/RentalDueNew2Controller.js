@@ -4,7 +4,7 @@ const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const path = require("path");
 const { computeOutstandingSummary } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller"); 
-console.log("computeOutstandingSummary import check:", typeof computeOutstandingSummary); 
+
 const {
   ROLE,
   ROLE_LABEL,

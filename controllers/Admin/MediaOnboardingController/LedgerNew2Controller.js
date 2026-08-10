@@ -4715,16 +4715,19 @@ function buildSingleMediaHistoryBlock(
   );
 
  const effectiveYear = year
-    ? year
+    ? String(year)
     : requestedMonthYear
       ? String(requestedMonthYear.year)
       : null;
+
+
   const effectiveMonth = month
-    ? month
-    : requestedMonthYear
+    ? String(month)
+    : !year && requestedMonthYear
       ? String(requestedMonthYear.month)
       : null;
-const effectiveMonthYear =
+
+  const effectiveMonthYear =
     effectiveYear && effectiveMonth
       ? { year: Number(effectiveYear), month: Number(effectiveMonth) }
       : requestedMonthYear || null;
