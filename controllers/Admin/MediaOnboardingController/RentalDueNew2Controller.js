@@ -1183,28 +1183,23 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
     media.gstBalanceHistory = [];
   }
 
-  // ✅ NEW GUARD — if the generic rentalDue-level placeholder row (source:
-  // "rental", ownerId:null) already exists for this rentalDueId, remove it
-  // now that we're about to add the real per-owner breakdown instead. This
-  // covers the case where addGstToBalanceIfApplicable ran FIRST.
-  const placeholderExists = media.gstBalanceHistory.some(
-    (g) => String(g.rentalDueId) === String(entry._id) && g.source === "rental" && !g.ownerId,
-  );
-  if (placeholderExists) {
-    media.gstBalanceHistory = media.gstBalanceHistory.filter(
-      (g) => !(String(g.rentalDueId) === String(entry._id) && g.source === "rental" && !g.ownerId),
-    );
-    media.markModified("gstBalanceHistory");
-  }
-
-  let anyAdded = false;
+  // ✅ FIXED — build the owner-level rows FIRST, and only remove the
+  // site-level placeholder (and mark it as replaced) if at least one
+  // owner-level row was actually added. Previously the placeholder was
+  // deleted UNCONDITIONALLY before checking whether any owner
+  // qualified — so if the site-level GST was genuinely held
+  // (addGstToBalanceIfApplicable had already pushed it) but no
+  // individual owner had BOTH gstApplicable===1 AND gstAmount>0, the
+  // valid placeholder got deleted here and nothing replaced it,
+  // leaving gstBalanceHistory empty despite a real GST hold existing.
+  const ownerRowsToAdd = [];
 
   media.landOwners.forEach((owner) => {
     const ownerGstApplicable = Number(owner.gstApplicable || 0);
     const ownerGstAmount = Number(owner.gstAmount || 0);
 
     if (ownerGstApplicable === 1 && ownerGstAmount > 0) {
-      media.gstBalanceHistory.push({
+      ownerRowsToAdd.push({
         rentalDueId: entry._id,
         dueMonth: entry.dueMonth,
         cycle: entry.dueDate,
@@ -1219,16 +1214,30 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
         ownerId: owner._id,
         ownerName: owner.name,
       });
-      anyAdded = true;
     }
   });
 
-  if (anyAdded) {
+  if (ownerRowsToAdd.length > 0) {
+    // ✅ only remove the placeholder NOW, since we know it's genuinely
+    // being replaced by real owner-level rows.
+    const placeholderExists = media.gstBalanceHistory.some(
+      (g) => String(g.rentalDueId) === String(entry._id) && g.source === "rental" && !g.ownerId,
+    );
+    if (placeholderExists) {
+      media.gstBalanceHistory = media.gstBalanceHistory.filter(
+        (g) => !(String(g.rentalDueId) === String(entry._id) && g.source === "rental" && !g.ownerId),
+      );
+    }
+
+    media.gstBalanceHistory.push(...ownerRowsToAdd);
     media.markModified("gstBalanceHistory");
     entry.ownerGstAddedToBalance = true;
-    entry.gstAddedToBalance = true; // ✅ NEW — also mark this so addGstToBalanceIfApplicable's flag check short-circuits if it runs afterward
+    entry.gstAddedToBalance = true;
     recomputeBalanceGstAmount(media);
   }
+  // ✅ if ownerRowsToAdd is empty, we do NOTHING — the site-level
+  // placeholder (if it exists) is left completely intact, so
+  // gstBalanceHistory still correctly reflects the site-level GST hold.
 }
 function recomputeBalanceGstAmount(media) {
   const unpaidTotal = (media.gstBalanceHistory || []).reduce((sum, g) => {
