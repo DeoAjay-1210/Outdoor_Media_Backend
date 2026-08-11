@@ -105,9 +105,9 @@ function getCycleMonthsForFrequency(media) {
   return FREQUENCY_MONTHS_MAP[frequency] || 1;
 }
 
-function addMonthsLocal(date, months) {
+function addMonthsUTC(date, months) {
   const d = new Date(date);
-  d.setMonth(d.getMonth() + months);
+  d.setUTCMonth(d.getUTCMonth() + months);
   return d;
 }
 
@@ -431,11 +431,12 @@ async function generateMissedEntriesForMedia(media, userName) {
   if (!anchorRaw) return { generatedEntries: [] };
 
   const anchorDateObj = new Date(anchorRaw);
-  const anchorMonthStart = new Date(
-    anchorDateObj.getFullYear(),
-    anchorDateObj.getMonth(),
-    anchorDateObj.getDate(), // ✅ preserve day-of-month (e.g. the 10th/12th), unlike getAllDueCycles which uses day 1 — this keeps dueDate matching your real billing day
-  );
+  // Use Date.UTC to create a date at midnight UTC, avoiding timezone shifts.
+  const anchorMonthStart = new Date(Date.UTC(
+    anchorDateObj.getUTCFullYear(),
+    anchorDateObj.getUTCMonth(),
+    anchorDateObj.getUTCDate()
+  ));
 
   const today = new Date();
   const referenceDate = today; // this sweep always targets "now" — same as getAllDueCycles with no requestedMonthYear
@@ -444,13 +445,13 @@ async function generateMissedEntriesForMedia(media, userName) {
   // the complete list of due cycles in one pass, not extended
   // incrementally from whatever's already saved.
   const dueCycles = [];
-  let cursor = addMonthsLocal(anchorMonthStart, cycleMonths);
+  let cursor = addMonthsUTC(anchorMonthStart, cycleMonths);
   let guard = 0;
   while (guard < 240) {
     const cursorIsPastReference =
-      cursor.getFullYear() > referenceDate.getFullYear() ||
-      (cursor.getFullYear() === referenceDate.getFullYear() &&
-        cursor.getMonth() > referenceDate.getMonth());
+      cursor.getUTCFullYear() > referenceDate.getUTCFullYear() ||
+      (cursor.getUTCFullYear() === referenceDate.getUTCFullYear() &&
+        cursor.getUTCMonth() > referenceDate.getUTCMonth());
     if (cursorIsPastReference) break;
 
     dueCycles.push(new Date(cursor));
@@ -461,7 +462,7 @@ async function generateMissedEntriesForMedia(media, userName) {
     ) {
       break;
     }
-    cursor = addMonthsLocal(cursor, cycleMonths);
+    cursor = addMonthsUTC(cursor, cycleMonths);
     guard++;
   }
 
@@ -725,7 +726,7 @@ const generatedEntries = [];
   // entry (self-corrects drift either way).
   if (latestCycleDate) {
     media.rentalPayment.lastBillPaidDate = latestCycleDate;
-    media.rentalPayment.nextBillingDate = addMonthsLocal(latestCycleDate, cycleMonths);
+    media.rentalPayment.nextBillingDate = addMonthsUTC(latestCycleDate, cycleMonths);
     media.markModified("rentalPayment");
   }
 

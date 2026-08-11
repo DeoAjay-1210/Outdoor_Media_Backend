@@ -5002,19 +5002,11 @@ function buildSingleMediaHistoryBlock(
         // saves) OR fall back to landOwnerId+paymentMode. Previously
         // required landOwnerId+paymentMode together, which silently missed
         // real entries if landOwnerId types/format didn't line up exactly.
-        const realEntry =
-          realEntries.find(
-            (e) =>
-              e.paymentMode === mode &&
-              (e.rentalDueId
-                ? true // if this entry HAS a rentalDueId, paymentMode match alone within this owner's mode slot is enough once we also confirm ownership below
-                : String(e.landOwnerId) === String(owner._id)),
-          ) ||
-          realEntries.find(
-            (e) =>
-              String(e.landOwnerId) === String(owner._id) &&
-              e.paymentMode === mode,
-          );
+          const realEntry = realEntries.find(
+          (e) =>
+            String(e.landOwnerId) === String(owner._id) &&
+            e.paymentMode === mode,
+        );
 
         if (realEntry) {
           // ✅ NEW — same cashAmount/onlineAmount source as the virtual
