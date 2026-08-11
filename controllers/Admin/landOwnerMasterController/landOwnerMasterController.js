@@ -1504,13 +1504,42 @@ if (Number(due.withGst) !== 2) return;
         String(o.landOwnerMasterId),
       );
  
+       const siteGstFlag = Number(mediaDoc.gstApplicableFlag || 0);
+      const ownerLevelGstTotal = ownersOnThisSite.reduce(
+        (sum, o) => sum + Number(o.gstAmount || 0),
+        0,
+      );
+      const rentalLevelGstAmount =
+        Number(mediaDoc.rentalPayment?.gstApplicable) === 1
+          ? Number(mediaDoc.rentalPayment?.gstAmount || 0)
+          : 0;
+
+      // ✅ FIXED — was returning 0 outright whenever gstApplicableFlag
+      // was 0/unset (true for many existing sites that predate this
+      // flag, or were never migrated/re-saved through the flow that
+      // sets it). Now: when the flag IS explicitly 1 or 2, it's trusted
+      // as authoritative, same as before. When it's 0/unset, fall back
+      // to whichever source actually has a GST amount — this restores
+      // the old owner-level-sum behavior for sites like this one
+      // (ownerLevelGstTotal: 4500) while still correctly resolving 0
+      // for sites where neither source has GST.
+      let resolvedSiteGstAmount;
+      if (siteGstFlag === 1) {
+        resolvedSiteGstAmount = rentalLevelGstAmount;
+      } else if (siteGstFlag === 2) {
+        resolvedSiteGstAmount = ownerLevelGstTotal;
+      } else {
+        resolvedSiteGstAmount =
+          ownerLevelGstTotal > 0 ? ownerLevelGstTotal : rentalLevelGstAmount;
+      }
+
       siteMap.set(String(mediaDoc._id), {
         mediaId: mediaDoc._id,
         mediaCode: mediaDoc.mediaCode,
         mediaName: mediaDoc.mediaName,
         totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
-        gstAmount: mediaDoc.rentalPayment?.gstAmount || 0,
-        gstApplicable: Number(mediaDoc.rentalPayment?.gstApplicable) || 0,
+        gstAmount: resolvedSiteGstAmount,
+        gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
         updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
         ownerIds: ownerIdsOnThisSite,
         ownersDetail: ownersOnThisSite.map((o) => ({
@@ -1526,35 +1555,14 @@ if (Number(due.withGst) !== 2) return;
       });
     });
  
-    const toSiteResponseShape = (site, ownerIdForGst) => {
-      if (ownerIdForGst) {
-        const ownerDetail = site.ownersDetail?.find(
-          (od) => od.landOwnerMasterId === ownerIdForGst,
-        );
-        return {
-          mediaId: site.mediaId,
-          mediaCode: site.mediaCode,
-          mediaName: site.mediaName,
-          baseRent: site.totalRentalAmount,
-          gstAmount: ownerDetail?.gstAmount || 0,
-          gstApplicable: ownerDetail?.paymentCategory ? (ownerDetail.gstAmount > 0 ? 1 : 0) : 0,
-        };
-      }
-
-      const combinedGstAmount = (site.ownersDetail || []).reduce(
-        (sum, od) => sum + Number(od.gstAmount || 0),
-        0,
-      );
-      const anyOwnerGstApplicable = (site.ownersDetail || []).some(
-        (od) => Number(od.gstAmount || 0) > 0,
-      );
+      const toSiteResponseShape = (site) => {
       return {
         mediaId: site.mediaId,
         mediaCode: site.mediaCode,
         mediaName: site.mediaName,
         baseRent: site.totalRentalAmount,
-        gstAmount: combinedGstAmount,
-        gstApplicable: anyOwnerGstApplicable ? 1 : 0,
+        gstAmount: site.gstAmount,
+        gstApplicable: site.gstApplicable,
       };
     };
  

@@ -1558,7 +1558,7 @@ if ([0, 1, 2].includes(Number(gstApplicableFlag))) {
 if ([0, 1, 2].includes(Number(requestedPastFlag))) {
   entry.pastgstApplicableFlag = Number(requestedPastFlag);
 }
-    if ([1, 2].includes(Number(withGst))) {
+     if ([1, 2].includes(Number(withGst))) {
       const newWithGst = Number(withGst);
       if (entry.withGst !== newWithGst) {
         entry.withGst = newWithGst;
@@ -1597,9 +1597,17 @@ if ([0, 1, 2].includes(Number(requestedPastFlag))) {
 
       markRoleVerified(media, entry, ROLE.OWNER, userName);
       applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
+
+ if (Number(entry.withGst) === 1 && Number(entry.gstAmount) <= 0) {
+        const freshSplit = computeGstSplit(media, 1);
+        entry.gstAmount = Number(freshSplit.gstAmount) || 0;
+        entry.baseAmount = Number(freshSplit.baseAmount) || 0;
+        entry.netPayable = Number(freshSplit.netPayable) || 0;
+      }
       addGstToBalanceIfApplicable(media, entry, userName);
       addOwnerGstToBalanceIfApplicable(media, entry, userName);
-
+      addGstToBalanceIfApplicable(media, entry, userName);
+      addOwnerGstToBalanceIfApplicable(media, entry, userName);
       // ✅ CHANGED — date advancement removed. lastBillPaidDate/
       // nextBillingDate now auto-advance on schedule via
       // generateMissedEntriesForMedia (called earlier this same
@@ -1652,6 +1660,12 @@ if ([0, 1, 2].includes(Number(requestedPastFlag))) {
           if (userType === ROLE.OWNER) {
             entry.ownerApprovalDate = nowIST();
             applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
+             if (Number(entry.withGst) === 1 && Number(entry.gstAmount) <= 0) {
+              const freshSplit = computeGstSplit(media, 1);
+              entry.gstAmount = Number(freshSplit.gstAmount) || 0;
+              entry.baseAmount = Number(freshSplit.baseAmount) || 0;
+              entry.netPayable = Number(freshSplit.netPayable) || 0;
+            }
             addGstToBalanceIfApplicable(media, entry, userName);
             addOwnerGstToBalanceIfApplicable(media, entry, userName);
             // ✅ CHANGED — date advancement removed, same reason as above.

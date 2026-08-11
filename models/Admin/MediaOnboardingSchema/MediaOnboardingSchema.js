@@ -1068,7 +1068,7 @@ MediaSchema.pre("save", function () {
   rp.totalRentalAmountWithGst = totalRentalAmount + rp.gstAmount;
 
   if (!this.landOwners || !this.landOwners.length) {
-    rp.netPayable = totalRentalAmount;
+    rp.netPayable = totalRentalAmount + rp.gstAmount;
     return;
   }
 
@@ -1154,8 +1154,14 @@ MediaSchema.pre("save", function () {
     0,
   );
 
-  const effectiveGstAmount =
-    rentalGstApplicable === 1 ? rp.gstAmount : totalGstAcrossOwners;
+  // ✅ FIXED — was choosing EITHER rp.gstAmount (rentalPayment-level GST)
+  // OR totalGstAcrossOwners (landOwner-level GST), never both. Here
+  // rentalPayment.gstApplicable is 0 (rp.gstAmount is correctly 0), but
+  // the landOwner has gstApplicable:1 / gstAmount:9000 — that amount was
+  // being dropped from netPayable entirely. Now both are summed:
+  // rp.gstAmount is 0 when rentalGstApplicable isn't 1, so this simply
+  // adds whatever GST actually exists on either side.
+  const effectiveGstAmount = Number(rp.gstAmount || 0) + totalGstAcrossOwners;
 
   rp.netPayable = totalRentalAmount + effectiveGstAmount;
 
@@ -1296,7 +1302,7 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
   const activeSites = await this.find({
     status: 1,
     "rentalPayment.billingStartDate": { $ne: null },
-  }).select("rentalPayment mediaName");
+  }).select("rentalPayment mediaName landOwners");
 
   let updatedCount = 0;
   const debugLog = [];
