@@ -4716,8 +4716,8 @@ function buildSingleMediaHistoryBlock(
     matchingLandOwners.map((o) => String(o._id)),
   );
 
-  const belongsToMatchingOwner = (landOwnerId) =>
-    !ownerMasterIdFilter || matchingOwnerIdSet.has(String(landOwnerId));
+ const belongsToMatchingOwner = (landOwnerId) =>
+    !ownerMasterIdFilter || !landOwnerId || matchingOwnerIdSet.has(String(landOwnerId));
 
   if (ownerMasterIdFilter && matchingLandOwners.length === 0) {
     // No owner on this media matches the filter — return an empty-but-present block
@@ -5054,7 +5054,32 @@ function buildSingleMediaHistoryBlock(
     }
     return Number(owner.gstApplicable || 0) === 1;
   };
+const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, paymentCategory) => {
+  let baseAmount;
+  if (Number(paymentCategory) === 3) {
+    baseAmount =
+      mode === "Cash"
+        ? Number(matchedDue?.cashAmount ?? owner.cashAmount ?? 0)
+        : Number(matchedDue?.onlineAmount ?? owner.onlineAmount ?? 0);
+  } else {
+    // paymentCategory 1 or 2 — single combined share value
+    baseAmount = Number(matchedDue?.shareAmount ?? owner.shareAmount ?? 0);
+  }
 
+  if (Number(effectiveWithGst) !== 2) {
+    return baseAmount;
+  }
+
+  const gstFlag = Number(media.gstApplicableFlag || 0);
+  let ownerGst = 0;
+  if (gstFlag === 1) {
+    const ownerCount = matchingLandOwners.length || 1;
+    ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+  } else {
+    ownerGst = Number(owner.gstAmount || 0);
+  }
+  return baseAmount + ownerGst;
+};
   const buildModeSplitLedger = (
     realEntries,
     withGstValue,
@@ -5074,12 +5099,35 @@ function buildSingleMediaHistoryBlock(
             e.paymentMode === mode,
         );
 
-        if (realEntry) {
+         if (realEntry) {
           // ✅ NEW — same cashAmount/onlineAmount source as the virtual
           // (unpaid) branch below, so real entries match that shape.
           const matchedDue = (media.rentalDue || []).find(
             (d) => String(d._id) === String(realEntry.rentalDueId),
           );
+          const realWithGst = isGstApplicableForOwner(owner) ? withGstValue : 0;
+
+          // ✅ ADDED — do not return amount:0 when the corresponding
+          // rental amount is available. Only recompute a fallback
+          // amount when the real saved entry genuinely has no amount
+          // recorded — a real entry's OWN saved amount always takes
+          // priority when present (never overridden).
+           const resolvedRealAmount =
+            realEntry.amount && Number(realEntry.amount) > 0
+              ? Number(realEntry.amount)
+              : computeOwnerModeAmount(owner, mode, matchedDue, realWithGst, paymentCategory);
+   const isSplitCategory = Number(paymentCategory) === 3;
+          const resolvedCashAmount =
+            isSplitCategory && mode === "Cash"
+              ? Number(matchedDue?.cashAmount ?? owner.cashAmount ?? 0)
+              : 0;
+          const resolvedOnlineAmount =
+            isSplitCategory && mode === "Online"
+              ? Number(matchedDue?.onlineAmount ?? owner.onlineAmount ?? 0)
+              : 0;
+          const resolvedShareAmount = isSplitCategory
+            ? 0
+            : Number(matchedDue?.shareAmount ?? owner.shareAmount ?? 0);
           result.push({
             landOwnerId: realEntry.landOwnerId,
             landOwnerName: realEntry.landOwnerName,
@@ -5088,7 +5136,7 @@ function buildSingleMediaHistoryBlock(
             utrNumber: realEntry.utrNumber,
             date: realEntry.date,
             status: realEntry.status,
-           withGst: isGstApplicableForOwner(owner) ? withGstValue : 0,
+           withGst: realWithGst,
             month: realEntry.month,
             cycle: realEntry.cycle,
             rentalDueId: realEntry.rentalDueId,
@@ -5101,19 +5149,91 @@ function buildSingleMediaHistoryBlock(
             netPayable: realEntry.netPayable,
             lastBillPaidDate: realEntry.lastBillPaidDate,
             nextBillingDate: realEntry.nextBillingDate,
-            amount: realEntry.amount,
+            // amount: resolvedRealAmount,
             paymentCategory,
-            cashAmount:
-              mode === "Cash"
-                ? Number(matchedDue?.cashAmount ?? owner.cashAmount ?? 0)
-                : undefined,
-            onlineAmount:
-              mode === "Online"
-                ? Number(matchedDue?.onlineAmount ?? owner.onlineAmount ?? 0)
-                : undefined,
+            cashAmount: resolvedCashAmount, // ✅ CHANGED — always a number now
+            onlineAmount: resolvedOnlineAmount, // ✅ CHANGED — always a number now
+            shareAmount: resolvedShareAmount, // ✅ ADDED
             isVirtual: false,
           });
         } else {
+              const fullMonthLabelForGstMatch = `${monthLabel} ${cycleDate.getUTCFullYear()}`;
+          const matchedGstBalanceRow = (fullGstBalanceHistory || []).find(
+            (g) =>
+              g.dueMonth === fullMonthLabelForGstMatch &&
+              (!g.ownerId || String(g.ownerId) === String(owner._id)),
+          );
+
+          const isSplitCategoryVirtual = Number(paymentCategory) === 3;
+
+          // ✅ ADDED — second tier: no gstBalanceHistory HOLD exists,
+          // but GST may still genuinely be applicable to this owner
+          // (added directly into the payment, withGst: 2), instead of
+          // silently defaulting to 0. Reuses the same
+          // gstApplicableFlag-driven resolution as computeOwnerModeAmount.
+          let directGstAmount = 0;
+          if (!matchedGstBalanceRow) {
+            const gstFlag = Number(media.gstApplicableFlag || 0);
+            if (gstFlag === 1 && Number(media.rentalPayment?.gstApplicable) === 1) {
+              const ownerCount = matchingLandOwners.length || 1;
+              directGstAmount = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+            } else if (Number(owner.gstApplicable) === 1) {
+              directGstAmount = Number(owner.gstAmount || 0);
+            }
+          }
+
+          // ✅ withGst: 1 = held (real gstBalanceHistory row), 2 = GST
+          // applicable and added directly, 0 = not applicable at all.
+          // For category 3, direct GST (withGst:2) only ever attaches
+          // to the ONLINE row — the Cash row stays GST-free.
+         const virtualWithGst = matchedGstBalanceRow
+            ? 1
+            : directGstAmount > 0
+              ? 2
+              : 0;
+
+          // ✅ this gate is now ONLY used to decide which row's AMOUNT
+          // gets the GST money added — unchanged from before.
+          const appliesDirectGstToThisRow =
+            directGstAmount > 0 && (!isSplitCategoryVirtual || mode === "Online");
+
+          const matchedDueForVirtual = (media.rentalDue || []).find(
+            (d) => d.dueMonth === monthLabel,
+          );
+
+          const baseAmountVirtual = computeOwnerModeAmount(
+            owner,
+            mode,
+            matchedDueForVirtual,
+            0,
+            paymentCategory,
+          );
+
+          let resolvedVirtualAmount = baseAmountVirtual;
+          if (matchedGstBalanceRow) {
+            resolvedVirtualAmount = baseAmountVirtual + Number(matchedGstBalanceRow.gstAmount || 0);
+          } else if (appliesDirectGstToThisRow) {
+            resolvedVirtualAmount = baseAmountVirtual + directGstAmount;
+          }
+
+          const resolvedCashAmountVirtual =
+            isSplitCategoryVirtual && mode === "Cash"
+              ? Number(matchedDueForVirtual?.cashAmount ?? owner.cashAmount ?? 0)
+              : 0;
+          // ✅ CHANGED — Online amount now includes the direct GST
+          // addition (category 3 case) when applicable.
+          const resolvedOnlineAmountVirtual =
+            isSplitCategoryVirtual && mode === "Online"
+              ? Number(matchedDueForVirtual?.onlineAmount ?? owner.onlineAmount ?? 0) +
+                (appliesDirectGstToThisRow ? directGstAmount : 0)
+              : 0;
+          // ✅ CHANGED — shareAmount now includes the direct GST
+          // addition (category 1/2 case) when applicable.
+          const resolvedShareAmountVirtual = isSplitCategoryVirtual
+            ? 0
+            : Number(matchedDueForVirtual?.shareAmount ?? owner.shareAmount ?? 0) +
+              (appliesDirectGstToThisRow ? directGstAmount : 0);
+
           result.push({
             landOwnerId: owner._id,
             landOwnerName: owner.name,
@@ -5122,22 +5242,17 @@ function buildSingleMediaHistoryBlock(
             utrNumber: "",
             date: null,
             status: 0,
-            // ✅ FIXED — was hardcoded to withGstValue (always 2 for
-            // this call site) regardless of whether GST actually
-            // applies. A site/owner with GST not applicable at all
-            // was incorrectly showing withGst: 2 on every virtual
-            // (unpaid/placeholder) entry, implying GST is being held
-            // separately when it isn't applicable in the first place.
-            // Now null when GST doesn't apply to this owner, matching
-            // how a real not-applicable rentalDue entry would look.
-            withGst: isGstApplicableForOwner(owner) ? withGstValue : 0,
+            withGst: virtualWithGst,
             month: monthLabel,
             cycle: cycleDate,
             rentalDueId: null,
             index: null,
             updatedBy: "",
             updatedAt: null,
-            amount: 0,
+            amount: resolvedVirtualAmount,
+            cashAmount: resolvedCashAmountVirtual,
+            onlineAmount: resolvedOnlineAmountVirtual,
+            shareAmount: resolvedShareAmountVirtual,
             isVirtual: true,
           });
         }

@@ -4138,6 +4138,13 @@ const filteredAgreementDocVerificationHistory = (
   if (currentEntry) {
     return resolveGstApplicable(item, currentEntry.gstApplicableFlag, currentEntry.pastgstApplicableFlag);
   }
+   const anyEntryWithFlag = (item.rentalDue || []).find(
+    (e) => Number(e.gstApplicableFlag) === 1 || Number(e.gstApplicableFlag) === 2,
+  );
+  if (anyEntryWithFlag) {
+    return resolveGstApplicable(item, anyEntryWithFlag.gstApplicableFlag, anyEntryWithFlag.pastgstApplicableFlag);
+  }
+
   return resolveGstApplicable(item);
 })(),
 
