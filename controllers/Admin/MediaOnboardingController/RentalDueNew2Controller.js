@@ -1293,12 +1293,10 @@ function syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName) {
 }
 
 function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, pastgstApplicableFlag) {
-  if (userType !== ROLE.OWNER) return;
   if ([0, 1, 2].includes(Number(gstApplicableFlag))) {
     media.gstApplicableFlag = Number(gstApplicableFlag);
   }
 
-  // Ensure we don't save null if a value is provided
   const parsedPastFlag = Number(pastgstApplicableFlag);
   if ([0, 1, 2].includes(parsedPastFlag)) {
     media.pastgstApplicableFlag = parsedPastFlag;
