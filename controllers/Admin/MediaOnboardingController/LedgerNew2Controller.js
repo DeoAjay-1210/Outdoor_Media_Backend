@@ -496,11 +496,80 @@ function computeOutstandingSummary(media, requestedMonthYear) {
   const previousBaseRentDue = rentResult.previousBaseRentDue + sumUnpaidRentalOutstanding(media);
   const previousGSTDue = gstResult.previousGSTDue + sumUnpaidGstOutstanding(media);
 
+  // ✅ NEW — Future (fecture) dues: unpaid items past the current requested cycle
+  // Only calculate future dues if the site is not currently outstanding (current or previous)
+  // This satisfies the rule: "don't current month cannot taken only fecture amount will be added"
+  let fectureBaseReant = 0;
+  let fectureGstDue = 0;
+
+  const totalOutstandingForCheck = currentBaseRent + currentGSTDue + previousBaseRentDue + previousGSTDue;
+
+  if (totalOutstandingForCheck === 0) {
+    const liveKey = getLiveKeyForOutstanding(media, requestedMonthYear);
+    if (liveKey) {
+      const [liveYr, liveMonthIdx] = liveKey.split("-").map(Number);
+
+      // 1) Future GST from gstBalanceHistory
+      fectureGstDue = (media.gstBalanceHistory || []).reduce((sum, row) => {
+        if (row.isPaid) return sum;
+        const parsed = parseDueMonthLabel(row.dueMonth);
+        if (!parsed) return sum;
+        const isFuture = parsed.year > liveYr || (parsed.year === liveYr && parsed.monthIdx > liveMonthIdx);
+        if (!isFuture) return sum;
+        return sum + Number(row.gstAmount || 0);
+      }, 0);
+
+      // 2) Future Rent from rentalDue
+      fectureBaseReant = (media.rentalDue || []).reduce((sum, due) => {
+        const parsed = parseDueMonthLabel(due.dueMonth);
+        if (!parsed) return sum;
+        const isFuture = parsed.year > liveYr || (parsed.year === liveYr && parsed.monthIdx > liveMonthIdx);
+        if (!isFuture) return sum;
+
+        const isPaid = (media.ledger || []).some(e => e.status === 1 && (String(e.rentalDueId) === String(due._id) || e.dueMonth === due.dueMonth));
+        if (isPaid) return sum;
+
+        return sum + Number(due.netPayable || 0);
+      }, 0);
+
+      // 3) Fallback for nextBillingDate if it's future and not represented in the arrays above
+      const nextBillingDate = media.rentalPayment?.nextBillingDate;
+      if (nextBillingDate) {
+        const nextD = new Date(nextBillingDate);
+        const nextYr = nextD.getUTCFullYear();
+        const nextMonthIdx = nextD.getUTCMonth();
+        if (nextYr > liveYr || (nextYr === liveYr && nextMonthIdx > liveMonthIdx)) {
+          const nextMonthLabel = `${MONTH_NAMES[nextMonthIdx]} ${nextYr}`;
+
+          // Check if already counted in rent loop
+          const inRentalDue = (media.rentalDue || []).some((d) => d.dueMonth === nextMonthLabel);
+          if (!inRentalDue) {
+            const isPaid = (media.ledger || []).some((e) => e.status === 1 && (e.dueMonth === nextMonthLabel || e.month === nextMonthLabel));
+            if (!isPaid) {
+              fectureBaseReant += Number(media.rentalPayment?.totalRentalAmount || 0);
+            }
+          }
+
+          // Check if already counted in GST loop
+          const inGstHistory = (media.gstBalanceHistory || []).some((g) => g.dueMonth === nextMonthLabel);
+          if (!inGstHistory) {
+            const isGstPaid = (media.gstBalanceHistory || []).some((g) => g.dueMonth === nextMonthLabel && g.isPaid);
+            if (!isGstPaid) {
+              fectureGstDue += resolveExpectedGstForCycle(media);
+            }
+          }
+        }
+      }
+    }
+  }
+
   return {
     currentBaseRent,
     currentGSTDue,
     previousBaseRentDue,
     previousGSTDue,
+    fectureBaseReant,
+    fectureGstDue,
     totalOutstandingAmount:
       currentBaseRent + currentGSTDue + previousBaseRentDue + previousGSTDue,
   };
@@ -3747,7 +3816,14 @@ latestLedger = latestLedger.sort((a, b) => {
             // 0/unset = fall back to owner-level (previous behavior) as a best guess
             let gstAmount = Number(due.gstAmount || 0);
             if (Number(due.withGst) === 1 && gstAmount === 0) {
-              const gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+              let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+              // ✅ AUTO-INFER if 0
+              if (gstFlag === 0) {
+                const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
+                const ownerGst = (mediaObj.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+                if (ownerGst) gstFlag = 2;
+                else if (siteGst) gstFlag = 1;
+              }
 
               if (gstFlag === 1) {
                 // site-level GST is authoritative
@@ -4321,6 +4397,8 @@ latestLedger = latestLedger.sort((a, b) => {
         acc.overallCurrentGSTDue += s.currentGSTDue;
         acc.overallPreviousBaseRentDue += s.previousBaseRentDue;
         acc.overallPreviousGSTDue += s.previousGSTDue;
+        acc.overallFectureRentalDue += s.fectureBaseReant;
+        acc.overallFectureGSTDUe += s.fectureGstDue;
         acc.overallTotalOutstandingAmount += s.totalOutstandingAmount;
         return acc;
       },
@@ -4329,6 +4407,8 @@ latestLedger = latestLedger.sort((a, b) => {
         overallCurrentGSTDue: 0,
         overallPreviousBaseRentDue: 0,
         overallPreviousGSTDue: 0,
+        overallFectureRentalDue: 0,
+        overallFectureGSTDUe: 0,
         overallTotalOutstandingAmount: 0,
       },
     );
@@ -4579,6 +4659,8 @@ exports.getLedgerHistory = async (req, res) => {
         acc.overallCurrentGSTDue += block.outstanding.currentGSTDue;
         acc.overallPreviousBaseRentDue += block.outstanding.previousBaseRentDue;
         acc.overallPreviousGSTDue += block.outstanding.previousGSTDue;
+        acc.overallFectureRentalDue += block.outstanding.fectureBaseReant;
+        acc.overallFectureGSTDUe += block.outstanding.fectureGstDue;
         acc.overallTotalOutstandingAmount +=
           block.outstanding.totalOutstandingAmount;
         return acc;
@@ -4590,6 +4672,8 @@ exports.getLedgerHistory = async (req, res) => {
         overallCurrentGSTDue: 0,
         overallPreviousBaseRentDue: 0,
         overallPreviousGSTDue: 0,
+        overallFectureRentalDue: 0,
+        overallFectureGSTDUe: 0,
         overallTotalOutstandingAmount: 0,
       },
     );
@@ -5048,7 +5132,15 @@ function buildSingleMediaHistoryBlock(
   };
 
     const isGstApplicableForOwner = (owner) => {
-    const gstFlag = Number(media.gstApplicableFlag || 0);
+    let gstFlag = Number(media.gstApplicableFlag || 0);
+    // ✅ AUTO-INFER if 0
+    if (gstFlag === 0) {
+      const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+      const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+      if (ownerGst) gstFlag = 2;
+      else if (siteGst) gstFlag = 1;
+    }
+
     if (gstFlag === 1) {
       return Number(media.rentalPayment?.gstApplicable || 0) === 1;
     }
@@ -5070,7 +5162,15 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
     return baseAmount;
   }
 
-  const gstFlag = Number(media.gstApplicableFlag || 0);
+  let gstFlag = Number(media.gstApplicableFlag || 0);
+  // ✅ AUTO-INFER if 0
+  if (gstFlag === 0) {
+    const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+    const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+    if (ownerGst) gstFlag = 2;
+    else if (siteGst) gstFlag = 1;
+  }
+
   let ownerGst = 0;
   if (gstFlag === 1) {
     const ownerCount = matchingLandOwners.length || 1;

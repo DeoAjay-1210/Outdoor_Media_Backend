@@ -652,6 +652,15 @@ const generatedEntries = [];
 
     const gstSplit = computeGstSplit(media, 0);
 
+    // ✅ AUTO-INFER gstApplicableFlag if it's currently 0 on the media
+    let inferredFlag = Number(media.gstApplicableFlag) || 0;
+    if (inferredFlag === 0) {
+      const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+      const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+      if (ownerGst) inferredFlag = 2;
+      else if (siteGst) inferredFlag = 1;
+    }
+
     const newEntry = {
       dueMonth: getDueMonthLabel(candidateDate),
       dueDate: new Date(candidateDate),
@@ -681,7 +690,7 @@ const generatedEntries = [];
       withGst: 0,
       gstAmount: Number(gstSplit.gstAmount) || 0,
       baseAmount: Number(gstSplit.baseAmount) || 0,
-      gstApplicableFlag: media.gstApplicableFlag || 0,
+      gstApplicableFlag: inferredFlag,
       pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
       updatedBy: userName || "",
       updatedAt: nowIST(),
@@ -1323,8 +1332,18 @@ function syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName) {
 }
 
 function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, pastgstApplicableFlag) {
-  if ([0, 1, 2].includes(Number(gstApplicableFlag))) {
-    media.gstApplicableFlag = Number(gstApplicableFlag);
+  let resolvedFlag = Number(gstApplicableFlag) || 0;
+
+  // ✅ AUTO-INFER if 0
+  if (resolvedFlag === 0 && (Number(media.gstApplicableFlag) || 0) === 0) {
+    const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+    const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+    if (ownerGst) resolvedFlag = 2;
+    else if (siteGst) resolvedFlag = 1;
+  }
+
+  if ([0, 1, 2].includes(resolvedFlag)) {
+    media.gstApplicableFlag = resolvedFlag;
   }
 
   const parsedPastFlag = Number(pastgstApplicableFlag);
@@ -1334,8 +1353,16 @@ function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, pastg
 }
 
 const resolveGstApplicable = (item, entryGstFlag, entryPastFlag) => {
-  const flag = entryGstFlag !== undefined ? Number(entryGstFlag) : (Number(item.gstApplicableFlag) || 0);
+  let flag = entryGstFlag !== undefined ? Number(entryGstFlag) : (Number(item.gstApplicableFlag) || 0);
   const pastgstApplicableFlag = entryPastFlag !== undefined ? Number(entryPastFlag) : (Number(item.pastgstApplicableFlag) || 0);
+
+  // ✅ AUTO-INFER if flag is 0 but GST data exists
+  if (flag === 0) {
+    const siteGst = Number(item.rentalPayment?.gstApplicable) === 1;
+    const ownerGst = (item.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+    if (ownerGst) flag = 2;
+    else if (siteGst) flag = 1;
+  }
 
   if (flag === 0) {
     return {
@@ -1589,12 +1616,23 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 
     if (campaignName) entry.campaignName = campaignName;
     if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
-if ([0, 1, 2].includes(Number(gstApplicableFlag))) {
-  entry.gstApplicableFlag = Number(gstApplicableFlag);
-}
-if ([0, 1, 2].includes(Number(requestedPastFlag))) {
-  entry.pastgstApplicableFlag = Number(requestedPastFlag);
-}
+
+    // ✅ AUTO-INFER gstApplicableFlag if it's currently 0 or passed as 0
+    let resolvedUpdateFlag = gstApplicableFlag !== undefined ? Number(gstApplicableFlag) : Number(entry.gstApplicableFlag || 0);
+    if (resolvedUpdateFlag === 0) {
+      const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+      const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+      if (ownerGst) resolvedUpdateFlag = 2;
+      else if (siteGst) resolvedUpdateFlag = 1;
+    }
+
+    if ([0, 1, 2].includes(resolvedUpdateFlag)) {
+      entry.gstApplicableFlag = resolvedUpdateFlag;
+    }
+
+    if ([0, 1, 2].includes(Number(requestedPastFlag))) {
+      entry.pastgstApplicableFlag = Number(requestedPastFlag);
+    }
      if ([1, 2].includes(Number(withGst))) {
       const newWithGst = Number(withGst);
       if (entry.withGst !== newWithGst) {
@@ -1888,6 +1926,15 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
     : 0;
   const gstSplit = computeGstSplit(media, resolvedWithGst);
 
+  // ✅ AUTO-INFER if flag is 0
+  let resolvedGstFlag = Number(gstApplicableFlag) || 0;
+  if (resolvedGstFlag === 0) {
+    const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+    const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+    if (ownerGst) resolvedGstFlag = 2;
+    else if (siteGst) resolvedGstFlag = 1;
+  }
+
   const newEntry = {
     dueMonth: getDueMonthLabel(dueDateObj),
     dueDate: dueDateObj,
@@ -1910,8 +1957,8 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
     agreementDocVerified: allApproved,
     status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
     withGst: resolvedWithGst,
-    gstApplicableFlag: Number(gstApplicableFlag) || 0,
-pastgstApplicableFlag: Number(requestedPastFlag) || 0,
+    gstApplicableFlag: resolvedGstFlag,
+    pastgstApplicableFlag: Number(requestedPastFlag) || 0,
     gstAmount: Number(gstSplit.gstAmount) || 0,
     baseAmount: Number(gstSplit.baseAmount) || 0,
     updatedBy: userName,

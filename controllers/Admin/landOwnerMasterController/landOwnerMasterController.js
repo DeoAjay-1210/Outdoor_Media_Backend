@@ -1300,7 +1300,15 @@ const landOwnerSiteFilter = async (req, res) => {
         // fallback — if no gstBalanceHistory row exists yet for the
         // current cycle, derive currentGst from rentalDue directly
          const resolveGstForOwnerThisCycle = (ownerId) => {
-          const gstFlag = Number(mediaDoc.gstApplicableFlag || 0);
+          let gstFlag = Number(mediaDoc.gstApplicableFlag || 0);
+          // ✅ AUTO-INFER if 0
+          if (gstFlag === 0) {
+            const siteGst = Number(mediaDoc.rentalPayment?.gstApplicable) === 1;
+            const ownerGst = (mediaDoc.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+            if (ownerGst) gstFlag = 2;
+            else if (siteGst) gstFlag = 1;
+          }
+
           if (gstFlag === 1) {
             if (Number(mediaDoc.rentalPayment?.gstApplicable) !== 1) return 0;
             const siteGst = Number(mediaDoc.rentalPayment?.gstAmount || 0);
