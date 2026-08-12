@@ -291,27 +291,50 @@ function parseDueMonthLabel(label) {
  * Otherwise "" — meaning the site is behind on its cycle relative to the
  * requested/current month.
  */
-function getCurrentBillDate(media, requestedMonthYear) {
-  const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
-  if (!lastBillPaidDate) return "";
-  const d = new Date(lastBillPaidDate);
-  if (Number.isNaN(d.getTime())) return "";
+// function getCurrentBillDate(media, requestedMonthYear) {
+//   const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
+//   if (!lastBillPaidDate) return "";
+//   const d = new Date(lastBillPaidDate);
+//   if (Number.isNaN(d.getTime())) return "";
 
-  let refMonth, refYear;
+//   let refMonth, refYear;
+//   if (requestedMonthYear) {
+//     refMonth = requestedMonthYear.month - 1;
+//     refYear = requestedMonthYear.year;
+//   } else {
+//     const now = new Date();
+//     refMonth = now.getMonth();
+//     refYear = now.getFullYear();
+//   }
+
+//   const matches =
+//     d.getUTCMonth() === refMonth && d.getUTCFullYear() === refYear;
+//   return matches ? lastBillPaidDate : "";
+// }
+function getCurrentBillDate(media, requestedMonthYear) {
+  let liveMonthLabel;
+
   if (requestedMonthYear) {
-    refMonth = requestedMonthYear.month - 1;
-    refYear = requestedMonthYear.year;
+    // caller explicitly wants a specific month evaluated
+    liveMonthLabel = `${MONTH_NAMES[requestedMonthYear.month - 1]} ${requestedMonthYear.year}`;
   } else {
-    const now = new Date();
-    refMonth = now.getMonth();
-    refYear = now.getFullYear();
+    const nextBillingDate = media.rentalPayment?.nextBillingDate;
+    if (!nextBillingDate) return media.rentalPayment?.lastBillPaidDate || "";
+    const d = new Date(nextBillingDate);
+    if (Number.isNaN(d.getTime())) return media.rentalPayment?.lastBillPaidDate || "";
+    liveMonthLabel = `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   }
 
-  const matches =
-    d.getUTCMonth() === refMonth && d.getUTCFullYear() === refYear;
-  return matches ? lastBillPaidDate : "";
-}
+  // ✅ dueMonth-based match — same label comparison style as
+  // classifyDueMonthTargetType/isLiveCycleMonthLabel elsewhere in
+  // this file.
+ const matchedDue = (media.rentalDue || []).find(
+    (due) =>
+      String(due.dueMonth).trim().toLowerCase() === liveMonthLabel.toLowerCase(),
+  );
 
+  return matchedDue ? media.rentalPayment?.lastBillPaidDate || "" : "";
+}
 /** Sum of unpaid rows in rentalPayment.gstOutstandingHistory (pre-onboarding legacy GST debt) */
 function sumUnpaidGstOutstanding(media) {
   return (media.rentalPayment?.gstOutstandingHistory || []).reduce(
