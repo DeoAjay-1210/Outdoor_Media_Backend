@@ -5199,13 +5199,28 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             e.paymentMode === mode,
         );
 
-         if (realEntry) {
+        const fullMonthLabelForGstMatch = `${monthLabel} ${cycleDate.getUTCFullYear()}`;
+        const matchedGstBalanceRow = (fullGstBalanceHistory || []).find(
+          (g) =>
+            g.dueMonth === fullMonthLabelForGstMatch &&
+            (!g.ownerId || String(g.ownerId) === String(owner._id)),
+        );
+
+        if (realEntry) {
           // ✅ NEW — same cashAmount/onlineAmount source as the virtual
           // (unpaid) branch below, so real entries match that shape.
           const matchedDue = (media.rentalDue || []).find(
             (d) => String(d._id) === String(realEntry.rentalDueId),
           );
-          const realWithGst = isGstApplicableForOwner(owner) ? withGstValue : 0;
+
+          // ✅ FIXED — if a gstBalanceHistory entry exists for this month,
+          // then withGst must be 1 (held), even if this is a real, saved
+          // entry. Otherwise, if GST is applicable, it's 2 (direct).
+          const realWithGst = matchedGstBalanceRow
+            ? 1
+            : isGstApplicableForOwner(owner)
+              ? 2
+              : 0;
 
           // ✅ ADDED — do not return amount:0 when the corresponding
           // rental amount is available. Only recompute a fallback
