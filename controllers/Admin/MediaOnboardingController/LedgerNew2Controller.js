@@ -666,12 +666,12 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
 }
 
 function resolveExpectedGstForCycle(media) {
-  const gstFlag = Number(media.gstApplicableFlag || 0);
-  if (gstFlag === 1) {
-    return Number(media.rentalPayment?.gstApplicable) === 1
-      ? Number(media.rentalPayment?.gstAmount || 0)
-      : 0;
+  const rentalGstApplicable = Number(media.rentalPayment?.gstApplicable) === 1;
+  const rentalGstAmount = Number(media.rentalPayment?.gstAmount || 0);
+  if (rentalGstApplicable && rentalGstAmount > 0) {
+    return rentalGstAmount;
   }
+
   return (media.landOwners || [])
     .filter((o) => Number(o.gstApplicable) === 1)
     .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
