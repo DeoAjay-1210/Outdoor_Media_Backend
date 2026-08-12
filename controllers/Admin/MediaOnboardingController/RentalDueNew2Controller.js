@@ -1813,6 +1813,7 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
       rentalPayment: media.rentalPayment,
       ledger: media.ledger,
       mailSent: mailSentFlag,
+      gstApplicableFlag: resolvedGst.gstApplicableFlag,
       gstApplicableDisplay: resolvedGst,
 
     };
@@ -2057,6 +2058,7 @@ const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, sa
     rentalPayment: media.rentalPayment,
     ledger: media.ledger,
     mailSent: mailSentFlag,
+    gstApplicableFlag: resolvedGst.gstApplicableFlag,
     gstApplicableDisplay: resolvedGst,
 
   };
@@ -4103,9 +4105,11 @@ const entryVerificationProgressHistory = (
   return vCycleKey === entryCycleKey;
 });
 
+  const resolvedGstDisplay = resolveGstApplicable(item, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
+
   let resolvedEntryGstAmount = Number(entry.gstAmount || 0);
   if (resolvedEntryGstAmount === 0) {
-    const gstFlag = Number(item.gstApplicableFlag || entry.gstApplicableFlag || 0);
+    const gstFlag = resolvedGstDisplay.gstApplicableFlag;
     if (gstFlag === 1 && Number(item.rentalPayment?.gstApplicable) === 1) {
       resolvedEntryGstAmount = Number(item.rentalPayment?.gstAmount || 0);
     } else if (gstFlag === 2) {
@@ -4118,9 +4122,10 @@ const entryVerificationProgressHistory = (
   return {
     ...entry,
     gstAmount: resolvedEntryGstAmount,
+    gstApplicableFlag: resolvedGstDisplay.gstApplicableFlag,
     verificationProgress: buildVerificationProgress(item, entry.dueDate, entry._id),
     verificationProgressHistory: entryVerificationProgressHistory,
-    gstApplicableDisplay: resolveGstApplicable(item, entry.gstApplicableFlag, entry.pastgstApplicableFlag),
+    gstApplicableDisplay: resolvedGstDisplay,
   };
 });
 
