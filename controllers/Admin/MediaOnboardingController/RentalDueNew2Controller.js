@@ -420,6 +420,28 @@ async function generateMissedEntriesForMedia(media, userName) {
   if (!Array.isArray(media.rentalDue)) media.rentalDue = [];
   if (!Array.isArray(media.rentalDueHistory)) media.rentalDueHistory = [];
 
+  if (media.rentalPayment?.lastBillPaidDate) {
+    const lbpDate = new Date(media.rentalPayment.lastBillPaidDate);
+    if (!Number.isNaN(lbpDate.getTime())) {
+      const lbpMonthLabel = getDueMonthLabel(lbpDate);
+      const matchingEntry = media.rentalDue.find(
+        (e) => e.dueMonth === lbpMonthLabel && e.approvalStatus !== 3,
+      );
+      if (
+        matchingEntry &&
+        new Date(matchingEntry.dueDate).getTime() !== lbpDate.getTime()
+      ) {
+        const syncResult = await atomicallyEnsureOrUpdateRentalDueEntry(
+          media._id,
+          { dueMonth: lbpMonthLabel, dueDate: lbpDate },
+        );
+        if (syncResult.result) {
+          media.rentalDue = syncResult.result.rentalDue;
+        }
+      }
+    }
+  }
+
   const cycleMonths = getCycleMonthsForFrequency(media);
   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
 
@@ -468,10 +490,8 @@ async function generateMissedEntriesForMedia(media, userName) {
 
   if (dueCycles.length === 0) return { generatedEntries: [] };
 
-  const existingDueDateKeys = new Set(
-    media.rentalDue
-      .filter((e) => e.dueDate)
-      .map((e) => new Date(e.dueDate).getTime()),
+  const existingDueMonthKeys = new Set(
+    media.rentalDue.filter((e) => e.dueMonth).map((e) => e.dueMonth),
   );
 
 //   const generatedEntries = [];
@@ -603,8 +623,18 @@ const generatedEntries = [];
 
   for (const candidateDate of dueCycles) {
     latestCycleDate = candidateDate;
-    const candidateKey = candidateDate.getTime();
-    if (existingDueDateKeys.has(candidateKey)) continue; // already saved — skip, never overwrite
+    const candidateMonthLabel = getDueMonthLabel(candidateDate);
+
+    const existingEntryForMonth = media.rentalDue.find(
+      (e) => e.dueMonth === candidateMonthLabel,
+    );
+    if (
+      existingEntryForMonth &&
+      new Date(existingEntryForMonth.dueDate).getTime() === candidateDate.getTime()
+    ) {
+      existingDueMonthKeys.add(candidateMonthLabel);
+      continue;
+    } // already saved — skip, never overwrite
 
     const chainSteps = buildApprovalSteps(2);
     const steps = [
@@ -669,12 +699,12 @@ const generatedEntries = [];
     // source of truth: the push only applies if no entry with this
     // exact dueDate exists in the database at that instant, so only
     // one of two racing requests can ever win.
-    const atomicResult = await atomicallyEnsureRentalDueEntry(media._id, newEntry);
+    const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
 
     if (!atomicResult) {
       // another concurrent request already created this exact cycle
       // first — don't duplicate, just record the cycle as covered.
-      existingDueDateKeys.add(candidateKey);
+      existingDueMonthKeys.add(candidateMonthLabel);
       continue;
     }
 
@@ -718,7 +748,7 @@ const generatedEntries = [];
       currentPendingRole: newEntry.currentPendingRole,
     });
 
-    existingDueDateKeys.add(candidateKey);
+    existingDueMonthKeys.add(candidateMonthLabel);
   }
 
   // ✅ advance lastBillPaidDate/nextBillingDate to match the latest
@@ -3041,30 +3071,42 @@ exports.revertRentalApproval = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
-async function atomicallyEnsureRentalDueEntry(mediaId, newEntry) {
-  const updated = await Media.findOneAndUpdate(
-    {
-      _id: mediaId,
-      // the atomic guard — MongoDB only applies this update if NO
-      // existing rentalDue entry already has this exact dueDate
-      rentalDue: {
-        $not: {
-          $elemMatch: { dueDate: newEntry.dueDate },
-        },
-      },
-    },
-    {
-      $push: { rentalDue: newEntry },
-      $set: { updatedAt: nowIST() },
-    },
-    { new: true },
-  );
+// async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
+//   const updated = await Media.findOneAndUpdate(
+//     {
+//       _id: mediaId,
+//       rentalDue: {
+//         $elemMatch: { dueMonth: newEntry.dueMonth, approvalStatus: { $ne: 3 } },
+//       },
+//     },
+//     {
+//       $set: {
+//         "rentalDue.$[elem].dueDate": newEntry.dueDate,
+//         updatedAt: nowIST(),
+//       },
+//     },
+//     {
+//       new: true,
+//       arrayFilters: [
+//         { "elem.dueMonth": newEntry.dueMonth, "elem.approvalStatus": { $ne: 3 } },
+//       ],
+//     },
+//   );
+//   if (updated) return { result: updated, action: "updated" };
 
-  // updated === null means another concurrent request already won
-  // the race and created this cycle's entry first — that's fine,
-  // just means we don't create a duplicate.
-  return updated;
-}
+//   const created = await Media.findOneAndUpdate(
+//     {
+//       _id: mediaId,
+//       rentalDue: { $not: { $elemMatch: { dueMonth: newEntry.dueMonth } } },
+//     },
+//     {
+//       $push: { rentalDue: newEntry },
+//       $set: { updatedAt: nowIST() },
+//     },
+//     { new: true },
+//   );
+//   return created ? { result: created, action: "created" } : { result: null, action: "none" };
+// }
 // ═════════════════════════════════════════════════════════════
 // NEW ENDPOINT — landowner-grouped rental due list
 // SAME full filter set as getRentalDueListWithStats:
@@ -3076,6 +3118,42 @@ async function atomicallyEnsureRentalDueEntry(mediaId, newEntry) {
 // each carrying the sites (that matched the filters) they're on.
 // Pagination (pageNumber/count) applies to the OWNER list, not sites.
 // ═════════════════════════════════════════════════════════════
+async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
+  const updated = await Media.findOneAndUpdate(
+    {
+      _id: mediaId,
+      rentalDue: {
+        $elemMatch: { dueMonth: newEntry.dueMonth, approvalStatus: { $ne: 3 } },
+      },
+    },
+    {
+      $set: {
+        "rentalDue.$[elem].dueDate": newEntry.dueDate,
+        updatedAt: nowIST(),
+      },
+    },
+    {
+      returnDocument: 'after',
+      arrayFilters: [
+        { "elem.dueMonth": newEntry.dueMonth, "elem.approvalStatus": { $ne: 3 } },
+      ],
+    },
+  );
+  if (updated) return { result: updated, action: "updated" };
+
+  const created = await Media.findOneAndUpdate(
+    {
+      _id: mediaId,
+      rentalDue: { $not: { $elemMatch: { dueMonth: newEntry.dueMonth } } },
+    },
+    {
+      $push: { rentalDue: newEntry },
+      $set: { updatedAt: nowIST() },
+    },
+    { returnDocument: 'after' },
+  );
+  return created ? { result: created, action: "created" } : { result: null, action: "none" };
+}
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const {
