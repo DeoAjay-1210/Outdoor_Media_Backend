@@ -4834,12 +4834,12 @@ function buildSingleMediaHistoryBlock(
     };
   }
 
-  const mergeLedgerSources = (sourceA, sourceB) => {
+  const mergeLedgerSources = (sourceA, sourceB, liveLedger, liveGst1Ledger) => {
     const yearMap = new Map();
 
     const addYearEntry = (yearEntry) => {
       if (!yearEntry || !yearEntry.year) return;
-      const yearKey = String(yearEntry.year).trim(); // ✅ CHANGED — normalize key type
+      const yearKey = String(yearEntry.year).trim();
       if (!yearMap.has(yearKey)) {
         yearMap.set(yearKey, new Map());
       }
@@ -4863,6 +4863,26 @@ function buildSingleMediaHistoryBlock(
     (sourceA || []).forEach(addYearEntry);
     (sourceB || []).forEach(addYearEntry);
 
+    // ✅ NEW — include live ledger entries in the history mapping too
+    const allLive = [...(liveLedger || []), ...(liveGst1Ledger || [])].filter(Boolean);
+    allLive.forEach((entry) => {
+      const d = entry.cycle || entry.date;
+      if (!d) return;
+      const { year: yr, month: mon } = getYearAndMonthName(d);
+      const yearKey = String(yr).trim();
+      if (!yearMap.has(yearKey)) yearMap.set(yearKey, new Map());
+      const monthMap = yearMap.get(yearKey);
+      const monKey = mon.toLowerCase();
+      if (!monthMap.has(monKey)) {
+        monthMap.set(monKey, { month: mon, entries: [] });
+      }
+      // Avoid duplicating if this exact entry is somehow already there
+      const alreadyPresent = monthMap.get(monKey).entries.some(e => String(e._id) === String(entry._id));
+      if (!alreadyPresent) {
+        monthMap.get(monKey).entries.push(entry);
+      }
+    });
+
     return Array.from(yearMap.entries()).map(([yr, monthMap]) => ({
       year: yr,
       months: Array.from(monthMap.values()),
@@ -4872,6 +4892,8 @@ function buildSingleMediaHistoryBlock(
   let ledgerHistory = mergeLedgerSources(
     media.rentalDueHistory,
     media.ledgerHistory,
+    media.ledger,
+    media.withGst1Ledger
   );
 
   const effectiveYear = year ? String(year) : null;
@@ -5623,65 +5645,65 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
   // builder uses. Ensures EVERY elapsed billing cycle (not just months
   // that already have a real ledgerHistory bucket) shows up here too —
   // e.g. August, even though only July has a real saved payment.
-    const hasExplicitRangeFilter = !!(rangeStart || rangeEnd);
+  const hasExplicitRangeFilter = !!(rangeStart || rangeEnd);
 
-  // {
-  //   const autoCyclesForHistory = getAllDueCycles(media, effectiveMonthYear);
-  //   autoCyclesForHistory.forEach((cycleDate) => {
-  //     const cycleYM = {
-  //       year: cycleDate.getUTCFullYear(),
-  //       month: cycleDate.getUTCMonth() + 1,
-  //     };
-  //     if (!isYMInRange(cycleYM, rangeStart, rangeEnd)) return;
-  //     if (effectiveYear && cycleYM.year !== Number(effectiveYear)) return;
+  {
+    const autoCyclesForHistory = getAllDueCycles(media, effectiveMonthYear);
+    autoCyclesForHistory.forEach((cycleDate) => {
+      const cycleYM = {
+        year: cycleDate.getUTCFullYear(),
+        month: cycleDate.getUTCMonth() + 1,
+      };
+      if (!isYMInRange(cycleYM, rangeStart, rangeEnd)) return;
+      if (effectiveYear && cycleYM.year !== Number(effectiveYear)) return;
 
-  //     const cycleYear = String(cycleDate.getUTCFullYear());
-  //     const cycleMonthName = MONTH_NAMES_LOCAL[cycleDate.getUTCMonth()];
-  //     const bucketKey = `${cycleYear}-${cycleMonthName.toLowerCase()}`;
-  //     if (existingBucketKeys.has(bucketKey)) return;
+      const cycleYear = String(cycleDate.getUTCFullYear());
+      const cycleMonthName = MONTH_NAMES_LOCAL[cycleDate.getUTCMonth()];
+      const bucketKey = `${cycleYear}-${cycleMonthName.toLowerCase()}`;
+      if (existingBucketKeys.has(bucketKey)) return;
 
-  //     const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(cycleMonthName);
-  //     const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(cycleMonthName, cycleYear, cycleDate);
-  //     const ledgerFinal = buildModeSplitLedger([], 2, cycleMonthName, cycleDate);
+      const gstBalanceHistoryForMonth = getGstBalanceHistoryForMonth(cycleMonthName);
+      const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(cycleMonthName, cycleYear, cycleDate);
+      const ledgerFinal = buildModeSplitLedger([], 2, cycleMonthName, cycleDate);
 
-  //     const withGst1Final = matchingLandOwners.map((owner) => ({
-  //       landOwnerId: owner._id,
-  //       landOwnerName: owner.name,
-  //       utrNumber: "",
-  //       date: null,
-  //       status: 0,
-  //       withGst: 1,
-  //       month: cycleMonthName,
-  //       cycle: cycleDate,
-  //       rentalDueId: null,
-  //       index: null,
-  //       updatedBy: "",
-  //       updatedAt: null,
-  //       isPaid: false,
-  //       gstAmount: 0,
-  //       isVirtual: true,
-  //     }));
+      const withGst1Final = matchingLandOwners.map((owner) => ({
+        landOwnerId: owner._id,
+        landOwnerName: owner.name,
+        utrNumber: "",
+        date: null,
+        status: 0,
+        withGst: 1,
+        month: cycleMonthName,
+        cycle: cycleDate,
+        rentalDueId: null,
+        index: null,
+        updatedBy: "",
+        updatedAt: null,
+        isPaid: false,
+        gstAmount: 0,
+        isVirtual: true,
+      }));
 
-  //     const syntheticCycleBucket = {
-  //       month: cycleMonthName,
-  //       ledger: ledgerFinal,
-  //       withGst1Ledger: withGst1Final,
-  //       allEntries: [],
-  //       gstBalanceHistory: gstBalanceHistoryForMonth,
-  //       tdsBalanceHistory: tdsBalanceHistoryForMonth,
-  //       pendingLedgerHistory: [],
-  //       isSyntheticMonth: true,
-  //     };
+      const syntheticCycleBucket = {
+        month: cycleMonthName,
+        ledger: ledgerFinal,
+        withGst1Ledger: withGst1Final,
+        allEntries: [],
+        gstBalanceHistory: gstBalanceHistoryForMonth,
+        tdsBalanceHistory: tdsBalanceHistoryForMonth,
+        pendingLedgerHistory: [],
+        isSyntheticMonth: true,
+      };
 
-  //     let cycleYearEntry = transformedLedgerHistory.find((y) => y.year === cycleYear);
-  //     if (!cycleYearEntry) {
-  //       cycleYearEntry = { year: cycleYear, months: [] };
-  //       transformedLedgerHistory.push(cycleYearEntry);
-  //     }
-  //     cycleYearEntry.months.push(syntheticCycleBucket);
-  //     existingBucketKeys.add(bucketKey);
-  //   });
-  // }
+      let cycleYearEntry = transformedLedgerHistory.find((y) => y.year === cycleYear);
+      if (!cycleYearEntry) {
+        cycleYearEntry = { year: cycleYear, months: [] };
+        transformedLedgerHistory.push(cycleYearEntry);
+      }
+      cycleYearEntry.months.push(syntheticCycleBucket);
+      existingBucketKeys.add(bucketKey);
+    });
+  }
 
   transformedLedgerHistory.sort((a, b) => Number(a.year) - Number(b.year));
   transformedLedgerHistory.forEach((yearEntry) => {
