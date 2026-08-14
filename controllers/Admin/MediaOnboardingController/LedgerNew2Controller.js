@@ -761,6 +761,15 @@ function getGstDueForCycles(media, requestedMonthYear) {
     const isLiveCycle = cycleKey === liveCycleKey;
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
 
+    // ✅ FIXED: withGst 2 (Without GST) means this cycle's GST should NOT be added
+    // to the outstanding summary. withGst 1 (With GST) SHOULD be added.
+    const matchedRealDue = (media.rentalDue || []).find(
+      (d) => d.dueMonth === cycleMonthLabel,
+    );
+    if (matchedRealDue && Number(matchedRealDue.withGst) === 2) {
+      return;
+    }
+
     const paidRow = (media.gstBalanceHistory || []).find(
       (row) => row.dueMonth === cycleMonthLabel && row.isPaid,
     );
@@ -821,13 +830,21 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
     const unpaidGstRow = (media.gstBalanceHistory || []).find(
       (row) => row.dueMonth === cycleMonthLabel && !row.isPaid,
     );
-    const cycleGstAmount = paidGstRow
-      ? 0
-      : unpaidGstRow
-        ? Number(unpaidGstRow.gstAmount || 0)
-        : expectedGstPerCycle;
 
-    const matchedRealDue = (media.rentalDue || []).find((d) => d.dueMonth === cycleMonthLabel);
+    const matchedRealDue = (media.rentalDue || []).find(
+      (d) => d.dueMonth === cycleMonthLabel,
+    );
+
+    let cycleGstAmount = 0;
+    // ✅ FIXED: Only calculate cycleGstAmount if withGst is NOT 2 (Without GST)
+    if (!(matchedRealDue && Number(matchedRealDue.withGst) === 2)) {
+      cycleGstAmount = paidGstRow
+        ? 0
+        : unpaidGstRow
+          ? Number(unpaidGstRow.gstAmount || 0)
+          : expectedGstPerCycle;
+    }
+
     return {
       _id: matchedRealDue?._id || null, // ✅ NEW — real rentalDueId, now that ensureRentalDueForCycles guarantees it exists
       dueMonth: cycleMonthLabel,
