@@ -263,9 +263,12 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 const toDateOnly = (input) => {
   const d = new Date(input);
-  // Use local date parts to construct a UTC date. This correctly handles
-  // date-only strings by ignoring the timezone offset from parsing.
-  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  // Use UTC date parts to construct a UTC date. This prevents the date from
+  // shifting when constructive a midnight-UTC object, regardless of the
+  // server's local time zone.
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+  );
 };
 
 const dayKey = (input) => toDateOnly(input).getTime();
@@ -1673,9 +1676,13 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       );
     }
     if (mediaData.rentalPayment?.nextBillingDate) {
-      // ✅ ADDED: Ensure nextBillingDate is also normalized to UTC midnight
       mediaData.rentalPayment.nextBillingDate = toDateOnly(
         mediaData.rentalPayment.nextBillingDate,
+      );
+    }
+    if (mediaData.rentalPayment?.billingStartDate) {
+      mediaData.rentalPayment.billingStartDate = toDateOnly(
+        mediaData.rentalPayment.billingStartDate,
       );
     }
 
@@ -2127,9 +2134,13 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       // with the ORIGINAL lastBillPaidDate before it gets overwritten.
       if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
       if (media.rentalPayment?.billingStartDate) {
-        mediaData.rentalPayment.billingStartDate = media.rentalPayment.billingStartDate;
+        mediaData.rentalPayment.billingStartDate = toDateOnly(
+          media.rentalPayment.billingStartDate,
+        );
       } else if (media.rentalPayment?.lastBillPaidDate) {
-        mediaData.rentalPayment.billingStartDate = media.rentalPayment.lastBillPaidDate;
+        mediaData.rentalPayment.billingStartDate = toDateOnly(
+          media.rentalPayment.lastBillPaidDate,
+        );
       }
 
       Object.keys(mediaData).forEach((key) => {
@@ -2430,8 +2441,8 @@ const updateAgreement = async (req, res) => {
       : (media.agreement?.rentalPayment?.updatedBy ?? userName);
 
     const newAgreement = {
-      startDate: new Date(incoming.startDate),
-      endDate: new Date(incoming.endDate),
+      startDate: toDateOnly(incoming.startDate),
+      endDate: toDateOnly(incoming.endDate),
       reminderBeforeExpiry:
         incoming.reminderBeforeExpiry !== undefined
           ? Number(incoming.reminderBeforeExpiry)
