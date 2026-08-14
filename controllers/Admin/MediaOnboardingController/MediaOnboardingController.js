@@ -2121,6 +2121,17 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
       handleAgreementHistory(mediaData, media, userName);
 
+      // ✅ FIXED — preserve billingStartDate if it exists in the database
+      // to ensure cycle-walking (getAllDueCycles) anchor doesn't shift when
+      // lastBillPaidDate is updated. If it's missing (legacy), backfill it
+      // with the ORIGINAL lastBillPaidDate before it gets overwritten.
+      if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
+      if (media.rentalPayment?.billingStartDate) {
+        mediaData.rentalPayment.billingStartDate = media.rentalPayment.billingStartDate;
+      } else if (media.rentalPayment?.lastBillPaidDate) {
+        mediaData.rentalPayment.billingStartDate = media.rentalPayment.lastBillPaidDate;
+      }
+
       Object.keys(mediaData).forEach((key) => {
         if (!["_id", "__v", "createdAt", "mediaId"].includes(key)) {
           media[key] = mediaData[key];
