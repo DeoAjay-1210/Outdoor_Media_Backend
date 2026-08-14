@@ -1497,7 +1497,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
     // matches "landOwners[3][bankPassbook]" -> index "3"
     const parseLandOwnerFile = (fieldname) => {
       const match = fieldname.match(
-        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage|aadharCardImage)\]$/,
+        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage|aadharCardImage|pancardImage|AAdharCardImage|cancelcheck leaf)\]$/,
       );
       return match ? { index: Number(match[1]), key: match[2] } : null;
     };
@@ -1544,32 +1544,46 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       mediaData.landOwners = mediaData.landOwners.map((owner, index) => {
         const ownerFiles = ownerFileMap[index] || {};
 
-        // ✅ CHANGED — binary file first, URL string fallback second, for
-        // each of the 4 owner image fields.
+        // ✅ FIXED — binary file first, URL string fallback second, for
+        // each of the 4 owner image fields. Supports alternate names from frontend.
         if (ownerFiles.bankPassbook) {
           owner.bankPassbook = req.processFile(ownerFiles.bankPassbook);
         } else {
           const urlObj = resolveOwnerImageValue(owner.bankPassbook);
           if (urlObj) owner.bankPassbook = urlObj;
         }
-        if (ownerFiles.cancelCheckLeaf) {
-          owner.cancelCheckLeaf = req.processFile(ownerFiles.cancelCheckLeaf);
+
+        const cancelCheckFile = ownerFiles.cancelCheckLeaf || ownerFiles["cancelcheck leaf"];
+        const cancelCheckInput = owner.cancelCheckLeaf || owner["cancelcheck leaf"];
+        if (cancelCheckFile) {
+          owner.cancelCheckLeaf = req.processFile(cancelCheckFile);
         } else {
-          const urlObj = resolveOwnerImageValue(owner.cancelCheckLeaf);
+          const urlObj = resolveOwnerImageValue(cancelCheckInput);
           if (urlObj) owner.cancelCheckLeaf = urlObj;
         }
-        if (ownerFiles.panCardImage) {
-          owner.panCardImage = req.processFile(ownerFiles.panCardImage);
+
+        const panFile = ownerFiles.panCardImage || ownerFiles.pancardImage;
+        const panInput = owner.panCardImage || owner.pancardImage;
+        if (panFile) {
+          owner.panCardImage = req.processFile(panFile);
         } else {
-          const urlObj = resolveOwnerImageValue(owner.panCardImage);
+          const urlObj = resolveOwnerImageValue(panInput);
           if (urlObj) owner.panCardImage = urlObj;
         }
-        if (ownerFiles.aadharCardImage) {
-          owner.aadharCardImage = req.processFile(ownerFiles.aadharCardImage);
+
+        const aadharFile = ownerFiles.aadharCardImage || ownerFiles.AAdharCardImage;
+        const aadharInput = owner.aadharCardImage || owner.AAdharCardImage;
+        if (aadharFile) {
+          owner.aadharCardImage = req.processFile(aadharFile);
         } else {
-          const urlObj = resolveOwnerImageValue(owner.aadharCardImage);
+          const urlObj = resolveOwnerImageValue(aadharInput);
           if (urlObj) owner.aadharCardImage = urlObj;
         }
+
+        // Cleanup alternate names to avoid cluttering DB
+        delete owner.pancardImage;
+        delete owner.AAdharCardImage;
+        delete owner["cancelcheck leaf"];
         // const OWNER_FILE_FIELDS = [
         //   "bankPassbook",
         //   "cancelCheckLeaf",
@@ -1993,8 +2007,13 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           }
 
           OWNER_FILE_FIELDS.forEach((field) => {
-            if (typeof owner[field] === "string") {
-              owner[field] = existingOwner ? existingOwner[field] : undefined;
+            // Restore from existing if the incoming field is missing, null, empty string,
+            // OR if it's a string (which means it wasn't converted to an object).
+            const val = owner[field];
+            if (val === undefined || val === null || val === "" || typeof val === "string") {
+              if (existingOwner && existingOwner[field]) {
+                owner[field] = existingOwner[field];
+              }
             }
           });
         });
