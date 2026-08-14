@@ -1295,7 +1295,13 @@ const CYCLE_MONTHS_BY_FREQUENCY = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
 
 function addMonthsUTC(date, months) {
   const d = new Date(date);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
+  const originalDay = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+  // Handle month-end overflow (e.g., Jan 31 + 1 month -> March 3)
+  if (d.getUTCDate() !== originalDay) {
+    d.setUTCDate(0);
+  }
+  return d;
 }
 
 MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {

@@ -107,7 +107,12 @@ function getCycleMonthsForFrequency(media) {
 
 function addMonthsUTC(date, months) {
   const d = new Date(date);
+  const originalDay = d.getUTCDate();
   d.setUTCMonth(d.getUTCMonth() + months);
+  // Handle month-end overflow (e.g., Jan 31 + 1 month -> March 3)
+  if (d.getUTCDate() !== originalDay) {
+    d.setUTCDate(0);
+  }
   return d;
 }
 

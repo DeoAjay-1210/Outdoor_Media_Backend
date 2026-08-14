@@ -603,7 +603,13 @@ function getCycleMonthsForFrequency(paymentFrequency, customPaymentFrequency) {
 
 function addMonthsUTC(date, months) {
   const d = new Date(date);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1));
+  const originalDay = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+  // Handle month-end overflow (e.g., Jan 31 + 1 month -> March 3)
+  if (d.getUTCDate() !== originalDay) {
+    d.setUTCDate(0);
+  }
+  return d;
 }
 function getAllDueCycles(media, requestedMonthYear) {
   // ✅ CHANGED — anchor is now billingStartDate (immutable, set once at
@@ -625,25 +631,18 @@ function getAllDueCycles(media, requestedMonthYear) {
   const referenceDate = requestedMonthYear
     ? new Date(Date.UTC(requestedMonthYear.year, requestedMonthYear.month - 1, 1))
     : new Date();
-  const refKey = `${referenceDate.getUTCFullYear()}-${referenceDate.getUTCMonth()}`;
 
-const anchorDateObj = new Date(anchorRaw);
-  const anchorMonthStart = new Date(Date.UTC(
-    anchorDateObj.getUTCFullYear(),
-    anchorDateObj.getUTCMonth(),
-    1,
-  ));
+  const anchorDateObj = new Date(anchorRaw);
 
-  let cursor = addMonthsUTC(anchorMonthStart, cycleMonths);
-
- const cycles = [];
+  const cycles = [];
+  let monthOffset = cycleMonths;
   let guard = 0;
   while (guard < 240) {
-    // ✅ FIXED — check BEFORE pushing. For non-monthly frequencies,
-    // cycles rarely land exactly on the requested month, so pushing
-    // first then checking overshoot always included one future,
-    // not-yet-due cycle. Now: only push if this cycle's month is <= the
-    // reference month.
+    // ✅ FIXED — use monthOffset from anchorDateObj to preserve the day
+    // (e.g. 14th) across iterations and handle month-end transitions
+    // correctly (Jan 31 -> Feb 28 -> Mar 31).
+    const cursor = addMonthsUTC(anchorDateObj, monthOffset);
+
     const cursorIsPastReference =
       cursor.getUTCFullYear() > referenceDate.getUTCFullYear() ||
       (cursor.getUTCFullYear() === referenceDate.getUTCFullYear() &&
@@ -656,7 +655,7 @@ const anchorDateObj = new Date(anchorRaw);
     const refKey = `${referenceDate.getUTCFullYear()}-${referenceDate.getUTCMonth()}`;
     if (cursorKey === refKey) break;
 
-    cursor = addMonthsUTC(cursor, cycleMonths);
+    monthOffset += cycleMonths;
     guard++;
   }
   return cycles;
