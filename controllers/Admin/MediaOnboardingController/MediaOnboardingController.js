@@ -498,7 +498,7 @@ const cascadeHistory = (history, baseRent) => {
 
 const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
   if (!Array.isArray(landOwners) || !landOwners.length) return;
-  if (!oldAmount || oldAmount <= 0) return;
+  if (!oldAmount || oldAmount <= 0 || !newAmount || newAmount <= 0) return;
 
   const ratio = newAmount / oldAmount;
   if (!isFinite(ratio) || ratio <= 0) return;
@@ -506,32 +506,23 @@ const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
   landOwners.forEach((owner) => {
     const cat = Number(owner.paymentCategory);
 
-    if (cat === 1) {
-      // Cash only
-      owner.cashAmount = Math.floor(
-        (Number(owner.cashAmount || 0) * ratio).toFixed(2),
-      );
-    } else if (cat === 2) {
-      // Online only
-      owner.onlineAmount = Math.floor(
-        (Number(owner.onlineAmount || 0) * ratio).toFixed(2),
-      );
-    } else if (cat === 3) {
-      // Cash + Online split
-      owner.cashAmount = Math.floor(
-        (Number(owner.cashAmount || 0) * ratio).toFixed(2),
-      );
-      owner.onlineAmount = Math.floor(
-        (Number(owner.onlineAmount || 0) * ratio).toFixed(2),
-      );
+    // Scale fixed-amount shares proportionally
+    if (Number(owner.typeShare) === 2) {
+      owner.shareAmount = Math.floor(Number(owner.shareAmount || 0) * ratio);
     }
 
-    // Fixed-amount owners: rescale shareAmount too, since it doesn't
-    // auto-derive from netPayable like percentage-type does.
-    if (Number(owner.typeShare) === 2) {
-      owner.shareAmount = Math.floor(
-        (Number(owner.shareAmount || 0) * ratio).toFixed(2),
-      );
+    if (cat === 1) {
+      // Cash only
+      owner.cashAmount = Math.floor(Number(owner.cashAmount || 0) * ratio);
+      owner.onlineAmount = 0;
+    } else if (cat === 2) {
+      // Online only
+      owner.onlineAmount = Math.floor(Number(owner.onlineAmount || 0) * ratio);
+      owner.cashAmount = 0;
+    } else if (cat === 3) {
+      // Cash + Online split: scale both components
+      owner.cashAmount = Math.floor(Number(owner.cashAmount || 0) * ratio);
+      owner.onlineAmount = Math.floor(Number(owner.onlineAmount || 0) * ratio);
     }
   });
 };
@@ -1614,27 +1605,29 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           onlineMode: hasValue(owner.onlineMode)
             ? Number(owner.onlineMode)
             : undefined,
-          cashAmount: hasValue(owner.cashAmount) ? Number(owner.cashAmount) : 0,
+          cashAmount: hasValue(owner.cashAmount)
+            ? Number(owner.cashAmount)
+            : undefined,
           onlineAmount: hasValue(owner.onlineAmount)
             ? Number(owner.onlineAmount)
-            : 0,
+            : undefined,
           tdsApplicable: hasValue(owner.tdsApplicable)
             ? Number(owner.tdsApplicable)
-            : 0,
+            : undefined,
           tdsPercentage: hasValue(owner.tdsPercentage)
             ? Number(owner.tdsPercentage)
-            : 0,
-          tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : 0,
+            : undefined,
+          tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : undefined,
           gstApplicable: hasValue(owner.gstApplicable)
             ? Number(owner.gstApplicable)
-            : 0,
+            : undefined,
           gstPercentage: hasValue(owner.gstPercentage)
             ? Number(owner.gstPercentage)
-            : 0,
-          gstAmount: hasValue(owner.gstAmount) ? Number(owner.gstAmount) : 0,
+            : undefined,
+          gstAmount: hasValue(owner.gstAmount) ? Number(owner.gstAmount) : undefined,
           totalAmountWithGst: hasValue(owner.totalAmountWithGst)
             ? Number(owner.totalAmountWithGst)
-            : 0,
+            : undefined,
         };
       });
     }
@@ -1744,6 +1737,71 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         };
       }
     }
+    // ✅ NEW — restore missing financial/profile fields for existing
+    // owners from the database BEFORE scaling and validation. Without
+    // this, partial updates (e.g. only changing the owner's phone)
+    // would wipe out onlineAmount/cashAmount/GST/TDS fields since they
+    // default to undefined in the map() above.
+    if (existingMediaForValidation && Array.isArray(mediaData.landOwners)) {
+      mediaData.landOwners.forEach((owner, idx) => {
+        const existing = existingMediaForValidation.landOwners?.[idx];
+        if (!existing) return;
+
+        const FIELDS_TO_RESTORE = [
+          "typeShare",
+          "sharePercentage",
+          "shareAmount",
+          "paymentCategory",
+          "onlineMode",
+          "cashAmount",
+          "onlineAmount",
+          "tdsApplicable",
+          "tdsPercentage",
+          "tdsAmount",
+          "gstApplicable",
+          "gstPercentage",
+          "gstAmount",
+          "totalAmountWithGst",
+          "phone",
+          "bankName",
+          "ifsc",
+          "accountNumber",
+          "upiId",
+          "panNumber",
+          "aadharCardNumber",
+          "eligibleMode",
+          "landOwnerBillMode",
+        ];
+
+        FIELDS_TO_RESTORE.forEach((field) => {
+          if (owner[field] === undefined && existing[field] !== undefined) {
+            owner[field] = existing[field];
+          }
+        });
+
+        // Special handling for file objects — restore if missing, null,
+        // empty string, or an unconverted URL string.
+        OWNER_FILE_FIELDS.forEach((field) => {
+          const val = owner[field];
+          if (
+            val === undefined ||
+            val === null ||
+            val === "" ||
+            typeof val === "string"
+          ) {
+            if (existing[field]) {
+              owner[field] = existing[field];
+            }
+          }
+        });
+
+        // Preserve _id too for validation/matching
+        if (!owner._id && existing._id) {
+          owner._id = existing._id;
+        }
+      });
+    }
+
     if (id) {
       revertAppraisalRentIfTurnedOff(mediaData, existingMediaForValidation);
     }
@@ -2012,17 +2070,6 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
               owner._id = existingOwner._id;
             }
           }
-
-          OWNER_FILE_FIELDS.forEach((field) => {
-            // Restore from existing if the incoming field is missing, null, empty string,
-            // OR if it's a string (which means it wasn't converted to an object).
-            const val = owner[field];
-            if (val === undefined || val === null || val === "" || typeof val === "string") {
-              if (existingOwner && existingOwner[field]) {
-                owner[field] = existingOwner[field];
-              }
-            }
-          });
         });
       }
       // ✅ ADDED — Media → LandOwnerMaster sync. For any owner that's

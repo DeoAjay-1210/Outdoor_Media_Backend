@@ -1086,6 +1086,19 @@ MediaSchema.pre("save", function () {
 
     owner.shareAmount = resolvedShareAmount;
     const paymentCategory = Number(owner.paymentCategory || 1);
+
+    // ✅ FIXED — ensure onlineAmount and cashAmount are synced for
+    // Online-only (2) and Cash-only (1) owners. For category 3, they
+    // must be handled by the controller's scaling logic since the
+    // split is manual.
+    if (paymentCategory === 1) {
+      owner.cashAmount = resolvedShareAmount;
+      owner.onlineAmount = 0;
+    } else if (paymentCategory === 2) {
+      owner.cashAmount = 0;
+      owner.onlineAmount = resolvedShareAmount;
+    }
+
     let tdsBaseAmount = 0;
 
     if (paymentCategory === 1) {
