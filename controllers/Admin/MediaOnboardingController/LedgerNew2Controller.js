@@ -1982,13 +1982,19 @@ async function runBulkLedgerEntry(req, res) {
       "rentalDueId does not match any rentalDue record on this media",
     );
 
-  const isSharedDue =
-    (rentalDueIdCounts[String(item.rentalDueId)] || 0) > 1;
-  amount = isSharedDue
-    ? Number(owner.netPayable || owner.shareAmount || 0)
-    : Number(
-        rentalDue.netPayable || media.rentalPayment?.netPayable || 0,
-      );
+  const ownerCat = Number(owner.paymentCategory || 1);
+  let baseAmt = 0;
+  if (ownerCat === 3) {
+    baseAmt =
+      item.paymentMode === "Cash"
+        ? Number(owner.cashAmount || 0)
+        : Number(owner.onlineAmount || 0);
+  } else {
+    baseAmt = Number(owner.shareAmount || 0);
+  }
+  const tdsToDeduct =
+    item.paymentMode === "Online" ? Number(owner.tdsAmount || 0) : 0;
+  amount = baseAmt - tdsToDeduct;
 
   const ledgerEntryPayload = {
     landOwnerId: owner._id,
@@ -2077,10 +2083,19 @@ async function runBulkLedgerEntry(req, res) {
           const rentalDue = media.rentalDue?.find((d) => String(d._id) === String(item.rentalDueId));
           if (!rentalDue) throw new Error("rentalDueId does not match any rentalDue record on this media");
 
-          const isSharedDue = (rentalDueIdCounts[String(item.rentalDueId)] || 0) > 1;
-          amount = isSharedDue
-            ? Number(owner.netPayable || owner.shareAmount || 0)
-            : Number(rentalDue.netPayable || owner.shareAmount || owner.onlineAmount || owner.cashAmount || 0);
+          const ownerCat = Number(owner.paymentCategory || 1);
+          let baseAmt = 0;
+          if (ownerCat === 3) {
+            baseAmt =
+              item.paymentMode === "Cash"
+                ? Number(owner.cashAmount || 0)
+                : Number(owner.onlineAmount || 0);
+          } else {
+            baseAmt = Number(owner.shareAmount || 0);
+          }
+          const tdsToDeduct =
+            item.paymentMode === "Online" ? Number(owner.tdsAmount || 0) : 0;
+          amount = baseAmt - tdsToDeduct;
 
           const parsed = parseDueMonthLabel(rentalDue.dueMonth);
           const bucketYear = parsed ? String(parsed.year) : String(new Date(rentalDue.dueDate).getUTCFullYear());
