@@ -3046,7 +3046,12 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
-    const landOwnerNameFilter = await LandOwnerMaster.distinct("name");
+    const landOwnerNameFilter = (
+      await LandOwnerMaster.aggregate([
+        { $group: { _id: "$name", latestUpdate: { $max: "$updatedAt" } } },
+        { $sort: { latestUpdate: -1 } },
+      ])
+    ).map((item) => item._id);
     return successResponse(
       res,
       "Media list fetched successfully",

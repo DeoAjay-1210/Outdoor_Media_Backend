@@ -626,7 +626,12 @@ const landOwnerList = async (req, res) => {
       filter.$and.push({ name: nameRegex });
     }
 
-    const landOwnerNameFilter = await LandOwnerMaster.distinct("name", {});
+    const landOwnerNameFilter = (
+      await LandOwnerMaster.aggregate([
+        { $group: { _id: "$name", latestUpdate: { $max: "$updatedAt" } } },
+        { $sort: { latestUpdate: -1 } },
+      ])
+    ).map((item) => item._id);
 
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
