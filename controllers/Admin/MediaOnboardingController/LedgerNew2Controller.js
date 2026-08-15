@@ -1027,6 +1027,7 @@ exports.createLedgerEntry = async (req, res) => {
             gstBalanceHistoryId: req.body.gstBalanceHistoryId,
             gstOutstandingId: req.body.gstOutstandingId,
             rentalOutstandingId: req.body.rentalOutstandingId,
+            rentalDueId: req.body.rentalDueId,
           },
         ];
       }
@@ -1418,6 +1419,7 @@ exports.createLedgerEntry = async (req, res) => {
           gstBalanceHistoryId,
           gstOutstandingId,
           rentalOutstandingId,
+          rentalDueId,
         } = item;
 
         if (!["gst", "rental"].includes(entryType)) {
@@ -1511,19 +1513,43 @@ exports.createLedgerEntry = async (req, res) => {
         const updatedBy = req.user?.userName || "Admin";
 
         if (entryType === "gst" && targetType === "pastCycle") {
-          if (!gstBalanceHistoryId) {
-            return errorResponse(
-              res,
-              `outstandingEntries[${i}].gstBalanceHistoryId is required for gst+pastCycle`,
-              null,
-              400,
+          let row;
+          if (gstBalanceHistoryId) {
+            row = media.gstBalanceHistory.id(gstBalanceHistoryId);
+          } else if (rentalDueId) {
+            row = media.gstBalanceHistory.find(
+              (g) =>
+                String(g.rentalDueId) === String(rentalDueId) &&
+                String(g.ownerId) === String(owner._id),
             );
+
+            if (!row) {
+              const rentalDue = media.rentalDue?.find(
+                (d) => String(d._id) === String(rentalDueId),
+              );
+              if (rentalDue) {
+                media.gstBalanceHistory.push({
+                  rentalDueId: rentalDueId,
+                  dueMonth: rentalDue.dueMonth,
+                  cycle: rentalDue.dueDate,
+                  gstAmount: Number(rentalDue.gstAmount || 0),
+                  isPaid: false,
+                  source: "owner",
+                  ownerId: owner._id,
+                  ownerName: owner.name,
+                  createdAt: nowIST(),
+                  createdBy: updatedBy,
+                });
+                row =
+                  media.gstBalanceHistory[media.gstBalanceHistory.length - 1];
+              }
+            }
           }
-          const row = media.gstBalanceHistory.id(gstBalanceHistoryId);
+
           if (!row) {
             return errorResponse(
               res,
-              `outstandingEntries[${i}].gstBalanceHistoryId does not match any gstBalanceHistory record`,
+              `outstandingEntries[${i}].gstBalanceHistoryId or rentalDueId is required for gst+pastCycle`,
               null,
               400,
             );
@@ -2703,14 +2729,42 @@ async function runBulkLedgerEntry(req, res) {
           result.rentalDueId = item.rentalDueId;
           result.gstAmount = amount;
         } else if (entryType === "gst" && targetType === "pastCycle") {
-          if (!item.gstBalanceHistoryId)
-            throw new Error(
-              "gstBalanceHistoryId is required for gst+pastCycle",
+          let row;
+          if (item.gstBalanceHistoryId) {
+            row = media.gstBalanceHistory.id(item.gstBalanceHistoryId);
+          } else if (item.rentalDueId) {
+            row = media.gstBalanceHistory.find(
+              (g) =>
+                String(g.rentalDueId) === String(item.rentalDueId) &&
+                String(g.ownerId) === String(owner._id),
             );
-          const row = media.gstBalanceHistory.id(item.gstBalanceHistoryId);
+
+            if (!row) {
+              const rentalDue = media.rentalDue?.find(
+                (d) => String(d._id) === String(item.rentalDueId),
+              );
+              if (rentalDue) {
+                media.gstBalanceHistory.push({
+                  rentalDueId: item.rentalDueId,
+                  dueMonth: rentalDue.dueMonth,
+                  cycle: rentalDue.dueDate,
+                  gstAmount: Number(rentalDue.gstAmount || 0),
+                  isPaid: false,
+                  source: "owner",
+                  ownerId: owner._id,
+                  ownerName: owner.name,
+                  createdAt: nowIST(),
+                  createdBy: updatedBy,
+                });
+                row =
+                  media.gstBalanceHistory[media.gstBalanceHistory.length - 1];
+              }
+            }
+          }
+
           if (!row)
             throw new Error(
-              "gstBalanceHistoryId does not match any gstBalanceHistory record",
+              "gstBalanceHistoryId or rentalDueId is required for gst+pastCycle",
             );
           amount = Number(row.gstAmount || 0);
 
@@ -2723,7 +2777,8 @@ async function runBulkLedgerEntry(req, res) {
           row.updatedAt = nowIST();
           media.markModified("gstBalanceHistory");
           result.dueMonth = row.dueMonth;
-          result.gstBalanceHistoryId = item.gstBalanceHistoryId;
+          result.gstBalanceHistoryId = row._id;
+          result.rentalDueId = item.rentalDueId || null;
           result.gstAmount = amount;
         } else if (entryType === "gst" && targetType === "outstanding") {
           if (!item.gstOutstandingId)
