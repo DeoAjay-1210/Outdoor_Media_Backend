@@ -3223,6 +3223,11 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
 }
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
+    const today = new Date();
+    // Normalize today to start of day UTC to match stored dueDates (e.g. 2026-08-15T00:00:00.000Z)
+    // This ensures it only becomes "Overdue" the day AFTER the due date.
+    today.setUTCHours(0, 0, 0, 0);
+
     const {
       dueDate,
       city,
@@ -3568,11 +3573,47 @@ for (const siteDoc of activeSitesForSweep) {
     };
 
     const dueAmountOpenAgg = await Media.aggregate([
-      { $match: { status: 1, "rentalPayment.status": { $in: [2, 3] } } },
+      { $match: { status: 1 } },
       { $match: monthOrCondition },
+      {
+        $addFields: {
+          matchingEntry: {
+            $first: {
+              $filter: {
+                input: { $ifNull: ["$rentalDue", []] },
+                as: "rd",
+                cond: {
+                  $and: [
+                    { $gte: ["$$rd.dueDate", monthStart] },
+                    { $lte: ["$$rd.dueDate", monthEnd] },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
+          effectiveNetPayable: {
+            $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+          },
+        },
+      },
+      {
+        $match: {
+          $or: [
+            { "rentalPayment.status": { $in: [2, 3] } },
+            {
+              "matchingEntry.dueDate": { $lt: today },
+              "matchingEntry.approvalStatus": { $ne: 3 },
+            },
+          ],
+        },
+      },
       { $match: { $expr: { $not: [isClosedOverallCond] } } },
       {
-        $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
+        $group: { _id: null, totalOpen: { $sum: "$effectiveNetPayable" } },
       },
     ]);
     const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
@@ -3606,7 +3647,17 @@ for (const siteDoc of activeSitesForSweep) {
           isApprovedByRole: hasRoleApprovedCond,
           isClosedOverall: isClosedOverallCond,
           hasRoleActed: hasRoleActedCond,
-          isOverdueGlobally: { $eq: ["$rentalPayment.status", 3] },
+          isOverdueGlobally: {
+            $or: [
+              { $eq: ["$rentalPayment.status", 3] },
+              {
+                $and: [
+                  { $lt: ["$matchingEntry.dueDate", today] },
+                  { $ne: ["$matchingEntry.approvalStatus", 3] },
+                ],
+              },
+            ],
+          },
         },
       },
       {
@@ -3900,10 +3951,38 @@ if (Number(isPastPending) === 1) {
       { $match: relevantToRoleMatch },
       {
         $addFields: {
+          matchingEntry: {
+            $first: {
+              $filter: {
+                input: { $ifNull: ["$rentalDue", []] },
+                as: "rd",
+                cond: {
+                  $and: [
+                    { $gte: ["$$rd.dueDate", monthStart] },
+                    { $lte: ["$$rd.dueDate", monthEnd] },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
           isApprovedThisMonth: hasRoleApprovedCond,
           isClosedOverall: isClosedOverallCond,
           hasRoleActed: hasRoleActedCond,
-          isOverdueGlobally: { $eq: ["$rentalPayment.status", 3] },
+          isOverdueGlobally: {
+            $or: [
+              { $eq: ["$rentalPayment.status", 3] },
+              {
+                $and: [
+                  { $lt: ["$matchingEntry.dueDate", today] },
+                  { $ne: ["$matchingEntry.approvalStatus", 3] },
+                ],
+              },
+            ],
+          },
           isPastPendingByRole: isPastPendingByRoleCond,
         },
       },
@@ -4076,6 +4155,21 @@ if (Number(isPastPending) === 1) {
     // entry carries its own verificationProgress, computed for that
     // entry's own dueDate/cycle.
     const buildFullSiteDetail = (item) => {
+      // ✅ ADDED — calculate dynamic overdue status for the current cycle
+      const currentMonthEntry = (item.rentalDue || []).find((e) => {
+        if (!e.dueDate) return false;
+        const d = new Date(e.dueDate);
+        return d >= monthStart && d <= monthEnd;
+      });
+
+      const isOverdue =
+        item.rentalPayment?.status === 3 ||
+        (currentMonthEntry &&
+          new Date(currentMonthEntry.dueDate) < today &&
+          currentMonthEntry.approvalStatus !== 3);
+
+      const resolvedDueStatus = isOverdue ? 3 : (item.rentalPayment?.status || 1);
+
       // ✅ FIXED — isPastPending=1 now excludes the current month
       // (dueDate < monthStart, strictly past), so only May/June show,
       // never July. Without the flag: unchanged, dueDate <= monthEnd
@@ -4196,8 +4290,8 @@ const filteredAgreementDocVerificationHistory = (
           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
         nextBillingDate: item.rentalPayment?.nextBillingDate,
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
-        dueStatus: item.rentalPayment?.status,
-        dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
+        dueStatus: resolvedDueStatus,
+        dueStatusLabel: STATUS_LABEL[resolvedDueStatus] || "",
        gstApplicableDisplay: (() => {
   // Find the entry for the current requested month to get its specific flags
   const currentEntry = (item.rentalDue || []).find((e) => {

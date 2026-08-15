@@ -1010,7 +1010,7 @@ const SITE_FILTER_MONTH_NAMES = [
 
 function parseSiteFilterMonthParam(monthYearStr) {
   if (!monthYearStr) return null;
-  const match = /^(0[1-9]|1[0-2])-([0-9]{4})$/.exec(monthYearStr);
+  const match = /^([0-9]{1,2})-([0-9]{4})$/.exec(monthYearStr);
   if (!match) return null;
   return { month: Number(match[1]), year: Number(match[2]) };
 }
@@ -1041,11 +1041,13 @@ const landOwnerSiteFilter = async (req, res) => {
       pastGst: wantPastGst,
       // ✅ NEW: Rental Status Filters
       approvalSite: wantApprovalSite,
-      pendingSites: wantPendingSites,
+      pendingSite: wantPendingSite,
       pastPending: wantPastPending,
       overDue: wantOverDue,
     } = req.body || {};
  
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
 
@@ -1066,7 +1068,7 @@ const landOwnerSiteFilter = async (req, res) => {
     const includePastGst = Number(wantPastGst) === 1;
 
     const includeApprovalSite = Number(wantApprovalSite) === 1;
-    const includePendingSites = Number(wantPendingSites) === 1;
+    const includePendingSites = Number(wantPendingSite) === 1;
     const includePastPending = Number(wantPastPending) === 1;
     const includeOverDue = Number(wantOverDue) === 1;
 
@@ -1119,9 +1121,9 @@ const landOwnerSiteFilter = async (req, res) => {
     // requested, so the query stays light for callers who don't ask
     // for any of this.
    const mediaProjection =
-  "mediaCode mediaName updatedAt rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount" +
+  "mediaCode mediaName updatedAt rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries" +
   (needsLedgerFields || needsRentalStatusFields
-    ? " ledger ledgerHistory gstBalanceHistory rentalDue"
+    ? " ledger ledgerHistory gstBalanceHistory"
     : "");
  
     const relatedMediaDocs = await MediaOnboarding.find(
@@ -1542,21 +1544,42 @@ if (Number(due.withGst) !== 2) return;
           : 0;
 
       // ✅ NEW: compute rental status for this site relative to reference month
-      const rentalDue = Array.isArray(mediaDoc.rentalDue) ? mediaDoc.rentalDue : [];
+      const rawRentalDue = Array.isArray(mediaDoc.rentalDue)
+        ? mediaDoc.rentalDue
+        : Array.isArray(mediaDoc.rentalDueEntries)
+          ? mediaDoc.rentalDueEntries
+          : [];
+
+      const rentalDue = rawRentalDue.map((due) => {
+        if (due.dueMonth) return due;
+        return {
+          ...due,
+          dueMonth: due.dueDate
+            ? `${SITE_FILTER_MONTH_NAMES[new Date(due.dueDate).getMonth()]} ${new Date(due.dueDate).getFullYear()}`
+            : null,
+        };
+      });
+
       const hasApprovedSite = rentalDue.some(due => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
         return parsed && parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx && due.approvalStatus === 3;
       });
       const hasPendingSite = rentalDue.some(due => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
-        return parsed && parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx && due.approvalStatus !== 3;
+        const status = due.approvalStatus ?? 1;
+        return parsed && parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx && (status === 1 || status === 2);
       });
       const hasPastPendingSite = rentalDue.some(due => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
         const isPast = parsed && (parsed.year < referenceYear || (parsed.year === referenceYear && parsed.monthIdx < referenceMonthIdx));
-        return isPast && due.approvalStatus !== 3;
+        const status = due.approvalStatus ?? 1;
+        return isPast && (status === 1 || status === 2);
       });
-      const isOverDueSite = Number(mediaDoc.rentalPayment?.status) === 3;
+      const isOverDueSite = Number(mediaDoc.rentalPayment?.status) === 3 || rentalDue.some(due => {
+        const status = due.approvalStatus ?? due.status ?? 1;
+        const isPastDueDate = due.dueDate && new Date(due.dueDate) < today;
+        return status === 4 || (isPastDueDate && status !== 3);
+      });
 
       // ✅ FIXED — was returning 0 outright whenever gstApplicableFlag
       // was 0/unset (true for many existing sites that predate this
@@ -1602,10 +1625,36 @@ if (Number(due.withGst) !== 2) return;
           cashAmount: o.cashAmount || 0,
           tdsAmount: o.tdsAmount || 0,
         })),
+        rentalDue: rentalDue, // ✅ STORE FOR RESPONSE
       });
     });
  
       const toSiteResponseShape = (site) => {
+      // ✅ Filter rentalDue entries matching the requested monthFilter
+      // (Matches RentalDueNew2 behavior: current month OR past pending)
+      const filteredDues = (site.rentalDue || [])
+        .filter((due) => {
+          const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+          if (!parsed) return false;
+          const isCurrent =
+            parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx;
+          const isPast =
+            parsed.year < referenceYear ||
+            (parsed.year === referenceYear && parsed.monthIdx < referenceMonthIdx);
+
+          return isCurrent || (isPast && due.approvalStatus !== 3);
+        })
+        .map((due) => ({
+          dueMonth: due.dueMonth,
+          dueDate: due.dueDate,
+          approvalStatus: due.approvalStatus,
+          ownerApprovalDate: due.ownerApprovalDate,
+          netPayable: due.netPayable,
+          withGst: due.withGst,
+          gstAmount: due.gstAmount,
+          baseAmount: due.baseAmount,
+        }));
+
       return {
         mediaId: site.mediaId,
         mediaCode: site.mediaCode,
@@ -1613,6 +1662,7 @@ if (Number(due.withGst) !== 2) return;
         baseRent: site.totalRentalAmount,
         gstAmount: site.gstAmount,
         gstApplicable: site.gstApplicable,
+        rentalDueEntries: filteredDues,
       };
     };
  

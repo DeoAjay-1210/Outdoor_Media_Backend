@@ -2210,7 +2210,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           media[key] = mediaData[key];
         }
       });
-
+      media.updatedAt = nowIST();
       await media.save();
       await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
@@ -2353,7 +2353,8 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         mediaData.rentalPayment.billingStartDate =
           mediaData.rentalPayment.lastBillPaidDate;
       }
-
+      mediaData.createdAt = nowIST();
+      mediaData.updatedAt = nowIST();
       media = new MediaOnboarding(mediaData);
       await media.save();
        await MediaOnboarding.syncBillingCycles();
@@ -3014,7 +3015,7 @@ const mediaList = async (req, res) => {
     const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
-      .sort({ updatedAt: -1, _id: -1 })
+      .sort({ updatedAt: -1})
       .skip((pageNumbers - 1) * pageSize)
       .limit(pageSize)
       .lean();
@@ -3221,6 +3222,8 @@ const uploadExcel = async (req, res) => {
 
       // ── Assign unique mediaId from in-memory counter ──
       mapped.mediaId = `${prefix}MED#${nextNumber}`;
+      mapped.createdAt = nowIST();
+      mapped.updatedAt = nowIST();
       nextNumber++; // increment for next row
       // ─────────────────────────────────────────────────
 

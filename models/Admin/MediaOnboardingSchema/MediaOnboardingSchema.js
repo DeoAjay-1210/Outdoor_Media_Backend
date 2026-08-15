@@ -877,8 +877,10 @@ const MediaSchema = new mongoose.Schema(
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],
+    createdAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
   },
-  { timestamps: true },
+  { timestamps: false },
 );
 
 // ─────────────────────────────────────────────────────────────
