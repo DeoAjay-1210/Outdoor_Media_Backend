@@ -655,16 +655,10 @@ const generatedEntries = [];
       ...chainSteps,
     ];
 
-    const gstSplit = computeGstSplit(media, 0);
-
-    // ✅ AUTO-INFER gstApplicableFlag if it's currently 0 on the media
-    let inferredFlag = Number(media.gstApplicableFlag) || 0;
-    if (inferredFlag === 0) {
-      const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-      const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
-      if (ownerGst) inferredFlag = 2;
-      else if (siteGst) inferredFlag = 1;
-    }
+    // ✅ FIXED — default to 0 (Pending) even if GST is applicable.
+    // It will be changed to 1 (Hold) or 2 (Direct) only on Owner approval.
+    const inferredWithGst = 0; // Always 0 initially
+    const gstSplit = computeGstSplit(media, inferredWithGst);
 
     const newEntry = {
       dueMonth: getDueMonthLabel(candidateDate),
@@ -692,10 +686,12 @@ const generatedEntries = [];
       currentPendingRole: ROLE.STAFF,
       agreementDocVerified: false,
       status: 1,
-      withGst: 0,
+      withGst: inferredWithGst,
       gstAmount: Number(gstSplit.gstAmount) || 0,
       baseAmount: Number(gstSplit.baseAmount) || 0,
-      gstApplicableFlag: inferredFlag,
+      // ✅ FIXED — default flag to 0 for pending entries. Display logic in List API
+      // will auto-infer it for the UI while it's pending.
+      gstApplicableFlag: 0,
       pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
       updatedBy: userName || "",
       updatedAt: nowIST(),
@@ -1343,8 +1339,7 @@ function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, pastg
   if (resolvedFlag === 0 && (Number(media.gstApplicableFlag) || 0) === 0) {
     const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
     const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
-    if (ownerGst) resolvedFlag = 2;
-    else if (siteGst) resolvedFlag = 1;
+    if (ownerGst || siteGst) resolvedFlag = 2;
   }
 
   if ([0, 1, 2].includes(resolvedFlag)) {
@@ -1361,12 +1356,11 @@ const resolveGstApplicable = (item, entryGstFlag, entryPastFlag) => {
   let flag = entryGstFlag !== undefined ? Number(entryGstFlag) : (Number(item.gstApplicableFlag) || 0);
   const pastgstApplicableFlag = entryPastFlag !== undefined ? Number(entryPastFlag) : (Number(item.pastgstApplicableFlag) || 0);
 
-  // ✅ AUTO-INFER if flag is 0 but GST data exists
+  // ✅ FIXED — Default to 2 if GST is present anywhere
   if (flag === 0) {
     const siteGst = Number(item.rentalPayment?.gstApplicable) === 1;
     const ownerGst = (item.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
-    if (ownerGst) flag = 2;
-    else if (siteGst) flag = 1;
+    if (ownerGst || siteGst) flag = 2;
   }
 
   if (flag === 0) {
@@ -1391,22 +1385,35 @@ const resolveGstApplicable = (item, entryGstFlag, entryPastFlag) => {
     };
   }
 
+  // Flag is 2
   const gstOwners = (item.landOwners || []).filter(
     (o) => Number(o.gstApplicable) === 1,
   );
 
+  if (gstOwners.length > 0) {
+    return {
+      gstApplicableFlag: flag,
+      pastgstApplicableFlag,
+      source: "landOwners",
+      gstApplicable: 1,
+      owners: gstOwners.map((o) => ({
+        ownerId: o._id,
+        ownerName: o.name,
+        gstApplicable: Number(o.gstApplicable) || 0,
+        gstPercentage: o.gstPercentage || 0,
+        gstAmount: o.gstAmount || 0,
+      })),
+    };
+  }
+
+  // Fallback for flag 2 if owners don't have GST but site does
   return {
     gstApplicableFlag: flag,
-     pastgstApplicableFlag,
-    source: "landOwners",
-    gstApplicable: gstOwners.length > 0 ? 1 : 0,
-    owners: gstOwners.map((o) => ({
-      ownerId: o._id,
-      ownerName: o.name,
-      gstApplicable: Number(o.gstApplicable) || 0,
-      gstPercentage: o.gstPercentage || 0,
-      gstAmount: o.gstAmount || 0,
-    })),
+    pastgstApplicableFlag,
+    source: "rentalPayment",
+    gstApplicable: Number(item.rentalPayment?.gstApplicable) || 0,
+    gstPercentage: item.rentalPayment?.gstPercentage || 0,
+    gstAmount: item.rentalPayment?.gstAmount || 0,
   };
 };
 
@@ -1627,12 +1634,16 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     if (resolvedUpdateFlag === 0) {
       const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
       const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
-      if (ownerGst) resolvedUpdateFlag = 2;
-      else if (siteGst) resolvedUpdateFlag = 1;
+      // Priority: Default to 2 (Enabled/General) if GST exists anywhere.
+      if (ownerGst || siteGst) resolvedUpdateFlag = 2;
     }
 
     if ([0, 1, 2].includes(resolvedUpdateFlag)) {
       entry.gstApplicableFlag = resolvedUpdateFlag;
+      // Also update media level if it's currently 0 or if payload explicitly sends a value
+      if (gstApplicableFlag !== undefined || (Number(media.gstApplicableFlag) || 0) === 0) {
+          media.gstApplicableFlag = resolvedUpdateFlag;
+      }
     }
 
     if ([0, 1, 2].includes(Number(requestedPastFlag))) {
@@ -1642,6 +1653,11 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       const newWithGst = Number(withGst);
       if (entry.withGst !== newWithGst) {
         entry.withGst = newWithGst;
+        // ✅ FIXED — align gstApplicableFlag with withGst:
+        // 1 (Hold) -> Flag 1 (Site/Rental)
+        // 2 (Direct) -> Flag 2 (Landowner)
+        entry.gstApplicableFlag = newWithGst;
+
         const recomputedSplit = computeGstSplit(media, newWithGst);
         entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
         entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
@@ -1932,14 +1948,11 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
     : 0;
   const gstSplit = computeGstSplit(media, resolvedWithGst);
 
-  // ✅ AUTO-INFER if flag is 0
-  let resolvedGstFlag = Number(gstApplicableFlag) || 0;
-  if (resolvedGstFlag === 0) {
-    const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-    const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
-    if (ownerGst) resolvedGstFlag = 2;
-    else if (siteGst) resolvedGstFlag = 1;
-  }
+  // ✅ FIXED — align gstApplicableFlag with withGst:
+  // 1 (Hold) -> Flag 1 (Site/Rental)
+  // 2 (Direct) -> Flag 2 (Landowner)
+  // 0 (Pending) -> Flag 0
+  let resolvedGstFlag = resolvedWithGst;
 
   const newEntry = {
     dueMonth: getDueMonthLabel(dueDateObj),

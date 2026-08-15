@@ -194,17 +194,7 @@ const validateLandOwnerShares = (
       totalComputedAmount += Math.floor(shareAmount.toFixed(2));
     }
 
-    // ✅ NEW — per-owner TDS validation
-    const tdsApplicable = Number(owner.tdsApplicable);
-    if (tdsApplicable === 1) {
-      const tdsPercentage = Number(owner.tdsPercentage);
-      if (isNaN(tdsPercentage) || tdsPercentage < 0 || tdsPercentage > 100) {
-        return {
-          valid: false,
-          message: `Owner "${owner.name || "Unknown"}": tdsPercentage must be between 0 and 100 when tdsApplicable is 1.`,
-        };
-      }
-    }
+    
   }
 
   if (hasPercentageShare && !hasFixedShare) {
@@ -285,29 +275,27 @@ const dateString = (date) => {
 };
 const processGstOutstandingHistory = (rentalPayment, userName) => {
   if (!rentalPayment) return rentalPayment;
-  
-  // Initialize array if not exists
-  if (!rentalPayment.gstOutstandingHistory) {
-    rentalPayment.gstOutstandingHistory = [];
-  }
 
   // If outStandingStatus is 1, manage history
-  if (rentalPayment.outStantStatus  === 1) {
-    // ✅ FIX: Check if history is provided in request AND has items
-    if (rentalPayment.gstOutstandingHistory && 
-        Array.isArray(rentalPayment.gstOutstandingHistory) && 
-        rentalPayment.gstOutstandingHistory.length > 0) {
-      
+  if (rentalPayment.outStantStatus === 1) {
+    // ✅ Check if history is provided in request AND has items
+    if (
+      rentalPayment.gstOutstandingHistory &&
+      Array.isArray(rentalPayment.gstOutstandingHistory) &&
+      rentalPayment.gstOutstandingHistory.length > 0
+    ) {
       // Process each entry - keep existing data
-      rentalPayment.gstOutstandingHistory = rentalPayment.gstOutstandingHistory.map(item => ({
-        dueMonth: item.dueMonth,
-        gstOutStandingAmount: item.gstOutStandingAmount || 0,
-        // ✅ Keep existing _id, updatedAt, updatedBy if they exist
-        _id: item._id || new mongoose.Types.ObjectId(),
-        updatedBy: userName,
-        updatedAt: nowIST(),
-      }));
-      
+      rentalPayment.gstOutstandingHistory = rentalPayment.gstOutstandingHistory.map(
+        (item) => ({
+          dueMonth: item.dueMonth,
+          gstOutStandingAmount: item.gstOutStandingAmount || 0,
+          // ✅ Keep existing _id, updatedAt, updatedBy if they exist
+          _id: item._id || new mongoose.Types.ObjectId(),
+          updatedBy: userName,
+          updatedAt: nowIST(),
+        }),
+      );
+
       // Remove duplicates (keep latest)
       const uniqueHistory = [];
       const seenMonths = new Set();
@@ -318,39 +306,47 @@ const processGstOutstandingHistory = (rentalPayment, userName) => {
         }
       }
       rentalPayment.gstOutstandingHistory = uniqueHistory;
-      
+
       // Calculate total
       rentalPayment.gstOutStandingAmount = rentalPayment.gstOutstandingHistory.reduce(
         (sum, item) => sum + (item.gstOutStandingAmount || 0),
-        0
+        0,
       );
-    } 
-    // ✅ If history array is empty in request BUT we have existing data, keep existing
-    else if (rentalPayment.gstOutstandingHistory && 
-             Array.isArray(rentalPayment.gstOutstandingHistory) && 
-             rentalPayment.gstOutstandingHistory.length === 0) {
-      // Keep the empty array - don't auto-generate
-      // This allows users to intentionally clear the history
     }
-    // ✅ Auto-generate only if NO history exists at all
-    else if (!rentalPayment.gstOutstandingHistory || rentalPayment.gstOutstandingHistory.length === 0) {
+    // ✅ If history array is empty in request, keep it empty (user intentionally cleared it)
+    else if (
+      rentalPayment.gstOutstandingHistory &&
+      Array.isArray(rentalPayment.gstOutstandingHistory) &&
+      rentalPayment.gstOutstandingHistory.length === 0
+    ) {
+      rentalPayment.gstOutStandingAmount = 0;
+    }
+    // ✅ Auto-generate only if history field is MISSING (undefined) in request AND we have a lastBillPaidDate
+    else if (rentalPayment.lastBillPaidDate) {
       // Auto-generate from lastBillPaidDate
       const lastBillDate = new Date(rentalPayment.lastBillPaidDate);
-      const currentDate = new Date();
-      
-      const monthsDiff = (currentDate.getFullYear() - lastBillDate.getFullYear()) * 12 +
-                        (currentDate.getMonth() - lastBillDate.getMonth());
-      
-      if (monthsDiff >= 0) {
-        const gstAmount = rentalPayment.gstAmount || 
-                         (rentalPayment.totalRentalAmount * rentalPayment.gstPercentage / 100);
-        
+      const currentDate = nowIST();
+
+      const monthsDiff =
+        (currentDate.getFullYear() - lastBillDate.getFullYear()) * 12 +
+        (currentDate.getMonth() - lastBillDate.getMonth());
+
+      // Start from i=1 to skip the month of lastBillPaidDate, as it's already paid.
+      // This ensures "cannot create against" the paid month.
+      if (monthsDiff >= 1) {
+        const gstAmount =
+          rentalPayment.gstAmount ||
+          (rentalPayment.totalRentalAmount * rentalPayment.gstPercentage) / 100;
+
         rentalPayment.gstOutstandingHistory = [];
-        for (let i = 0; i <= monthsDiff; i++) {
+        for (let i = 1; i <= monthsDiff; i++) {
           const date = new Date(lastBillDate);
           date.setMonth(date.getMonth() + i);
-          const dueMonth = date.toLocaleString('default', { month: 'short' }) + ' ' + date.getFullYear();
-          
+          const dueMonth =
+            date.toLocaleString("default", { month: "short" }) +
+            " " +
+            date.getFullYear();
+
           rentalPayment.gstOutstandingHistory.push({
             dueMonth: dueMonth,
             gstOutStandingAmount: gstAmount,
@@ -358,11 +354,14 @@ const processGstOutstandingHistory = (rentalPayment, userName) => {
             updatedAt: nowIST(),
           });
         }
-        
+
         rentalPayment.gstOutStandingAmount = rentalPayment.gstOutstandingHistory.reduce(
           (sum, item) => sum + item.gstOutStandingAmount,
-          0
+          0,
         );
+      } else {
+        rentalPayment.gstOutstandingHistory = [];
+        rentalPayment.gstOutStandingAmount = 0;
       }
     }
   } else {
@@ -370,7 +369,7 @@ const processGstOutstandingHistory = (rentalPayment, userName) => {
     rentalPayment.gstOutstandingHistory = [];
     rentalPayment.gstOutStandingAmount = 0;
   }
-  
+
   return rentalPayment;
 };
 const APPRAISAL_FREQUENCY_MONTHS = { 1: 12, 2: 24, 3: 36 };
@@ -2191,7 +2190,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
 
       Object.keys(mediaData).forEach((key) => {
-        if (!["_id", "__v", "createdAt", "mediaId"].includes(key)) {
+        if (!["_id", "__v", "createdAt", "updatedAt", "mediaId"].includes(key)) {
           media[key] = mediaData[key];
         }
       });
@@ -2992,7 +2991,7 @@ const mediaList = async (req, res) => {
     const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
-      .sort({ updatedAt: -1 })
+      .sort({ updatedAt: -1, _id: -1 })
       .skip((pageNumbers - 1) * pageSize)
       .limit(pageSize)
       .lean();
@@ -3191,6 +3190,8 @@ const uploadExcel = async (req, res) => {
       mapped.height = Math.floor(mapped.height);
       mapped.totalSqFt = Math.floor((mapped.width * mapped.height).toFixed(2));
       mapped.excelRowNumber = excelRow;
+      mapped.createdAt = new Date();
+      mapped.updatedAt = new Date();
 
       // ── Assign unique mediaId from in-memory counter ──
       mapped.mediaId = `${prefix}MED#${nextNumber}`;
