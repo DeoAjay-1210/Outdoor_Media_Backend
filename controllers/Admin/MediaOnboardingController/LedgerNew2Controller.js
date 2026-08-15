@@ -459,6 +459,17 @@ function sumUnpaidPastCycleRent(media, requestedMonthYear) {
 }
 
 function computeOutstandingSummary(media, requestedMonthYear) {
+  if (media.status !== 1) {
+    return {
+      currentBaseRent: 0,
+      currentGSTDue: 0,
+      previousBaseRentDue: 0,
+      previousGSTDue: 0,
+      fectureBaseReant: 0,
+      fectureGstDue: 0,
+      totalOutstandingAmount: 0,
+    };
+  }
   const rentResult = getUnpaidRentForCycle(media, requestedMonthYear);
   const gstResult = getGstDueForCycles(media, requestedMonthYear);
 
@@ -978,6 +989,10 @@ exports.createLedgerEntry = async (req, res) => {
     const media = await Media.findById(mediaId);
     if (!media)
       return errorResponse(res, "Media not found for given mediaId", null, 404);
+
+    if (media.status !== 1) {
+      return errorResponse(res, "Ledger can only be created for active media", null, 400);
+    }
 
     if (!Array.isArray(media.ledger)) media.ledger = [];
     if (!Array.isArray(media.withGst1Ledger)) media.withGst1Ledger = [];
@@ -1639,7 +1654,7 @@ exports.createLedgerEntry = async (req, res) => {
     }
 
     recomputePendingMonths(media);
-    await media.save();
+    await media.save({ timestamps: false });
 
     // ✅ NEW — outstanding summary + currentBillDate appended to response
     const outstanding = computeOutstandingSummary(media, null); // save response always reflects the site's actual live cycle, not a requested month
@@ -1689,6 +1704,7 @@ exports.createLedgerEntry = async (req, res) => {
 
 
 async function ensureRentalDueForCycles(media, requestedMonthYear, updatedBy) {
+  if (media.status !== 1) return false;
   const cycles = getAllDueCycles(media, requestedMonthYear);
   if (cycles.length === 0) return false;
 
@@ -1720,7 +1736,7 @@ async function ensureRentalDueForCycles(media, requestedMonthYear, updatedBy) {
 
   if (anyCreated) {
     media.markModified("rentalDue");
-    await media.save();
+    await media.save({ timestamps: false });
   }
   return anyCreated;
 }
@@ -1848,6 +1864,10 @@ async function runBulkLedgerEntry(req, res) {
 
         const media = await Media.findById(item.mediaId);
         if (!media) throw new Error("Media not found for given mediaId");
+
+        if (media.status !== 1) {
+          throw new Error(`Ledger can only be created for active media: ${media.mediaName}`);
+        }
 
         result.mediaName = media.mediaName;
 
@@ -2289,7 +2309,7 @@ async function runBulkLedgerEntry(req, res) {
         }
 
         // ✅ CRITICAL FIX: Save after EACH payment, not all at once
-        await media.save();
+        await media.save({ timestamps: false });
 
         result.amount = amount;
         result.status = "saved";
@@ -2398,7 +2418,7 @@ exports.listMediaByLedger = async (req, res) => {
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
 
-    const filter = {};
+    const filter = { status: 1 };
     if (!(Array.isArray(req.body.mediaId) && req.body.mediaId.length > 0)) {
       filter.rentalStatus = 3;
     }
@@ -4296,9 +4316,9 @@ exports.getLedgerHistory = async (req, res) => {
       rangeEnd = autoCurrentMonthYM;
     }
 
-    const mediaDocs = await Media.find({ _id: { $in: validMediaIds } })
+    const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, status: 1 })
       .select(
-        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths",
+        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths status",
       )
       .lean();
 

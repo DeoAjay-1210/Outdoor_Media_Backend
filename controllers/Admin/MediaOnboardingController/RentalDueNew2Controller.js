@@ -401,7 +401,7 @@ function ensureNextBillingDateSeed(media) {
 //     media.markModified("rentalDueHistory");
 //     media.updatedBy = userName || "";
 //     media.updatedAt = nowIST();
-//     await media.save();
+//     await media.save({ timestamps: false });
 //   }
 
 //   return { generatedEntries };
@@ -613,12 +613,12 @@ async function generateMissedEntriesForMedia(media, userName) {
 //     media.markModified("rentalDueHistory");
 //     media.updatedBy = userName || "";
 //     media.updatedAt = nowIST();
-//     await media.save();
+//     await media.save({ timestamps: false });
 //   } else if (latestCycleDate) {
 //     // rentalPayment dates may have been corrected even with no new entries
 //     media.updatedBy = userName || "";
 //     media.updatedAt = nowIST();
-//     await media.save();
+//     await media.save({ timestamps: false });
 //   }
 
 //   return { generatedEntries };
@@ -772,14 +772,10 @@ const generatedEntries = [];
 
   if (generatedEntries.length > 0) {
     media.markModified("rentalDueHistory");
-    media.updatedBy = userName || "";
-    media.updatedAt = nowIST();
-    await media.save();
+    await media.save({ timestamps: false });
   } else if (latestCycleDate) {
     // rentalPayment dates may have been corrected even with no new entries
-    media.updatedBy = userName || "";
-    media.updatedAt = nowIST();
-    await media.save();
+    await media.save({ timestamps: false });
   }
 
   return { generatedEntries };
@@ -1796,16 +1792,14 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       historyRecord.updatedBy = userName;
     }
 
-    media.updatedBy = userName;
-    media.updatedAt = nowIST();
-    await media.save();
+    await media.save({ timestamps: false });
 
     let mailSentFlag = entry.mailSent;
     if (userType === ROLE.OWNER && entry.approvalStatus === 3) {
       const mailResult = await sendRentalDueApprovalMail(media, entry);
       entry.mailSent = !!mailResult.sent;
       mailSentFlag = entry.mailSent;
-      await media.save();
+      await media.save({ timestamps: false });
     }
 const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
     return {
@@ -2036,16 +2030,14 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
     updatedBy: userName,
   });
 
-  media.updatedBy = userName;
-  media.updatedAt = nowIST();
-  await media.save();
+  await media.save({ timestamps: false });
 
   let mailSentFlag = savedEntry.mailSent;
   if (isOwnerOverride && savedEntry.approvalStatus === 3) {
     const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
     savedEntry.mailSent = !!mailResult.sent;
     mailSentFlag = savedEntry.mailSent;
-    await media.save();
+    await media.save({ timestamps: false });
   }
 const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
   return {
@@ -2301,7 +2293,7 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
     }
      if (ensureApprovalStepsPopulated(targetEntry)) {
     media.markModified("rentalDue");
-    await media.save();
+    await media.save({ timestamps: false });
   }
     currentCycle = getCurrentCycle(targetEntry.dueDate);
   } else {
@@ -2404,9 +2396,9 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
     },
     {
       $push: { agreementDocVerification: verificationRecord },
-      $set: { updatedBy: userName, updatedAt: nowIST() },
+      $set: { updatedBy: userName },
     },
-    { new: true },
+    { new: true,timestamps: false },
   );
 
   if (!updatedMedia) {
@@ -2473,7 +2465,7 @@ saveVerificationProgressSnapshot(
   userName,
   targetEntry ? targetEntry._id : null,
 );
-  await media.save();
+  await media.save({ timestamps: false });
 
   return {
     success: true,
@@ -2665,9 +2657,7 @@ async function processSingleGstPayment({ mediaId, gstCycleIds, userName }) {
 
   media.markModified("gstBalanceHistory");
   recomputeBalanceGstAmount(media);
-  media.updatedBy = userName;
-  media.updatedAt = nowIST();
-  await media.save();
+  await media.save({ timestamps: false });
 
   return {
     success: true,
@@ -2846,8 +2836,7 @@ async function processSingleRevertVerification({ mediaId, role }) {
     }
   }
 
-  media.updatedAt = nowIST();
-  await media.save();
+  await media.save({ timestamps: false });
 
   return {
     success: true,
@@ -3068,8 +3057,7 @@ async function processSingleRevertApproval({ mediaId, role }) {
     }
   }
 
-  media.updatedAt = nowIST();
-  await media.save();
+  await media.save({ timestamps: false });
 
   return {
     success: true,
@@ -3196,11 +3184,11 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
     {
       $set: {
         "rentalDue.$[elem].dueDate": newEntry.dueDate,
-        updatedAt: nowIST(),
       },
     },
     {
       returnDocument: 'after',
+      timestamps: false,
       arrayFilters: [
         { "elem.dueMonth": newEntry.dueMonth, "elem.approvalStatus": { $ne: 3 } },
       ],
@@ -3215,9 +3203,8 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
     },
     {
       $push: { rentalDue: newEntry },
-      $set: { updatedAt: nowIST() },
     },
-    { returnDocument: 'after' },
+    { returnDocument: 'after',timestamps: false  },
   );
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
@@ -3505,7 +3492,7 @@ for (const siteDoc of activeSitesForSweep) {
   // would be discarded every request and rentalDue would NEVER catch
   // up on sites whose seed date is still in the future.
   if (generatedCount > 0 || siteDoc.isModified()) {
-    await siteDoc.save();
+    await siteDoc.save({ timestamps: false });
   }
 
   // sweepDebugLog.push({

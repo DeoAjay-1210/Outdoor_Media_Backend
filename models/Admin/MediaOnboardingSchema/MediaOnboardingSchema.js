@@ -1374,7 +1374,7 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
     if (advanced) {
       media.rentalPayment.lastBillPaidDate = cursor;
       media.rentalPayment.nextBillingDate = addMonthsUTC(cursor, cycleMonths);
-      await media.save();
+      await media.save({ timestamps: false });
       updatedCount++;
       debugLog.push({ mediaName: media.mediaName, advancedTo: cursor });
     } else {
