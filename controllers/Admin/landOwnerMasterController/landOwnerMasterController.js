@@ -1039,6 +1039,11 @@ const landOwnerSiteFilter = async (req, res) => {
       pastMonthLedgerEntries: wantPastMonthLedger,
       currentGst: wantCurrentGst,
       pastGst: wantPastGst,
+      // ✅ NEW: Rental Status Filters
+      approvalSite: wantApprovalSite,
+      pendingSites: wantPendingSites,
+      pastPending: wantPastPending,
+      overDue: wantOverDue,
     } = req.body || {};
  
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -1059,8 +1064,17 @@ const landOwnerSiteFilter = async (req, res) => {
     const includePastLedger = Number(wantPastMonthLedger) === 1;
     const includeCurrentGst = Number(wantCurrentGst) === 1;
     const includePastGst = Number(wantPastGst) === 1;
+
+    const includeApprovalSite = Number(wantApprovalSite) === 1;
+    const includePendingSites = Number(wantPendingSites) === 1;
+    const includePastPending = Number(wantPastPending) === 1;
+    const includeOverDue = Number(wantOverDue) === 1;
+
     const needsLedgerFields =
       includeCurrentLedger || includePastLedger || includeCurrentGst || includePastGst;
+    const needsRentalStatusFields =
+      includeApprovalSite || includePendingSites || includePastPending || includeOverDue;
+    const isAnyFilterActive = needsLedgerFields || needsRentalStatusFields;
 
     let ownerFilter = {};
     if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
@@ -1106,7 +1120,7 @@ const landOwnerSiteFilter = async (req, res) => {
     // for any of this.
    const mediaProjection =
   "mediaCode mediaName updatedAt rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount" +
-  (needsLedgerFields
+  (needsLedgerFields || needsRentalStatusFields
     ? " ledger ledgerHistory gstBalanceHistory rentalDue"
     : "");
  
@@ -1527,6 +1541,23 @@ if (Number(due.withGst) !== 2) return;
           ? Number(mediaDoc.rentalPayment?.gstAmount || 0)
           : 0;
 
+      // ✅ NEW: compute rental status for this site relative to reference month
+      const rentalDue = Array.isArray(mediaDoc.rentalDue) ? mediaDoc.rentalDue : [];
+      const hasApprovedSite = rentalDue.some(due => {
+        const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+        return parsed && parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx && due.approvalStatus === 3;
+      });
+      const hasPendingSite = rentalDue.some(due => {
+        const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+        return parsed && parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx && due.approvalStatus !== 3;
+      });
+      const hasPastPendingSite = rentalDue.some(due => {
+        const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+        const isPast = parsed && (parsed.year < referenceYear || (parsed.year === referenceYear && parsed.monthIdx < referenceMonthIdx));
+        return isPast && due.approvalStatus !== 3;
+      });
+      const isOverDueSite = Number(mediaDoc.rentalPayment?.status) === 3;
+
       // ✅ FIXED — was returning 0 outright whenever gstApplicableFlag
       // was 0/unset (true for many existing sites that predate this
       // flag, or were never migrated/re-saved through the flow that
@@ -1555,6 +1586,12 @@ if (Number(due.withGst) !== 2) return;
         gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
         updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
         ownerIds: ownerIdsOnThisSite,
+        rentalStatus: {
+          hasApprovedSite,
+          hasPendingSite,
+          hasPastPendingSite,
+          isOverDueSite
+        },
         ownersDetail: ownersOnThisSite.map((o) => ({
           landOwnerMasterId: String(o.landOwnerMasterId),
           paymentCategory: o.paymentCategory,
@@ -1634,6 +1671,8 @@ if (Number(due.withGst) !== 2) return;
 
       // ✅ ADDED — accumulate ledger/GST data across this owner's sole-owned sites
       const combinedLedger = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
+      // ✅ NEW: Rental Status accumulation
+      const rentalStatusMatch = { hasApproved: false, hasPending: false, hasPastPending: false, isOverDue: false };
 
       sites.forEach((site) => {
         const ownerDetail = site.ownersDetail?.find(
@@ -1655,6 +1694,11 @@ if (Number(due.withGst) !== 2) return;
         ) {
           latestActivityAt = site.updatedAt;
         }
+
+        if (site.rentalStatus.hasApprovedSite) rentalStatusMatch.hasApproved = true;
+        if (site.rentalStatus.hasPendingSite) rentalStatusMatch.hasPending = true;
+        if (site.rentalStatus.hasPastPendingSite) rentalStatusMatch.hasPastPending = true;
+        if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
 
         if (needsLedgerFields) {
           const siteBucket = getLedgerBucketsForSite(String(site.mediaId), [ownerId]);
@@ -1701,18 +1745,22 @@ if (Number(due.withGst) !== 2) return;
         if (includePastGst) entryPayload.gstSummary.pastGst = combinedLedger.pastGst;
       }
 
-        if (needsLedgerFields) {
-        const hasCurrentLedgerData =
-          includeCurrentLedger && combinedLedger.currentMonthEntries.length > 0;
-        const hasPastLedgerData =
-          includePastLedger && combinedLedger.pastMonthEntries.length > 0;
-        const hasCurrentGstData = includeCurrentGst && combinedLedger.currentGst > 0;
-        const hasPastGstData = includePastGst && combinedLedger.pastGst > 0;
+      if (isAnyFilterActive) {
+        const ledgerMatch = needsLedgerFields ? (
+          (includeCurrentLedger && combinedLedger.currentMonthEntries.length > 0) ||
+          (includePastLedger && combinedLedger.pastMonthEntries.length > 0) ||
+          (includeCurrentGst && combinedLedger.currentGst > 0) ||
+          (includePastGst && combinedLedger.pastGst > 0)
+        ) : false;
 
-        const matchesAnyRequestedFlag =
-          hasCurrentLedgerData || hasPastLedgerData || hasCurrentGstData || hasPastGstData;
+        const rentalMatch = needsRentalStatusFields ? (
+          (includeApprovalSite && rentalStatusMatch.hasApproved) ||
+          (includePendingSites && rentalStatusMatch.hasPending) ||
+          (includePastPending && rentalStatusMatch.hasPastPending) ||
+          (includeOverDue && rentalStatusMatch.isOverDue)
+        ) : false;
 
-        if (!matchesAnyRequestedFlag) return; // skip this owner — nothing to show for the requested flag(s)
+        if (!ledgerMatch && !rentalMatch) return; // skip this owner — nothing to show for the requested flag(s)
       }
 
       entries.push(entryPayload);
@@ -1785,13 +1833,23 @@ if (Number(due.withGst) !== 2) return;
 
       // ✅ ADDED — accumulate ledger/GST across ALL owners + ALL sites in this group
       const combinedLedger = { currentMonthEntries: [], pastMonthEntries: [], currentGst: 0, pastGst: 0 };
-      if (needsLedgerFields) {
+      // ✅ NEW: Rental Status accumulation
+      const rentalStatusMatch = { hasApproved: false, hasPending: false, hasPastPending: false, isOverDue: false };
+
+      if (needsLedgerFields || needsRentalStatusFields) {
         group.sites.forEach((site) => {
-          const siteBucket = getLedgerBucketsForSite(String(site.mediaId), group.ownerIds);
-          combinedLedger.currentMonthEntries.push(...siteBucket.currentMonthEntries);
-          combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
-          combinedLedger.currentGst += siteBucket.currentGst;
-          combinedLedger.pastGst += siteBucket.pastGst;
+          if (site.rentalStatus.hasApprovedSite) rentalStatusMatch.hasApproved = true;
+          if (site.rentalStatus.hasPendingSite) rentalStatusMatch.hasPending = true;
+          if (site.rentalStatus.hasPastPendingSite) rentalStatusMatch.hasPastPending = true;
+          if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
+
+          if (needsLedgerFields) {
+            const siteBucket = getLedgerBucketsForSite(String(site.mediaId), group.ownerIds);
+            combinedLedger.currentMonthEntries.push(...siteBucket.currentMonthEntries);
+            combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
+            combinedLedger.currentGst += siteBucket.currentGst;
+            combinedLedger.pastGst += siteBucket.pastGst;
+          }
         });
       }
  
@@ -1819,18 +1877,22 @@ if (Number(due.withGst) !== 2) return;
         if (includePastGst) entryPayload.gstSummary.pastGst = combinedLedger.pastGst;
       }
 
-       if (needsLedgerFields) {
-        const hasCurrentLedgerData =
-          includeCurrentLedger && combinedLedger.currentMonthEntries.length > 0;
-        const hasPastLedgerData =
-          includePastLedger && combinedLedger.pastMonthEntries.length > 0;
-        const hasCurrentGstData = includeCurrentGst && combinedLedger.currentGst > 0;
-        const hasPastGstData = includePastGst && combinedLedger.pastGst > 0;
+      if (isAnyFilterActive) {
+        const ledgerMatch = needsLedgerFields ? (
+          (includeCurrentLedger && combinedLedger.currentMonthEntries.length > 0) ||
+          (includePastLedger && combinedLedger.pastMonthEntries.length > 0) ||
+          (includeCurrentGst && combinedLedger.currentGst > 0) ||
+          (includePastGst && combinedLedger.pastGst > 0)
+        ) : false;
 
-        const matchesAnyRequestedFlag =
-          hasCurrentLedgerData || hasPastLedgerData || hasCurrentGstData || hasPastGstData;
+        const rentalMatch = needsRentalStatusFields ? (
+          (includeApprovalSite && rentalStatusMatch.hasApproved) ||
+          (includePendingSites && rentalStatusMatch.hasPending) ||
+          (includePastPending && rentalStatusMatch.hasPastPending) ||
+          (includeOverDue && rentalStatusMatch.isOverDue)
+        ) : false;
 
-        if (!matchesAnyRequestedFlag) return;
+        if (!ledgerMatch && !rentalMatch) return;
       }
 
       entries.push(entryPayload);

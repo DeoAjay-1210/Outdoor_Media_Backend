@@ -2174,23 +2174,39 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
       handleAgreementHistory(mediaData, media, userName);
 
-      // ✅ FIXED — preserve billingStartDate if it exists in the database
-      // to ensure cycle-walking (getAllDueCycles) anchor doesn't shift when
-      // lastBillPaidDate is updated. If it's missing (legacy), backfill it
-      // with the ORIGINAL lastBillPaidDate before it gets overwritten.
+      // ✅ FIXED — manage billingStartDate (the cycle-walking anchor).
+      // If the user manually edits lastBillPaidDate in the property
+      // settings (incoming !== existing), we treat it as a manual
+      // anchor shift and update billingStartDate to match. Otherwise,
+      // we preserve the existing billingStartDate to ensure cycle
+      // stability (e.g. keeping the 31st as the anchor even after a
+      // Feb 28th automatic bill update).
       if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
-      if (media.rentalPayment?.billingStartDate) {
-        mediaData.rentalPayment.billingStartDate = toDateOnly(
-          media.rentalPayment.billingStartDate,
-        );
-      } else if (media.rentalPayment?.lastBillPaidDate) {
-        mediaData.rentalPayment.billingStartDate = toDateOnly(
-          media.rentalPayment.lastBillPaidDate,
-        );
+
+      const incomingLBP = mediaData.rentalPayment?.lastBillPaidDate;
+      const existingLBP = media.rentalPayment?.lastBillPaidDate
+        ? toDateOnly(media.rentalPayment.lastBillPaidDate).getTime()
+        : null;
+      const existingBSD = media.rentalPayment?.billingStartDate
+        ? toDateOnly(media.rentalPayment.billingStartDate)
+        : null;
+
+      if (incomingLBP) {
+        const incomingTime = toDateOnly(incomingLBP).getTime();
+
+        if (incomingTime !== existingLBP) {
+          // Manual change detected — update anchor to follow the user's shift.
+          mediaData.rentalPayment.billingStartDate = toDateOnly(incomingLBP);
+        } else if (existingBSD) {
+          // No manual change — preserve the stable anchor.
+          mediaData.rentalPayment.billingStartDate = existingBSD;
+        }
+      } else if (existingBSD) {
+        mediaData.rentalPayment.billingStartDate = existingBSD;
       }
 
       Object.keys(mediaData).forEach((key) => {
-        if (!["_id", "__v", "createdAt", "updatedAt", "mediaId"].includes(key)) {
+        if (!["_id", "__v", "createdAt", "mediaId"].includes(key)) {
           media[key] = mediaData[key];
         }
       });
@@ -2330,6 +2346,13 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         };
       }
       handleAgreementHistory(mediaData, null, userName);
+
+      // ✅ ADDED — initialize billingStartDate on create so it serves
+      // as the stable anchor for all future cycle walking.
+      if (mediaData.rentalPayment?.lastBillPaidDate) {
+        mediaData.rentalPayment.billingStartDate =
+          mediaData.rentalPayment.lastBillPaidDate;
+      }
 
       media = new MediaOnboarding(mediaData);
       await media.save();
@@ -3195,8 +3218,6 @@ const uploadExcel = async (req, res) => {
       mapped.height = Math.floor(mapped.height);
       mapped.totalSqFt = Math.floor((mapped.width * mapped.height).toFixed(2));
       mapped.excelRowNumber = excelRow;
-      mapped.createdAt = new Date();
-      mapped.updatedAt = new Date();
 
       // ── Assign unique mediaId from in-memory counter ──
       mapped.mediaId = `${prefix}MED#${nextNumber}`;

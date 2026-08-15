@@ -3202,7 +3202,7 @@ for (const media of results) {
            if (gstFlag === 1) resolvedGstAmount = Number(mediaObj.rentalPayment?.gstAmount || 0);
            else {
                const ownerCount = (mediaObj.landOwners || []).length || 1;
-               resolvedGstAmount = (item.landOwners || []).filter(o => String(o._id) === String(entry.landOwnerId)).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+               resolvedGstAmount = (mediaObj.landOwners || []).filter(o => String(o._id) === String(entry.landOwnerId)).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
            }
         }
 
