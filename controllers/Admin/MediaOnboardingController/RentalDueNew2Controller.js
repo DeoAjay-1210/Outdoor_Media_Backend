@@ -1977,10 +1977,22 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
     updatedBy: userName,
     updatedAt: nowIST(),
   };
-  media.rentalStatus = RENTAL_STATUS_MAP[userType];
 
-  media.rentalDueEntries.push(newEntry);
-  const savedEntry = media.rentalDueEntries[media.rentalDueEntries.length - 1];
+  // ✅ CHANGED — use atomic check-and-push to avoid duplicates if two
+  // requests try to create the same cycle entry at once.
+  const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(
+    media._id,
+    newEntry,
+  );
+
+  if (atomicResult) {
+    media.rentalDue = atomicResult.rentalDue;
+    // Sync alias if used
+    media.rentalDueEntries = media.rentalDue;
+  }
+
+  const savedEntry = media.rentalDue[media.rentalDue.length - 1];
+  media.rentalStatus = RENTAL_STATUS_MAP[userType];
 
   if (isOwnerOverride) {
     markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
@@ -3524,15 +3536,39 @@ for (const siteDoc of activeSitesForSweep) {
       {
         $addFields: {
           matchingEntry: {
-            $first: {
-              $filter: {
-                input: { $ifNull: ["$rentalDue", []] },
-                as: "rd",
-                cond: {
-                  $and: [
-                    { $gte: ["$$rd.dueDate", monthStart] },
-                    { $lte: ["$$rd.dueDate", monthEnd] },
-                  ],
+            $let: {
+              vars: {
+                filtered: {
+                  $filter: {
+                    input: { $ifNull: ["$rentalDue", []] },
+                    as: "rd",
+                    cond: {
+                      $and: [
+                        { $gte: ["$$rd.dueDate", monthStart] },
+                        { $lte: ["$$rd.dueDate", monthEnd] },
+                      ],
+                    },
+                  },
+                },
+              },
+              in: {
+                $let: {
+                  vars: {
+                    approved: {
+                      $filter: {
+                        input: "$$filtered",
+                        as: "f",
+                        cond: { $eq: ["$$f.approvalStatus", 3] },
+                      },
+                    },
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: [{ $size: "$$approved" }, 0] },
+                      { $first: "$$approved" },
+                      { $first: "$$filtered" },
+                    ],
+                  },
                 },
               },
             },
@@ -3565,15 +3601,39 @@ for (const siteDoc of activeSitesForSweep) {
       {
         $addFields: {
           matchingEntry: {
-            $first: {
-              $filter: {
-                input: { $ifNull: ["$rentalDue", []] },
-                as: "rd",
-                cond: {
-                  $and: [
-                    { $gte: ["$$rd.dueDate", monthStart] },
-                    { $lte: ["$$rd.dueDate", monthEnd] },
-                  ],
+            $let: {
+              vars: {
+                filtered: {
+                  $filter: {
+                    input: { $ifNull: ["$rentalDue", []] },
+                    as: "rd",
+                    cond: {
+                      $and: [
+                        { $gte: ["$$rd.dueDate", monthStart] },
+                        { $lte: ["$$rd.dueDate", monthEnd] },
+                      ],
+                    },
+                  },
+                },
+              },
+              in: {
+                $let: {
+                  vars: {
+                    approved: {
+                      $filter: {
+                        input: "$$filtered",
+                        as: "f",
+                        cond: { $eq: ["$$f.approvalStatus", 3] },
+                      },
+                    },
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: [{ $size: "$$approved" }, 0] },
+                      { $first: "$$approved" },
+                      { $first: "$$filtered" },
+                    ],
+                  },
                 },
               },
             },
@@ -3611,15 +3671,39 @@ for (const siteDoc of activeSitesForSweep) {
       {
         $addFields: {
           matchingEntry: {
-            $first: {
-              $filter: {
-                input: { $ifNull: ["$rentalDue", []] },
-                as: "rd",
-                cond: {
-                  $and: [
-                    { $gte: ["$$rd.dueDate", monthStart] },
-                    { $lte: ["$$rd.dueDate", monthEnd] },
-                  ],
+            $let: {
+              vars: {
+                filtered: {
+                  $filter: {
+                    input: { $ifNull: ["$rentalDue", []] },
+                    as: "rd",
+                    cond: {
+                      $and: [
+                        { $gte: ["$$rd.dueDate", monthStart] },
+                        { $lte: ["$$rd.dueDate", monthEnd] },
+                      ],
+                    },
+                  },
+                },
+              },
+              in: {
+                $let: {
+                  vars: {
+                    approved: {
+                      $filter: {
+                        input: "$$filtered",
+                        as: "f",
+                        cond: { $eq: ["$$f.approvalStatus", 3] },
+                      },
+                    },
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: [{ $size: "$$approved" }, 0] },
+                      { $first: "$$approved" },
+                      { $first: "$$filtered" },
+                    ],
+                  },
                 },
               },
             },
@@ -3939,15 +4023,39 @@ if (Number(isPastPending) === 1) {
       {
         $addFields: {
           matchingEntry: {
-            $first: {
-              $filter: {
-                input: { $ifNull: ["$rentalDue", []] },
-                as: "rd",
-                cond: {
-                  $and: [
-                    { $gte: ["$$rd.dueDate", monthStart] },
-                    { $lte: ["$$rd.dueDate", monthEnd] },
-                  ],
+            $let: {
+              vars: {
+                filtered: {
+                  $filter: {
+                    input: { $ifNull: ["$rentalDue", []] },
+                    as: "rd",
+                    cond: {
+                      $and: [
+                        { $gte: ["$$rd.dueDate", monthStart] },
+                        { $lte: ["$$rd.dueDate", monthEnd] },
+                      ],
+                    },
+                  },
+                },
+              },
+              in: {
+                $let: {
+                  vars: {
+                    approved: {
+                      $filter: {
+                        input: "$$filtered",
+                        as: "f",
+                        cond: { $eq: ["$$f.approvalStatus", 3] },
+                      },
+                    },
+                  },
+                  in: {
+                    $cond: [
+                      { $gt: [{ $size: "$$approved" }, 0] },
+                      { $first: "$$approved" },
+                      { $first: "$$filtered" },
+                    ],
+                  },
                 },
               },
             },
@@ -4181,13 +4289,36 @@ if (Number(isPastPending) === 1) {
         return Number(e.approvalStatus) !== 3;
       });
 
+      // ✅ ADDED — Dedupe for safety. If multiple entries exist for the same
+      // month, priority: Approved (3) > most recently updated.
+      const dedupedMap = new Map();
+      pendingEntriesUpToMonth.forEach((e) => {
+        const key = String(e.dueMonth).trim();
+        const existing = dedupedMap.get(key);
+        if (!existing) {
+          dedupedMap.set(key, e);
+        } else {
+          // Priority: 1) Approved (3) wins. 2) Most recent wins.
+          const existingStatus = Number(existing.approvalStatus || 0);
+          const currentStatus = Number(e.approvalStatus || 0);
+          const isBetter =
+            (currentStatus === 3 && existingStatus !== 3) ||
+            (currentStatus === existingStatus &&
+              new Date(e.updatedAt) > new Date(existing.updatedAt));
+          if (isBetter) dedupedMap.set(key, e);
+        }
+      });
+      const finalPendingEntries = Array.from(dedupedMap.values()).sort(
+        (a, b) => new Date(a.dueDate) - new Date(b.dueDate),
+      );
+
       // ✅ CHANGED — verificationProgressHistory is now ALSO nested
       // per-entry (filtered to that entry's own dueDate/cycle),
       // alongside the already-per-entry verificationProgress. Neither
       // field is returned at the site level anymore — both live only
       // inside each rentalDueEntries[] item, scoped to that specific
       // pending month.
-      const filteredRentalDueEntries = pendingEntriesUpToMonth.map((entry) => {
+      const filteredRentalDueEntries = finalPendingEntries.map((entry) => {
       const entryCycleKey = entry.dueDate ? getCurrentCycle(entry.dueDate) : null;
 
 const entryVerificationProgressHistory = (
@@ -4440,7 +4571,7 @@ const filteredAgreementDocVerificationHistory = (
     // actually requested, matching what the ledger List API already
     // correctly shows for the same filter.
       const outstandingScopedSites = await Media.find(mediaMatch)
-      .select("rentalDue landOwners ledger ledgerHistory rentalPayment pendingMonths gstBalanceHistory")
+      .select("status gstApplicableFlag rentalDue landOwners ledger ledgerHistory rentalPayment pendingMonths gstBalanceHistory")
       .lean();
 
     const overallOutstandingTotals = outstandingScopedSites.reduce(

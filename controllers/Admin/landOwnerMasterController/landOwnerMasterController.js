@@ -1121,7 +1121,7 @@ const landOwnerSiteFilter = async (req, res) => {
     // requested, so the query stays light for callers who don't ask
     // for any of this.
    const mediaProjection =
-  "mediaCode mediaName updatedAt rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries" +
+  "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries" +
   (needsLedgerFields || needsRentalStatusFields
     ? " ledger ledgerHistory gstBalanceHistory"
     : "");

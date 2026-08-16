@@ -2206,11 +2206,14 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
 
       Object.keys(mediaData).forEach((key) => {
-        if (!["_id", "__v", "createdAt", "mediaId"].includes(key)) {
+        if (!["_id", "__v", "createdAt", "mediaId", "updatedAt"].includes(key)) {
           media[key] = mediaData[key];
         }
       });
-      media.updatedAt = nowIST();
+
+      if (media.isModified()) {
+        media.updatedAt = nowIST();
+      }
       await media.save();
       await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
@@ -2876,7 +2879,9 @@ const updateAgreement = async (req, res) => {
       media.rentalPayment.customPaymentFrequency = activeCustomPaymentFrequency;
     }
 
-    media.updatedAt = nowIST();
+    if (media.isModified()) {
+      media.updatedAt = nowIST();
+    }
     await media.save();
 
     const saved = await MediaOnboarding.findById(media._id)
@@ -3227,10 +3232,11 @@ const uploadExcel = async (req, res) => {
       nextNumber++; // increment for next row
       // ─────────────────────────────────────────────────
 
+      const { mediaCode, ...dataToInsert } = mapped;
       bulkOps.push({
         updateOne: {
-          filter: { mediaCode: mapped.mediaCode },
-          update: { $setOnInsert: mapped },
+          filter: { mediaCode },
+          update: { $setOnInsert: dataToInsert },
           upsert: true,
         },
       });
@@ -3239,6 +3245,7 @@ const uploadExcel = async (req, res) => {
     if (bulkOps.length) {
       const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
         ordered: false,
+        timestamps: false,
       });
       results.inserted = bulkResult.upsertedCount;
       results.skipped += bulkResult.matchedCount;
