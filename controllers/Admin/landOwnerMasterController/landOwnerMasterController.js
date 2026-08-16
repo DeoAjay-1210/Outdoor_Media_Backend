@@ -600,7 +600,6 @@ const landOwnerSave = async (req, res) => {
     session.endSession();
   }
 };
-
 const landOwnerList = async (req, res) => {
   try {
     const { pageNumber = 1, count = 10, search, landOwnerName } = req.body;
@@ -610,7 +609,6 @@ const landOwnerList = async (req, res) => {
 
     const filter = {};
 
-    // Main search filter for the list
     if (search && search.trim() !== "") {
       const searchRegex = new RegExp(search.trim(), "i");
       filter.$or = [
@@ -626,16 +624,21 @@ const landOwnerList = async (req, res) => {
       filter.$and.push({ name: nameRegex });
     }
 
-    const landOwnerNameFilter = (
-      await LandOwnerMaster.aggregate([
-        { $group: { _id: "$name", latestUpdate: { $max: "$updatedAt" } } },
-        { $sort: { latestUpdate: -1 } },
-      ])
-    ).map((item) => item._id);
+    // ✅ FIXED — every landowner's name, one entry per record, no
+    // grouping/dedup of any kind. Duplicate names (e.g. two different
+    // "Land 1" landowners) both show up.
+    const allLandOwnersForNameFilter = await LandOwnerMaster.find({})
+      .select("name updatedAt")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const landOwnerNameFilter = allLandOwnersForNameFilter.map(
+      (item) => item.name,
+    );
 
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
-   const landOwnerListRaw = await LandOwnerMaster.aggregate([
+    const landOwnerListRaw = await LandOwnerMaster.aggregate([
       { $match: filter },
       {
         $addFields: {
@@ -659,7 +662,6 @@ const landOwnerList = async (req, res) => {
       { $skip: (pageNumbers - 1) * pageSize },
       { $limit: pageSize },
     ]);
-
 
     const landOwnerListData = landOwnerListRaw.map((owner) => ({
       ...owner,
@@ -685,6 +687,90 @@ const landOwnerList = async (req, res) => {
     return errorResponse(res, error.message, null, 400);
   }
 };
+// const landOwnerList = async (req, res) => {
+//   try {
+//     const { pageNumber = 1, count = 10, search, landOwnerName } = req.body;
+
+//     const pageNumbers = parseInt(pageNumber) || 1;
+//     const pageSize = parseInt(count) || 10;
+
+//     const filter = {};
+
+//     // Main search filter for the list
+//     if (search && search.trim() !== "") {
+//       const searchRegex = new RegExp(search.trim(), "i");
+//       filter.$or = [
+//         { name: searchRegex },
+//         { phone: searchRegex },
+//         { panNumber: searchRegex },
+//         { aadharCardNumber: searchRegex },
+//       ];
+//     }
+//     if (landOwnerName && landOwnerName.trim() !== "") {
+//       const nameRegex = new RegExp(landOwnerName.trim(), "i");
+//       if (!filter.$and) filter.$and = [];
+//       filter.$and.push({ name: nameRegex });
+//     }
+
+//     const landOwnerNameFilter = (
+//       await LandOwnerMaster.aggregate([
+//         { $group: { _id: "$name", latestUpdate: { $max: "$updatedAt" } } },
+//         { $sort: { latestUpdate: -1 } },
+//       ])
+//     ).map((item) => item._id);
+
+//     const totalCount = await LandOwnerMaster.countDocuments(filter);
+
+//    const landOwnerListRaw = await LandOwnerMaster.aggregate([
+//       { $match: filter },
+//       {
+//         $addFields: {
+//           latestActivityAt: {
+//             $max: [
+//               "$updatedAt",
+//               {
+//                 $max: {
+//                   $map: {
+//                     input: { $ifNull: ["$linkedSites", []] },
+//                     as: "site",
+//                     in: "$$site.updatedAt",
+//                   },
+//                 },
+//               },
+//             ],
+//           },
+//         },
+//       },
+//       { $sort: { latestActivityAt: -1 } },
+//       { $skip: (pageNumbers - 1) * pageSize },
+//       { $limit: pageSize },
+//     ]);
+
+
+//     const landOwnerListData = landOwnerListRaw.map((owner) => ({
+//       ...owner,
+//       totalSites: Array.isArray(owner.linkedSites)
+//         ? owner.linkedSites.length
+//         : 0,
+//     }));
+
+//     return successResponse(
+//       res,
+//       "LandOwner list fetched successfully",
+//       {
+//         pageNumber: pageNumbers,
+//         count: pageSize,
+//         totalCount,
+//         totalPages: Math.ceil(totalCount / pageSize),
+//         landOwnerList: landOwnerListData,
+//         landOwnerNameFilter,
+//       },
+//       200,
+//     );
+//   } catch (error) {
+//     return errorResponse(res, error.message, null, 400);
+//   }
+// };
 
 
 

@@ -480,15 +480,41 @@ const computeAppraisalAmount = (entry, previousRent) => {
   return 0;
 };
 
-const cascadeHistory = (history, baseRent) => {
+const cascadeHistory = (
+  history,
+  baseRent,
+  netPayable,
+  rentActuallyChanged = false,
+) => {
+  const today = todayKey();
   const sorted = history
     .filter((h) => h.appraisalDate)
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
 
   let prev = Number(baseRent || 0);
+  let manualRebaseDone = false;
+
   for (const entry of sorted) {
+    const entryDateKey = dayKey(entry.appraisalDate);
+
+    // ✅ Re-baseline from today onwards if the rent was manually changed.
+    // This ensures that if a user updates rent to 60,000, future appraisals
+    // start from 60,000 rather than the old schedule's base.
+    if (rentActuallyChanged && !manualRebaseDone && entryDateKey >= today) {
+      prev = Number(netPayable ?? prev);
+      manualRebaseDone = true;
+    }
+
     entry.previousRent = prev;
-    entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+
+    // ✅ FIXED — Only apply bump if it's a current/future entry and NOT an anchor.
+    // "Yesterday don't apply, today it will apply"
+    if (entry.isAnchorEntry || entryDateKey < today) {
+      entry.appraisalAmount = 0;
+    } else {
+      entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+    }
+
     entry.newRent = Math.floor(prev + entry.appraisalAmount);
     prev = entry.newRent;
   }
@@ -568,6 +594,71 @@ const buildAppraisalScheduleFromAnchor = ({
 
   return history;
 };
+const backfillHistoricalAppraisalEntries = (
+  history,
+  agreementStartDate,
+  userName,
+) => {
+  if (!Array.isArray(history) || !history.length || !agreementStartDate)
+    return history;
+
+  const start = toDateOnly(agreementStartDate);
+  history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
+
+  let earliestDate = new Date(history[0].appraisalDate);
+  if (dayKey(earliestDate) <= dayKey(start)) return history;
+
+  const monthsToSub = getFrequencyMonths(
+    history[0].frequency,
+    history[0].customFrequencyMonths,
+  );
+  if (monthsToSub <= 0) return history;
+
+  let current = new Date(earliestDate);
+  let safety = 0;
+
+  while (safety < 60) {
+    safety++;
+    current.setMonth(current.getMonth() - monthsToSub);
+    if (dayKey(current) < dayKey(start)) break;
+
+    const backEntry = {
+      appraisalDate: toDateOnly(current),
+      type: history[0].type,
+      percentage: history[0].percentage,
+      fixedAmount: history[0].fixedAmount,
+      frequency: history[0].frequency,
+      customFrequencyMonths: history[0].customFrequencyMonths,
+      previousRent: 0,
+      appraisalAmount: 0,
+      newRent: 0,
+      updatedBy: userName,
+      updatedAt: nowIST(),
+    };
+    history.unshift(backEntry);
+  }
+
+  // Ensure an anchor entry exists at the agreement start date if missing
+  if (dayKey(history[0].appraisalDate) > dayKey(start)) {
+    history.unshift({
+      appraisalDate: start,
+      type: history[0].type,
+      percentage: history[0].percentage,
+      fixedAmount: history[0].fixedAmount,
+      frequency: history[0].frequency,
+      customFrequencyMonths: history[0].customFrequencyMonths,
+      previousRent: 0,
+      appraisalAmount: 0,
+      newRent: 0,
+      isAnchorEntry: true,
+      updatedBy: userName,
+      updatedAt: nowIST(),
+    });
+  }
+
+  return history;
+};
+
 const handleAppraisalLogic = async (
   mediaData,
   existingMedia,
@@ -580,6 +671,8 @@ const handleAppraisalLogic = async (
 
   if (!appraisal || Number(appraisal.applicable) !== 1) return mediaData;
   if (!agreement?.startDate || !agreement?.endDate) return mediaData;
+
+  const today = todayKey();
 
   const agreementStartDate = new Date(agreement.startDate);
   const agreementEndDate = new Date(agreement.endDate);
@@ -645,13 +738,15 @@ const handleAppraisalLogic = async (
 
       if (!isAnchorSeed) {
         // ✅ NEW — no lastAppraisalDate given, so nextAppraisalDate is a
-        // real, due appraisal event: 50K + fixedAmount/percentage bump
-        // applies directly here (e.g. 50K + 2K fixed = 52K), and this
-        // becomes the entry's newRent in history.
-        seedEntry.appraisalAmount = computeAppraisalAmount(
-          seedEntry,
-          netPayable,
-        );
+        // real, due appraisal event. We apply the bump if it's today or in the future.
+        if (dayKey(seedDate) >= today) {
+          seedEntry.appraisalAmount = computeAppraisalAmount(
+            seedEntry,
+            netPayable,
+          );
+        } else {
+          seedEntry.appraisalAmount = 0;
+        }
         seedEntry.newRent = Math.floor(netPayable + seedEntry.appraisalAmount);
       }
 
@@ -662,19 +757,23 @@ const handleAppraisalLogic = async (
         userName,
       );
 
-      // ✅ safety net — only re-flatten index 0 if it's a genuine anchor
-      // checkpoint. Real first-appraisal entries (isAnchorSeed = false)
-      // are left with their computed bump intact.
-      if (
-        isAnchorSeed &&
-        appraisal.history[0] &&
-        dayKey(appraisal.history[0].appraisalDate) === dayKey(seedDate)
-      ) {
-        appraisal.history[0].previousRent = netPayable;
-        appraisal.history[0].appraisalAmount = 0;
-        appraisal.history[0].newRent = netPayable;
-        appraisal.history[0].isAnchorEntry = true;
+      // ✅ Only backfill to agreement start date if NO manual last appraisal date was provided.
+      // If the user provides a lastAppraisalDate during onboarding, we treat that as the
+      // definitive starting point for the appraisal history.
+      if (!manualLastAppraisalDate) {
+        appraisal.history = backfillHistoricalAppraisalEntries(
+          appraisal.history,
+          agreement.startDate,
+          userName,
+        );
       }
+
+      appraisal.history = cascadeHistory(
+        appraisal.history,
+        netPayable,
+        netPayable,
+        true,
+      );
 
       const lastEntry = appraisal.history[appraisal.history.length - 1];
       if (lastEntry)
@@ -702,9 +801,13 @@ const handleAppraisalLogic = async (
     .map((h) => ({ ...h }))
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
 
-  const hasAnyExistingAppraisalHistory = history.length > 0;
-  const seedBaseRent = hasAnyExistingAppraisalHistory ? oldRent : netPayable;
-  const today = todayKey();
+  // ✅ FIXED — The seed baseline for recalculating history must be the
+  // previousRent of the FIRST entry in history, not the current total rent.
+  // Using the current rent (which already includes applied appraisals)
+  // would cause the baseline to shift forward every time we save,
+  // leading to "double bumps" where 10% is added on top of 10% repeatedly.
+  const seedBaseRent =
+    history.length > 0 ? Number(history[0].previousRent || 0) : netPayable;
 
   let isNewFutureEntry = false;
 
@@ -738,16 +841,32 @@ const handleAppraisalLogic = async (
       : null;
 
   if (manualLastAppraisalDateUpdate) {
-    history = buildAppraisalScheduleFromAnchor({
+    const anchorKey = dayKey(manualLastAppraisalDateUpdate);
+    // ✅ PRESERVE existing history entries that occurred BEFORE the new anchor date
+    // This ensures that 2024, 2025, etc. dates do not change when the user
+    // updates the lastAppraisalDate to a later date like 2026-05-15.
+    const preserved = history.filter(
+      (h) => dayKey(h.appraisalDate) < anchorKey,
+    );
+
+    // If we have preserved entries, the base rent for the new anchor is the last preserved newRent.
+    const newBaseRentForAnchor =
+      preserved.length > 0
+        ? Number(preserved[preserved.length - 1].newRent || 0)
+        : seedBaseRent;
+
+    const newSchedule = buildAppraisalScheduleFromAnchor({
       anchorDate: manualLastAppraisalDateUpdate,
       frequency: appraisal.frequency,
       customFrequencyMonths: appraisal.customFrequencyMonths,
       type: appraisal.type,
       percentage: appraisal.percentage,
       fixedAmount: appraisal.fixedAmount,
-      baseRent: seedBaseRent,
+      baseRent: newBaseRentForAnchor,
       userName,
     });
+
+    history = [...preserved, ...newSchedule];
   } else if (nextDate) {
     const nextDay = dayKey(nextDate);
     const existingIdx = history.findIndex(
@@ -774,7 +893,7 @@ const handleAppraisalLogic = async (
       };
 
       const e = history[existingIdx];
-      const isFutureEntry = dayKey(e.appraisalDate) > today;
+      const isFutureEntry = dayKey(e.appraisalDate) >= today;
 
       if (rentActuallyChanged && isFutureEntry) {
         e.previousRent = netPayable;
@@ -782,7 +901,12 @@ const handleAppraisalLogic = async (
 
       // ✅ skip bump computation if this entry is an anchor checkpoint
       if (!e.isAnchorEntry) {
-        e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
+        // ✅ Only bump if it's a future entry
+        if (isFutureEntry) {
+          e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
+        } else {
+          e.appraisalAmount = 0;
+        }
         e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
       } else {
         e.appraisalAmount = 0;
@@ -798,7 +922,7 @@ const handleAppraisalLogic = async (
       } else {
         let prev = e.newRent;
         for (let i = existingIdx + 1; i < history.length; i++) {
-          if (dayKey(history[i].appraisalDate) > today) {
+          if (dayKey(history[i].appraisalDate) >= today) {
             history[i].previousRent = prev;
             history[i].appraisalAmount = computeAppraisalAmount(
               history[i],
@@ -836,48 +960,13 @@ const handleAppraisalLogic = async (
         movedEntry.updatedBy = userName;
         movedEntry.updatedAt = nowIST();
 
-        if (nextDay > today) isNewFutureEntry = true;
+        if (nextDay >= today) isNewFutureEntry = true;
 
         history.sort(
           (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
         );
 
-        const newIdx = history.findIndex(
-          (h) => dayKey(h.appraisalDate) === nextDay,
-        );
-
-        let baseForNewEntry;
-        if (newIdx > 0) {
-          baseForNewEntry = history[newIdx - 1].newRent || 0;
-        } else if (rentActuallyChanged && nextDay > today) {
-          baseForNewEntry = netPayable;
-        } else {
-          baseForNewEntry = seedBaseRent;
-        }
-
-        history[newIdx].previousRent = baseForNewEntry;
-        history[newIdx].appraisalAmount = computeAppraisalAmount(
-          history[newIdx],
-          baseForNewEntry,
-        );
-        history[newIdx].newRent = Math.floor(
-          baseForNewEntry + history[newIdx].appraisalAmount,
-        );
-
-        let prev = history[newIdx].newRent;
-        for (let i = newIdx + 1; i < history.length; i++) {
-          if (dayKey(history[i].appraisalDate) > today) {
-            history[i].previousRent = prev;
-            history[i].appraisalAmount = computeAppraisalAmount(
-              history[i],
-              prev,
-            );
-            history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
-            prev = history[i].newRent;
-          }
-        }
-
-        appliedEntry = history[newIdx];
+        appliedEntry = history.find((h) => dayKey(h.appraisalDate) === nextDay);
       } else {
         // ✅ no existing history at all — nextDate is the first, real
         // appraisal event (no anchor exists), so compute the bump directly
@@ -896,11 +985,7 @@ const handleAppraisalLogic = async (
           updatedAt: nowIST(),
         });
 
-        const e = history[0];
-        e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
-        e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
-
-        appliedEntry = e;
+        appliedEntry = history[0];
       }
     }
 
@@ -915,52 +1000,44 @@ const handleAppraisalLogic = async (
     }
   }
 
-  for (const entry of history) {
-    if (dayKey(entry.appraisalDate) <= today && !entry.isAnchorEntry) {
-      entry.appraisalAmount = computeAppraisalAmount(entry, entry.previousRent);
-      entry.newRent = Math.floor(entry.previousRent + entry.appraisalAmount);
-    }
-  }
+  // ✅ Only backfill if NO anchor date exists (neither incoming nor existing).
+  // If the user has established an anchor (e.g. 2025), we respect it as the
+  // official start of the appraisal schedule and don't backfill to 2024.
+  const effectiveAnchorDate =
+    incomingLastAppraisalDate || existingLastAppraisalDate;
 
-  history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
-
-  // ✅ only flatten index 0 if it's a genuine anchor checkpoint entry.
-  // Real first-appraisal entries (isAnchorEntry: false/undefined) keep
-  // their computed bump — this is what fixes the "no lastAppraisalDate,
-  // only future nextAppraisalDate" case (50K + fixed/percentage = 52K).
-  if (history.length > 0 && history[0].isAnchorEntry) {
-    history[0].appraisalAmount = 0;
-    history[0].newRent = history[0].previousRent;
-  }
-
-  const futureDates = history.filter((h) => dayKey(h.appraisalDate) > today);
-  const todayEntries = history.filter((h) => dayKey(h.appraisalDate) === today);
-
-  if (todayEntries.length > 0) {
-    appraisal.nextAppraisalDate = new Date(
-      todayEntries[todayEntries.length - 1].appraisalDate,
+  if (!effectiveAnchorDate) {
+    history = backfillHistoricalAppraisalEntries(
+      history,
+      agreement.startDate,
+      userName,
     );
-  } else if (futureDates.length > 0) {
-    appraisal.nextAppraisalDate = new Date(futureDates[0].appraisalDate);
-  } else {
-    appraisal.nextAppraisalDate = null;
   }
 
-  const currentEntry = history
+  // ✅ Use centralized cascade logic to ensure all rents are correct
+  // and past appraisal amounts are forced to 0.
+  appraisal.history = cascadeHistory(
+    history,
+    seedBaseRent,
+    netPayable,
+    rentActuallyChanged,
+  );
+
+  // Set the frequency metadata based on the current/first entry
+  const currentEntryForMeta = history
     .filter((h) => dayKey(h.appraisalDate) <= today)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
 
-  if (currentEntry) {
-    appraisal.frequency = currentEntry.frequency;
-    appraisal.customFrequencyMonths = currentEntry.customFrequencyMonths || 0;
+  if (currentEntryForMeta) {
+    appraisal.frequency = currentEntryForMeta.frequency;
+    appraisal.customFrequencyMonths =
+      currentEntryForMeta.customFrequencyMonths || 0;
   } else if (history.length > 0) {
     const firstEntry = history[0];
     appraisal.frequency = firstEntry.frequency;
     appraisal.customFrequencyMonths = firstEntry.customFrequencyMonths || 0;
   }
 
-  appraisal.history = history;
-  mediaData.appraisal = appraisal;
   return mediaData;
 };
 
@@ -1107,10 +1184,14 @@ const autoScheduleFutureAppraisalEntries = (history, userName) => {
       updatedAt: nowIST(),
     };
 
-    autoEntry.appraisalAmount = computeAppraisalAmount(
-      autoEntry,
-      autoEntry.previousRent,
-    );
+    if (dayKey(nextDateOnly) >= today) {
+      autoEntry.appraisalAmount = computeAppraisalAmount(
+        autoEntry,
+        autoEntry.previousRent,
+      );
+    } else {
+      autoEntry.appraisalAmount = 0;
+    }
     autoEntry.newRent = Math.floor(
       autoEntry.previousRent + autoEntry.appraisalAmount,
     );
@@ -1207,9 +1288,15 @@ const revertAppraisalRentIfTurnedOff = (mediaData, existingMedia) => {
   return true;
 };
 // This is for Appraisal Amout based TotalRentalAmount Calculation
-const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
+const applyAppraisalRentIfDuent = (
+  mediaData,
+  existingMedia,
+  userName,
+  rentActuallyChanged,
+) => {
   const appraisal = mediaData.appraisal;
   if (!appraisal || Number(appraisal.applicable) !== 1) return false;
+
   if (Number(appraisal.appraisalHold) === 1) return false;
   if (!Array.isArray(appraisal.history) || !appraisal.history.length)
     return false;
@@ -2141,16 +2228,8 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      // if (mediaData.rentalPayment && mediaData.agreement) {
-      //   mediaData.agreement.rentalPayment = {
-      //     totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-      //     paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
-      //     customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
-      //   };
-      // }
-
       // Step 4: handle agreement history with updatedBy/updatedAt on rentalPayment.
-      applyAppraisalRentIfDuent(mediaData, media, userName);
+      applyAppraisalRentIfDuent(mediaData, media, userName, rentActuallyChanged);
 
       applyOwnerApprovalBillingShift(mediaData, media, userName);
       if (mediaData.rentalPayment && mediaData.agreement) {
@@ -2323,7 +2402,12 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      applyAppraisalRentIfDuent(mediaData, null, userName);
+      applyAppraisalRentIfDuent(
+        mediaData,
+        null,
+        userName,
+        rentActuallyChanged,
+      );
       mediaData.gstApplicableFlag = detectInitialGstApplicableFlag(mediaData);
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
@@ -3070,12 +3154,14 @@ const mediaList = async (req, res) => {
     const mediaTypeFilter = [
       ...new Set(allData.map((item) => item.mediaType)),
     ].filter(Boolean);
-    const landOwnerNameFilter = (
-      await LandOwnerMaster.aggregate([
-        { $group: { _id: "$name", latestUpdate: { $max: "$updatedAt" } } },
-        { $sort: { latestUpdate: -1 } },
-      ])
-    ).map((item) => item._id);
+const allLandOwnersForNameFilter = await LandOwnerMaster.find({})
+  .select("name updatedAt")
+  .sort({ updatedAt: -1 })
+  .lean();
+
+const landOwnerNameFilter = allLandOwnersForNameFilter.map(
+  (item) => item.name,
+);
     return successResponse(
       res,
       "Media list fetched successfully",
