@@ -5745,3 +5745,4 @@ const outstanding = computeOutstandingSummary(media, effectiveMonthYear);
   };
 }
 exports.computeOutstandingSummary = computeOutstandingSummary;
+exports.dedupeGstBalanceHistory = dedupeGstBalanceHistory; // ✅ ADDED — export so landOwnerController can dedupe before computing pending totals

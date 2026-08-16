@@ -3,7 +3,7 @@ const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/Lan
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const mongoose = require("mongoose");
-const { computeOutstandingSummary } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller")
+const { computeOutstandingSummary,dedupeGstBalanceHistory  } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller")
 // ─────────────────────────────────────────────────────────────
 // IST HELPER — same pattern as mediaOnboardingController.js.
 // updatedAt is stamped manually with this, NOT mongoose's
@@ -2245,24 +2245,28 @@ const landOwnerSiteFilter = async (req, res) => {
           if (entryYear === null) return; // can't classify — skip
 
           const isCurrentMonth =
-            entryYear === referenceYear && entryMonthIdx === referenceMonthIdx;
-          const isPastMonth =
-            entryYear < referenceYear ||
-            (entryYear === referenceYear && entryMonthIdx < referenceMonthIdx);
+  entryYear === referenceYear && entryMonthIdx === referenceMonthIdx;
+const isPastMonth =
+  entryYear < referenceYear ||
+  (entryYear === referenceYear && entryMonthIdx < referenceMonthIdx);
 
-          const isPending = !entry.utrNumber || !entry.date;
+// ✅ FIXED — "pending" must be driven by payment status, not UTR
+// presence. Cash entries legitimately have NO utrNumber even when
+// fully paid (utrNumber is only ever set for "Online"), so using
+// !entry.utrNumber was flagging every paid Cash row as pending.
+const isPending = Number(entry.status) !== 1;
 
-          const shapedEntry = {
-            mediaId: mediaDoc._id,
-            mediaName: mediaDoc.mediaName,
-            landOwnerMasterId: ownerId,
-            paymentMode: entry.paymentMode,
-            amount: Number(entry.amount || 0),
-            status: entry.status,
-            date: entry.date,
-            utrNumber: entry.utrNumber,
-            dueMonth: entry.dueMonth || entry.month || null,
-          };
+const shapedEntry = {
+  mediaId: mediaDoc._id,
+  mediaName: mediaDoc.mediaName,
+  landOwnerMasterId: ownerId,
+  paymentMode: entry.paymentMode,
+  amount: Number(entry.amount || 0),
+  status: entry.status,
+  date: entry.date,
+  utrNumber: entry.utrNumber,
+  dueMonth: entry.dueMonth || entry.month || null,
+};
 
           if (isCurrentMonth) {
             bucket.currentMonthEntries.push(shapedEntry);
@@ -2277,9 +2281,9 @@ const landOwnerSiteFilter = async (req, res) => {
         // pastGst from unpaid gstBalanceHistory rows before referenceMonth
         // PLUS legacy rentalPayment.gstOutstandingHistory (merged, per
         // your instruction — same key, summed together, not separated).
-        const gstBalanceHistory = Array.isArray(mediaDoc.gstBalanceHistory)
-          ? mediaDoc.gstBalanceHistory
-          : [];
+        const gstBalanceHistory = dedupeGstBalanceHistory(
+  Array.isArray(mediaDoc.gstBalanceHistory) ? mediaDoc.gstBalanceHistory : [],
+);
         const gstOutstandingHistory = Array.isArray(
           mediaDoc.rentalPayment?.gstOutstandingHistory,
         )
@@ -2344,27 +2348,36 @@ const landOwnerSiteFilter = async (req, res) => {
         // legacy pre-onboarding outstanding GST — merged into the SAME
         // pastGst key, attributed to every owner on this site, unpaid rows only
         gstOutstandingHistory.forEach((row) => {
-          if (row.isPaid) return;
-          const amt = Number(row.gstOutStandingAmount || 0);
-          ownerIdsOnSite.forEach((ownerId) => {
-            const key = `${mediaId}_${ownerId}`;
-            if (!ledgerDataByMediaOwner.has(key)) {
-              ledgerDataByMediaOwner.set(key, {
-                currentMonthEntries: [],
-                pastMonthEntries: [],
-                currentPendingRentEntries: [],
-                pastRentalPendingEntries: [],
-                currentGst: 0,
-                pastGst: 0,
-                currentGstPending: 0,
-                pastGstPending: 0,
-              });
-            }
-            const bucket = ledgerDataByMediaOwner.get(key);
-            bucket.pastGst += amt;
-            bucket.pastGstPending += amt;
-          });
-        });
+  // ✅ FIXED — same robust "paid" check as the gstBalanceHistory loop
+  // above (isPaid flag OR a real UTR+date), instead of trusting
+  // isPaid alone, which can be left stale/false even after a UTR was
+  // recorded against this row.
+  const isRowPaid =
+    row.isPaid === true ||
+    row.isPaid === "true" ||
+    (row.utrNumber && String(row.utrNumber).trim() !== "" && row.date);
+  if (isRowPaid) return;
+
+  const amt = Number(row.gstOutStandingAmount || 0);
+  ownerIdsOnSite.forEach((ownerId) => {
+    const key = `${mediaId}_${ownerId}`;
+    if (!ledgerDataByMediaOwner.has(key)) {
+      ledgerDataByMediaOwner.set(key, {
+        currentMonthEntries: [],
+        pastMonthEntries: [],
+        currentPendingRentEntries: [],
+        pastRentalPendingEntries: [],
+        currentGst: 0,
+        pastGst: 0,
+        currentGstPending: 0,
+        pastGstPending: 0,
+      });
+    }
+    const bucket = ledgerDataByMediaOwner.get(key);
+    bucket.pastGst += amt;
+    bucket.pastGstPending += amt;
+  });
+});
 
         // fallback — if no gstBalanceHistory row exists yet for the
         // current cycle, derive currentGst from rentalDue directly
