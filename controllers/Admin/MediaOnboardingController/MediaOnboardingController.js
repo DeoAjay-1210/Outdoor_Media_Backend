@@ -262,7 +262,7 @@ const toDateOnly = (input) => {
 };
 
 const dayKey = (input) => toDateOnly(input).getTime();
-const todayKey = () => dayKey(new Date());
+const todayKey = () => dayKey(nowIST());
 const sameDay = (a, b) => dayKey(a) === dayKey(b);
 const isFutureDate = (date) => dayKey(date) > todayKey();
 
@@ -1530,7 +1530,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           mimeType: null,
           size: null,
           fileType: "image",
-          uploadedAt: new Date(),
+          uploadedAt: nowIST(),
         };
       };
 
@@ -1967,7 +1967,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
             mimeType: null,
             size: null,
             fileType: "image",
-            uploadedAt: new Date(),
+            uploadedAt: nowIST(),
           };
         } else {
           delete mediaData[field];
@@ -2206,15 +2206,12 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
 
       Object.keys(mediaData).forEach((key) => {
-        if (!["_id", "__v", "createdAt", "mediaId", "updatedAt"].includes(key)) {
+        if (!["_id", "__v", "createdAt", "updatedAt", "mediaId"].includes(key)) {
           media[key] = mediaData[key];
         }
       });
-
-      if (media.isModified()) {
-        media.updatedAt = nowIST();
-      }
-      await media.save();
+      media.updatedAt = nowIST();
+      await media.save({ timestamps: false });
       await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
       if (media.landOwners && Array.isArray(media.landOwners)) {
@@ -2245,7 +2242,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           mimeType: null,
           size: null,
           fileType: "pdf",
-          uploadedAt: new Date(),
+          uploadedAt: nowIST(),
         };
       } else {
         delete mediaData.agreement.agreementPDF;
@@ -2359,7 +2356,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       mediaData.createdAt = nowIST();
       mediaData.updatedAt = nowIST();
       media = new MediaOnboarding(mediaData);
-      await media.save();
+      await media.save({ timestamps: false });
        await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
       // ✅ ADDED — same pass-2 correction as UPDATE branch.
@@ -2389,7 +2386,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
 const resolveActiveAgreement = (historyArr) => {
   if (!historyArr || !historyArr.length) return null;
 
-  const now = new Date();
+  const now = nowIST();
   const today = new Date(now.setHours(0, 0, 0, 0));
 
   const toDay = (d) => new Date(new Date(d).setHours(0, 0, 0, 0));
@@ -2879,10 +2876,8 @@ const updateAgreement = async (req, res) => {
       media.rentalPayment.customPaymentFrequency = activeCustomPaymentFrequency;
     }
 
-    if (media.isModified()) {
-      media.updatedAt = nowIST();
-    }
-    await media.save();
+    media.updatedAt = nowIST();
+    await media.save({ timestamps: false });
 
     const saved = await MediaOnboarding.findById(media._id)
       .select("agreement agreementHistory rentalPayment")
@@ -3142,15 +3137,16 @@ const getMediaById = async (req, res) => {
 
 // Excel Upload
 const COLUMN_MAP = {
-  State: "state",
-  City: "city",
-  "Media Name": "mediaName", // e.g. Hoarding, Unipole, Wall Graphics
-  "Media Code": "mediaCode",
-  "Media Type": "mediaType",
-  Width: "width",
-  Hight: "height", // note: typo in Excel kept as-is
-  Height: "height",
+  state: "state",
+  city: "city",
+  "media name": "mediaName",
+  "media code": "mediaCode",
+  "media type": "mediaType",
+  width: "width",
+  hight: "height",
+  height: "height",
 };
+
 const uploadExcel = async (req, res) => {
   try {
     if (!req.file) {
@@ -3174,7 +3170,7 @@ const uploadExcel = async (req, res) => {
     const bulkOps = [];
 
     // ── Generate starting mediaId counter ONCE before the loop ──
-    const today = new Date();
+    const today = nowIST();
     const prefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
 
     const lastMedia = await MediaOnboarding.findOne({
@@ -3192,13 +3188,16 @@ const uploadExcel = async (req, res) => {
 
     for (const [index, row] of rows.entries()) {
       const excelRow = index + 2;
-
       const mapped = {};
-      for (const [excelCol, schemaField] of Object.entries(COLUMN_MAP)) {
-        if (row[excelCol] !== undefined && row[excelCol] !== null) {
-          mapped[schemaField] = row[excelCol];
+
+      // ✅ Robust case-insensitive header matching
+      Object.keys(row).forEach((excelKey) => {
+        const normalizedKey = excelKey.trim().toLowerCase();
+        const schemaField = COLUMN_MAP[normalizedKey];
+        if (schemaField && (row[excelKey] !== undefined && row[excelKey] !== null)) {
+          mapped[schemaField] = row[excelKey];
         }
-      }
+      });
 
       mapped.mediaName = mapped.mediaName || `Media-${excelRow}`;
 
@@ -3208,8 +3207,8 @@ const uploadExcel = async (req, res) => {
       if (!mapped.state) missing.push("State");
       if (!mapped.city) missing.push("City");
       if (!mapped.width) missing.push("Width");
-      if (!mapped.height) missing.push("Height (Hight)");
-      if (!mapped.mediaType) missing.push("Media Name (type)");
+      if (!mapped.height) missing.push("Height");
+      if (!mapped.mediaType) missing.push("Media Type");
 
       if (missing.length) {
         results.errors.push({
@@ -3220,23 +3219,31 @@ const uploadExcel = async (req, res) => {
         continue;
       }
 
-      mapped.width = Math.floor(mapped.width);
-      mapped.height = Math.floor(mapped.height);
+      mapped.width = Math.floor(Number(mapped.width) || 0);
+      mapped.height = Math.floor(Number(mapped.height) || 0);
       mapped.totalSqFt = Math.floor((mapped.width * mapped.height).toFixed(2));
       mapped.excelRowNumber = excelRow;
 
       // ── Assign unique mediaId from in-memory counter ──
       mapped.mediaId = `${prefix}MED#${nextNumber}`;
-      mapped.createdAt = nowIST();
-      mapped.updatedAt = nowIST();
-      nextNumber++; // increment for next row
+
+      // ✅ Reversed index-based offset: first row gets HIGHEST timestamp
+      // so it appears at the TOP of the dashboard (sort: { updatedAt: -1 })
+      const rowTimestamp = new Date(today.getTime() + (rows.length - index));
+      mapped.createdAt = rowTimestamp;
+      mapped.updatedAt = rowTimestamp;
+
+      nextNumber++;
       // ─────────────────────────────────────────────────
 
-      const { mediaCode, ...dataToInsert } = mapped;
+      const { mediaCode, createdAt, mediaId, ...dataToUpdate } = mapped;
       bulkOps.push({
         updateOne: {
           filter: { mediaCode },
-          update: { $setOnInsert: dataToInsert },
+          update: {
+            $set: dataToUpdate,
+            $setOnInsert: { createdAt, mediaId },
+          },
           upsert: true,
         },
       });

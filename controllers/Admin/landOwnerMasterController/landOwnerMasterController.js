@@ -82,7 +82,7 @@ const syncLandOwnerToMedia = async (landOwner, session) => {
     });
 
     if (changed) {
-      await media.save({ session });
+      await media.save({ session, timestamps: false });
     }
   }
 };
@@ -1046,7 +1046,7 @@ const landOwnerSiteFilter = async (req, res) => {
       overDue: wantOverDue,
     } = req.body || {};
  
-    const today = new Date();
+    const today = nowIST();
     today.setUTCHours(0, 0, 0, 0);
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
@@ -1055,7 +1055,7 @@ const landOwnerSiteFilter = async (req, res) => {
     const parsedMonthFilter = parseSiteFilterMonthParam(monthFilter);
     const referenceDate = parsedMonthFilter
       ? new Date(parsedMonthFilter.year, parsedMonthFilter.month - 1, 1)
-      : new Date();
+      : nowIST();
     const referenceYear = referenceDate.getFullYear();
     const referenceMonthIdx = referenceDate.getMonth();
     const monthFilterApplied = parsedMonthFilter

@@ -40,7 +40,7 @@ const MediaSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    fullAddress: {
+    location: {
       type: String,
       required: true,
       trim: true,
@@ -68,11 +68,6 @@ const MediaSchema = new mongoose.Schema(
     },
 
     // ── Fields to be filled later (not required here) ─────────
-    location: {
-      type: String,
-      trim: true,
-      default: null,
-    },
     numberOfLandOwners: {
       type: Number,
       min: 1,
@@ -123,7 +118,7 @@ const MediaSchema = new mongoose.Schema(
     },
   },
   {
-    timestamps: true,
+    timestamps: false,
    // separate collection — won't touch MediaOnboarding
   },
 );
@@ -135,4 +130,4 @@ MediaSchema.pre("save", function () {
   }
 });
 
-module.exports = mongoose.model("MediaOnboarding", MediaSchema);
+module.exports = mongoose.model("MediaUpload", MediaSchema);

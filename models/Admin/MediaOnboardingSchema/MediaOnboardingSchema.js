@@ -1323,7 +1323,7 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
   const activeSites = await this.find({
     status: 1,
     "rentalPayment.billingStartDate": { $ne: null },
-  }).select("rentalPayment mediaName landOwners");
+  }).select("rentalPayment mediaName landOwners updatedAt");
 
   let updatedCount = 0;
   const debugLog = [];
