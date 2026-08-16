@@ -885,10 +885,12 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
     const inferredWithGst = expectedGstPerCycle > 0 ? 0 : null;
     // ✅ FIXED: Only calculate cycleGstAmount if withGst is NOT 2 (Without GST)
     if (!(matchedRealDue && Number(matchedRealDue.withGst) === 2)) {
+      // ✅ UPDATED — resolveExpectedGstForCycle already handles fallback to site level if needed,
+      // but ensure we pick the best source here if unpaidGstRow exists.
       cycleGstAmount = paidGstRow
         ? 0
         : unpaidGstRow
-          ? Number(unpaidGstRow.gstAmount || 0)
+          ? Number(unpaidGstRow.gstAmount || expectedGstPerCycle || 0)
           : expectedGstPerCycle;
     }
 
@@ -3310,7 +3312,8 @@ for (const media of results) {
                else if (siteGst) gstFlag = 1;
            }
 
-           if (gstFlag === 1) {
+           if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+               // ✅ UPDATED — fallback to site-level share if owner amount is missing
                const ownerCount = (mediaObj.landOwners || []).length || 1;
                resolvedGstAmount = Number(mediaObj.rentalPayment?.gstAmount || 0) / ownerCount;
            } else {
@@ -3458,7 +3461,8 @@ for (const media of results) {
                 else if (siteGst) gstFlag = 1;
             }
 
-            if (gstFlag === 1 && Number(mediaObj.rentalPayment?.gstApplicable) === 1) {
+            if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+              // ✅ UPDATED — fallback to site-level share if owner amount is missing
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               ownerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / ownerCount;
             } else if (Number(owner.gstApplicable) === 1) {
@@ -3606,8 +3610,8 @@ latestLedger = latestLedger.sort((a, b) => {
                 else if (siteGst) gstFlag = 1;
               }
 
-              if (gstFlag === 1) {
-                // site-level GST is authoritative
+              if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+                // site-level GST is authoritative OR owner-level but site-level amount is present
                 if (Number(mediaObj.rentalPayment?.gstApplicable || 0) === 1) {
                   gstAmount = Number(mediaObj.rentalPayment?.gstAmount || 0);
                 }
@@ -5059,9 +5063,9 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             }
 
             if (
-              gstFlag === 1 &&
-              Number(media.rentalPayment?.gstApplicable) === 1
+              gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
             ) {
+              // ✅ UPDATED — fallback to site-level share if owner amount is missing
               const ownerCount = matchingLandOwners.length || 1;
               realGstAmount =
                 Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
@@ -5145,8 +5149,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             }
 
             if (
-              gstFlag === 1 &&
-              Number(media.rentalPayment?.gstApplicable) === 1
+              gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
             ) {
               const ownerCount = matchingLandOwners.length || 1;
               directGstAmount =
@@ -5370,8 +5373,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           }
 
           if (
-            gstFlag === 1 &&
-            Number(media.rentalPayment?.gstApplicable) === 1
+            gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
           ) {
             const ownerCount = matchingLandOwners.length || 1;
             ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
