@@ -2173,15 +2173,42 @@ const landOwnerSiteFilter = async (req, res) => {
       includeApprovalSite || includePendingSites || includePastPending || includeOverDue;
     const isAnyFilterActive = needsLedgerFields || needsRentalStatusFields;
 
+    // let ownerFilter = {};
+     const genericSearchRegex =
+      search && search.trim() !== "" ? new RegExp(search.trim(), "i") : null;
+    const mediaSearchRegex =
+      req.body?.mediaSearch && req.body.mediaSearch.trim() !== ""
+        ? new RegExp(req.body.mediaSearch.trim(), "i")
+        : null;
+    // combined regex used against media docs — either explicit
+    // mediaSearch, or fall back to the generic `search` term
+    const effectiveMediaSearchRegex = mediaSearchRegex || genericSearchRegex;
+
     let ownerFilter = {};
     if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
       ownerFilter._id = { $in: landOwnerMasterIds };
-    } else if (search && search.trim() !== "") {
-      const searchRegex = new RegExp(search.trim(), "i");
+    } else if (genericSearchRegex) {
+      // ✅ ADDED — first, find owner ids matching mediaName/mediaCode
+      // (the "apprisal 11" case), so a media-name search still
+      // resolves to the correct owner(s) instead of coming back empty.
+      const mediaMatchDocs = await MediaOnboarding.find(
+        { $or: [{ mediaName: genericSearchRegex }, { mediaCode: genericSearchRegex }] },
+        "landOwners.landOwnerMasterId",
+      ).lean();
+      const ownerIdsFromMediaMatch = new Set();
+      mediaMatchDocs.forEach((m) => {
+        (m.landOwners || []).forEach((o) => {
+          if (o.landOwnerMasterId) ownerIdsFromMediaMatch.add(String(o.landOwnerMasterId));
+        });
+      });
+
       ownerFilter.$or = [
-        { name: searchRegex },
-        { panNumber: searchRegex },
-        { aadharCardNumber: searchRegex },
+        { name: genericSearchRegex },
+        { panNumber: genericSearchRegex },
+        { aadharCardNumber: genericSearchRegex },
+        ...(ownerIdsFromMediaMatch.size > 0
+          ? [{ _id: { $in: Array.from(ownerIdsFromMediaMatch) } }]
+          : []),
       ];
     }
 
@@ -2222,7 +2249,16 @@ const landOwnerSiteFilter = async (req, res) => {
         : "");
 
     const relatedMediaDocs = await MediaOnboarding.find(
-      { "landOwners.landOwnerMasterId": { $in: requestedOwnerIds } },
+      {
+        "landOwners.landOwnerMasterId": { $in: requestedOwnerIds },
+        // ✅ CHANGED — uses effectiveMediaSearchRegex so a plain
+        // `search` term (matched to media name/code) also narrows
+        // which sites show up under the resolved owner(s), not just
+        // an explicit `mediaSearch` param.
+        ...(effectiveMediaSearchRegex
+          ? { $or: [{ mediaName: effectiveMediaSearchRegex }, { mediaCode: effectiveMediaSearchRegex }] }
+          : {}),
+      },
       mediaProjection,
     ).lean();
 
