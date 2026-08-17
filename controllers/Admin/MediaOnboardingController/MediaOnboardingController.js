@@ -390,10 +390,10 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
     return { currentBaseRent: incomingAmount, rentActuallyChanged: false };
   }
 
-  // Carry forward existing history (deep-copy so Mongoose isn't confused).
+  // Carry forward existing history (deep-copy safely without losing Date objects).
   let history = existingMedia
-    ? JSON.parse(
-        JSON.stringify(existingMedia.rentalPayment?.rentalAmountHistory ?? []),
+    ? (existingMedia.rentalPayment?.rentalAmountHistory || []).map((h) =>
+        h.toObject ? h.toObject() : { ...h },
       )
     : [];
 
@@ -422,6 +422,7 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
     // Same amount → no new entry, rentActuallyChanged stays false.
   }
 
+  history.sort((a, b) => b.updatedAt - a.updatedAt);
   mediaData.rentalPayment.rentalAmountHistory = history;
   return { currentBaseRent: incomingAmount, rentActuallyChanged };
 };
@@ -1343,10 +1344,8 @@ const applyAppraisalRentIfDuent = (
   let history = Array.isArray(mediaData.rentalPayment.rentalAmountHistory)
     ? mediaData.rentalPayment.rentalAmountHistory
     : existingMedia
-      ? JSON.parse(
-          JSON.stringify(
-            existingMedia.rentalPayment?.rentalAmountHistory ?? [],
-          ),
+      ? (existingMedia.rentalPayment?.rentalAmountHistory || []).map((h) =>
+          h.toObject ? h.toObject() : { ...h },
         )
       : [];
 
@@ -1356,6 +1355,7 @@ const applyAppraisalRentIfDuent = (
     updatedAt: nowIST(),
   });
 
+  history.sort((a, b) => b.updatedAt - a.updatedAt);
   mediaData.rentalPayment.rentalAmountHistory = history;
   return true;
 };
@@ -2951,6 +2951,9 @@ const updateAgreement = async (req, res) => {
           updatedAt: nowIST(),
         });
 
+        // Sort rentalAmountHistory by updatedAt DESC
+        rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
+
         media.rentalPayment.totalRentalAmount = activeTotalRentalAmount;
         media.rentalPayment.rentalAmountHistory = rentalAmountHistory;
         // NOTE: gstAmount, tdsAmount, netPayable, ownerPayments are intentionally
@@ -2997,6 +3000,7 @@ const mediaList = async (req, res) => {
       status,
       search,
       landOwnerName,
+      landOwnerMasterId,
     } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -3034,7 +3038,18 @@ const mediaList = async (req, res) => {
         ? { $in: mediaType }
         : mediaType;
     }
-    if (landOwnerName) {
+if (landOwnerMasterId) {
+      const idList = Array.isArray(landOwnerMasterId)
+        ? landOwnerMasterId
+        : [landOwnerMasterId];
+      const validIds = idList
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validIds.length > 0) {
+        filter["landOwners.landOwnerMasterId"] = { $in: validIds };
+      }
+    } else if (landOwnerName) {
       const nameList = Array.isArray(landOwnerName)
         ? landOwnerName
         : [landOwnerName];
@@ -3104,6 +3119,15 @@ const mediaList = async (req, res) => {
       .limit(pageSize)
       .lean();
 
+    // ✅ Sort rentalAmountHistory by updatedAt DESC for each media item
+    mediaListData.forEach((item) => {
+      if (item.rentalPayment?.rentalAmountHistory) {
+        item.rentalPayment.rentalAmountHistory.sort(
+          (a, b) => b.updatedAt - a.updatedAt
+        );
+      }
+    });
+
     // ===============================
     // AGGREGATION FOR STATISTICS
     // ===============================
@@ -3159,9 +3183,10 @@ const allLandOwnersForNameFilter = await LandOwnerMaster.find({})
   .sort({ updatedAt: -1 })
   .lean();
 
-const landOwnerNameFilter = allLandOwnersForNameFilter.map(
-  (item) => item.name,
-);
+const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
+  id: item._id,
+  name: item.name,
+}));
     return successResponse(
       res,
       "Media list fetched successfully",
@@ -3201,6 +3226,13 @@ const getMediaById = async (req, res) => {
     // Check if media exists
     if (!mediaData) {
       return errorResponse(res, "Media not found", null, 404);
+    }
+
+    // ✅ Sort rentalAmountHistory by updatedAt DESC
+    if (mediaData.rentalPayment?.rentalAmountHistory) {
+      mediaData.rentalPayment.rentalAmountHistory.sort(
+        (a, b) => b.updatedAt - a.updatedAt
+      );
     }
 
     // Return success response with media data

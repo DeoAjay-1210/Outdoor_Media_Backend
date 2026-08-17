@@ -602,7 +602,13 @@ const landOwnerSave = async (req, res) => {
 };
 const landOwnerList = async (req, res) => {
   try {
-    const { pageNumber = 1, count = 10, search, landOwnerName } = req.body;
+    const {
+      pageNumber = 1,
+      count = 10,
+      search,
+      landOwnerName,
+      landOwnerMasterId, // ✅ ADDED — exact-id filter, takes priority over landOwnerName
+    } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
@@ -618,23 +624,35 @@ const landOwnerList = async (req, res) => {
         { aadharCardNumber: searchRegex },
       ];
     }
-    if (landOwnerName && landOwnerName.trim() !== "") {
+
+    // ✅ ADDED — exact match by _id. Preferred over landOwnerName since
+    // an id unambiguously targets ONE owner, even when two different
+    // owners share the same name (e.g. "Land 1", "Land 1").
+    if (landOwnerMasterId && mongoose.Types.ObjectId.isValid(landOwnerMasterId)) {
+      if (!filter.$and) filter.$and = [];
+      filter.$and.push({ _id: new mongoose.Types.ObjectId(landOwnerMasterId) });
+    } else if (landOwnerName && landOwnerName.trim() !== "") {
+      // ✅ UNCHANGED — kept for backward compatibility with any caller
+      // still sending the old name-based filter.
       const nameRegex = new RegExp(landOwnerName.trim(), "i");
       if (!filter.$and) filter.$and = [];
       filter.$and.push({ name: nameRegex });
     }
 
-    // ✅ FIXED — every landowner's name, one entry per record, no
-    // grouping/dedup of any kind. Duplicate names (e.g. two different
-    // "Land 1" landowners) both show up.
+    // ✅ CHANGED — landOwnerNameFilter now returns { id, name } pairs
+    // instead of plain name strings, so the frontend can send back an
+    // unambiguous landOwnerMasterId instead of a name that might match
+    // more than one owner. Duplicate names still both appear since
+    // they carry different ids.
     const allLandOwnersForNameFilter = await LandOwnerMaster.find({})
       .select("name updatedAt")
       .sort({ updatedAt: -1 })
       .lean();
 
-    const landOwnerNameFilter = allLandOwnersForNameFilter.map(
-      (item) => item.name,
-    );
+    const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
+      id: item._id,
+      name: item.name,
+    }));
 
     const totalCount = await LandOwnerMaster.countDocuments(filter);
 
