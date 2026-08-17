@@ -164,8 +164,18 @@ const LandOwnerMasterSchema = new mongoose.Schema(
         shareAmount: { type: Number, default: 0, min: 0 },
         cashAmount: { type: Number, default: 0, min: 0 },
         onlineAmount: { type: Number, default: 0, min: 0 },
-          gstAmount: { type: Number, default: 0, min: 0 },              // ← ADDED, needed to sum totalGstAmount
-        netPayableToOwner: { type: Number, default: 0, min: 0 }, 
+          // gstAmount: { type: Number, default: 0, min: 0 },              // ← ADDED, needed to sum totalGstAmount
+          tdsApplicable: { type: Number, enum: [0, 1], default: 0 },
+    tdsPercentage: { type: Number, min: 0, max: 100, default: 0 },
+    tdsAmount: { type: Number, min: 0, default: 0 },
+
+    // ✅ NEW — GST is per-site now, same reasoning as TDS above.
+    // gstAmount already existed; adding the applicable/percentage
+    // flags so the UI can show "why" this site has a GST amount.
+    gstApplicable: { type: Number, enum: [0, 1], default: 0 },
+    gstPercentage: { type: Number, min: 0, default: 0 },
+    gstAmount: { type: Number, default: 0, min: 0 },
+          netPayableToOwner: { type: Number, default: 0, min: 0 }, 
         updatedAt: { type: Date, default: null },
       },
     ],

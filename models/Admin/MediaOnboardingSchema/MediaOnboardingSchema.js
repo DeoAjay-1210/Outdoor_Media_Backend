@@ -408,7 +408,7 @@ const MediaSchema = new mongoose.Schema(
     status: {
       type: Number,
       enum: [1, 2, 3], // 1=Active 2=InActive 3=Hold
-      default: 1,
+      default: 2,
     },
     numberOfLandOwners: {
       type: Number,
@@ -701,6 +701,16 @@ const MediaSchema = new mongoose.Schema(
             shareAmount: { type: Number, default: 0, min: 0 },
             cashAmount: { type: Number, default: 0, min: 0 },
             onlineAmount: { type: Number, default: 0, min: 0 },
+              tdsApplicable: { type: Number, enum: [0, 1], default: 0 },
+    tdsPercentage: { type: Number, min: 0, max: 100, default: 0 },
+    tdsAmount: { type: Number, min: 0, default: 0 },
+
+    // ✅ NEW — GST is per-site now, same reasoning as TDS above.
+    // gstAmount already existed; adding the applicable/percentage
+    // flags so the UI can show "why" this site has a GST amount.
+    gstApplicable: { type: Number, enum: [0, 1], default: 0 },
+    gstPercentage: { type: Number, min: 0, default: 0 },
+    gstAmount: { type: Number, default: 0, min: 0 },
             updatedAt: { type: Date, default: null },
           },
         ],
