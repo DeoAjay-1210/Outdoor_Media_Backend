@@ -4431,6 +4431,7 @@ exports.getLedgerHistory = async (req, res) => {
         ownerMasterIdFilter,
         rangeStart,
         rangeEnd,
+        autoCurrentMonthYM,
       }));
     }
 
@@ -4572,8 +4573,13 @@ exports.getLedgerHistory = async (req, res) => {
 
 function buildSingleMediaHistoryBlock(
   media,
-   { year, ownerMasterIdFilter, rangeStart, rangeEnd },
+   { year, ownerMasterIdFilter, rangeStart, rangeEnd, autoCurrentMonthYM },
 ) {
+  // ✅ NEW — cap the walk range by "now" to avoid synthetic future cycles
+  const cycleWalkLimit = (rangeEnd && autoCurrentMonthYM)
+    ? (isYMInRange(rangeEnd, null, autoCurrentMonthYM) ? rangeEnd : autoCurrentMonthYM)
+    : (rangeEnd || autoCurrentMonthYM);
+
   // ── landOwnerMasterId -> matching embedded landOwners._id set ──
   const allLandOwners = media.landOwners || [];
   const matchingLandOwners = ownerMasterIdFilter
@@ -4605,7 +4611,7 @@ function buildSingleMediaHistoryBlock(
       city: media.city,
       landOwners: [],
       ledgerHistory: [],
-       rentalDueEntries: buildAutoRentalDueEntries(media, rangeEnd || null),
+       rentalDueEntries: buildAutoRentalDueEntries(media, cycleWalkLimit || null),
       gstPayment: false,
       tdsPayment: false,
       outstanding: emptyOutstanding,
@@ -4707,7 +4713,7 @@ function buildSingleMediaHistoryBlock(
 
   // ✅ used for outstanding/currentBillDate/auto-cycle-walk reference —
   // the upper bound of the resolved range.
-  const effectiveMonthYear = rangeEnd || null;
+  const effectiveMonthYear = cycleWalkLimit || null;
 
   // ✅ owner filter applied to every month bucket's raw entries up front
   if (ownerMasterIdFilter) {
