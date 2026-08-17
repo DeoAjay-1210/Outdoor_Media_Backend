@@ -5744,5 +5744,120 @@ const outstanding = computeOutstandingSummary(media, effectiveMonthYear);
       media.rentalPayment?.rentalOutstandingHistory || [],
   };
 }
+
+
+
+function getOwnerWiseOutstanding(media, requestedMonthYear) {
+  const owners = media.landOwners || [];
+  const result = {};
+  owners.forEach((o) => {
+    result[String(o._id)] = {
+      currentRentPending: 0,
+      pastRentPending: 0,
+      currentGstPending: 0,
+      pastGstPending: 0,
+    };
+  });
+
+  if (media.status !== 1 || owners.length === 0) return result;
+
+  const cycles = getAllDueCycles(media, requestedMonthYear);
+  if (cycles.length === 0) return result;
+
+  const liveCycleKey = `${cycles[cycles.length - 1].getUTCFullYear()}-${cycles[cycles.length - 1].getUTCMonth()}`;
+  const expectedGstPerCycle = resolveExpectedGstForCycle(media);
+  const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
+
+  cycles.forEach((cycleDate) => {
+    const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
+    const isLiveCycle = cycleKey === liveCycleKey;
+    const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+
+    // ── best-match rentalDue for this cycle (Approved wins) ──
+    const matchedDue = (media.rentalDue || [])
+      .filter((d) => d.dueMonth === cycleMonthLabel)
+      .sort((a, b) => {
+        const sA = Number(a.approvalStatus || 0);
+        const sB = Number(b.approvalStatus || 0);
+        if (sA === 3 && sB !== 3) return -1;
+        if (sB === 3 && sA !== 3) return 1;
+        return new Date(b.updatedAt) - new Date(a.updatedAt);
+      })[0];
+    const effectiveWithGst =
+      matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
+
+    // ── RENT — identical rule to getUnpaidRentForCycle(), per owner ──
+    owners.forEach((owner) => {
+      const paymentCategory = Number(owner.paymentCategory || 1);
+      getRequiredModesShared(paymentCategory).forEach((mode) => {
+        const isPaid = isOwnerModePaidForCycle(
+          media, owner, mode, cycleDate, isLiveCycle,
+        );
+        if (isPaid) return;
+
+        let modeAmount =
+          mode === "Cash"
+            ? Number(owner.cashAmount || owner.shareAmount || 0)
+            : Number(owner.onlineAmount || owner.shareAmount || 0);
+
+        if (Number(effectiveWithGst) === 2) {
+          let gstFlag = Number(media.gstApplicableFlag || 0);
+          if (gstFlag === 0) {
+            const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+            const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1);
+            if (ownerGstAny) gstFlag = 2;
+            else if (siteGst) gstFlag = 1;
+          }
+          let ownerGst = 0;
+          if (gstFlag === 1) {
+            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1);
+          } else {
+            ownerGst = Number(owner.gstAmount || 0);
+          }
+          if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
+        }
+
+        const bucket = result[String(owner._id)];
+        if (!bucket) return;
+        if (isLiveCycle) bucket.currentRentPending += modeAmount;
+        else bucket.pastRentPending += modeAmount;
+      });
+    });
+
+    // ── GST — identical rule to getGstDueForCycles(), per owner ──
+    if (matchedDue && Number(matchedDue.withGst) === 2) return; // GST folded into rent above, not tracked separately
+
+    const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
+    const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
+
+    if (rowsForMonth.length > 0) {
+      rowsForMonth.forEach((row) => {
+        if (isRowPaid(row)) return;
+        const amt = Number(row.gstAmount || 0);
+        const targetOwnerIds = row.ownerId
+          ? [String(row.ownerId)]
+          : owners.map((o) => String(o._id));
+        const share = row.ownerId ? amt : amt / (targetOwnerIds.length || 1);
+        targetOwnerIds.forEach((ownerId) => {
+          const bucket = result[ownerId];
+          if (!bucket) return;
+          if (isLiveCycle) bucket.currentGstPending += share;
+          else bucket.pastGstPending += share;
+        });
+      });
+    } else if (expectedGstPerCycle > 0) {
+      const share = expectedGstPerCycle / (owners.length || 1);
+      owners.forEach((owner) => {
+        const bucket = result[String(owner._id)];
+        if (!bucket) return;
+        if (isLiveCycle) bucket.currentGstPending += share;
+        else bucket.pastGstPending += share;
+      });
+    }
+  });
+
+  return result;
+}
 exports.computeOutstandingSummary = computeOutstandingSummary;
 exports.dedupeGstBalanceHistory = dedupeGstBalanceHistory; // ✅ ADDED — export so landOwnerController can dedupe before computing pending totals
+exports.getOwnerWiseOutstanding = getOwnerWiseOutstanding; // ✅ ADDED
