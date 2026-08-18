@@ -5468,15 +5468,12 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 
           const resolvedOnlineAmountVirtual =
             isSplitCategoryVirtual && mode === "Online"
-              ? Number(
-                  matchedDue?.onlineAmount ?? owner.onlineAmount ?? 0,
-                ) + (appliesGstToThisRow ? virtualGstAmount : 0)
+              ? Number(matchedDue?.onlineAmount ?? owner.onlineAmount ?? 0)
               : 0;
 
           const resolvedShareAmountVirtual = isSplitCategoryVirtual
             ? 0
-            : Number(matchedDue?.shareAmount ?? owner.shareAmount ?? 0) +
-              (appliesGstToThisRow ? virtualGstAmount : 0);
+            : Number(matchedDue?.shareAmount ?? owner.shareAmount ?? 0);
 
           result.push({
             landOwnerId: owner._id,
