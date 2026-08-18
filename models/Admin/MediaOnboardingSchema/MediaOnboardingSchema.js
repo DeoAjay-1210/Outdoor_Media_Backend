@@ -485,6 +485,9 @@ const MediaSchema = new mongoose.Schema(
         type: Date,
         required: true,
       },
+      previousBillGenerateDate: {
+        type: Date,
+      },
       nextBillingDate: {
         type: Date,
       },
@@ -896,6 +899,12 @@ const MediaSchema = new mongoose.Schema(
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 1 — Total Sq Ft
 // ─────────────────────────────────────────────────────────────
+MediaSchema.post("init", function (doc) {
+  if (doc.rentalPayment) {
+    doc._originalLastBillPaidDate = doc.rentalPayment.lastBillPaidDate;
+  }
+});
+
 MediaSchema.pre("save", function () {
   this.totalSqFt = this.width * this.height;
 });
@@ -1254,9 +1263,71 @@ MediaSchema.pre("save", function () {
         ? Number(rp.customPaymentFrequency) || 1
         : frequencyMap[Number(rp.paymentFrequency)] || 1;
 
-    const nextDate = new Date(rp.lastBillPaidDate);
+    // ✅ NEW: Centralized Cyclic logic
+    if (this.isNew) {
+      if (!rp.previousBillGenerateDate) {
+        rp.previousBillGenerateDate = rp.lastBillPaidDate;
+      }
+    } else if (
+      this.isModified("rentalPayment.lastBillPaidDate") &&
+      !this.isModified("rentalPayment.previousBillGenerateDate")
+    ) {
+      if (this._originalLastBillPaidDate) {
+        const oldDate = new Date(this._originalLastBillPaidDate);
+        const newDate = new Date(rp.lastBillPaidDate);
+        const diffDays = Math.abs(newDate - oldDate) / (1000 * 60 * 60 * 24);
+
+        // threshold to detect cycle jump vs manual tweak
+        if (diffDays > 15) {
+          rp.previousBillGenerateDate = oldDate;
+        }
+      }
+    }
+
+    // ✅ NEW: Auto-catchup logic for backdated entries
+    const now = new Date();
+    const currentMonthKey = `${now.getUTCFullYear()}-${now.getUTCMonth()}`;
+
+    let cursor = new Date(rp.lastBillPaidDate);
+    let nextDate = new Date(cursor);
     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
+
+    let safety = 0;
+    while (safety < 240) {
+      // If the NEXT billing date month has already started, advance.
+      const nextMonthStarted =
+        nextDate.getUTCFullYear() < now.getUTCFullYear() ||
+        (nextDate.getUTCFullYear() === now.getUTCFullYear() && nextDate.getUTCMonth() <= now.getUTCMonth());
+
+      if (!nextMonthStarted) break;
+
+      rp.previousBillGenerateDate = new Date(cursor);
+      cursor = new Date(nextDate);
+      nextDate = new Date(cursor);
+      nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
+
+      rp.lastBillPaidDate = cursor;
+      safety++;
+    }
+
     rp.nextBillingDate = nextDate;
+
+    // ✅ NEW: Sync rentalDue entry if lastBillPaidDate was manually tweaked
+    if (!this.isNew && this.isModified("rentalPayment.lastBillPaidDate")) {
+      const newLBP = new Date(rp.lastBillPaidDate);
+      const monthNames = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+      ];
+      const dueMonthLabel = `${monthNames[newLBP.getMonth()]} ${newLBP.getFullYear()}`;
+
+      const matchingDue = (this.rentalDue || []).find(
+        (d) => d.dueMonth === dueMonthLabel
+      );
+      if (matchingDue) {
+        matchingDue.dueDate = newLBP;
+      }
+    }
   }
 });
 // ─────────────────────────────────────────────────────────────
@@ -1362,6 +1433,7 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
         : CYCLE_MONTHS_BY_FREQUENCY[paymentFrequency] || 1;
 
     let cursor = new Date(lastBillPaidDate);
+    let previousCursor = new Date(lastBillPaidDate);
     let advanced = false;
     let guard = 0;
 
@@ -1376,12 +1448,14 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
         (nextCycle.getUTCFullYear() === asOfDate.getUTCFullYear() &&
           nextCycle.getUTCMonth() <= asOfDate.getUTCMonth());
       if (!nextCycleMonthStarted) break;
+      previousCursor = new Date(cursor);
       cursor = nextCycle;
       advanced = true;
       guard++;
     }
 
     if (advanced) {
+      media.rentalPayment.previousBillGenerateDate = previousCursor;
       media.rentalPayment.lastBillPaidDate = cursor;
       media.rentalPayment.nextBillingDate = addMonthsUTC(cursor, cycleMonths);
       await media.save({ timestamps: false });

@@ -5298,12 +5298,20 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           // ✅ FIXED — if the real entry already has a withGst value (1 or 2),
           // respect it. Otherwise, use matchedGstBalanceRow's value,
           // or fallback to landOwner configuration.
-          const realWithGst = (realEntry.withGst !== undefined && realEntry.withGst !== null)
+          let realWithGst = (realEntry.withGst !== undefined && realEntry.withGst !== null)
             ? Number(realEntry.withGst)
             : (matchedGstBalanceRow
                 ? (matchedGstBalanceRow.withGst ?? 1)
                 : (isGstApplicableForOwner(owner) ? 2 : 0)
               );
+
+          // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
+          // Also, if there's a tracked GST record (withGst: 1), favor that for the rent row too.
+          if (matchedGstBalanceRow && Number(matchedGstBalanceRow.withGst) === 1) {
+            realWithGst = 1;
+          } else if (Number(realWithGst) === 2 && Number(matchedDue?.approvalStatus) !== 3) {
+            realWithGst = 1;
+          }
 
           // ✅ NEW — calculate gstAmount for display
           let realGstAmount = Number(
@@ -5621,7 +5629,20 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
       );
 
       const virtualWithGst1Entries = matchingLandOwners
-        .filter((owner) => !withGst1OwnerIds.has(String(owner._id)))
+        .filter((owner) => {
+          if (withGst1OwnerIds.has(String(owner._id))) return false;
+
+          // ✅ FIXED — If this month is already handled as Direct GST in the main ledger,
+          // don't show a virtual Tracked GST row.
+          const isDirectGst = ledgerFinal.some(
+            (e) =>
+              String(e.landOwnerId) === String(owner._id) &&
+              Number(e.withGst) === 2,
+          );
+          if (isDirectGst) return false;
+
+          return isGstApplicableForOwner(owner);
+        })
         .map((owner) => {
           let ownerGst = 0;
           let gstFlag = Number(media.gstApplicableFlag || 0);
@@ -5752,23 +5773,52 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
       cycleDate,
     );
 
-    const withGst1Final = matchingLandOwners.map((owner) => ({
-      landOwnerId: owner._id,
-      landOwnerName: owner.name,
-      utrNumber: "",
-      date: null,
-      status: 0,
-      withGst: 1,
-      month: pendingMonthName,
-      cycle: cycleDate,
-      rentalDueId: null,
-      index: null,
-      updatedBy: "",
-      updatedAt: null,
-      isPaid: false,
-      gstAmount: 0,
-      isVirtual: true,
-    }));
+    const withGst1Final = matchingLandOwners
+      .filter((owner) => {
+        const isDirectGst = ledgerFinal.some(
+          (e) =>
+            String(e.landOwnerId) === String(owner._id) &&
+            Number(e.withGst) === 2,
+        );
+        if (isDirectGst) return false;
+        return isGstApplicableForOwner(owner);
+      })
+      .map((owner) => {
+        let ownerGst = 0;
+        let gstFlag = Number(media.gstApplicableFlag || 0);
+        if (gstFlag === 0) {
+          const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+          const ownerGstArr = (media.landOwners || []).some(
+            (o) => Number(o.gstApplicable) === 1,
+          );
+          if (ownerGstArr) gstFlag = 2;
+          else if (siteGst) gstFlag = 1;
+        }
+        if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
+          const ownerCount = matchingLandOwners.length || 1;
+          ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+        } else if (Number(owner.gstApplicable) === 1) {
+          ownerGst = Number(owner.gstAmount || 0);
+        }
+
+        return {
+          landOwnerId: owner._id,
+          landOwnerName: owner.name,
+          utrNumber: "",
+          date: null,
+          status: 0,
+          withGst: 1,
+          month: pendingMonthName,
+          cycle: cycleDate,
+          rentalDueId: null,
+          index: null,
+          updatedBy: "",
+          updatedAt: null,
+          isPaid: false,
+          gstAmount: ownerGst,
+          isVirtual: true,
+        };
+      });
 
     const syntheticMonthBucket = {
       month: pendingMonthName,
@@ -5821,23 +5871,52 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
       const tdsBalanceHistoryForMonth = getTdsBalanceHistoryForMonth(cycleMonthName, cycleYear, cycleDate);
       const ledgerFinal = buildModeSplitLedger([], 2, cycleMonthName, cycleDate);
 
-      const withGst1Final = matchingLandOwners.map((owner) => ({
-        landOwnerId: owner._id,
-        landOwnerName: owner.name,
-        utrNumber: "",
-        date: null,
-        status: 0,
-        withGst: 1,
-        month: cycleMonthName,
-        cycle: cycleDate,
-        rentalDueId: null,
-        index: null,
-        updatedBy: "",
-        updatedAt: null,
-        isPaid: false,
-        gstAmount: 0,
-        isVirtual: true,
-      }));
+      const withGst1Final = matchingLandOwners
+        .filter((owner) => {
+          const isDirectGst = ledgerFinal.some(
+            (e) =>
+              String(e.landOwnerId) === String(owner._id) &&
+              Number(e.withGst) === 2,
+          );
+          if (isDirectGst) return false;
+          return isGstApplicableForOwner(owner);
+        })
+        .map((owner) => {
+          let ownerGst = 0;
+          let gstFlag = Number(media.gstApplicableFlag || 0);
+          if (gstFlag === 0) {
+            const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+            const ownerGstArr = (media.landOwners || []).some(
+              (o) => Number(o.gstApplicable) === 1,
+            );
+            if (ownerGstArr) gstFlag = 2;
+            else if (siteGst) gstFlag = 1;
+          }
+          if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
+            const ownerCount = matchingLandOwners.length || 1;
+            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+          } else if (Number(owner.gstApplicable) === 1) {
+            ownerGst = Number(owner.gstAmount || 0);
+          }
+
+          return {
+            landOwnerId: owner._id,
+            landOwnerName: owner.name,
+            utrNumber: "",
+            date: null,
+            status: 0,
+            withGst: 1,
+            month: cycleMonthName,
+            cycle: cycleDate,
+            rentalDueId: null,
+            index: null,
+            updatedBy: "",
+            updatedAt: null,
+            isPaid: false,
+            gstAmount: ownerGst,
+            isVirtual: true,
+          };
+        });
 
       const syntheticCycleBucket = {
         month: cycleMonthName,

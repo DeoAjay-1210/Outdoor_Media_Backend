@@ -430,7 +430,7 @@ async function generateMissedEntriesForMedia(media, userName) {
     if (!Number.isNaN(lbpDate.getTime())) {
       const lbpMonthLabel = getDueMonthLabel(lbpDate);
       const matchingEntry = media.rentalDue.find(
-        (e) => e.dueMonth === lbpMonthLabel && e.approvalStatus !== 3,
+        (e) => e.dueMonth === lbpMonthLabel,
       );
       if (
         matchingEntry &&
@@ -3190,7 +3190,7 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
     {
       _id: mediaId,
       rentalDue: {
-        $elemMatch: { dueMonth: newEntry.dueMonth, approvalStatus: { $ne: 3 } },
+        $elemMatch: { dueMonth: newEntry.dueMonth },
       },
     },
     {
@@ -3202,7 +3202,7 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
       returnDocument: 'after',
       timestamps: false,
       arrayFilters: [
-        { "elem.dueMonth": newEntry.dueMonth, "elem.approvalStatus": { $ne: 3 } },
+        { "elem.dueMonth": newEntry.dueMonth },
       ],
     },
   );
@@ -4408,6 +4408,12 @@ const filteredAgreementDocVerificationHistory = (
           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
         nextBillingDate: item.rentalPayment?.nextBillingDate,
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+        previousBillGenerateDate: item.rentalPayment?.previousBillGenerateDate
+          ? formatDate(item.rentalPayment.previousBillGenerateDate)
+          : "",
+        currentBillDate: currentMonthEntry
+          ? formatDate(item.rentalPayment?.lastBillPaidDate)
+          : "",
         dueStatus: resolvedDueStatus,
         dueStatusLabel: STATUS_LABEL[resolvedDueStatus] || "",
        gstApplicableDisplay: (() => {
@@ -4606,6 +4612,8 @@ const filteredAgreementDocVerificationHistory = (
       // sweepDebugLog,
       value: {
         totalSites,
+        previousBillGenerateDate: formatDate(new Date(yr, mo - 2, 1)),
+        currentBillDate: formatDate(monthStart),
         dueThisMonth,
         dueAmountOpen,
         overDue: { siteCount: overDueSiteCount, amount: overDueAmountTotal },

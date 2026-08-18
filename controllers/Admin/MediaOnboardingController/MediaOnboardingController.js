@@ -1397,6 +1397,8 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
   nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
   const newNextBillingDate = toDateOnly(nextDate);
 
+  // ✅ NEW: store the previous cycle start
+  mediaData.rentalPayment.previousBillGenerateDate = media.rentalPayment.lastBillPaidDate;
   mediaData.rentalPayment.lastBillPaidDate = newLastBillPaidDate;
   mediaData.rentalPayment.nextBillingDate = newNextBillingDate;
 
@@ -2284,6 +2286,16 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         mediaData.rentalPayment.billingStartDate = existingBSD;
       }
 
+      // ✅ NEW — preserve previousBillGenerateDate on manual update
+      if (
+        mediaData.rentalPayment &&
+        !mediaData.rentalPayment.previousBillGenerateDate &&
+        media.rentalPayment?.previousBillGenerateDate
+      ) {
+        mediaData.rentalPayment.previousBillGenerateDate =
+          media.rentalPayment.previousBillGenerateDate;
+      }
+
       Object.keys(mediaData).forEach((key) => {
         if (!["_id", "__v", "createdAt", "updatedAt", "mediaId"].includes(key)) {
           media[key] = mediaData[key];
@@ -2291,7 +2303,6 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       });
       media.updatedAt = nowIST();
       await media.save({ timestamps: false });
-      await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
       if (media.landOwners && Array.isArray(media.landOwners)) {
         for (const savedOwner of media.landOwners) {
@@ -2441,7 +2452,6 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       mediaData.updatedAt = nowIST();
       media = new MediaOnboarding(mediaData);
       await media.save({ timestamps: false });
-       await MediaOnboarding.syncBillingCycles();
       media = await MediaOnboarding.findById(media._id).lean();
       // ✅ ADDED — same pass-2 correction as UPDATE branch.
       if (media.landOwners && Array.isArray(media.landOwners)) {
