@@ -6,6 +6,9 @@ const {
   computeOutstandingSummary,
   dedupeGstBalanceHistory,
   getOwnerWiseOutstanding,
+  calculateOverallLedgerSummary,
+  getOverallSummaryForCycle,
+  ensureRentalDueForCycles,
 } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
 // ─────────────────────────────────────────────────────────────
 // IST HELPER — same pattern as mediaOnboardingController.js.
@@ -1190,6 +1193,11 @@ const landOwnerSiteFilter = async (req, res) => {
       pastRentalPending: wantPastRentalPending,
       currentGstPending: wantCurrentGstPending,
       pastGstPending: wantPastGstPending,
+      // ✅ NEW: Overall Summary Filter Flags
+      totalLedgerAmount: wantTotalLedgerAmount,
+      totalLedgerGstAmount: wantTotalLedgerGstAmount,
+      totalLedgerPendingAmount: wantTotalLedgerPendingAmount,
+      totalGstPendingAmount: wantTotalGstPendingAmount,
     } = req.body || {};
 
     const today = nowIST();
@@ -1223,6 +1231,11 @@ const landOwnerSiteFilter = async (req, res) => {
     const includeCurrentGstPending = Number(wantCurrentGstPending) === 1;
     const includePastGstPending = Number(wantPastGstPending) === 1;
 
+    const includeTotalLedgerAmount = Number(wantTotalLedgerAmount) === 1;
+    const includeTotalLedgerGstAmount = Number(wantTotalLedgerGstAmount) === 1;
+    const includeTotalLedgerPendingAmount = Number(wantTotalLedgerPendingAmount) === 1;
+    const includeTotalGstPendingAmount = Number(wantTotalGstPendingAmount) === 1;
+
     const needsLedgerFields =
       includeCurrentLedger ||
       includePastLedger ||
@@ -1231,7 +1244,11 @@ const landOwnerSiteFilter = async (req, res) => {
       includeCurrentPendingRent ||
       includePastRentalPending ||
       includeCurrentGstPending ||
-      includePastGstPending;
+      includePastGstPending ||
+      includeTotalLedgerAmount ||
+      includeTotalLedgerGstAmount ||
+      includeTotalLedgerPendingAmount ||
+      includeTotalGstPendingAmount;
     const needsRentalStatusFields =
       includeApprovalSite ||
       includePendingSites ||
@@ -1315,15 +1332,9 @@ const landOwnerSiteFilter = async (req, res) => {
       ownerUpdatedAtById[String(o._id)] = o.updatedAt;
     });
 
-    // ✅ CHANGED — project the extra fields needed for ledger/GST
-    // computation ONLY when at least one of the new flags was
-    // requested, so the query stays light for callers who don't ask
-    // for any of this.
+    // ✅ CHANGED — always include ledger fields for overall summaries
     const mediaProjection =
-      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries" +
-      (needsLedgerFields || needsRentalStatusFields
-        ? " ledger ledgerHistory gstBalanceHistory"
-        : "");
+      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory";
 
     const relatedMediaDocs = await MediaOnboarding.find(
       {
@@ -1343,6 +1354,15 @@ const landOwnerSiteFilter = async (req, res) => {
       },
       mediaProjection,
     ).lean();
+
+    // ✅ Ensure all site cycles are processed for the requested month
+    for (const media of relatedMediaDocs) {
+      await ensureRentalDueForCycles(
+        media,
+        { year: referenceYear, month: referenceMonthIdx + 1 },
+        req.user?.userName || "Admin",
+      );
+    }
 
     const allOwnerIdsFromMedia = new Set();
     relatedMediaDocs.forEach((mediaDoc) => {
@@ -2106,6 +2126,11 @@ const landOwnerSiteFilter = async (req, res) => {
           return status === 4 || (isPastDueDate && status !== 3);
         });
 
+      const overallSummary = getOverallSummaryForCycle(mediaDoc, {
+        year: referenceYear,
+        month: referenceMonthIdx + 1,
+      });
+
       siteMap.set(String(mediaDoc._id), {
         mediaId: mediaDoc._id,
         mediaCode: mediaDoc.mediaCode,
@@ -2115,6 +2140,7 @@ const landOwnerSiteFilter = async (req, res) => {
         gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
         updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
         ownerIds: ownerIdsOnThisSite,
+        _overallSummary: overallSummary, // ✅ ADDED for filtering
         rentalStatus: {
           hasApprovedSite,
           hasPendingSite,
@@ -2286,6 +2312,10 @@ const landOwnerSiteFilter = async (req, res) => {
         pastGstPending: 0,
         currentRentPending: 0, // ✅ ADDED
         pastRentPending: 0, // ✅ ADDED
+        hasTotalLedger: false, // ✅ NEW
+        hasTotalGst: false,    // ✅ NEW
+        hasPendingLedger: false, // ✅ NEW
+        hasPendingGst: false    // ✅ NEW
       };
       // ✅ NEW: Rental Status accumulation
       const rentalStatusMatch = {
@@ -2324,6 +2354,13 @@ const landOwnerSiteFilter = async (req, res) => {
         if (site.rentalStatus.hasPastPendingSite)
           rentalStatusMatch.hasPastPending = true;
         if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
+
+        if (site._overallSummary) {
+          if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
+          if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
+          if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
+          if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
+        }
 
         if (needsLedgerFields) {
           const siteBucket = getLedgerBucketsForSite(String(site.mediaId), [
@@ -2426,7 +2463,11 @@ const landOwnerSiteFilter = async (req, res) => {
             (includePastRentalPending && combinedLedger.pastRentPending > 0) ||
             (includeCurrentGstPending &&
               combinedLedger.currentGstPending > 0) ||
-            (includePastGstPending && combinedLedger.pastGstPending > 0)
+            (includePastGstPending && combinedLedger.pastGstPending > 0) ||
+            (includeTotalLedgerAmount && combinedLedger.hasTotalLedger) ||
+            (includeTotalLedgerGstAmount && combinedLedger.hasTotalGst) ||
+            (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
+            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst)
           : false;
 
         const rentalMatch = needsRentalStatusFields
@@ -2520,6 +2561,10 @@ const landOwnerSiteFilter = async (req, res) => {
         pastGstPending: 0,
         currentRentPending: 0, // ✅ ADDED — was missing, left rentPendingSummary undefined for shared entries
         pastRentPending: 0, // ✅ ADDED
+        hasTotalLedger: false, // ✅ NEW
+        hasTotalGst: false,    // ✅ NEW
+        hasPendingLedger: false, // ✅ NEW
+        hasPendingGst: false    // ✅ NEW
       };
       // ✅ NEW: Rental Status accumulation
       const rentalStatusMatch = {
@@ -2539,6 +2584,13 @@ const landOwnerSiteFilter = async (req, res) => {
             rentalStatusMatch.hasPastPending = true;
           if (site.rentalStatus.isOverDueSite)
             rentalStatusMatch.isOverDue = true;
+
+          if (site._overallSummary) {
+            if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
+            if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
+            if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
+            if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
+          }
 
           if (needsLedgerFields) {
             const siteBucket = getLedgerBucketsForSite(
@@ -2636,7 +2688,11 @@ const landOwnerSiteFilter = async (req, res) => {
             (includePastRentalPending && combinedLedger.pastRentPending > 0) ||
             (includeCurrentGstPending &&
               combinedLedger.currentGstPending > 0) ||
-            (includePastGstPending && combinedLedger.pastGstPending > 0)
+            (includePastGstPending && combinedLedger.pastGstPending > 0) ||
+            (includeTotalLedgerAmount && combinedLedger.hasTotalLedger) ||
+            (includeTotalLedgerGstAmount && combinedLedger.hasTotalGst) ||
+            (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
+            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst)
           : false;
 
         const rentalMatch = needsRentalStatusFields
@@ -2670,41 +2726,73 @@ const landOwnerSiteFilter = async (req, res) => {
       ({ latestActivityAt, ...rest }) => rest,
     );
 
-    let overallOutstandingTotals = null;
-    if (needsLedgerFields) {
-      // computeOutstandingSummary expects { year, month } with month
-      // 1-indexed — referenceYear/referenceMonthIdx were already
-      // resolved above (from monthFilter, or "now" as the default).
-      const outstandingMonthYear = {
-        year: referenceYear,
-        month: referenceMonthIdx + 1,
-      };
+    // ✅ NEW — Filter relatedMediaDocs to only include those that passed the filters
+    const filteredMediaIds = new Set();
+    entries.forEach((entry) => {
+      (entry.sites || []).forEach((site) => {
+        if (site.mediaId) filteredMediaIds.add(String(site.mediaId));
+      });
+    });
+    const filteredMediaDocs = relatedMediaDocs.filter((doc) =>
+      filteredMediaIds.has(String(doc._id)),
+    );
 
-      overallOutstandingTotals = relatedMediaDocs.reduce(
-        (acc, mediaDoc) => {
-          const s = computeOutstandingSummary(mediaDoc, outstandingMonthYear);
-          acc.overallCurrentBaseRentDue += s.currentBaseRent;
-          acc.overallCurrentGSTDue += s.currentGSTDue;
-          acc.overallPreviousBaseRentDue += s.previousBaseRentDue;
-          acc.overallPreviousGSTDue += s.previousGSTDue;
-          acc.overallTotalOutstandingAmount += s.totalOutstandingAmount;
-          return acc;
-        },
-        {
-          overallCurrentBaseRentDue: 0,
-          overallCurrentGSTDue: 0,
-          overallPreviousBaseRentDue: 0,
-          overallPreviousGSTDue: 0,
-          overallTotalOutstandingAmount: 0,
-        },
+    // ✅ ALWAYS compute global overall totals (All sites in system)
+    const outstandingMonthYear = {
+      year: referenceYear,
+      month: referenceMonthIdx + 1,
+    };
+
+    const globalMediaDocs = await MediaOnboarding.find(
+      { status: 1 },
+      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
+    ).lean();
+
+    // ✅ ensure rentalDue exists for global docs to ensure system-wide accuracy
+    for (const media of globalMediaDocs) {
+      await ensureRentalDueForCycles(
+        media,
+        outstandingMonthYear,
+        req.user?.userName || "Admin",
       );
     }
+
+    // ✅ ensure rentalDue exists for filtered docs too (they might not be in global if they are old/inactive, though global has status:1)
+    for (const media of filteredMediaDocs) {
+      if (!globalMediaDocs.some(g => String(g._id) === String(media._id))) {
+         await ensureRentalDueForCycles(media, outstandingMonthYear, req.user?.userName || "Admin");
+      }
+    }
+
+    const overallOutstandingTotals = globalMediaDocs.reduce(
+      (acc, mediaDoc) => {
+        const s = computeOutstandingSummary(mediaDoc, outstandingMonthYear);
+        acc.overallCurrentBaseRentDue += s.currentBaseRent;
+        acc.overallCurrentGSTDue += s.currentGSTDue;
+        acc.overallPreviousBaseRentDue += s.previousBaseRentDue;
+        acc.overallPreviousGSTDue += s.previousGSTDue;
+        acc.overallTotalOutstandingAmount += s.totalOutstandingAmount;
+        return acc;
+      },
+      {
+        overallCurrentBaseRentDue: 0,
+        overallCurrentGSTDue: 0,
+        overallPreviousBaseRentDue: 0,
+        overallPreviousGSTDue: 0,
+        overallTotalOutstandingAmount: 0,
+      },
+    );
 
     const totalCount = entriesForResponse.length;
     const startIdx = (pageNumbers - 1) * pageSize;
     const pagedEntries = entriesForResponse.slice(
       startIdx,
       startIdx + pageSize,
+    );
+
+    const overallLedgerSummary = calculateOverallLedgerSummary(
+      globalMediaDocs,
+      outstandingMonthYear,
     );
 
     return successResponse(
@@ -2717,12 +2805,13 @@ const landOwnerSiteFilter = async (req, res) => {
           totalCount,
           totalPages: Math.ceil(totalCount / pageSize),
         },
-        // ✅ ADDED — echo back which month was actually applied
-        ...(needsLedgerFields ? { monthFilterApplied } : {}),
+        // ✅ ALWAYS echo back which month was actually applied
+        monthFilterApplied,
         entries: pagedEntries,
-        // ✅ ADDED — overall outstanding totals, same shape as the
+        // ✅ ALWAYS include overall outstanding totals, same shape as the
         // ledger APIs' summary block
-        ...(overallOutstandingTotals || {}),
+        ...overallOutstandingTotals,
+        overallLedgerSummary,
       },
       200,
     );

@@ -326,10 +326,16 @@ function sumUnpaidGstOutstanding(media) {
 
 /** Sum of unpaid rows in rentalPayment.rentalOutstandingHistory (pre-onboarding legacy rent debt) */
 function sumUnpaidRentalOutstanding(media) {
+  const owners = media.landOwners || [];
   return (media.rentalPayment?.rentalOutstandingHistory || []).reduce(
     (sum, row) => {
       if (row.isPaid) return sum;
-      return sum + Number(row.baseRentOutstandingAmount || 0);
+      let amt = Number(row.baseRentOutstandingAmount || 0);
+      if (row.paymentMode === "Online" || row.paymentMode === "Cash+Online") {
+        const siteTds = owners.reduce((s, o) => s + Number(o.tdsAmount || 0), 0);
+        amt -= siteTds;
+      }
+      return sum + amt;
     },
     0,
   );
@@ -747,9 +753,15 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
             }
             // Only add GST to the Online row for Category 3, or the single row for others.
             if (paymentCategory !== 3 || mode === "Online") {
-                modeAmount += ownerGst;
+              modeAmount += ownerGst;
             }
           }
+
+          // ✅ NEW: Deduct TDS from Unpaid Rent (Online mode only)
+          if (mode === "Online") {
+            modeAmount -= Number(owner.tdsAmount || 0);
+          }
+
           cycleUnpaid += modeAmount;
         });
       });
@@ -2506,6 +2518,10 @@ exports.listMediaByLedger = async (req, res) => {
       isTdsPending,
       landOwnerMasterId, // ✅ NEW
       mediaId, // ✅ NEW
+      totalLedgerAmount, // ✅ NEW
+      totalLedgerGstAmount, // ✅ NEW
+      totalLedgerPendingAmount, // ✅ NEW
+      totalGstPendingAmount, // ✅ NEW
     } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -2624,55 +2640,14 @@ exports.listMediaByLedger = async (req, res) => {
     let requestedMonthRange = null;
     let requestedMonthYearParsed = null; // ✅ NEW — for getCurrentBillDate
 
-    let isPendingFilter = false;
-    if (isPending !== undefined && isPending !== null && isPending !== "") {
-      const isPendingNum = Number(isPending);
-      if (isPendingNum !== 1) {
-        return errorResponse(
-          res,
-          "isPending must be 1 (any other value is invalid)",
-          null,
-          400,
-        );
-      }
-      isPendingFilter = true;
-    }
+    const isPendingFilter = Number(isPending) === 1;
+    const isGstPendingFilter = Number(isGstPending) === 1;
+    const isTdsPendingFilter = Number(isTdsPending) === 1;
 
-    let isGstPendingFilter = false;
-    if (
-      isGstPending !== undefined &&
-      isGstPending !== null &&
-      isGstPending !== ""
-    ) {
-      const isGstPendingNum = Number(isGstPending);
-      if (isGstPendingNum !== 1) {
-        return errorResponse(
-          res,
-          "isGstPending must be 1 (any other value is invalid)",
-          null,
-          400,
-        );
-      }
-      isGstPendingFilter = true;
-    }
-
-    let isTdsPendingFilter = false;
-    if (
-      isTdsPending !== undefined &&
-      isTdsPending !== null &&
-      isTdsPending !== ""
-    ) {
-      const isTdsPendingNum = Number(isTdsPending);
-      if (isTdsPendingNum !== 1) {
-        return errorResponse(
-          res,
-          "isTdsPending must be 1 (any other value is invalid)",
-          null,
-          400,
-        );
-      }
-      isTdsPendingFilter = true;
-    }
+    const isTotalLedgerAmountFilter = Number(totalLedgerAmount) === 1;
+    const isTotalLedgerGstAmountFilter = Number(totalLedgerGstAmount) === 1;
+    const isTotalLedgerPendingAmountFilter = Number(totalLedgerPendingAmount) === 1;
+    const isTotalGstPendingAmountFilter = Number(totalGstPendingAmount) === 1;
 
     let isPendingExplicitCutoff = null;
     const refMonthYear = dateRange || currentMonth || null;
@@ -2697,11 +2672,15 @@ exports.listMediaByLedger = async (req, res) => {
 
     const skip = (pageNumbers - 1) * pageSize;
     const needsFullFetchForTdsFilter = tdsStatusFilter !== null;
-    const needsFullFetch =
+      const needsFullFetch =
       needsFullFetchForTdsFilter ||
       isPendingFilter ||
       isGstPendingFilter ||
       isTdsPendingFilter ||
+      isTotalLedgerAmountFilter ||
+      isTotalLedgerGstAmountFilter ||
+      isTotalLedgerPendingAmountFilter ||
+      isTotalGstPendingAmountFilter ||
       !!isPendingExplicitCutoff;
 
     const MONTH_NAME_TO_INDEX_FOR_HELPER = MONTH_NAMES.reduce(
@@ -3887,6 +3866,10 @@ latestLedger = latestLedger.sort((a, b) => {
         mediaObj,
         requestedMonthYearParsed,
       );
+      const overallSummary = getOverallSummaryForCycle(
+        mediaObj,
+        requestedMonthYearParsed,
+      );
       const currentBillDateForMedia = getCurrentBillDate(
         mediaObj,
         requestedMonthYearParsed,
@@ -3961,6 +3944,7 @@ latestLedger = latestLedger.sort((a, b) => {
         rentalOutstandingHistory:
           mediaObj.rentalPayment?.rentalOutstandingHistory || [],
         pendingApprovals: pendingApprovalsIncludingPastMonths,
+        _overallSummary: overallSummary, // ✅ internal used for filtering
       };
     });
 
@@ -3979,6 +3963,10 @@ latestLedger = latestLedger.sort((a, b) => {
       !isPendingFilter &&
       !isGstPendingFilter &&
       !isTdsPendingFilter &&
+      !isTotalLedgerAmountFilter &&
+      !isTotalLedgerGstAmountFilter &&
+      !isTotalLedgerPendingAmountFilter &&
+      !isTotalGstPendingAmountFilter &&
       !mediaIdExplicitlyRequested
     ) {
       const requestedMonthName =
@@ -4034,6 +4022,23 @@ latestLedger = latestLedger.sort((a, b) => {
         const matchesGst = isGstPendingFilter && m.isGstPending;
         const matchesTds = isTdsPendingFilter && m.isTdsPending;
         return matchesGst || matchesTds;
+      });
+    }
+
+    if (
+      isTotalLedgerAmountFilter ||
+      isTotalLedgerGstAmountFilter ||
+      isTotalLedgerPendingAmountFilter ||
+      isTotalGstPendingAmountFilter
+    ) {
+      finalMediaListData = finalMediaListData.filter((m) => {
+        const s = m._overallSummary;
+        if (!s) return false;
+        if (isTotalLedgerAmountFilter && s.hasTotalLedger) return true;
+        if (isTotalLedgerGstAmountFilter && s.hasTotalGst) return true;
+        if (isTotalLedgerPendingAmountFilter && s.hasPendingLedger) return true;
+        if (isTotalGstPendingAmountFilter && s.hasPendingGst) return true;
+        return false;
       });
     }
 
@@ -4182,6 +4187,7 @@ latestLedger = latestLedger.sort((a, b) => {
         tdsStatusFlags,
         isPendingAcrossPastMonths,
         _pastMonthPendingCount,
+        _overallSummary,
         ...rest
       }) => rest,
     );
@@ -4192,10 +4198,31 @@ latestLedger = latestLedger.sort((a, b) => {
       finalMediaListData = finalMediaListData.slice(skip, skip + pageSize);
     }
 
-    // ✅ NEW — overall outstanding totals across the overallPendingDocs set
-    const overallOutstandingTotals = overallPendingDocs.reduce(
+    const filteredMediaIds = new Set(
+      finalMediaListData.map((m) => String(m._id || m.mediaId)),
+    );
+    const filteredMediaDocs = overallPendingDocs.filter((doc) =>
+      filteredMediaIds.has(String(doc._id)),
+    );
+
+    const globalMediaDocs = await Media.find(
+      { status: 1 },
+      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
+    ).lean();
+
+    // ✅ ensure rentalDue exists for global docs to ensure system-wide accuracy
+    for (const media of globalMediaDocs) {
+      await ensureRentalDueForCycles(
+        media,
+        requestedMonthYearParsed,
+        req.user?.userName || "Admin",
+      );
+    }
+
+    // ✅ NEW — overall outstanding totals across ALL sites in system
+    const overallOutstandingTotals = globalMediaDocs.reduce(
       (acc, doc) => {
-        const obj = doc.toObject();
+        const obj = doc.toObject ? doc.toObject() : doc;
         // ✅ FIXED — was missing requestedMonthYearParsed, so
         // getCurrentGstDue fell back to nextBillingDate (already advanced
         // past the live cycle) instead of the actual requested/current
@@ -4222,80 +4249,9 @@ latestLedger = latestLedger.sort((a, b) => {
       },
     );
 
-    // ✅ NEW — billGroups: collapse ledger entries that share the same
-    // utrNumber (a siteBillMode:1 single bill spanning multiple sites/
-    // owners) into one grouped row, instead of repeating the same UTR
-    // once per site in the flat mediaList. Cash entries (no UTR) are
-    // never grouped — each stays under its own media item as before.
-    const billGroupsMap = new Map();
-    finalMediaListData.forEach((mediaItem) => {
-      const allLedgerEntries = [
-        ...(Array.isArray(mediaItem.ledger) ? mediaItem.ledger : []),
-        ...(Array.isArray(mediaItem.withGst1Ledger)
-          ? mediaItem.withGst1Ledger
-          : []),
-      ];
-      const nextBillingDate = mediaItem.rentalPayment?.nextBillingDate;
-      allLedgerEntries.forEach((entry) => {
-        if (entry.isVirtual) return; // only real, saved entries form a bill group
-        if (!entry.utrNumber || String(entry.utrNumber).trim() === "") return;
-        const monthKey = entry.dueMonth || entry.month || "";
-        const groupKey = `${entry.utrNumber}_${monthKey}`;
-
-        if (!billGroupsMap.has(groupKey)) {
-          billGroupsMap.set(groupKey, {
-            billGroupId: groupKey,
-            dueMonth: monthKey,
-            paymentMode: entry.paymentMode,
-            utrNumber: entry.utrNumber,
-            date: entry.date,
-            landOwners: [],
-            sites: [],
-            totalAmount: 0,
-            breakdown: {
-              currentAmount: 0,
-              pastCycleAmount: 0,
-              outstandingAmount: 0,
-            }, // ✅ NEW
-          });
-        }
-        const group = billGroupsMap.get(groupKey);
-
-        // ✅ NEW — inferred targetType per site (dueMonth vs. this site's
-        // own live cycle — each site in a multi-site bill can have a
-        // different live cycle, so this is computed per entry, not once
-        // for the whole group)
-        const inferredTargetType = classifyDueMonthTargetType(
-          monthKey,
-          nextBillingDate,
-        );
-
-        if (
-          !group.landOwners.some(
-            (o) => String(o.landOwnerId) === String(entry.landOwnerId),
-          )
-        ) {
-          group.landOwners.push({
-            landOwnerId: entry.landOwnerId,
-            landOwnerName: entry.landOwnerName,
-          });
-        }
-        group.sites.push({
-          mediaId: mediaItem._id || mediaItem.mediaId,
-          mediaName: mediaItem.mediaName,
-          landOwnerId: entry.landOwnerId,
-          amount: Number(entry.amount || 0),
-          rentalDueId: entry.rentalDueId || null,
-          targetType: inferredTargetType, // ✅ NEW
-        });
-        group.totalAmount += Number(entry.amount || 0);
-        if (inferredTargetType === "current")
-          group.breakdown.currentAmount += Number(entry.amount || 0);
-        else group.breakdown.pastCycleAmount += Number(entry.amount || 0);
-      });
-    });
-    const billGroups = Array.from(billGroupsMap.values()).filter(
-      (g) => g.sites.length > 1,
+    const overallLedgerSummary = calculateOverallLedgerSummary(
+      globalMediaDocs,
+      requestedMonthYearParsed,
     );
 
     return successResponse(
@@ -4312,6 +4268,7 @@ latestLedger = latestLedger.sort((a, b) => {
         GSTPeningCount,
         TDSPeningCount,
         ...overallOutstandingTotals, // ✅ NEW
+        overallLedgerSummary, // ✅ NEW
         // billGroups, // ✅ NEW
         mediaList: finalMediaListData,
       },
@@ -6160,6 +6117,11 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
           if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
         }
 
+        // ✅ NEW: Deduct TDS from Pending Rent (Online mode only)
+        if (mode === "Online") {
+          modeAmount -= Number(owner.tdsAmount || 0);
+        }
+
         const bucket = result[String(owner._id)];
         if (!bucket) return;
         if (isLiveCycle) bucket.currentRentPending += modeAmount;
@@ -6202,6 +6164,204 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
 
   return result;
 }
+
+/**
+ * ✅ NEW — Internal helper for Overall Ledger Summary (Current Month)
+ */
+function getOverallSummaryForCycle(media, requestedMonthYear) {
+  const owners = media.landOwners || [];
+  const cycles = getAllDueCycles(media, requestedMonthYear);
+  const result = {
+    totalLedgerAmount: 0,
+    totalLedgerGstAmount: 0,
+    totalLedgerPendingAmount: 0,
+    totalGstPendingAmount: 0,
+    hasTotalLedger: false,
+    hasTotalGst: false,
+    hasPendingLedger: false,
+    hasPendingGst: false
+  };
+
+  if (media.status !== 1 || cycles.length === 0) return result;
+
+  const liveCycleDate = cycles[cycles.length - 1];
+  const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[liveCycleDate.getUTCMonth()]} ${liveCycleDate.getUTCFullYear()}`;
+
+  const expectedGstPerCycle = resolveExpectedGstForCycle(media);
+  const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
+
+  const matchedDue = (media.rentalDue || [])
+    .filter((d) => d.dueMonth === cycleMonthLabel)
+    .sort((a, b) => {
+      const sA = Number(a.approvalStatus || 0);
+      const sB = Number(b.approvalStatus || 0);
+      if (sA === 3 && sB !== 3) return -1;
+      if (sB === 3 && sA !== 3) return 1;
+      return new Date(b.updatedAt) - new Date(a.updatedAt);
+    })[0];
+
+  const isApproved = Number(matchedDue?.approvalStatus) === 3;
+  const effectiveWithGst = matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
+  const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
+
+  owners.forEach((owner) => {
+    const paymentCategory = Number(owner.paymentCategory || 1);
+    getRequiredModesShared(paymentCategory).forEach((mode) => {
+      let modeAmount = (mode === "Cash"
+        ? Number(owner.cashAmount || owner.shareAmount || 0)
+        : Number(owner.onlineAmount || owner.shareAmount || 0));
+
+      if (isOwnerAppraisedDirect) {
+        let gstFlag = Number(media.gstApplicableFlag || 0);
+        if (gstFlag === 0) {
+          const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+          const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1);
+          if (ownerGstAny) gstFlag = 2;
+          else if (siteGst) gstFlag = 1;
+        }
+        let ownerGst = 0;
+        if (gstFlag === 1) {
+          ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1);
+        } else {
+          ownerGst = Number(owner.gstAmount || 0);
+        }
+        if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
+      }
+
+      // ✅ NEW: Deduct TDS from Ledger Amounts (Online mode only)
+      if (mode === "Online") {
+        modeAmount -= Number(owner.tdsAmount || 0);
+      }
+
+      const isPaid = isOwnerModePaidForCycle(media, owner, mode, liveCycleDate, true);
+      if (isPaid) {
+        result.totalLedgerAmount += modeAmount;
+        if (modeAmount > 0) result.hasTotalLedger = true;
+      } else {
+        result.totalLedgerPendingAmount += modeAmount;
+        if (modeAmount > 0) result.hasPendingLedger = true;
+      }
+    });
+  });
+
+  if (!(matchedDue && Number(matchedDue.withGst) === 2 && isApproved)) {
+    const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
+    const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
+
+    if (rowsForMonth.length > 0) {
+      rowsForMonth.forEach((row) => {
+        const amt = Number(row.gstAmount || 0);
+        const paid = isRowPaid(row);
+        if (paid) {
+          result.totalLedgerGstAmount += amt;
+          if (amt > 0) result.hasTotalGst = true;
+        } else {
+          result.totalGstPendingAmount += amt;
+          if (amt > 0) result.hasPendingGst = true;
+        }
+      });
+    } else if (expectedGstPerCycle > 0) {
+      result.totalGstPendingAmount += expectedGstPerCycle;
+      result.hasPendingGst = true;
+    }
+  }
+
+  // ✅ NEW — Legacy Outstanding (Pre-onboarding)
+  // 1) GST Outstanding
+  (media.rentalPayment?.gstOutstandingHistory || []).forEach((row) => {
+    const amt = Number(row.gstOutStandingAmount || 0);
+    const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
+
+    if (isPaid) {
+      // If paid in the requested month, add to paid total
+      if (row.date) {
+        const d = new Date(row.date);
+        if (d.getUTCFullYear() === requestedMonthYear.year && (d.getUTCMonth() + 1) === requestedMonthYear.month) {
+          result.totalLedgerGstAmount += amt;
+          if (amt > 0) result.hasTotalGst = true;
+        }
+      }
+    } else {
+      result.totalGstPendingAmount += amt;
+      if (amt > 0) result.hasPendingGst = true;
+    }
+  });
+
+  // 2) Rental Outstanding
+  (media.rentalPayment?.rentalOutstandingHistory || []).forEach((row) => {
+    let amt = Number(row.baseRentOutstandingAmount || 0);
+    const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
+
+    // ✅ REDUCE TDS for Online legacy rent if applicable
+    if (row.paymentMode === "Online" || row.paymentMode === "Cash+Online") {
+      const siteTds = owners.reduce((sum, o) => sum + Number(o.tdsAmount || 0), 0);
+      amt -= siteTds;
+    }
+
+    if (isPaid) {
+      if (row.date) {
+        const d = new Date(row.date);
+        if (d.getUTCFullYear() === requestedMonthYear.year && (d.getUTCMonth() + 1) === requestedMonthYear.month) {
+          result.totalLedgerAmount += amt;
+          if (amt > 0) result.hasTotalLedger = true;
+        }
+      }
+    } else {
+      result.totalLedgerPendingAmount += amt;
+      if (amt > 0) result.hasPendingLedger = true;
+    }
+  });
+
+  return result;
+}
+
+/**
+ * ✅ NEW — Main helper for Overall Ledger Summary (Current Month)
+ * Exported for use in landOwnerMasterController.js
+ */
+function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
+  const summary = {
+    totalLedgerAmount: 0,
+    totalLedgerAmountSites: new Set(),
+    totalLedgerGstAmount: 0,
+    totalLedgerGstAmountSites: new Set(),
+    totalLedgerPendingAmount: 0,
+    totalLedgerPendingAmountSites: new Set(),
+    totalGstPendingAmount: 0,
+    totalGstPendingAmountSites: new Set(),
+  };
+
+  for (const media of mediaDocs) {
+    const mediaId = String(media._id);
+    const s = getOverallSummaryForCycle(media, requestedMonthYear);
+
+    summary.totalLedgerAmount += s.totalLedgerAmount;
+    if (s.hasTotalLedger) summary.totalLedgerAmountSites.add(mediaId);
+
+    summary.totalLedgerGstAmount += s.totalLedgerGstAmount;
+    if (s.hasTotalGst) summary.totalLedgerGstAmountSites.add(mediaId);
+
+    summary.totalLedgerPendingAmount += s.totalLedgerPendingAmount;
+    if (s.hasPendingLedger) summary.totalLedgerPendingAmountSites.add(mediaId);
+
+    summary.totalGstPendingAmount += s.totalGstPendingAmount;
+    if (s.hasPendingGst) summary.totalGstPendingAmountSites.add(mediaId);
+  }
+
+  return {
+    totalLedgerAmount: Math.round(summary.totalLedgerAmount),
+    totalLedgerAmountSites: summary.totalLedgerAmountSites.size,
+    totalLedgerGstAmount: Math.round(summary.totalLedgerGstAmount),
+    totalLedgerGstAmountSites: summary.totalLedgerGstAmountSites.size,
+    totalLedgerPendingAmount: Math.round(summary.totalLedgerPendingAmount),
+    totalLedgerPendingAmountSites: summary.totalLedgerPendingAmountSites.size,
+    totalGstPendingAmount: Math.round(summary.totalGstPendingAmount),
+    totalGstPendingAmountSites: summary.totalGstPendingAmountSites.size,
+  };
+}
 exports.computeOutstandingSummary = computeOutstandingSummary;
 exports.dedupeGstBalanceHistory = dedupeGstBalanceHistory; // ✅ ADDED — export so landOwnerController can dedupe before computing pending totals
 exports.getOwnerWiseOutstanding = getOwnerWiseOutstanding; // ✅ ADDED
+exports.calculateOverallLedgerSummary = calculateOverallLedgerSummary; // ✅ NEW
+exports.getOverallSummaryForCycle = getOverallSummaryForCycle; // ✅ NEW: export for filter consistency
+exports.ensureRentalDueForCycles = ensureRentalDueForCycles; // ✅ NEW
