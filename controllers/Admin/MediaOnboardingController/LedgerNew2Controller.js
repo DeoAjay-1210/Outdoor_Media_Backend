@@ -4747,15 +4747,61 @@ function buildSingleMediaHistoryBlock(
     return Number(owner.gstApplicable || 0) === 1;
   };
 
+  const getOwnerPaymentInfo = (owner, cycleDate) => {
+    if (!owner || !cycleDate) return { isPaid: false, date: null };
+
+    const pc = Number(owner.paymentCategory || 1);
+    const modes = getRequiredModesShared(pc);
+    let latestDate = null;
+
+    const cycleYear = String(cycleDate.getUTCFullYear());
+    const cycleMonthName = MONTH_NAMES[cycleDate.getUTCMonth()];
+    const yearBucket = (ledgerHistory || []).find(y => String(y.year) === cycleYear);
+    const monthBucket = yearBucket?.months?.find(m => m.month.toLowerCase() === cycleMonthName.toLowerCase());
+
+    const allPaid = modes.every(mode => {
+        const rentEntry = (monthBucket?.entries || []).find(e =>
+            (e.status === 1 || (e.utrNumber && e.utrNumber.trim() !== "")) &&
+            String(e.landOwnerId) === String(owner._id) &&
+            e.paymentMode === mode
+        );
+        if (rentEntry && rentEntry.date) {
+            const d = new Date(rentEntry.date);
+            if (!latestDate || d > latestDate) latestDate = d;
+        }
+        return !!rentEntry;
+    });
+    return { isPaid: allPaid, date: latestDate };
+  };
+
   let fullGstBalanceHistoryUnfiltered = dedupeGstBalanceHistory(
     Array.isArray(media.gstBalanceHistory) ? media.gstBalanceHistory : [],
   ).map(entry => {
     const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
     const isApproved = matchedDue?.approvalStatus === 3;
+    const effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
+
+    let isPaid = entry.isPaid;
+    let paymentDate = entry.date;
+
+    // ✅ if withGst is 2 (Direct), GST is paid if rent is entered
+    if (Number(effectiveWithGst) === 2 && !isPaid) {
+        const ownerId = entry.ownerId || entry.landOwnerId;
+        const owner = (media.landOwners || []).find(o => String(o._id) === String(ownerId));
+        const cycleDate = entry.cycle || (entry.date ? new Date(entry.date) : null);
+        const info = getOwnerPaymentInfo(owner, cycleDate);
+        if (info.isPaid) {
+            isPaid = true;
+            paymentDate = info.date;
+        }
+    }
+
     return {
       ...entry,
-      withGst: entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0),
-      rentalDueId: entry.rentalDueId || matchedDue?._id || null
+      withGst: effectiveWithGst,
+      rentalDueId: entry.rentalDueId || matchedDue?._id || null,
+      isPaid,
+      date: paymentDate
     };
   });
 
@@ -4793,19 +4839,29 @@ function buildSingleMediaHistoryBlock(
           if (ownerGst > 0) {
             const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
             const isApproved = matchedDue?.approvalStatus === 3;
+            const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
+
+            let isPaid = false;
+            let paymentDate = null;
+            if (Number(effectiveWithGst) === 2) {
+                const info = getOwnerPaymentInfo(owner, cycleDate);
+                isPaid = info.isPaid;
+                paymentDate = info.date;
+            }
 
             fullGstBalanceHistoryUnfiltered.push({
               dueMonth: cycleMonthLabel,
               cycle: cycleDate,
               gstAmount: ownerGst,
-              isPaid: false,
+              isPaid,
               isVirtual: true,
-              withGst: isApproved ? (matchedDue?.withGst ?? 1) : 0,
+              withGst: effectiveWithGst,
               ownerId: owner._id,
               ownerName: owner.name,
               landOwnerId: owner._id,
               landOwnerName: owner.name,
               rentalDueId: matchedDue?._id || null,
+              date: paymentDate
             });
           }
         }
@@ -4842,10 +4898,35 @@ function buildSingleMediaHistoryBlock(
     matchingLandOwners.forEach((owner) => {
       const paymentCategory = Number(owner.paymentCategory || 1);
       cycleTds += Number(owner.tdsAmount || 0);
+
+      const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+      const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
+
       getRequiredModesShared(paymentCategory).forEach((mode) => {
-        const amt = (mode === "Cash"
+        let amt = (mode === "Cash"
             ? Number(owner.cashAmount || owner.shareAmount || 0)
             : Number(owner.onlineAmount || owner.shareAmount || 0));
+
+        // ✅ If Direct GST, add it to the base rent total
+        if (Number(effectiveWithGstForMonth) === 2) {
+            let gstFlag = Number(media.gstApplicableFlag || 0);
+            if (gstFlag === 0) {
+                const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+                const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+                if (ownerGst) gstFlag = 2;
+                else if (siteGst) gstFlag = 1;
+            }
+            let ownerGst = 0;
+            if (gstFlag === 1) {
+                ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (media.landOwners?.length || 1);
+            } else {
+                ownerGst = Number(owner.gstAmount || 0);
+            }
+            if (paymentCategory !== 3 || mode === "Online") {
+                amt += ownerGst;
+            }
+        }
+
         cycleTotal += amt;
 
         let entry = null;
@@ -5183,14 +5264,15 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           // ✅ NEW — same cashAmount/onlineAmount source as the virtual
           // (unpaid) branch below, so real entries match that shape.
 
-          // ✅ FIXED — if a gstBalanceHistory entry exists for this month,
-          // then withGst must be 1 (held), even if this is a real, saved
-          // entry. Otherwise, if GST is applicable, it's 2 (direct).
-          const realWithGst = matchedGstBalanceRow
-            ? 1
-            : isGstApplicableForOwner(owner)
-              ? 2
-              : 0;
+          // ✅ FIXED — if the real entry already has a withGst value (1 or 2),
+          // respect it. Otherwise, use matchedGstBalanceRow's value,
+          // or fallback to landOwner configuration.
+          const realWithGst = (realEntry.withGst !== undefined && realEntry.withGst !== null)
+            ? Number(realEntry.withGst)
+            : (matchedGstBalanceRow
+                ? (matchedGstBalanceRow.withGst ?? 1)
+                : (isGstApplicableForOwner(owner) ? 2 : 0)
+              );
 
           // ✅ NEW — calculate gstAmount for display
           let realGstAmount = Number(
@@ -5315,7 +5397,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           const isOwnerApproved = matchedDue?.approvalStatus === 3;
 
           const virtualWithGst = isOwnerApproved
-            ? (matchedGstBalanceRow ? 1 : Number(matchedDue?.withGst || 0))
+            ? (matchedGstBalanceRow ? (matchedGstBalanceRow.withGst ?? 1) : Number(matchedDue?.withGst || 0))
             : 0;
 
           // ✅ Calculate potential GST amount for display
