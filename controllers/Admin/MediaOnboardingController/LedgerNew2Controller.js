@@ -712,7 +712,9 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
           return new Date(b.updatedAt) - new Date(a.updatedAt);
         })[0];
 
+      const isApproved = Number(matchedDue?.approvalStatus) === 3;
       const effectiveWithGst = matchedDue?.withGst ?? (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
+      const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
 
       owners.forEach((owner) => {
         const paymentCategory = Number(owner.paymentCategory || 1);
@@ -726,7 +728,8 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
               : Number(owner.onlineAmount || owner.shareAmount || 0);
 
           // ✅ NEW — if "Without GST" (Direct to Owner), add GST to the rent due.
-          if (Number(effectiveWithGst) === 2) {
+          // ✅ FIXED — Only fold GST into rent if the owner has appraised the cycle (approvalStatus: 3).
+          if (isOwnerAppraisedDirect) {
             let gstFlag = Number(media.gstApplicableFlag || 0);
             if (gstFlag === 0) {
                 const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
@@ -801,7 +804,8 @@ function getGstDueForCycles(media, requestedMonthYear) {
         return new Date(b.updatedAt) - new Date(a.updatedAt);
       })[0];
 
-    if (matchedRealDue && Number(matchedRealDue.withGst) === 2) {
+    // ✅ FIXED — Only skip GST tracking if "Without GST" AND it has been owner-appraised.
+    if (matchedRealDue && Number(matchedRealDue.withGst) === 2 && Number(matchedRealDue.approvalStatus) === 3) {
       return;
     }
 
@@ -883,8 +887,9 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
 
     let cycleGstAmount = 0;
     const inferredWithGst = expectedGstPerCycle > 0 ? 0 : null;
-    // ✅ FIXED: Only calculate cycleGstAmount if withGst is NOT 2 (Without GST)
-    if (!(matchedRealDue && Number(matchedRealDue.withGst) === 2)) {
+    const isApproved = Number(matchedRealDue?.approvalStatus) === 3;
+    // ✅ FIXED: Only skip cycleGstAmount if withGst is 2 AND owner has appraised it.
+    if (!(matchedRealDue && Number(matchedRealDue.withGst) === 2 && isApproved)) {
       // ✅ UPDATED — resolveExpectedGstForCycle already handles fallback to site level if needed,
       // but ensure we pick the best source here if unpaidGstRow exists.
       cycleGstAmount = paidGstRow
@@ -2734,7 +2739,16 @@ exports.listMediaByLedger = async (req, res) => {
           const monthIdx =
             MONTH_NAME_TO_INDEX_FOR_HELPER[monthBucket.month.toLowerCase()];
           const entries = monthBucket.entries || [];
-          const gst2Entries = entries.filter((e) => e.withGst === 2);
+
+          // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
+          const monthLabel = `${monthBucket.month} ${yearBucket.year}`;
+          const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === monthLabel);
+          const isApproved = Number(matchedDue?.approvalStatus) === 3;
+
+          const gst2Entries = entries.filter((e) => {
+              if (Number(e.withGst) === 2) return isApproved;
+              return false;
+          });
 
           const allOwnersComplete =
             (mediaObj.landOwners || []).length > 0 &&
@@ -2909,7 +2923,16 @@ for (const media of results) {
                 (m) => m.toLowerCase() === monthBucket.month.toLowerCase(),
               );
               const entries = monthBucket.entries || [];
-              const gst2Entries = entries.filter((e) => e.withGst === 2);
+
+              // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
+              const monthLabel = `${monthBucket.month} ${yearBucket.year}`;
+              const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === monthLabel);
+              const isApproved = Number(matchedDue?.approvalStatus) === 3;
+
+              const gst2Entries = entries.filter((e) => {
+                  if (Number(e.withGst) === 2) return isApproved;
+                  return false;
+              });
 
               const allOwnersComplete =
                 (mediaObj.landOwners || []).length > 0 &&
@@ -3291,8 +3314,12 @@ for (const media of results) {
           (d) => d.dueMonth === dueMonthForMatch,
         );
 
-        const resolvedWithGst =
+        // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
+        let resolvedWithGst =
           entry.withGst ?? (matchedDueForApproval?.approvalStatus === 3 ? (matchedDueForApproval?.withGst ?? 0) : 0);
+        if (Number(resolvedWithGst) === 2 && Number(matchedDueForApproval?.approvalStatus) !== 3) {
+            resolvedWithGst = 1; // Fallback to tracked GST until appraisal.
+        }
 
         // ✅ Calculate expected GST amount to show even if withGst is 0
         let resolvedGstAmount = 0;
@@ -4779,7 +4806,11 @@ function buildSingleMediaHistoryBlock(
   ).map(entry => {
     const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
     const isApproved = matchedDue?.approvalStatus === 3;
-    const effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
+    // ✅ FIXED — Only trust withGst: 2 if the owner has appraised it.
+    let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
+    if (Number(effectiveWithGst) === 2 && !isApproved) {
+        effectiveWithGst = 1; // Treat as tracked GST until appraised.
+    }
 
     let isPaid = entry.isPaid;
     let paymentDate = entry.date;
@@ -6017,8 +6048,10 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
         if (sB === 3 && sA !== 3) return 1;
         return new Date(b.updatedAt) - new Date(a.updatedAt);
       })[0];
+    const isApproved = Number(matchedDue?.approvalStatus) === 3;
     const effectiveWithGst =
       matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
+    const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
 
     // ── RENT — identical rule to getUnpaidRentForCycle(), per owner ──
     owners.forEach((owner) => {
@@ -6034,7 +6067,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
             ? Number(owner.cashAmount || owner.shareAmount || 0)
             : Number(owner.onlineAmount || owner.shareAmount || 0);
 
-        if (Number(effectiveWithGst) === 2) {
+        if (isOwnerAppraisedDirect) {
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
             const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
@@ -6059,7 +6092,8 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     });
 
     // ── GST — identical rule to getGstDueForCycles(), per owner ──
-    if (matchedDue && Number(matchedDue.withGst) === 2) return; // GST folded into rent above, not tracked separately
+    // ✅ FIXED — Only skip GST tracking if "Without GST" AND owner appraised.
+    if (matchedDue && Number(matchedDue.withGst) === 2 && isApproved) return; // GST folded into rent above, not tracked separately
 
     const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
     const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
