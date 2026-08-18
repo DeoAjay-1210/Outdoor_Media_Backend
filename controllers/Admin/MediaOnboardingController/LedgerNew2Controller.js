@@ -674,7 +674,7 @@ function isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle) {
   );
   return (monthBucket?.entries || []).some(
     (e) =>
-      e.withGst === 2 &&
+      (e.withGst === 1 || e.withGst === 2) &&
       e.paymentMode === mode &&
       String(e.landOwnerId) === String(owner._id),
   );
@@ -4611,7 +4611,7 @@ function buildSingleMediaHistoryBlock(
       city: media.city,
       landOwners: [],
       ledgerHistory: [],
-       rentalDueEntries: buildAutoRentalDueEntries(media, cycleWalkLimit || null),
+       rentalDueEntries: buildAutoRentalDueEntries(media, autoCurrentMonthYM),
       gstPayment: false,
       tdsPayment: false,
       outstanding: emptyOutstanding,
@@ -4715,6 +4715,7 @@ function buildSingleMediaHistoryBlock(
   // the upper bound of the resolved range.
   const effectiveMonthYear = cycleWalkLimit || null;
   const autoCyclesForHistory = getAllDueCycles(media, effectiveMonthYear);
+  const allTimeCycles = getAllDueCycles(media, autoCurrentMonthYM);
   const expectedGstPerCycleTotal = resolveExpectedGstForCycle(media);
 
   // ✅ owner filter applied to every month bucket's raw entries up front
@@ -4759,8 +4760,9 @@ function buildSingleMediaHistoryBlock(
   });
 
   // ✅ NEW — Augment GST balance history with virtual entries for unpaid cycles
+  // Use allTimeCycles to ensure history is NOT filtered by requested range
   if (expectedGstPerCycleTotal > 0) {
-    autoCyclesForHistory.forEach((cycleDate) => {
+    allTimeCycles.forEach((cycleDate) => {
       const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
       matchingLandOwners.forEach((owner) => {
         if (!isGstApplicableForOwner(owner)) return;
@@ -4821,11 +4823,11 @@ function buildSingleMediaHistoryBlock(
     ...(media.rentalPayment?.rentalOutstandingHistory || [])
   ];
 
-  const liveCycleKeyForOutstanding = autoCyclesForHistory.length > 0
-    ? `${autoCyclesForHistory[autoCyclesForHistory.length - 1].getUTCFullYear()}-${autoCyclesForHistory[autoCyclesForHistory.length - 1].getUTCMonth()}`
+  const liveCycleKeyForOutstanding = allTimeCycles.length > 0
+    ? `${allTimeCycles[allTimeCycles.length - 1].getUTCFullYear()}-${allTimeCycles[allTimeCycles.length - 1].getUTCMonth()}`
     : null;
 
-  autoCyclesForHistory.forEach((cycleDate) => {
+  allTimeCycles.forEach((cycleDate) => {
     const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
     if (fullRentalOutstandingHistory.some((h) => h.dueMonth === cycleMonthLabel)) return;
 
@@ -4863,7 +4865,7 @@ function buildSingleMediaHistoryBlock(
           );
           entry = (monthBucket?.entries || []).find(
             (e) =>
-              e.withGst === 2 &&
+              (e.withGst === 1 || e.withGst === 2) &&
               e.paymentMode === mode &&
               String(e.landOwnerId) === String(owner._id),
           );
@@ -5860,8 +5862,8 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 
   // ✅ currentMonth removed — outstanding/currentBillDate now always
   // reflect the site's actual live cycle ("now"), not a requested month
-const outstanding = computeOutstandingSummary(media, effectiveMonthYear);
-  const currentBillDate = getCurrentBillDate(media, effectiveMonthYear);
+const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
+  const currentBillDate = getCurrentBillDate(media, autoCurrentMonthYM);
 
   return {
     mediaId: media._id,
