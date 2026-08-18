@@ -263,6 +263,13 @@ const toDateOnly = (input) => {
 
 const dayKey = (input) => toDateOnly(input).getTime();
 const todayKey = () => dayKey(nowIST());
+
+const monthKey = (input) => {
+  const d = toDateOnly(input);
+  return d.getUTCFullYear() * 12 + d.getUTCMonth();
+};
+const thisMonthKey = () => monthKey(nowIST());
+
 const sameDay = (a, b) => dayKey(a) === dayKey(b);
 const isFutureDate = (date) => dayKey(date) > todayKey();
 
@@ -488,6 +495,7 @@ const cascadeHistory = (
   rentActuallyChanged = false,
 ) => {
   const today = todayKey();
+  const currentMonth = thisMonthKey();
   const sorted = history
     .filter((h) => h.appraisalDate)
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
@@ -497,20 +505,25 @@ const cascadeHistory = (
 
   for (const entry of sorted) {
     const entryDateKey = dayKey(entry.appraisalDate);
+    const entryMonthKey = monthKey(entry.appraisalDate);
 
     // ✅ Re-baseline from today onwards if the rent was manually changed.
     // This ensures that if a user updates rent to 60,000, future appraisals
     // start from 60,000 rather than the old schedule's base.
-    if (rentActuallyChanged && !manualRebaseDone && entryDateKey >= today) {
+    if (rentActuallyChanged && !manualRebaseDone && entryMonthKey >= currentMonth) {
       prev = Number(netPayable ?? prev);
       manualRebaseDone = true;
     }
 
     entry.previousRent = prev;
 
-    // ✅ FIXED — Only apply bump if it's a current/future entry and NOT an anchor.
+    // ✅ FIXED — Only apply bump if it's a current/future entry and NOT a PAST anchor.
     // "Yesterday don't apply, today it will apply"
-    if (entry.isAnchorEntry || entryDateKey < today) {
+    // (We now allow current-month anchors to have a bump computed so the
+    // appraisalAmount shows up in the summary even after a date update)
+    const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
+
+    if (isPastAnchor || entryMonthKey < currentMonth) {
       entry.appraisalAmount = 0;
     } else {
       entry.appraisalAmount = computeAppraisalAmount(entry, prev);
@@ -674,6 +687,7 @@ const handleAppraisalLogic = async (
   if (!agreement?.startDate || !agreement?.endDate) return mediaData;
 
   const today = todayKey();
+  const currentMonth = thisMonthKey();
 
   const agreementStartDate = new Date(agreement.startDate);
   const agreementEndDate = new Date(agreement.endDate);
@@ -705,6 +719,11 @@ const handleAppraisalLogic = async (
       ? toDateOnly(appraisal.lastAppraisalDate)
       : null;
 
+    // ✅ FIXED — Detect if any dates were explicitly provided in the request
+    // before computing defaults.
+    const hasIncomingLastDate = !!mediaData.appraisal?.lastAppraisalDate;
+    const hasIncomingNextDate = !!mediaData.appraisal?.nextAppraisalDate;
+
     if (!nextDate && !manualLastAppraisalDate) {
       const firstDate = new Date(agreementStartDate);
       firstDate.setMonth(firstDate.getMonth() + months);
@@ -713,6 +732,7 @@ const handleAppraisalLogic = async (
     }
 
     const seedDate = manualLastAppraisalDate || nextDate;
+    const currentMonth = thisMonthKey();
 
     // ✅ Only treat this as a flat "anchor checkpoint" when lastAppraisalDate
     // was explicitly given. When it wasn't (only nextAppraisalDate / computed
@@ -739,8 +759,8 @@ const handleAppraisalLogic = async (
 
       if (!isAnchorSeed) {
         // ✅ NEW — no lastAppraisalDate given, so nextAppraisalDate is a
-        // real, due appraisal event. We apply the bump if it's today or in the future.
-        if (dayKey(seedDate) >= today) {
+        // real, due appraisal event. We apply the bump if it's current month or in the future.
+        if (monthKey(seedDate) >= currentMonth) {
           seedEntry.appraisalAmount = computeAppraisalAmount(
             seedEntry,
             netPayable,
@@ -758,10 +778,11 @@ const handleAppraisalLogic = async (
         userName,
       );
 
-      // ✅ Only backfill to agreement start date if NO manual last appraisal date was provided.
-      // If the user provides a lastAppraisalDate during onboarding, we treat that as the
-      // definitive starting point for the appraisal history.
-      if (!manualLastAppraisalDate) {
+      // ✅ FIXED — Only backfill to agreement start date if NO appraisal dates
+      // (neither last nor next) were provided in the request. If the user
+      // provides a date during onboarding, we respect it as the definitive
+      // starting point for history and don't backfill to 2024.
+      if (!hasIncomingLastDate && !hasIncomingNextDate) {
         appraisal.history = backfillHistoricalAppraisalEntries(
           appraisal.history,
           agreement.startDate,
@@ -842,12 +863,12 @@ const handleAppraisalLogic = async (
       : null;
 
   if (manualLastAppraisalDateUpdate) {
-    const anchorKey = dayKey(manualLastAppraisalDateUpdate);
-    // ✅ PRESERVE existing history entries that occurred BEFORE the new anchor date
+    const anchorMonth = monthKey(manualLastAppraisalDateUpdate);
+    // ✅ PRESERVE existing history entries that occurred BEFORE the new anchor month
     // This ensures that 2024, 2025, etc. dates do not change when the user
     // updates the lastAppraisalDate to a later date like 2026-05-15.
     const preserved = history.filter(
-      (h) => dayKey(h.appraisalDate) < anchorKey,
+      (h) => monthKey(h.appraisalDate) < anchorMonth,
     );
 
     // If we have preserved entries, the base rent for the new anchor is the last preserved newRent.
@@ -894,16 +915,17 @@ const handleAppraisalLogic = async (
       };
 
       const e = history[existingIdx];
-      const isFutureEntry = dayKey(e.appraisalDate) >= today;
+      const currentMonth = thisMonthKey();
+      const isCurrentOrFutureMonth = monthKey(e.appraisalDate) >= currentMonth;
 
-      if (rentActuallyChanged && isFutureEntry) {
+      if (rentActuallyChanged && isCurrentOrFutureMonth) {
         e.previousRent = netPayable;
       }
 
       // ✅ skip bump computation if this entry is an anchor checkpoint
       if (!e.isAnchorEntry) {
-        // ✅ Only bump if it's a future entry
-        if (isFutureEntry) {
+        // ✅ Only bump if it's current or future month
+        if (isCurrentOrFutureMonth) {
           e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
         } else {
           e.appraisalAmount = 0;
@@ -923,7 +945,7 @@ const handleAppraisalLogic = async (
       } else {
         let prev = e.newRent;
         for (let i = existingIdx + 1; i < history.length; i++) {
-          if (dayKey(history[i].appraisalDate) >= today) {
+          if (monthKey(history[i].appraisalDate) >= currentMonth) {
             history[i].previousRent = prev;
             history[i].appraisalAmount = computeAppraisalAmount(
               history[i],
@@ -961,13 +983,13 @@ const handleAppraisalLogic = async (
         movedEntry.updatedBy = userName;
         movedEntry.updatedAt = nowIST();
 
-        if (nextDay >= today) isNewFutureEntry = true;
+        if (monthKey(nextDate) >= currentMonth) isNewFutureEntry = true;
 
         history.sort(
           (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
         );
 
-        appliedEntry = history.find((h) => dayKey(h.appraisalDate) === nextDay);
+        appliedEntry = history.find((h) => monthKey(h.appraisalDate) === monthKey(nextDate));
       } else {
         // ✅ no existing history at all — nextDate is the first, real
         // appraisal event (no anchor exists), so compute the bump directly
@@ -990,9 +1012,9 @@ const handleAppraisalLogic = async (
       }
     }
 
-    if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
+    if (appliedEntry && monthKey(appliedEntry.appraisalDate) <= currentMonth) {
       const hasLaterEntry = history.some(
-        (h) => dayKey(h.appraisalDate) > dayKey(appliedEntry.appraisalDate),
+        (h) => monthKey(h.appraisalDate) > monthKey(appliedEntry.appraisalDate),
       );
 
       if (!hasLaterEntry) {
@@ -1026,7 +1048,7 @@ const handleAppraisalLogic = async (
 
   // Set the frequency metadata based on the current/first entry
   const currentEntryForMeta = history
-    .filter((h) => dayKey(h.appraisalDate) <= today)
+    .filter((h) => monthKey(h.appraisalDate) <= currentMonth)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
 
   if (currentEntryForMeta) {
@@ -1051,7 +1073,7 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
 
     return appraisal;
   }
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
 
   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
     const pendingDate = appraisal.nextAppraisalDate
@@ -1059,15 +1081,15 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
       : null;
 
     appraisal.lastAppraisalDate =
-      pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
+      pendingDate && monthKey(pendingDate) <= currentMonth ? pendingDate : null;
 
     return appraisal;
   }
 
   const sorted = appraisal.history
     .filter((h) => h.appraisalDate)
-    .map((h) => ({ ...h, dateKey: dayKey(h.appraisalDate) }))
-    .sort((a, b) => a.dateKey - b.dateKey);
+    .map((h) => ({ ...h, monthKey: monthKey(h.appraisalDate) }))
+    .sort((a, b) => a.monthKey - b.monthKey);
 
   if (!sorted.length) {
     const pendingDate = appraisal.nextAppraisalDate
@@ -1075,15 +1097,15 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
       : null;
 
     appraisal.lastAppraisalDate =
-      pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
+      pendingDate && monthKey(pendingDate) <= currentMonth ? pendingDate : null;
 
     return appraisal;
   }
 
   const baseRent = Number(sorted[0].previousRent ?? fallbackBaseRent ?? 0);
 
-  const dueEntries = sorted.filter((h) => h.dateKey <= today);
-  const futureEntries = sorted.filter((h) => h.dateKey > today);
+  const dueEntries = sorted.filter((h) => h.monthKey <= currentMonth);
+  const futureEntries = sorted.filter((h) => h.monthKey > currentMonth);
 
   appraisal.lastAppraisalDate =
     dueEntries.length > 0
@@ -1149,7 +1171,7 @@ const getFrequencyMonths = (frequency, customMonths) => {
 const autoScheduleFutureAppraisalEntries = (history, userName) => {
   if (!Array.isArray(history) || !history.length) return history;
 
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
   let safety = 0;
 
   while (safety < 60) {
@@ -1160,7 +1182,7 @@ const autoScheduleFutureAppraisalEntries = (history, userName) => {
     );
     const lastEntry = sorted[sorted.length - 1];
 
-    if (dayKey(lastEntry.appraisalDate) > today) break; // already future — stop
+    if (monthKey(lastEntry.appraisalDate) > currentMonth) break; // already future month — stop
 
     const monthsToAdd = getFrequencyMonths(
       lastEntry.frequency,
@@ -1185,7 +1207,7 @@ const autoScheduleFutureAppraisalEntries = (history, userName) => {
       updatedAt: nowIST(),
     };
 
-    if (dayKey(nextDateOnly) >= today) {
+    if (monthKey(nextDateOnly) >= currentMonth) {
       autoEntry.appraisalAmount = computeAppraisalAmount(
         autoEntry,
         autoEntry.previousRent,
@@ -1262,12 +1284,12 @@ const revertAppraisalRentIfTurnedOff = (mediaData, existingMedia) => {
     ? existingMedia.appraisal.history
     : [];
 
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
 
   // Same "currently active entry" lookup applyAppraisalRentIfDuent uses —
-  // the latest entry whose appraisalDate has actually arrived.
+  // the latest entry whose month has actually arrived.
   const dueEntries = history
-    .filter((h) => h.appraisalDate && dayKey(h.appraisalDate) <= today)
+    .filter((h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
 
   // previousRent on that entry IS the base rent from before this
@@ -1302,11 +1324,11 @@ const applyAppraisalRentIfDuent = (
   if (!Array.isArray(appraisal.history) || !appraisal.history.length)
     return false;
 
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
 
-  // Latest entry whose appraisalDate has actually arrived (today or past).
+  // Latest entry whose month has actually arrived (current or past month).
   const dueEntries = appraisal.history
-    .filter((h) => h.appraisalDate && dayKey(h.appraisalDate) <= today)
+    .filter((h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
 
   if (!dueEntries.length) return false;

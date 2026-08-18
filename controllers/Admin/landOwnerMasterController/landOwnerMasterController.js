@@ -2199,6 +2199,10 @@ const landOwnerSiteFilter = async (req, res) => {
         mediaName: site.mediaName,
         baseRent: site.totalRentalAmount,
         gstAmount: site.gstAmount,
+        tdsAmount: (site.ownersDetail || []).reduce(
+          (sum, od) => sum + (od.tdsAmount || 0),
+          0,
+        ),
         gstApplicable: site.gstApplicable,
         rentalDueEntries: filteredDues,
       };
@@ -2210,9 +2214,19 @@ const landOwnerSiteFilter = async (req, res) => {
         0,
       );
       const gstHoldTotal = sites.reduce((s, site) => s + site.gstAmount, 0);
+      const tdsHoldTotal = sites.reduce((s, site) => {
+        return (
+          s +
+          (site.ownersDetail || []).reduce(
+            (sum, od) => sum + (od.tdsAmount || 0),
+            0,
+          )
+        );
+      }, 0);
       return {
         totalBaseRent,
         gstHoldTotal,
+        tdsHoldTotal,
         consolidatedPayable: totalBaseRent + gstHoldTotal,
       };
     };
