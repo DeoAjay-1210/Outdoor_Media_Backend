@@ -891,23 +891,25 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 }
 
 function computeGstSplit(media, withGst) {
-  const totalRentalAmount = media.rentalPayment?.netPayable || 0;
-  const gstAmountFull = media.rentalPayment?.gstAmount || 0;
+  const baseRent = Number(media.rentalPayment?.totalRentalAmount || 0);
+  const gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
   const totalWithGst =
     media.rentalPayment?.totalRentalAmountWithGst ||
-    totalRentalAmount + gstAmountFull;
+    baseRent + gstAmountFull;
 
-  if (withGst === 1) {
+  if (withGst === 1 || withGst === 0) {
     return {
-      baseAmount: totalRentalAmount,
+      baseAmount: totalWithGst,
       gstAmount: gstAmountFull,
-      netPayable: totalRentalAmount,
+      netPayable: baseRent,
     };
   }
 
+  // for withGst === 2 (Direct), we fold it into netPayable
+  // BUT we still return the gstAmount for record keeping in the entry
   return {
     baseAmount: totalWithGst,
-    gstAmount: 0,
+    gstAmount: gstAmountFull,
     netPayable: totalWithGst,
   };
 }
@@ -2222,7 +2224,7 @@ exports.saveRentalDue = async (req, res) => {
             failedCount,
             totalBaseAmount: results.reduce((s, r) => s + (r.baseAmount || 0), 0),
             totalGstAmount: results.reduce((s, r) => s + (r.gstAmount || 0), 0),
-            totalNetPayable: results.reduce((s, r) => s + (r.netPayable || 0), 0),
+            totalNetPayable: results.reduce((s, r) => s + (r.netPayable || 0) + (r.gstAmount || 0), 0),
           },
         },
       });
@@ -3578,7 +3580,43 @@ for (const siteDoc of activeSitesForSweep) {
       {
         $addFields: {
           effectiveNetPayable: {
-            $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+            $let: {
+              vars: {
+                base: { $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"] },
+                entryGst: { $ifNull: ["$matchingEntry.gstAmount", 0] },
+                siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                ownerGst: {
+                  $sum: {
+                    $map: {
+                      input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
+                      as: "o",
+                      in: { $ifNull: ["$$o.gstAmount", 0] }
+                    }
+                  }
+                }
+              },
+              in: {
+                $let: {
+                  vars: {
+                    gst: {
+                      $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
+                    }
+                  },
+                  in: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $gt: ["$$gst", 0] },
+                          { $gte: ["$$base", { $add: [{ $ifNull: ["$rentalPayment.totalRentalAmount", 0] }, "$$gst"] }] }
+                        ]
+                      },
+                      "$$base",
+                      { $add: ["$$base", "$$gst"] }
+                    ]
+                  }
+                }
+              }
+            }
           },
         },
       },
@@ -3643,7 +3681,43 @@ for (const siteDoc of activeSitesForSweep) {
       {
         $addFields: {
           effectiveNetPayable: {
-            $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+            $let: {
+              vars: {
+                base: { $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"] },
+                entryGst: { $ifNull: ["$matchingEntry.gstAmount", 0] },
+                siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                ownerGst: {
+                  $sum: {
+                    $map: {
+                      input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
+                      as: "o",
+                      in: { $ifNull: ["$$o.gstAmount", 0] }
+                    }
+                  }
+                }
+              },
+              in: {
+                $let: {
+                  vars: {
+                    gst: {
+                      $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
+                    }
+                  },
+                  in: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $gt: ["$$gst", 0] },
+                          { $gte: ["$$base", { $add: [{ $ifNull: ["$rentalPayment.totalRentalAmount", 0] }, "$$gst"] }] }
+                        ]
+                      },
+                      "$$base",
+                      { $add: ["$$base", "$$gst"] }
+                    ]
+                  }
+                }
+              }
+            }
           },
         },
       },
@@ -3713,7 +3787,43 @@ for (const siteDoc of activeSitesForSweep) {
       {
         $addFields: {
           effectiveNetPayable: {
-            $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
+            $let: {
+              vars: {
+                base: { $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"] },
+                entryGst: { $ifNull: ["$matchingEntry.gstAmount", 0] },
+                siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                ownerGst: {
+                  $sum: {
+                    $map: {
+                      input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
+                      as: "o",
+                      in: { $ifNull: ["$$o.gstAmount", 0] }
+                    }
+                  }
+                }
+              },
+              in: {
+                $let: {
+                  vars: {
+                    gst: {
+                      $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
+                    }
+                  },
+                  in: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $gt: ["$$gst", 0] },
+                          { $gte: ["$$base", { $add: [{ $ifNull: ["$rentalPayment.totalRentalAmount", 0] }, "$$gst"] }] }
+                        ]
+                      },
+                      "$$base",
+                      { $add: ["$$base", "$$gst"] }
+                    ]
+                  }
+                }
+              }
+            }
           },
           isApprovedByRole: hasRoleApprovedCond,
           isClosedOverall: isClosedOverallCond,
@@ -3865,7 +3975,42 @@ for (const siteDoc of activeSitesForSweep) {
         $group: {
           _id: null,
           count: { $sum: 1 },
-          amount: { $sum: "$rentalDue.netPayable" },
+          amount: {
+            $sum: {
+              $let: {
+                vars: {
+                  base: "$rentalDue.netPayable",
+                  entryGst: { $ifNull: ["$rentalDue.gstAmount", 0] },
+                  siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                  ownerGst: {
+                    $sum: {
+                      $map: {
+                        input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
+                        as: "o",
+                        in: { $ifNull: ["$$o.gstAmount", 0] }
+                      }
+                    }
+                  }
+                },
+                in: {
+                  $let: {
+                    vars: {
+                      gst: {
+                        $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
+                      }
+                    },
+                    in: {
+                      $cond: [
+                        { $and: [ { $gt: ["$$gst", 0] }, { $gte: ["$$base", { $add: ["$rentalPayment.totalRentalAmount", "$$gst"] }] } ] },
+                        "$$base",
+                        { $add: ["$$base", "$$gst"] }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
         },
       },
     ]);
