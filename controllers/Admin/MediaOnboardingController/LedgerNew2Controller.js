@@ -6176,10 +6176,12 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     totalLedgerGstAmount: 0,
     totalLedgerPendingAmount: 0,
     totalGstPendingAmount: 0,
+    totalDueMonthAmount: 0, // ✅ NEW
     hasTotalLedger: false,
     hasTotalGst: false,
     hasPendingLedger: false,
-    hasPendingGst: false
+    hasPendingGst: false,
+    hasDueMonth: false      // ✅ NEW
   };
 
   if (media.status !== 1 || cycles.length === 0) return result;
@@ -6237,6 +6239,12 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           modeAmount -= Number(owner.tdsAmount || 0);
         }
 
+        // ✅ NEW: Add to this month's generated revenue (Target)
+        if (isRequestedMonthCycle) {
+          result.totalDueMonthAmount += modeAmount;
+          if (modeAmount > 0) result.hasDueMonth = true;
+        }
+
         // Find the payment entry to check date and status
         const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, true);
 
@@ -6286,6 +6294,13 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
       if (rowsForMonth.length > 0) {
         rowsForMonth.forEach((row) => {
           const amt = Number(row.gstAmount || 0);
+
+          // ✅ NEW: Add to this month's generated GST (Target)
+          if (isRequestedMonthCycle) {
+            result.totalDueMonthAmount += amt;
+            if (amt > 0) result.hasDueMonth = true;
+          }
+
           const paid = isRowPaid(row);
           if (paid) {
             if (row.date) {
@@ -6305,6 +6320,12 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           }
         });
       } else if (expectedGstPerCycle > 0) {
+        // ✅ NEW: Add to this month's generated GST (Target)
+        if (isRequestedMonthCycle) {
+          result.totalDueMonthAmount += expectedGstPerCycle;
+          if (expectedGstPerCycle > 0) result.hasDueMonth = true;
+        }
+
         // CUMULATIVE Pending
         result.totalGstPendingAmount += expectedGstPerCycle;
         if (expectedGstPerCycle > 0) result.hasPendingGst = true;
@@ -6373,6 +6394,8 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     totalLedgerPendingAmountSites: new Set(),
     totalGstPendingAmount: 0,
     totalGstPendingAmountSites: new Set(),
+    overallDueMonthAmount: 0, // ✅ NEW
+    overallDueMonthAmountSites: new Set(), // ✅ NEW
   };
 
   for (const media of mediaDocs) {
@@ -6390,6 +6413,9 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
 
     summary.totalGstPendingAmount += s.totalGstPendingAmount;
     if (s.hasPendingGst) summary.totalGstPendingAmountSites.add(mediaId);
+
+    summary.overallDueMonthAmount += s.totalDueMonthAmount; // ✅ NEW
+    if (s.hasDueMonth) summary.overallDueMonthAmountSites.add(mediaId); // ✅ NEW
   }
 
   return {
@@ -6401,6 +6427,8 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     totalLedgerPendingAmountSites: summary.totalLedgerPendingAmountSites.size,
     totalGstPendingAmount: Math.round(summary.totalGstPendingAmount),
     totalGstPendingAmountSites: summary.totalGstPendingAmountSites.size,
+    overallDueMonthAmount: Math.round(summary.overallDueMonthAmount), // ✅ NEW
+    overallDueMonthAmountSites: summary.overallDueMonthAmountSites.size, // ✅ NEW
   };
 }
 exports.computeOutstandingSummary = computeOutstandingSummary;
