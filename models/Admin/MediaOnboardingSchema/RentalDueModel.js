@@ -144,6 +144,15 @@ const rentalDueEntrySchema = new mongoose.Schema(
       fileType: { type: String, enum: ["image"], default: "image" },
       uploadedAt: { type: Date, default: Date.now },
     },
+    invoice: {
+      originalName: { type: String },
+      fileName: { type: String },
+      filePath: { type: String },
+      mimeType: { type: String },
+      size: { type: Number },
+      fileType: { type: String, enum: ["pdf"], default: "pdf" },
+      uploadedAt: { type: Date, default: Date.now },
+    },
 
     // ── Who Saved This Entry ──────────────────────────────────
     savedBy: {

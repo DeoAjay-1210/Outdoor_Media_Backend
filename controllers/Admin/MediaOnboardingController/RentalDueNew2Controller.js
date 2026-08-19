@@ -1469,6 +1469,7 @@ async function processSingleRentalDue({
   gstApplicableFlag,
   pastgstApplicableFlag: requestedPastFlag,
   proofOfCampaign,
+  invoice, // ✅ ADDED
   userType,
   userId,
   userName,
@@ -1626,6 +1627,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 
     if (campaignName) entry.campaignName = campaignName;
     if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
+    if (invoice) entry.invoice = invoice; // ✅ ADDED
 
     // ✅ AUTO-INFER gstApplicableFlag if it's currently 0 or passed as 0
     let resolvedUpdateFlag = gstApplicableFlag !== undefined ? Number(gstApplicableFlag) : Number(entry.gstApplicableFlag || 0);
@@ -1812,6 +1814,7 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
       dueMonth: entry.dueMonth, // ✅ ADDED — makes it explicit which month this response is for
       campaignName: entry.campaignName,
       proofOfCampaign: entry.proofOfCampaign,
+      invoice: entry.invoice, // ✅ ADDED
       approvalSteps: entry.approvalSteps,
       approvalStatus: entry.approvalStatus,
       currentPendingRole: entry.currentPendingRole,
@@ -1964,6 +1967,7 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
     gstAddedToBalance: false,
     campaignName,
     proofOfCampaign: proofOfCampaign,
+    invoice: invoice, // ✅ ADDED
     savedBy: { userId, userName, role: userType, savedAt: nowIST() },
     approvalFlow: 2,
     approvalSteps: steps,
@@ -2062,6 +2066,7 @@ const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, sa
     mediaName: media.mediaName,
     campaignName,
     proofOfCampaign,
+    invoice, // ✅ ADDED
     dueDate: dueDateObj,
     netPayable: newEntry.netPayable,
     withGst: newEntry.withGst,
@@ -2117,6 +2122,18 @@ exports.saveRentalDue = async (req, res) => {
       proofOfCampaign = req.processFile(singleProofFile);
     }
 
+    let invoice = null;
+    const singleInvoiceFile = files.find((f) => f.fieldname === "invoice");
+    if (singleInvoiceFile) {
+      if (singleInvoiceFile.mimetype !== "application/pdf") {
+        return res.status(400).json({
+          success: false,
+          message: "Invoice must be a PDF file",
+        });
+      }
+      invoice = req.processFile(singleInvoiceFile);
+    }
+
     // ── NEW — batch mode: entries: [ { mediaId, campaignName, withGst, gstApplicableFlag }, ... ]
     // Note: proofOfCampaign file upload only applies to the single-mediaId
     // request below (multipart with one file). Batch requests don't carry
@@ -2130,10 +2147,20 @@ exports.saveRentalDue = async (req, res) => {
         return match ? Number(match[1]) : null;
       };
 
+      const parseEntryInvoiceIndex = (fieldname) => {
+        const match = fieldname.match(/^entries\[(\d+)\]\[invoice\]$/);
+        return match ? Number(match[1]) : null;
+      };
+
       const entryFileMap = {};
+      const entryInvoiceFileMap = {};
+
       files.forEach((f) => {
-        const idx = parseEntryFileIndex(f.fieldname);
-        if (idx !== null) entryFileMap[idx] = f;
+        const pIdx = parseEntryFileIndex(f.fieldname);
+        if (pIdx !== null) entryFileMap[pIdx] = f;
+
+        const iIdx = parseEntryInvoiceIndex(f.fieldname);
+        if (iIdx !== null) entryInvoiceFileMap[iIdx] = f;
       });
 
       const results = [];
@@ -2155,6 +2182,20 @@ exports.saveRentalDue = async (req, res) => {
           entryProofOfCampaign = req.processFile(entryFile);
         }
 
+        let entryInvoice = null;
+        const invoiceFile = entryInvoiceFileMap[index];
+        if (invoiceFile) {
+          if (invoiceFile.mimetype !== "application/pdf") {
+            results.push({
+              success: false,
+              mediaId: item.mediaId,
+              message: `entries[${index}].invoice must be a PDF file`,
+            });
+            continue;
+          }
+          entryInvoice = req.processFile(invoiceFile);
+        }
+
         const result = await processSingleRentalDue({
           mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
           rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
@@ -2163,6 +2204,7 @@ exports.saveRentalDue = async (req, res) => {
           gstApplicableFlag: item.gstApplicableFlag,
           pastgstApplicableFlag: item.pastgstApplicableFlag, // ✅ NEW
           proofOfCampaign: entryProofOfCampaign, // ✅ CHANGED — was hardcoded null
+          invoice: entryInvoice, // ✅ ADDED
           userType,
           userId,
           userName,
@@ -2248,6 +2290,7 @@ exports.saveRentalDue = async (req, res) => {
       gstApplicableFlag,
       pastgstApplicableFlag,
       proofOfCampaign,
+      invoice, // ✅ ADDED
       userType,
       userId,
       userName,

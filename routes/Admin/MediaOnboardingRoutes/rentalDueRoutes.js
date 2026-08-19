@@ -16,9 +16,10 @@ const {
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
-// Create uploader for rental due campaign proofs
+// Create uploader for rental due campaign proofs and invoices
 const { upload, processFile } = createUploader("rentalDueProofs", {
-  proofOfCampaign: "proofOfCampaign",
+  proofOfCampaign: "rentalDueProofs",
+  invoice: "invoice",
 });
 
 
