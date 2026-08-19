@@ -3916,13 +3916,6 @@ for (const siteDoc of activeSitesForSweep) {
       },
     ]);
 
-    const approvedCount = statsAgg[0]?.approved || 0;
-    const approvedAmountTotal = statsAgg[0]?.approvedAmount || 0;
-    const overDueSiteCount = statsAgg[0]?.overdue || 0;
-    const overDueAmountTotal = statsAgg[0]?.overdueAmount || 0;
-    const pendingCount = (statsAgg[0]?.pending || 0) + overDueSiteCount;
-    const pendingAmountTotal =
-      (statsAgg[0]?.pendingAmount || 0) + overDueAmountTotal;
 
     // ✅ FIXED — same root cause as isPastPendingByRoleCond above.
     // Since nextBillingDate auto-advances regardless of approval, the
@@ -4018,6 +4011,14 @@ for (const siteDoc of activeSitesForSweep) {
       count: pastPendingAgg[0]?.count || 0,
       amount: pastPendingAgg[0]?.amount || 0,
     };
+
+    const approvedCount = statsAgg[0]?.approved || 0;
+    const approvedAmountTotal = statsAgg[0]?.approvedAmount || 0;
+    const overDueSiteCount = (statsAgg[0]?.overdue || 0) + (pastPendingApproval.count || 0);
+    const overDueAmountTotal = (statsAgg[0]?.overdueAmount || 0) + (pastPendingApproval.amount || 0);
+    const pendingCount = (statsAgg[0]?.pending || 0) + overDueSiteCount;
+    const pendingAmountTotal =
+      (statsAgg[0]?.pendingAmount || 0) + overDueAmountTotal;
 
     const approvalBreakdownAgg = await Media.aggregate([
       { $match: { status: 1 } },
@@ -4779,7 +4780,7 @@ const filteredAgreementDocVerificationHistory = (
         approvedAmountTotal,
         pendingCount,
         pendingAmountTotal,
-        pastPendingApproval,
+        // pastPendingApproval removed per user request (merged into overDue)
         pendingApproval: {
           staff: pendingByRole.staff,
           teamLead: pendingByRole.teamLead,

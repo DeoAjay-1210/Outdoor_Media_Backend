@@ -1172,23 +1172,22 @@ function parseSiteFilterDueMonthLabel(label) {
 }
 const landOwnerSiteFilter = async (req, res) => {
   try {
-    const {
-      landOwnerMasterIds,
-      search,
-      pageNumber = 1,
-      count = 10,
-      // ✅ ADDED — new request params
-      monthFilter,
-      currentMonthLedgerEntries: wantCurrentMonthLedger,
-      pastMonthLedgerEntries: wantPastMonthLedger,
-      currentGst: wantCurrentGst,
-      pastGst: wantPastGst,
-      // ✅ NEW: Rental Status Filters
-      approvalSite: wantApprovalSite,
-      pendingSite: wantPendingSite,
-      pastPending: wantPastPending,
-      overDue: wantOverDue,
-      // ✅ NEW: Pending Payment Filters
+      const {
+        landOwnerMasterIds,
+        search,
+        pageNumber = 1,
+        count = 10,
+        // ✅ ADDED — new request params
+        monthFilter,
+        currentMonthLedgerEntries: wantCurrentMonthLedger,
+        pastMonthLedgerEntries: wantPastMonthLedger,
+        currentGst: wantCurrentGst,
+        pastGst: wantPastGst,
+        // ✅ NEW: Rental Status Filters
+        approvalSite: wantApprovalSite,
+        pendingSite: wantPendingSite,
+        overDue: wantOverDue,
+        // ✅ NEW: Pending Payment Filters
       currentPendingRent: wantCurrentPendingRent,
       pastRentalPending: wantPastRentalPending,
       currentGstPending: wantCurrentGstPending,
@@ -1221,10 +1220,10 @@ const landOwnerSiteFilter = async (req, res) => {
     const includeCurrentGst = Number(wantCurrentGst) === 1;
     const includePastGst = Number(wantPastGst) === 1;
 
-    const includeApprovalSite = Number(wantApprovalSite) === 1;
-    const includePendingSites = Number(wantPendingSite) === 1;
-    const includePastPending = Number(wantPastPending) === 1;
-    const includeOverDue = Number(wantOverDue) === 1;
+      const includeApprovalSite = Number(wantApprovalSite) === 1;
+      const includePendingSites = Number(wantPendingSite) === 1;
+      // const includePastPending = Number(wantPastPending) === 1; // Removed per user request
+      const includeOverDue = Number(wantOverDue) === 1;
 
     const includeCurrentPendingRent = Number(wantCurrentPendingRent) === 1;
     const includePastRentalPending = Number(wantPastRentalPending) === 1;
@@ -1252,7 +1251,6 @@ const landOwnerSiteFilter = async (req, res) => {
     const needsRentalStatusFields =
       includeApprovalSite ||
       includePendingSites ||
-      includePastPending ||
       includeOverDue;
     const isAnyFilterActive = needsLedgerFields || needsRentalStatusFields;
 
@@ -2108,6 +2106,7 @@ const landOwnerSiteFilter = async (req, res) => {
           (status === 1 || status === 2)
         );
       });
+      // ✅ CHANGED — Merged into isOverDueSite per user request
       const hasPastPendingSite = rentalDue.some((due) => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
         const isPast =
@@ -2120,6 +2119,7 @@ const landOwnerSiteFilter = async (req, res) => {
       });
       const isOverDueSite =
         Number(mediaDoc.rentalPayment?.status) === 3 ||
+        hasPastPendingSite || // ✅ Merged
         rentalDue.some((due) => {
           const status = due.approvalStatus ?? due.status ?? 1;
           const isPastDueDate = due.dueDate && new Date(due.dueDate) < today;
@@ -2144,7 +2144,6 @@ const landOwnerSiteFilter = async (req, res) => {
         rentalStatus: {
           hasApprovedSite,
           hasPendingSite,
-          hasPastPendingSite,
           isOverDueSite,
         },
         ownersDetail: ownersOnThisSite.map((o) => {
@@ -2321,7 +2320,6 @@ const landOwnerSiteFilter = async (req, res) => {
       const rentalStatusMatch = {
         hasApproved: false,
         hasPending: false,
-        hasPastPending: false,
         isOverDue: false,
       };
 
@@ -2351,8 +2349,6 @@ const landOwnerSiteFilter = async (req, res) => {
           rentalStatusMatch.hasApproved = true;
         if (site.rentalStatus.hasPendingSite)
           rentalStatusMatch.hasPending = true;
-        if (site.rentalStatus.hasPastPendingSite)
-          rentalStatusMatch.hasPastPending = true;
         if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
 
         if (site._overallSummary) {
@@ -2473,8 +2469,7 @@ const landOwnerSiteFilter = async (req, res) => {
         const rentalMatch = needsRentalStatusFields
           ? (includeApprovalSite && rentalStatusMatch.hasApproved) ||
             (includePendingSites && rentalStatusMatch.hasPending) ||
-            (includePastPending && rentalStatusMatch.hasPastPending) ||
-            (includeOverDue && rentalStatusMatch.isOverDue)
+            (includeOverDue && rentalStatusMatch.isOverDue) // ✅ isOverDue now includes past pending
           : false;
 
         if (!ledgerMatch && !rentalMatch) return; // skip this owner — nothing to show for the requested flag(s)
@@ -2570,7 +2565,6 @@ const landOwnerSiteFilter = async (req, res) => {
       const rentalStatusMatch = {
         hasApproved: false,
         hasPending: false,
-        hasPastPending: false,
         isOverDue: false,
       };
 
@@ -2580,8 +2574,6 @@ const landOwnerSiteFilter = async (req, res) => {
             rentalStatusMatch.hasApproved = true;
           if (site.rentalStatus.hasPendingSite)
             rentalStatusMatch.hasPending = true;
-          if (site.rentalStatus.hasPastPendingSite)
-            rentalStatusMatch.hasPastPending = true;
           if (site.rentalStatus.isOverDueSite)
             rentalStatusMatch.isOverDue = true;
 
@@ -2698,8 +2690,7 @@ const landOwnerSiteFilter = async (req, res) => {
         const rentalMatch = needsRentalStatusFields
           ? (includeApprovalSite && rentalStatusMatch.hasApproved) ||
             (includePendingSites && rentalStatusMatch.hasPending) ||
-            (includePastPending && rentalStatusMatch.hasPastPending) ||
-            (includeOverDue && rentalStatusMatch.isOverDue)
+            (includeOverDue && rentalStatusMatch.isOverDue) // ✅ isOverDue now includes past pending
           : false;
 
         if (!ledgerMatch && !rentalMatch) return;
