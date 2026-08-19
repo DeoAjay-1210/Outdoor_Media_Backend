@@ -3158,6 +3158,27 @@ if (landOwnerMasterId) {
           (a, b) => b.updatedAt - a.updatedAt
         );
       }
+      // ✅ ADDED — ensure previousBillGenerateDate is present for display
+      if (
+        item.rentalPayment &&
+        !item.rentalPayment.previousBillGenerateDate &&
+        item.rentalPayment.lastBillPaidDate
+      ) {
+        const lp = new Date(item.rentalPayment.lastBillPaidDate);
+        const freq = Number(item.rentalPayment.paymentFrequency || 1);
+        const custom = Number(item.rentalPayment.customPaymentFrequency || 1);
+        const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+        const months = freq === 6 ? custom : (map[freq] || 1);
+        lp.setMonth(lp.getMonth() - months);
+
+        // ✅ CLAMP — don't go before billingStartDate
+        const anchor = item.rentalPayment.billingStartDate || item.rentalPayment.lastBillPaidDate;
+        if (lp < new Date(anchor)) {
+          item.rentalPayment.previousBillGenerateDate = anchor;
+        } else {
+          item.rentalPayment.previousBillGenerateDate = lp;
+        }
+      }
     });
 
     // ===============================
@@ -3265,6 +3286,28 @@ const getMediaById = async (req, res) => {
       mediaData.rentalPayment.rentalAmountHistory.sort(
         (a, b) => b.updatedAt - a.updatedAt
       );
+    }
+
+    // ✅ ADDED — ensure previousBillGenerateDate is present for display
+    if (
+      mediaData.rentalPayment &&
+      !mediaData.rentalPayment.previousBillGenerateDate &&
+      mediaData.rentalPayment.lastBillPaidDate
+    ) {
+      const lp = new Date(mediaData.rentalPayment.lastBillPaidDate);
+      const freq = Number(mediaData.rentalPayment.paymentFrequency || 1);
+      const custom = Number(mediaData.rentalPayment.customPaymentFrequency || 1);
+      const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+      const months = freq === 6 ? custom : (map[freq] || 1);
+      lp.setMonth(lp.getMonth() - months);
+
+      // ✅ CLAMP — don't go before billingStartDate
+      const anchor = mediaData.rentalPayment.billingStartDate || mediaData.rentalPayment.lastBillPaidDate;
+      if (lp < new Date(anchor)) {
+        mediaData.rentalPayment.previousBillGenerateDate = anchor;
+      } else {
+        mediaData.rentalPayment.previousBillGenerateDate = lp;
+      }
     }
 
     // Return success response with media data

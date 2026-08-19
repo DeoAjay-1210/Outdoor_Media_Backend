@@ -4553,9 +4553,22 @@ const filteredAgreementDocVerificationHistory = (
           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
         nextBillingDate: item.rentalPayment?.nextBillingDate,
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
-        previousBillGenerateDate: item.rentalPayment?.previousBillGenerateDate
-          ? formatDate(item.rentalPayment.previousBillGenerateDate)
-          : "",
+        previousBillGenerateDate: (() => {
+          const pbgd = item.rentalPayment?.previousBillGenerateDate;
+          if (pbgd) return formatDate(pbgd);
+          const lp = item.rentalPayment?.lastBillPaidDate;
+          if (!lp) return "";
+          const freq = Number(item.rentalPayment?.paymentFrequency || 1);
+          const custom = Number(item.rentalPayment?.customPaymentFrequency || 1);
+          const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+          const months = freq === 6 ? custom : (map[freq] || 1);
+          const d = new Date(lp);
+          d.setMonth(d.getMonth() - months);
+
+          // ✅ CLAMP — don't go before billingStartDate
+          const anchor = item.rentalPayment?.billingStartDate || lp;
+          return formatDate(d < new Date(anchor) ? anchor : d);
+        })(),
         currentBillDate: currentMonthEntry
           ? formatDate(item.rentalPayment?.lastBillPaidDate)
           : "",

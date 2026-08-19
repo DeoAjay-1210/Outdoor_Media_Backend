@@ -1264,11 +1264,19 @@ MediaSchema.pre("save", function () {
         : frequencyMap[Number(rp.paymentFrequency)] || 1;
 
     // ✅ NEW: Centralized Cyclic logic
-    if (this.isNew) {
-      if (!rp.previousBillGenerateDate) {
-        rp.previousBillGenerateDate = rp.lastBillPaidDate;
+    if (!rp.previousBillGenerateDate && rp.lastBillPaidDate) {
+      const prevDate = new Date(rp.lastBillPaidDate);
+      prevDate.setMonth(prevDate.getMonth() - monthsToAdd);
+
+      // ✅ CLAMP — don't go before billingStartDate (onboarding anchor)
+      const anchor = rp.billingStartDate || rp.lastBillPaidDate;
+      if (prevDate < new Date(anchor)) {
+        rp.previousBillGenerateDate = anchor;
+      } else {
+        rp.previousBillGenerateDate = prevDate;
       }
     } else if (
+      !this.isNew &&
       this.isModified("rentalPayment.lastBillPaidDate") &&
       !this.isModified("rentalPayment.previousBillGenerateDate")
     ) {

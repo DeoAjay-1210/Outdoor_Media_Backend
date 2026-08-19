@@ -3935,6 +3935,22 @@ latestLedger = latestLedger.sort((a, b) => {
           ? formatDate(currentBillDateForMedia)
           : "",
         lastBillDate: formatDate(mediaObj.rentalPayment?.lastBillPaidDate),
+        previousBillGenerateDate: (() => {
+          const pbgd = mediaObj.rentalPayment?.previousBillGenerateDate;
+          if (pbgd) return formatDate(pbgd);
+          const lp = mediaObj.rentalPayment?.lastBillPaidDate;
+          if (!lp) return "";
+          const freq = Number(mediaObj.rentalPayment?.paymentFrequency || 1);
+          const custom = Number(mediaObj.rentalPayment?.customPaymentFrequency || 1);
+          const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+          const months = freq === 6 ? custom : (map[freq] || 1);
+          const d = new Date(lp);
+          d.setMonth(d.getMonth() - months);
+
+          // ✅ CLAMP — don't go before billingStartDate
+          const anchor = mediaObj.rentalPayment?.billingStartDate || lp;
+          return formatDate(d < new Date(anchor) ? anchor : d);
+        })(),
         nextBillingDate: formatDate(mediaObj.rentalPayment?.nextBillingDate),
         outStantStatus:
           mediaObj.rentalPayment?.outStantStatus ??
@@ -6032,6 +6048,22 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     tdsPayment,
     outstanding,
     lastBillDate: formatDate(media.rentalPayment?.lastBillPaidDate),
+    previousBillGenerateDate: (() => {
+      const pbgd = media.rentalPayment?.previousBillGenerateDate;
+      if (pbgd) return formatDate(pbgd);
+      const lp = media.rentalPayment?.lastBillPaidDate;
+      if (!lp) return "";
+      const freq = Number(media.rentalPayment?.paymentFrequency || 1);
+      const custom = Number(media.rentalPayment?.customPaymentFrequency || 1);
+      const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+      const months = freq === 6 ? custom : (map[freq] || 1);
+      const d = new Date(lp);
+      d.setMonth(d.getMonth() - months);
+
+      // ✅ CLAMP — don't go before billingStartDate
+      const anchor = media.rentalPayment?.billingStartDate || lp;
+      return formatDate(d < new Date(anchor) ? anchor : d);
+    })(),
     nextBillingDate: formatDate(media.rentalPayment?.nextBillingDate),
     currentBillDate: currentBillDate ? formatDate(currentBillDate) : "",
     outStantStatus:
