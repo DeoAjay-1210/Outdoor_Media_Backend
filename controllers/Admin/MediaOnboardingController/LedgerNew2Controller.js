@@ -3673,14 +3673,86 @@ latestLedger = latestLedger.sort((a, b) => {
           due.approvalStatus === null,
       );
 
-      const fullGstBalanceHistoryRaw = Array.isArray(mediaObj.gstBalanceHistory)
-        ? mediaObj.gstBalanceHistory
-        : [];
-      // ✅ NEW — dedupe fix (drop accidental null-owner placeholder rows
-      // when a real-owner row already covers that rentalDueId+dueMonth)
-      const fullGstBalanceHistory = dedupeGstBalanceHistory(
-        fullGstBalanceHistoryRaw,
-      );
+      const expectedGstPerCycleTotal = resolveExpectedGstForCycle(mediaObj);
+      const isGstApplicableForOwner = (owner) => {
+        if (Number(mediaObj.rentalPayment?.gstApplicable) === 1 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0) return true;
+        let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+        if (gstFlag === 0) {
+          const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
+          const ownerGst = (mediaObj.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+          if (ownerGst) gstFlag = 2;
+          else if (siteGst) gstFlag = 1;
+        }
+        if (gstFlag === 1) return Number(mediaObj.rentalPayment?.gstApplicable || 0) === 1;
+        return Number(owner.gstApplicable || 0) === 1;
+      };
+
+      let fullGstBalanceHistory = dedupeGstBalanceHistory(
+        Array.isArray(mediaObj.gstBalanceHistory) ? mediaObj.gstBalanceHistory : [],
+      ).map(entry => {
+        const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
+        const isApproved = matchedDue?.approvalStatus === 3;
+        let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
+        if (Number(effectiveWithGst) === 2 && !isApproved) effectiveWithGst = 1;
+
+        let isPaid = entry.isPaid;
+        let paymentDate = entry.date;
+        if (Number(effectiveWithGst) === 2 && !isPaid) {
+            const ownerId = entry.ownerId || entry.landOwnerId;
+            const owner = (mediaObj.landOwners || []).find(o => String(o._id) === String(ownerId));
+            const cycleDate = entry.cycle || (entry.date ? new Date(entry.date) : null);
+            const pc = Number(owner?.paymentCategory || 1);
+            const modes = getRequiredModesShared(pc);
+            const allPaid = modes.every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner?._id) && e.paymentMode === mode));
+            if (allPaid) isPaid = true;
+        }
+        return { ...entry, withGst: effectiveWithGst, isPaid, date: paymentDate };
+      });
+
+      if (expectedGstPerCycleTotal > 0) {
+        autoDueCycles.forEach((cycleDate) => {
+          const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+          (mediaObj.landOwners || []).forEach((owner) => {
+            if (!isGstApplicableForOwner(owner)) return;
+            const hasEntry = fullGstBalanceHistory.some(g =>
+              g.dueMonth === cycleMonthLabel &&
+              String(g.ownerId || g.landOwnerId || "") === String(owner._id)
+            );
+            if (!hasEntry) {
+              let ownerGst = 0;
+              let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+              if (gstFlag === 0) {
+                const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
+                const anyOwnerGst = (mediaObj.landOwners || []).some(o => Number(o.gstApplicable) === 1);
+                if (anyOwnerGst) gstFlag = 2;
+                else if (siteGst) gstFlag = 1;
+              }
+              if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+                ownerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
+              } else {
+                ownerGst = Number(owner.gstAmount || 0);
+              }
+              if (ownerGst > 0) {
+                const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+                const isApproved = matchedDue?.approvalStatus === 3;
+                const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
+                let isPaid = false;
+                if (Number(effectiveWithGst) === 2) {
+                    const pc = Number(owner.paymentCategory || 1);
+                    isPaid = getRequiredModesShared(pc).every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode));
+                }
+                fullGstBalanceHistory.push({
+                  dueMonth: cycleMonthLabel, cycle: cycleDate, gstAmount: ownerGst, isPaid, isVirtual: true,
+                  withGst: effectiveWithGst, ownerId: owner._id, ownerName: owner.name, landOwnerId: owner._id, landOwnerName: owner.name,
+                  rentalDueId: matchedDue?._id || null
+                });
+              }
+            }
+          });
+        });
+        fullGstBalanceHistory = dedupeGstBalanceHistory(fullGstBalanceHistory);
+        fullGstBalanceHistory.sort((a, b) => new Date(a.cycle || a.date || 0) - new Date(b.cycle || b.date || 0));
+      }
 
       let gstPendingAmount = 0;
       if (fullGstBalanceHistory.length > 0) {
@@ -4068,26 +4140,90 @@ latestLedger = latestLedger.sort((a, b) => {
       );
     }
 
-    const computeGstPendingAmountForDoc = (obj) => {
-      const fullGstBalanceHistory = dedupeGstBalanceHistory(
-        Array.isArray(obj.gstBalanceHistory) ? obj.gstBalanceHistory : [],
-      );
+    const computeGstPendingAmountForDoc = (mediaObj) => {
+      const expectedGstPerCycleTotal = resolveExpectedGstForCycle(mediaObj);
+      const isGstApplicableForOwner = (owner) => {
+        if (Number(mediaObj.rentalPayment?.gstApplicable) === 1 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0) return true;
+        let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+        if (gstFlag === 0) {
+          const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
+          const ownerGst = (mediaObj.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+          if (ownerGst) gstFlag = 2;
+          else if (siteGst) gstFlag = 1;
+        }
+        if (gstFlag === 1) return Number(mediaObj.rentalPayment?.gstApplicable || 0) === 1;
+        return Number(owner.gstApplicable || 0) === 1;
+      };
+
+      let fullGstBalanceHistory = dedupeGstBalanceHistory(
+        Array.isArray(mediaObj.gstBalanceHistory) ? mediaObj.gstBalanceHistory : [],
+      ).map(entry => {
+        const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
+        const isApproved = matchedDue?.approvalStatus === 3;
+        let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
+        if (Number(effectiveWithGst) === 2 && !isApproved) effectiveWithGst = 1;
+
+        let isPaid = entry.isPaid;
+        if (Number(effectiveWithGst) === 2 && !isPaid) {
+            const ownerId = entry.ownerId || entry.landOwnerId;
+            const owner = (mediaObj.landOwners || []).find(o => String(o._id) === String(ownerId));
+            const pc = Number(owner?.paymentCategory || 1);
+            const modes = getRequiredModesShared(pc);
+            const allPaid = modes.every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner?._id) && e.paymentMode === mode));
+            if (allPaid) isPaid = true;
+        }
+        return { ...entry, isPaid };
+      });
+
+      if (expectedGstPerCycleTotal > 0) {
+        const autoDueCycles = getAllDueCycles(mediaObj, requestedMonthYearParsed);
+        autoDueCycles.forEach((cycleDate) => {
+          const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+          (mediaObj.landOwners || []).forEach((owner) => {
+            if (!isGstApplicableForOwner(owner)) return;
+            const hasEntry = fullGstBalanceHistory.some(g =>
+              g.dueMonth === cycleMonthLabel &&
+              String(g.ownerId || g.landOwnerId || "") === String(owner._id)
+            );
+            if (!hasEntry) {
+              const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+              const isApproved = matchedDue?.approvalStatus === 3;
+              const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
+              let isPaid = false;
+              if (Number(effectiveWithGst) === 2) {
+                  const pc = Number(owner.paymentCategory || 1);
+                  isPaid = getRequiredModesShared(pc).every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode));
+              }
+              if (!isPaid) {
+                  let ownerGst = 0;
+                  let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+                  if (gstFlag === 0) {
+                    const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
+                    const anyOwnerGst = (mediaObj.landOwners || []).some(o => Number(o.gstApplicable) === 1);
+                    if (anyOwnerGst) gstFlag = 2;
+                    else if (siteGst) gstFlag = 1;
+                  }
+                  if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+                    ownerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
+                  } else {
+                    ownerGst = Number(owner.gstAmount || 0);
+                  }
+                  fullGstBalanceHistory.push({ gstAmount: ownerGst, isPaid: false, ownerId: owner._id, landOwnerId: owner._id, dueMonth: cycleMonthLabel });
+              }
+            }
+          });
+        });
+        fullGstBalanceHistory = dedupeGstBalanceHistory(fullGstBalanceHistory);
+      }
+
       let amountSum = 0;
       fullGstBalanceHistory.forEach((entry) => {
         const isPaid = entry.isPaid;
-        const isPaidFalse =
-          isPaid === false ||
-          isPaid === "false" ||
-          isPaid === 0 ||
-          isPaid === "0";
+        const isPaidFalse = isPaid === false || isPaid === "false" || isPaid === 0 || isPaid === "0";
         const hasRealUtr = entry.utrNumber && entry.utrNumber.trim() !== "";
         const isGenuinelyUnpaid = isPaidFalse || !hasRealUtr;
         if (isGenuinelyUnpaid) {
-          const amount =
-            Number(entry.paidAmount) ||
-            Number(entry.amount) ||
-            Number(entry.gstAmount) ||
-            0;
+          const amount = Number(entry.paidAmount) || Number(entry.amount) || Number(entry.gstAmount) || 0;
           amountSum += amount;
         }
       });
@@ -4732,6 +4868,7 @@ function buildSingleMediaHistoryBlock(
   }
 
   const isGstApplicableForOwner = (owner) => {
+    if (Number(media.rentalPayment?.gstApplicable) === 1 && Number(media.rentalPayment?.gstAmount || 0) > 0) return true;
     let gstFlag = Number(media.gstApplicableFlag || 0);
     // ✅ AUTO-INFER if 0
     if (gstFlag === 0) {
@@ -4871,6 +5008,7 @@ function buildSingleMediaHistoryBlock(
         }
       });
     });
+    fullGstBalanceHistoryUnfiltered = dedupeGstBalanceHistory(fullGstBalanceHistoryUnfiltered);
     fullGstBalanceHistoryUnfiltered.sort((a, b) => new Date(a.cycle || a.date || 0) - new Date(b.cycle || b.date || 0));
   }
   const fullGstBalanceHistory = ownerMasterIdFilter
