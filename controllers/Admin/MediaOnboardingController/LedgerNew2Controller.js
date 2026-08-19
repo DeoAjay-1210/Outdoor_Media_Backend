@@ -6184,96 +6184,141 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
   if (media.status !== 1 || cycles.length === 0) return result;
 
-  const liveCycleDate = cycles[cycles.length - 1];
-  const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[liveCycleDate.getUTCMonth()]} ${liveCycleDate.getUTCFullYear()}`;
-
   const expectedGstPerCycle = resolveExpectedGstForCycle(media);
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
 
-  const matchedDue = (media.rentalDue || [])
-    .filter((d) => d.dueMonth === cycleMonthLabel)
-    .sort((a, b) => {
-      const sA = Number(a.approvalStatus || 0);
-      const sB = Number(b.approvalStatus || 0);
-      if (sA === 3 && sB !== 3) return -1;
-      if (sB === 3 && sA !== 3) return 1;
-      return new Date(b.updatedAt) - new Date(a.updatedAt);
-    })[0];
+  cycles.forEach((cycleDate) => {
+    const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+    const isRequestedMonthCycle =
+      cycleDate.getUTCFullYear() === requestedMonthYear.year &&
+      (cycleDate.getUTCMonth() + 1) === requestedMonthYear.month;
 
-  const isApproved = Number(matchedDue?.approvalStatus) === 3;
-  const effectiveWithGst = matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
-  const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
+    // ── best-match rentalDue for this cycle ──
+    const matchedDue = (media.rentalDue || [])
+      .filter((d) => d.dueMonth === cycleMonthLabel)
+      .sort((a, b) => {
+        const sA = Number(a.approvalStatus || 0);
+        const sB = Number(b.approvalStatus || 0);
+        if (sA === 3 && sB !== 3) return -1;
+        if (sB === 3 && sA !== 3) return 1;
+        return new Date(b.updatedAt) - new Date(a.updatedAt);
+      })[0];
 
-  owners.forEach((owner) => {
-    const paymentCategory = Number(owner.paymentCategory || 1);
-    getRequiredModesShared(paymentCategory).forEach((mode) => {
-      let modeAmount = (mode === "Cash"
-        ? Number(owner.cashAmount || owner.shareAmount || 0)
-        : Number(owner.onlineAmount || owner.shareAmount || 0));
+    const isApproved = Number(matchedDue?.approvalStatus) === 3;
+    const effectiveWithGst = matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
+    const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
 
-      if (isOwnerAppraisedDirect) {
-        let gstFlag = Number(media.gstApplicableFlag || 0);
-        if (gstFlag === 0) {
-          const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-          const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1);
-          if (ownerGstAny) gstFlag = 2;
-          else if (siteGst) gstFlag = 1;
+    owners.forEach((owner) => {
+      const paymentCategory = Number(owner.paymentCategory || 1);
+      getRequiredModesShared(paymentCategory).forEach((mode) => {
+        let modeAmount = (mode === "Cash"
+          ? Number(owner.cashAmount || owner.shareAmount || 0)
+          : Number(owner.onlineAmount || owner.shareAmount || 0));
+
+        if (isOwnerAppraisedDirect) {
+          let gstFlag = Number(media.gstApplicableFlag || 0);
+          if (gstFlag === 0) {
+            const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+            const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1);
+            if (ownerGstAny) gstFlag = 2;
+            else if (siteGst) gstFlag = 1;
+          }
+          let ownerGst = 0;
+          if (gstFlag === 1) {
+            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1);
+          } else {
+            ownerGst = Number(owner.gstAmount || 0);
+          }
+          if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
         }
-        let ownerGst = 0;
-        if (gstFlag === 1) {
-          ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1);
-        } else {
-          ownerGst = Number(owner.gstAmount || 0);
+
+        // Deduct TDS from Ledger Amounts (Online mode only)
+        if (mode === "Online") {
+          modeAmount -= Number(owner.tdsAmount || 0);
         }
-        if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
-      }
 
-      // ✅ NEW: Deduct TDS from Ledger Amounts (Online mode only)
-      if (mode === "Online") {
-        modeAmount -= Number(owner.tdsAmount || 0);
-      }
+        // Find the payment entry to check date and status
+        const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, true);
 
-      const isPaid = isOwnerModePaidForCycle(media, owner, mode, liveCycleDate, true);
-      if (isPaid) {
-        result.totalLedgerAmount += modeAmount;
-        if (modeAmount > 0) result.hasTotalLedger = true;
-      } else {
-        result.totalLedgerPendingAmount += modeAmount;
-        if (modeAmount > 0) result.hasPendingLedger = true;
-      }
-    });
-  });
+        if (isPaid) {
+          // Identify if it was paid IN the requested month
+          let paymentDate = null;
+          const liveLedgerEntry = (media.ledger || []).find(e =>
+            e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode
+          );
+          if (liveLedgerEntry) paymentDate = liveLedgerEntry.date;
+          else {
+            const cycleYear = String(cycleDate.getUTCFullYear());
+            const cycleMonthName = MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()];
+            const yearBucket = (media.ledgerHistory || []).find(y => y.year === cycleYear);
+            const monthBucket = yearBucket?.months?.find(m => m.month.toLowerCase() === cycleMonthName.toLowerCase());
+            const histEntry = (monthBucket?.entries || []).find(e =>
+              (e.status === 1 || (e.utrNumber && e.utrNumber.trim() !== "")) &&
+              String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode
+            );
+            if (histEntry) paymentDate = histEntry.date;
+          }
 
-  if (!(matchedDue && Number(matchedDue.withGst) === 2 && isApproved)) {
-    const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
-    const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
-
-    if (rowsForMonth.length > 0) {
-      rowsForMonth.forEach((row) => {
-        const amt = Number(row.gstAmount || 0);
-        const paid = isRowPaid(row);
-        if (paid) {
-          result.totalLedgerGstAmount += amt;
-          if (amt > 0) result.hasTotalGst = true;
+          if (paymentDate) {
+            const pd = new Date(paymentDate);
+            if (pd.getUTCFullYear() === requestedMonthYear.year && (pd.getUTCMonth() + 1) === requestedMonthYear.month) {
+              result.totalLedgerAmount += modeAmount;
+              if (modeAmount > 0) result.hasTotalLedger = true;
+            }
+          } else if (isRequestedMonthCycle) {
+            // Fallback: if it's the requested month's cycle and marked paid but no date, assume it's this month's revenue
+            result.totalLedgerAmount += modeAmount;
+            if (modeAmount > 0) result.hasTotalLedger = true;
+          }
         } else {
-          result.totalGstPendingAmount += amt;
-          if (amt > 0) result.hasPendingGst = true;
+          // CUMULATIVE Pending
+          result.totalLedgerPendingAmount += modeAmount;
+          if (modeAmount > 0) result.hasPendingLedger = true;
         }
       });
-    } else if (expectedGstPerCycle > 0) {
-      result.totalGstPendingAmount += expectedGstPerCycle;
-      result.hasPendingGst = true;
-    }
-  }
+    });
 
-  // ✅ NEW — Legacy Outstanding (Pre-onboarding)
+    // GST Tracking
+    if (!(matchedDue && Number(matchedDue.withGst) === 2 && isApproved)) {
+      const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
+      const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
+
+      if (rowsForMonth.length > 0) {
+        rowsForMonth.forEach((row) => {
+          const amt = Number(row.gstAmount || 0);
+          const paid = isRowPaid(row);
+          if (paid) {
+            if (row.date) {
+              const pd = new Date(row.date);
+              if (pd.getUTCFullYear() === requestedMonthYear.year && (pd.getUTCMonth() + 1) === requestedMonthYear.month) {
+                result.totalLedgerGstAmount += amt;
+                if (amt > 0) result.hasTotalGst = true;
+              }
+            } else if (isRequestedMonthCycle) {
+              result.totalLedgerGstAmount += amt;
+              if (amt > 0) result.hasTotalGst = true;
+            }
+          } else {
+            // CUMULATIVE Pending
+            result.totalGstPendingAmount += amt;
+            if (amt > 0) result.hasPendingGst = true;
+          }
+        });
+      } else if (expectedGstPerCycle > 0) {
+        // CUMULATIVE Pending
+        result.totalGstPendingAmount += expectedGstPerCycle;
+        if (expectedGstPerCycle > 0) result.hasPendingGst = true;
+      }
+    }
+  });
+
+  // ✅ Legacy Outstanding (Pre-onboarding) — already processed as cumulative in your previous implementation
   // 1) GST Outstanding
   (media.rentalPayment?.gstOutstandingHistory || []).forEach((row) => {
     const amt = Number(row.gstOutStandingAmount || 0);
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
     if (isPaid) {
-      // If paid in the requested month, add to paid total
       if (row.date) {
         const d = new Date(row.date);
         if (d.getUTCFullYear() === requestedMonthYear.year && (d.getUTCMonth() + 1) === requestedMonthYear.month) {
@@ -6292,7 +6337,6 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     let amt = Number(row.baseRentOutstandingAmount || 0);
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
-    // ✅ REDUCE TDS for Online legacy rent if applicable
     if (row.paymentMode === "Online" || row.paymentMode === "Cash+Online") {
       const siteTds = owners.reduce((sum, o) => sum + Number(o.tdsAmount || 0), 0);
       amt -= siteTds;
