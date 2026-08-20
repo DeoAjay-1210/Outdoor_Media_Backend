@@ -1117,10 +1117,10 @@ exports.createLedgerEntry = async (req, res) => {
               400,
             );
           }
-          if (![1, 2].includes(Number(item.withGst ?? item.withGst))) {
+          if (![0, 1, 2].includes(Number(item.withGst ?? item.withGst))) {
             return errorResponse(
               res,
-              `entries[${i}].withGst (or withGst) must be 1 or 2 when paymentMode is present`,
+              `entries[${i}].withGst (or withGst) must be 0, 1 or 2 when paymentMode is present`,
               null,
               400,
             );
@@ -1905,6 +1905,14 @@ async function executeBulkPaymentBatch(req, batchData) {
       const media = await Media.findById(mId);
       if (!media) throw new Error(`Media not found: ${mId}`);
       if (media.status !== 1) throw new Error(`Active media required: ${media.mediaName}`);
+
+      // ✅ Initialize arrays if missing
+      if (!Array.isArray(media.ledger)) media.ledger = [];
+      if (!Array.isArray(media.withGst1Ledger)) media.withGst1Ledger = [];
+      if (!Array.isArray(media.ledgerHistory)) media.ledgerHistory = [];
+      if (!Array.isArray(media.gstBalanceHistory)) media.gstBalanceHistory = [];
+      if (!media.rentalPayment.gstOutstandingHistory) media.rentalPayment.gstOutstandingHistory = [];
+      if (!media.rentalPayment.rentalOutstandingHistory) media.rentalPayment.rentalOutstandingHistory = [];
 
       for (const item of sitePayments) {
         const targetType = item.targetType;
@@ -6063,7 +6071,14 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
   const expectedGstPerCycle = resolveExpectedGstForCycle(media);
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
 
+  const liveCycleKey = cycles.length > 0
+    ? `${cycles[cycles.length - 1].getUTCFullYear()}-${cycles[cycles.length - 1].getUTCMonth()}`
+    : null;
+
   cycles.forEach((cycleDate) => {
+    const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
+    const isLiveCycleIteration = cycleKey === liveCycleKey;
+
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
     const isRequestedMonthCycle =
       cycleDate.getUTCFullYear() === requestedMonthYear.year &&
@@ -6120,16 +6135,19 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         }
 
         // Find the payment entry to check date and status
-        const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, true);
+        const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycleIteration);
 
         if (isPaid) {
           // Identify if it was paid IN the requested month
           let paymentDate = null;
-          const liveLedgerEntry = (media.ledger || []).find(e =>
-            e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode
-          );
-          if (liveLedgerEntry) paymentDate = liveLedgerEntry.date;
-          else {
+          if (isLiveCycleIteration) {
+            const liveLedgerEntry = (media.ledger || []).find(e =>
+              e.status === 1 &&
+              (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)) &&
+              e.paymentMode === mode
+            );
+            if (liveLedgerEntry) paymentDate = liveLedgerEntry.date;
+          } else {
             const cycleYear = String(cycleDate.getUTCFullYear());
             const cycleMonthName = MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()];
             const yearBucket = (media.ledgerHistory || []).find(y => y.year === cycleYear);
@@ -6137,7 +6155,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
             const histEntry = (monthBucket?.entries || []).find(e =>
               e.isUtrEntry !== true &&
               (e.status === 1 || (e.utrNumber && e.utrNumber.trim() !== "")) &&
-              String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode
+              (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)) &&
+              e.paymentMode === mode
             );
             if (histEntry) paymentDate = histEntry.date;
           }
