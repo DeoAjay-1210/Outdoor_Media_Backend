@@ -1283,6 +1283,7 @@ const landOwnerSiteFilter = async (req, res) => {
           $or: [
             { mediaName: genericSearchRegex },
             { mediaCode: genericSearchRegex },
+            { "landOwners.name": genericSearchRegex },
           ],
         },
         "landOwners.landOwnerMasterId",
@@ -1352,6 +1353,8 @@ const landOwnerSiteFilter = async (req, res) => {
               $or: [
                 { mediaName: effectiveMediaSearchRegex },
                 { mediaCode: effectiveMediaSearchRegex },
+                { "landOwners.name": effectiveMediaSearchRegex },
+
               ],
             }
           : {}),
