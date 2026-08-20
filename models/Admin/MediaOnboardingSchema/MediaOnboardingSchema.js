@@ -193,6 +193,7 @@ const ledgerSchema = new mongoose.Schema({
   // `media.withGst1Ledger` instead, identified by rentalDueId).
   index: { type: Number, default: null },
   amount: { type: Number, default: 0, min: 0 },
+  isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -221,6 +222,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     // withGst===2 entries by slot when reading past months.
     index: { type: Number, default: null },
     amount: { type: Number, default: 0, min: 0 },
+    isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
   },
   { _id: true },
 );

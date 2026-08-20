@@ -681,7 +681,7 @@ function isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle) {
   );
   return (monthBucket?.entries || []).some(
     (e) =>
-      (e.withGst === 1 || e.withGst === 2) &&
+      e.isUtrEntry !== true &&
       e.paymentMode === mode &&
       (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)),
   );
@@ -1925,10 +1925,16 @@ async function executeBulkPaymentBatch(req, batchData) {
         result.landOwnerName = owner.name;
 
         let amount = 0;
+        let dueMonthLabel = "";
+        let cycleDateVal = null;
+
         if (entryType === "rental" && (targetType === "current" || targetType === "pastCycle")) {
           if (!item.rentalDueId) throw new Error("rentalDueId required");
           const rentalDue = media.rentalDue?.find(d => String(d._id) === String(item.rentalDueId));
           if (!rentalDue) throw new Error("rentalDue record not found");
+
+          dueMonthLabel = rentalDue.dueMonth;
+          cycleDateVal = rentalDue.dueDate;
 
           const ownerCat = Number(owner.paymentCategory || 1);
           let baseAmt = ownerCat === 3 ? (item.paymentMode === "Cash" ? Number(owner.cashAmount || 0) : Number(owner.onlineAmount || 0)) : Number(owner.shareAmount || 0);
@@ -1961,16 +1967,16 @@ async function executeBulkPaymentBatch(req, batchData) {
           if (targetType === "current") {
             media.ledger.push({
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
-              date: entryDate, status: 1, month: rentalDue.dueMonth, cycle: rentalDue.dueDate, rentalDueId: item.rentalDueId,
+              date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
               amount, updatedBy, updatedAt: nowIST(), index: media.ledger.length, withGst: effectiveWithGst,
               isUtrEntry: false
             });
             media.markModified("ledger");
           }
 
-          const parsed = parseDueMonthLabel(rentalDue.dueMonth);
-          const bYear = parsed ? String(parsed.year) : String(new Date(rentalDue.dueDate).getUTCFullYear());
-          const bMonth = parsed ? MONTH_NAMES[parsed.monthIdx] : MONTH_NAMES[new Date(rentalDue.dueDate).getUTCMonth()];
+          const parsed = parseDueMonthLabel(dueMonthLabel);
+          const bYear = parsed ? String(parsed.year) : String(new Date(cycleDateVal).getUTCFullYear());
+          const bMonth = parsed ? MONTH_NAMES[parsed.monthIdx] : MONTH_NAMES[new Date(cycleDateVal).getUTCMonth()];
 
           let yBucket = (media.ledgerHistory || []).find(y => y.year === bYear);
           if (!yBucket) { media.ledgerHistory.push({ year: bYear, months: [] }); yBucket = media.ledgerHistory[media.ledgerHistory.length - 1]; }
@@ -1979,17 +1985,19 @@ async function executeBulkPaymentBatch(req, batchData) {
 
           mBucket.entries.push({
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
-            netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: effectiveWithGst, month: rentalDue.dueMonth, cycle: rentalDue.dueDate,
+            netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: effectiveWithGst, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: false, index: media.ledger.length - 1 // ✅ ADDED index for deduping
+            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null
           });
           media.markModified("ledgerHistory");
-          result.dueMonth = rentalDue.dueMonth;
         }
         else if (entryType === "rental" && targetType === "outstanding") {
           if (!item.rentalOutstandingId) throw new Error("rentalOutstandingId required");
           const row = media.rentalPayment.rentalOutstandingHistory.id(item.rentalOutstandingId);
           if (!row) throw new Error("rentalOutstandingHistory record not found");
+
+          dueMonthLabel = row.dueMonth;
+          cycleDateVal = null;
           amount = Number(row.baseRentOutstandingAmount || 0);
 
           if (item.paymentMode === "Online") {
@@ -2000,16 +2008,38 @@ async function executeBulkPaymentBatch(req, batchData) {
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
-          result.dueMonth = row.dueMonth;
+
+          // ✅ Record outstanding rent in history bucket too
+          const parsed = parseDueMonthLabel(dueMonthLabel);
+          if (parsed) {
+            const bYear = String(parsed.year);
+            const bMonth = MONTH_NAMES[parsed.monthIdx];
+            let yBucket = (media.ledgerHistory || []).find(y => y.year === bYear);
+            if (!yBucket) { media.ledgerHistory.push({ year: bYear, months: [] }); yBucket = media.ledgerHistory[media.ledgerHistory.length - 1]; }
+            let mBucket = yBucket.months.find(m => m.month === bMonth);
+            if (!mBucket) { yBucket.months.push({ month: bMonth, entries: [] }); mBucket = yBucket.months[yBucket.months.length - 1]; }
+
+            mBucket.entries.push({
+              landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
+              netPayable: amount, rentalDueId: null, withGst: 2, month: dueMonthLabel, cycle: null,
+              paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
+              isUtrEntry: false
+            });
+            media.markModified("ledgerHistory");
+          }
         }
-        else if (entryType === "gst" && targetType === "current") {
+        else if (entryType === "gst" && (targetType === "current" || targetType === "pastCycle")) {
           if (!item.rentalDueId) throw new Error("rentalDueId required");
           const rentalDue = media.rentalDue?.find(d => String(d._id) === String(item.rentalDueId));
           if (!rentalDue) throw new Error("rentalDue record not found");
+
+          dueMonthLabel = rentalDue.dueMonth;
+          cycleDateVal = rentalDue.dueDate;
+
           let row = media.gstBalanceHistory.find(g => String(g.rentalDueId) === String(item.rentalDueId) && String(g.ownerId) === String(owner._id));
           if (!row) {
             media.gstBalanceHistory.push({
-              rentalDueId: item.rentalDueId, dueMonth: rentalDue.dueMonth, cycle: rentalDue.dueDate,
+              rentalDueId: item.rentalDueId, dueMonth: dueMonthLabel, cycle: cycleDateVal,
               gstAmount: Number(rentalDue.gstAmount || 0), isPaid: false, source: "owner",
               ownerId: owner._id, ownerName: owner.name, createdAt: nowIST(), createdBy: updatedBy
             });
@@ -2020,64 +2050,18 @@ async function executeBulkPaymentBatch(req, batchData) {
           row.date = entryDate; row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("gstBalanceHistory");
 
-          media.withGst1Ledger.push({
-            landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
-            date: entryDate, status: 1, month: rentalDue.dueMonth, cycle: rentalDue.dueDate, rentalDueId: item.rentalDueId,
-            amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true
-          });
-          media.markModified("withGst1Ledger");
-
-          const parsed = parseDueMonthLabel(rentalDue.dueMonth);
-          const bYear = parsed ? String(parsed.year) : String(new Date(rentalDue.dueDate).getUTCFullYear());
-          const bMonth = parsed ? MONTH_NAMES[parsed.monthIdx] : MONTH_NAMES[new Date(rentalDue.dueDate).getUTCMonth()];
-
-          let yBucket = (media.ledgerHistory || []).find(y => y.year === bYear);
-          if (!yBucket) { media.ledgerHistory.push({ year: bYear, months: [] }); yBucket = media.ledgerHistory[media.ledgerHistory.length - 1]; }
-          let mBucket = yBucket.months.find(m => m.month === bMonth);
-          if (!mBucket) { yBucket.months.push({ month: bMonth, entries: [] }); mBucket = yBucket.months[yBucket.months.length - 1]; }
-
-          mBucket.entries.push({
-            landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
-            netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 1, month: rentalDue.dueMonth, cycle: rentalDue.dueDate,
-            paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: true
-          });
-          media.markModified("ledgerHistory");
-          result.dueMonth = rentalDue.dueMonth;
-        }
-        else if (entryType === "gst" && targetType === "pastCycle") {
-          let row;
-          if (item.gstBalanceHistoryId) { row = media.gstBalanceHistory.id(item.gstBalanceHistoryId); }
-          else if (item.rentalDueId) {
-            row = media.gstBalanceHistory.find(g => String(g.rentalDueId) === String(item.rentalDueId) && String(g.ownerId) === String(owner._id));
-            if (!row) {
-              const rd = media.rentalDue?.find(d => String(d._id) === String(item.rentalDueId));
-              if (rd) {
-                media.gstBalanceHistory.push({
-                  rentalDueId: item.rentalDueId, dueMonth: rd.dueMonth, cycle: rd.dueDate,
-                  gstAmount: Number(rd.gstAmount || 0), isPaid: false, source: "owner",
-                  ownerId: owner._id, ownerName: owner.name, createdAt: nowIST(), createdBy: updatedBy
-                });
-                row = media.gstBalanceHistory[media.gstBalanceHistory.length - 1];
-              }
-            }
+          if (targetType === "current") {
+            media.withGst1Ledger.push({
+              landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
+              date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
+              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true
+            });
+            media.markModified("withGst1Ledger");
           }
-          if (!row) throw new Error("GST history record not found");
-          amount = Number(row.gstAmount || 0);
-          row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.isUtrEntry = true;
-          row.date = entryDate; row.updatedBy = updatedBy; row.updatedAt = nowIST();
-          media.markModified("gstBalanceHistory");
 
-          media.withGst1Ledger.push({
-            landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
-            date: entryDate, status: 1, month: row.dueMonth, cycle: row.cycle, rentalDueId: item.rentalDueId,
-            amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true
-          });
-          media.markModified("withGst1Ledger");
-
-          const parsed = parseDueMonthLabel(row.dueMonth);
-          const bYear = parsed ? String(parsed.year) : String(new Date(row.cycle).getUTCFullYear());
-          const bMonth = parsed ? MONTH_NAMES[parsed.monthIdx] : MONTH_NAMES[new Date(row.cycle).getUTCMonth()];
+          const parsed = parseDueMonthLabel(dueMonthLabel);
+          const bYear = parsed ? String(parsed.year) : String(new Date(cycleDateVal).getUTCFullYear());
+          const bMonth = parsed ? MONTH_NAMES[parsed.monthIdx] : MONTH_NAMES[new Date(cycleDateVal).getUTCMonth()];
 
           let yBucket = (media.ledgerHistory || []).find(y => y.year === bYear);
           if (!yBucket) { media.ledgerHistory.push({ year: bYear, months: [] }); yBucket = media.ledgerHistory[media.ledgerHistory.length - 1]; }
@@ -2086,24 +2070,44 @@ async function executeBulkPaymentBatch(req, batchData) {
 
           mBucket.entries.push({
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
-            netPayable: 0, rentalDueId: item.rentalDueId, withGst: 1, month: row.dueMonth, cycle: row.cycle,
+            netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 1, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
             isUtrEntry: true
           });
           media.markModified("ledgerHistory");
-          result.dueMonth = row.dueMonth;
         }
         else if (entryType === "gst" && targetType === "outstanding") {
           if (!item.gstOutstandingId) throw new Error("gstOutstandingId required");
           const row = media.rentalPayment.gstOutstandingHistory.id(item.gstOutstandingId);
           if (!row) throw new Error("gstOutstandingHistory record not found");
+
+          dueMonthLabel = row.dueMonth;
           amount = Number(row.gstOutStandingAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
-          result.dueMonth = row.dueMonth;
+
+          // ✅ Record outstanding GST in history bucket too
+          const parsed = parseDueMonthLabel(dueMonthLabel);
+          if (parsed) {
+            const bYear = String(parsed.year);
+            const bMonth = MONTH_NAMES[parsed.monthIdx];
+            let yBucket = (media.ledgerHistory || []).find(y => y.year === bYear);
+            if (!yBucket) { media.ledgerHistory.push({ year: bYear, months: [] }); yBucket = media.ledgerHistory[media.ledgerHistory.length - 1]; }
+            let mBucket = yBucket.months.find(m => m.month === bMonth);
+            if (!mBucket) { yBucket.months.push({ month: bMonth, entries: [] }); mBucket = yBucket.months[yBucket.months.length - 1]; }
+
+            mBucket.entries.push({
+              landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
+              netPayable: 0, rentalDueId: null, withGst: 1, month: dueMonthLabel, cycle: null,
+              paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
+              isUtrEntry: true
+            });
+            media.markModified("ledgerHistory");
+          }
         }
 
+        result.dueMonth = dueMonthLabel;
         result.amount = amount;
         totalAmountSaved += amount;
         savedEntries.push(result);
@@ -2408,20 +2412,13 @@ exports.listMediaByLedger = async (req, res) => {
             MONTH_NAME_TO_INDEX_FOR_HELPER[monthBucket.month.toLowerCase()];
           const entries = monthBucket.entries || [];
 
-          // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
-          const monthLabel = `${monthBucket.month} ${yearBucket.year}`;
-          const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === monthLabel);
-          const isApproved = Number(matchedDue?.approvalStatus) === 3;
-
-          const gst2Entries = entries.filter((e) => {
-              if (Number(e.withGst) === 2) return isApproved;
-              return false;
-          });
+          // ✅ REFACTORED — identify Rent entries by isUtrEntry (fallback to status if missing)
+          const rentEntries = entries.filter((e) => e.isUtrEntry !== true && e.paymentMode);
 
           const allOwnersComplete =
             (mediaObj.landOwners || []).length > 0 &&
             (mediaObj.landOwners || []).every((owner) => {
-              const ownerEntries = gst2Entries.filter(
+              const ownerEntries = rentEntries.filter(
                 (e) => String(e.landOwnerId) === String(owner._id),
               );
               const hasCash = ownerEntries.some(
@@ -2859,16 +2856,17 @@ for (const media of results) {
         );
 
         if (isSiteCurrentLiveCycleMonth) {
-          gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
-          gst1SourceEntries = mediaObj.withGst1Ledger || [];
+          gst2SourceEntries = (mediaObj.ledger || []).filter((e) => e && e.isUtrEntry !== true);
+          gst1SourceEntries = (mediaObj.withGst1Ledger || []).filter((e) => e && e.isUtrEntry === true);
         } else {
           const allMonthEntries = monthBucket?.entries || [];
-          gst2SourceEntries = allMonthEntries.filter((e) => e.withGst === 2);
-          gst1SourceEntries = allMonthEntries.filter((e) => e.withGst === 1);
+          // ✅ REFACTORED — separation by entry type (Rent vs GST) rather than withGst value
+          gst2SourceEntries = allMonthEntries.filter((e) => e.isUtrEntry !== true);
+          gst1SourceEntries = allMonthEntries.filter((e) => e.isUtrEntry === true);
         }
       } else {
-        gst2SourceEntries = (mediaObj.ledger || []).filter(Boolean);
-        gst1SourceEntries = mediaObj.withGst1Ledger || [];
+        gst2SourceEntries = (mediaObj.ledger || []).filter((e) => e && e.isUtrEntry !== true);
+        gst1SourceEntries = (mediaObj.withGst1Ledger || []).filter((e) => e && e.isUtrEntry === true);
       }
 
       const dedupeByKey = (entries, getKey) => {
@@ -2919,8 +2917,9 @@ for (const media of results) {
         );
         const monthEntries = monthBucket?.entries || [];
 
-        latestLedger = monthEntries.filter((e) => e.withGst === 2);
-        withGst1Ledger = monthEntries.filter((e) => e.withGst === 1);
+        // ✅ REFACTORED — separation by entry type (Rent vs GST) rather than withGst value
+        latestLedger = monthEntries.filter((e) => e.isUtrEntry !== true);
+        withGst1Ledger = monthEntries.filter((e) => e.isUtrEntry === true);
       } else {
         const sourcedFromLiveLedger =
           !requestedMonthRange || isSiteCurrentLiveCycleMonth;
@@ -4599,6 +4598,7 @@ function buildSingleMediaHistoryBlock(
 
     const allPaid = modes.every(mode => {
         const rentEntry = (monthBucket?.entries || []).find(e =>
+            e.isUtrEntry !== true &&
             (e.status === 1 || (e.utrNumber && e.utrNumber.trim() !== "")) &&
             (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)) &&
             e.paymentMode === mode
@@ -4791,7 +4791,7 @@ function buildSingleMediaHistoryBlock(
           );
           entry = (monthBucket?.entries || []).find(
             (e) =>
-              (e.withGst === 1 || e.withGst === 2) &&
+              e.isUtrEntry !== true &&
               e.paymentMode === mode &&
               String(e.landOwnerId) === String(owner._id),
           );
@@ -5452,6 +5452,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           const isDirectGst = ledgerFinal.some(
             (e) =>
               String(e.landOwnerId) === String(owner._id) &&
+              e.isUtrEntry !== true &&
               Number(e.withGst) === 2,
           );
           if (isDirectGst) return false;
@@ -5689,6 +5690,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           const isDirectGst = ledgerFinal.some(
             (e) =>
               String(e.landOwnerId) === String(owner._id) &&
+              e.isUtrEntry !== true &&
               Number(e.withGst) === 2,
           );
           if (isDirectGst) return false;
@@ -6133,6 +6135,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
             const yearBucket = (media.ledgerHistory || []).find(y => y.year === cycleYear);
             const monthBucket = yearBucket?.months?.find(m => m.month.toLowerCase() === cycleMonthName.toLowerCase());
             const histEntry = (monthBucket?.entries || []).find(e =>
+              e.isUtrEntry !== true &&
               (e.status === 1 || (e.utrNumber && e.utrNumber.trim() !== "")) &&
               String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode
             );
