@@ -3346,7 +3346,7 @@ latestLedger = latestLedger.sort((a, b) => {
             const allPaid = modes.every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner?._id) && e.paymentMode === mode));
             if (allPaid) isPaid = true;
         }
-        return { ...entry, withGst: effectiveWithGst, isPaid, date: paymentDate };
+        return { ...entry, withGst: effectiveWithGst, isPaid, date: paymentDate, rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0 };
       });
 
       if (expectedGstPerCycleTotal > 0) {
@@ -3384,7 +3384,7 @@ latestLedger = latestLedger.sort((a, b) => {
                 fullGstBalanceHistory.push({
                   dueMonth: cycleMonthLabel, cycle: cycleDate, gstAmount: ownerGst, isPaid, isVirtual: true,
                   withGst: effectiveWithGst, ownerId: owner._id, ownerName: owner.name, landOwnerId: owner._id, landOwnerName: owner.name,
-                  rentalDueId: matchedDue?._id || null
+                  rentalDueId: matchedDue?._id || null, rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0
                 });
               }
             }
@@ -4581,6 +4581,7 @@ function buildSingleMediaHistoryBlock(
       ...entry,
       withGst: effectiveWithGst,
       rentalDueId: entry.rentalDueId || matchedDue?._id || null,
+      rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ ADDED
       isPaid,
       date: paymentDate
     };
@@ -4642,6 +4643,7 @@ function buildSingleMediaHistoryBlock(
               landOwnerId: owner._id,
               landOwnerName: owner.name,
               rentalDueId: matchedDue?._id || null,
+              rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ ADDED
               date: paymentDate
             });
           }
@@ -5481,19 +5483,17 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
     const pendingYear = parts[1];
     if (!pendingMonthName || !pendingYear) return;
 
+    const pendingMonthIdx = MONTH_NAMES_LOCAL.findIndex(
+      (m) => m.toLowerCase() === pendingMonthName.toLowerCase(),
+    );
+    const ym = { year: Number(pendingYear), month: pendingMonthIdx + 1 };
+
     // ✅ NEW — respect the requested year/month filter. Without this, every
     // pending month gets injected regardless of what was filtered, which is
     // exactly why "2027-09" was showing June/July/August 2026 instead of
     // empty/synthetic-September-2027.
+    if (!isYMInRange(ym, rangeStart, rangeEnd)) return;
     if (year && String(pendingYear).trim() !== String(year).trim()) return;
-    if (month) {
-      const requestedMonthName = MONTH_NAMES[Number(month) - 1];
-      if (
-        !requestedMonthName ||
-        pendingMonthName.toLowerCase() !== requestedMonthName.toLowerCase()
-      )
-        return;
-    }
 
     const bucketKey = `${pendingYear}-${pendingMonthName.toLowerCase()}`;
     if (existingBucketKeys.has(bucketKey)) return;
