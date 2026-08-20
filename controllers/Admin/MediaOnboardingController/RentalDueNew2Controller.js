@@ -1,9 +1,11 @@
 
 const mongoose = require("mongoose");
+const { successResponse, errorResponse } = require("../../../utils/response");
 const axios = require("axios");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const path = require("path");
-const { computeOutstandingSummary } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller"); 
+const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+const { computeOutstandingSummary } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
 
 const {
   ROLE,
@@ -846,6 +848,64 @@ function pushVerificationHistory(media, entry, role, userName) {
 function markRoleVerified(media, entry, role, userName) {
   media.agreementDocVerified[ROLE_FLAG_KEY[role]] = true;
   pushVerificationHistory(media, entry, role, userName);
+}
+
+/**
+ * ✅ NEW — maintain history of overdue entries before they are removed by approval.
+ */
+async function saveOverDueHistoryIfApplicable(media, entry, userName) {
+  try {
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    const isOverdue =
+      Number(media.rentalPayment?.status) === 3 ||
+      (entry.dueDate && new Date(entry.dueDate) < today);
+
+    if (!isOverdue) return;
+
+    // Check for duplicate for this specific cycle/media to avoid double logging
+    const existing = await OverDueHistory.findOne({
+      mediaId: media._id,
+      rentalDueId: entry._id,
+    });
+    if (existing) return;
+
+    const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+    const entryGst = Number(entry.gstAmount || 0);
+    const siteGst = Number(media.rentalPayment?.gstAmount || 0);
+    const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+    const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+
+    let base = Number(entry.netPayable || 0);
+    let effectiveAmount = base;
+    if (resolvedGst > 0) {
+      if (base < (Number(media.rentalPayment?.totalRentalAmount || 0) + resolvedGst)) {
+        effectiveAmount = base + resolvedGst;
+      }
+    }
+
+    await OverDueHistory.create({
+      mediaId: media._id,
+      mediaName: media.mediaName,
+      mediaCode: media.mediaCode,
+      previousBillDate: media.rentalPayment?.previousBillGenerateDate,
+      currentBillDate: entry.dueDate,
+      nextBillDate: media.rentalPayment?.nextBillingDate,
+      overDueAmount: effectiveAmount,
+      approvedDate: nowIST(),
+      removedDate: nowIST(),
+      dueMonth: entry.dueMonth,
+      dueDate: entry.dueDate,
+      rentalDueId: entry._id,
+      status: entry.status,
+      updatedBy: userName,
+      createdAt: nowIST(),
+      updatedAt: nowIST(),
+    });
+  } catch (err) {
+    console.error("❌ Error saving OverDue History:", err.message);
+  }
 }
 
 const getCurrentCycle = (date) => {
@@ -1691,6 +1751,8 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       entry.ownerApprovalDate = nowIST();
       media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
 
+      await saveOverDueHistoryIfApplicable(media, entry, userName);
+
       markRoleVerified(media, entry, ROLE.OWNER, userName);
       applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
 
@@ -1755,6 +1817,9 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 
           if (userType === ROLE.OWNER) {
             entry.ownerApprovalDate = nowIST();
+
+            await saveOverDueHistoryIfApplicable(media, entry, userName);
+
             applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
              if (Number(entry.withGst) === 1 && Number(entry.gstAmount) <= 0) {
               const freshSplit = computeGstSplit(media, 1);
@@ -2008,6 +2073,9 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
 
   if (isOwnerOverride) {
     applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
+
+    await saveOverDueHistoryIfApplicable(media, savedEntry, userName);
+
     addGstToBalanceIfApplicable(media, savedEntry, userName);
     addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
     // ✅ CHANGED — date advancement removed, same reason as above.
@@ -2645,6 +2713,52 @@ exports.verifyAgreementDoc = async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Server error", error: err.message });
+  }
+};
+
+/**
+ * ✅ NEW — Dedicated API for OverDue History List
+ */
+exports.getOverDueHistoryList = async (req, res) => {
+  try {
+    const { pageNumber = 1, count = 10, search } = req.body;
+
+    const pageNumbers = parseInt(pageNumber) || 1;
+    const pageSize = parseInt(count) || 10;
+    const skip = (pageNumbers - 1) * pageSize;
+
+    const filter = {};
+
+    if (search) {
+      filter.$or = [
+        { mediaName: { $regex: search, $options: "i" } },
+        { mediaCode: { $regex: search, $options: "i" } },
+        { dueMonth: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const [history, totalCount] = await Promise.all([
+      OverDueHistory.find(filter)
+        .sort({ approvedDate: -1 })
+        .skip(skip)
+        .limit(pageSize)
+        .lean(),
+      OverDueHistory.countDocuments(filter)
+    ]);
+
+    return successResponse(res, "OverDue history fetched successfully", {
+      pagination: {
+        pageNumber: pageNumbers,
+        count: pageSize,
+        totalCount,
+        totalPages: Math.ceil(totalCount / pageSize),
+      },
+      overDueHistory: history
+    }, 200);
+
+  } catch (err) {
+    console.error("getOverDueHistoryList error:", err);
+    return errorResponse(res, "Something went wrong while fetching overdue history", { error: err.message }, 500);
   }
 };
 

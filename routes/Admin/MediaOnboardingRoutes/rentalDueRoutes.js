@@ -10,7 +10,8 @@ const {
   saveRentalDue,
   GstAmountPaid,
   revertAgreementDocVerification,
-  revertRentalApproval
+  revertRentalApproval,
+  getOverDueHistoryList
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -44,6 +45,7 @@ router.post("/verify-agreement", protect, verifyAgreementDoc);
 router.post("/gst-paid",protect, GstAmountPaid);
 router.post("/revert-Agreement",protect, revertAgreementDocVerification);
 router.post("/revert-Approval",protect, revertRentalApproval);
+router.post("/overdue-history-list", protect, getOverDueHistoryList);
 
 
 
