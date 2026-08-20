@@ -150,7 +150,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
       filePath: { type: String },
       mimeType: { type: String },
       size: { type: Number },
-      fileType: { type: String, enum: ["pdf"], default: "pdf" },
+      fileType: { type: String, enum: ["pdf", "image"], default: "pdf" },
       uploadedAt: { type: Date, default: Date.now },
     },
 

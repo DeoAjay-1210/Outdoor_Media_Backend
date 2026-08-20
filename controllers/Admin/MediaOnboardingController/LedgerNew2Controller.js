@@ -1925,22 +1925,48 @@ async function executeBulkPaymentBatch(req, batchData) {
       result.landOwnerName = owner.name;
 
       let amount = 0;
-      if (entryType === "rental" && targetType === "current") {
+      if (entryType === "rental" && (targetType === "current" || targetType === "pastCycle")) {
         if (!item.rentalDueId) throw new Error("rentalDueId required");
         const rentalDue = media.rentalDue?.find(d => String(d._id) === String(item.rentalDueId));
         if (!rentalDue) throw new Error("rentalDue record not found");
 
         const ownerCat = Number(owner.paymentCategory || 1);
         let baseAmt = ownerCat === 3 ? (item.paymentMode === "Cash" ? Number(owner.cashAmount || 0) : Number(owner.onlineAmount || 0)) : Number(owner.shareAmount || 0);
+
+        // ✅ NEW: Add GST if Approved and withGst is 2
+        const isApproved = Number(rentalDue?.approvalStatus) === 3;
+        const effectiveWithGst = rentalDue?.withGst ?? 0;
+
+        if (Number(effectiveWithGst) === 2 && isApproved) {
+            let gstFlag = Number(media.gstApplicableFlag || 0);
+            if (gstFlag === 0) {
+              const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+              const anyOwnerGst = (media.landOwners || []).some(o => Number(o.gstApplicable) === 1);
+              if (anyOwnerGst) gstFlag = 2;
+              else if (siteGst) gstFlag = 1;
+            }
+            let ownerGst = 0;
+            if (gstFlag === 1) {
+              ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (media.landOwners?.length || 1);
+            } else {
+              ownerGst = Number(owner.gstAmount || 0);
+            }
+            if (ownerCat !== 3 || item.paymentMode === "Online") {
+                baseAmt += ownerGst;
+            }
+        }
+
         const tdsToDeduct = item.paymentMode === "Online" ? Number(owner.tdsAmount || 0) : 0;
         amount = baseAmt - tdsToDeduct;
 
-        media.ledger.push({
-          landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
-          date: entryDate, status: 1, month: rentalDue.dueMonth, cycle: rentalDue.dueDate, rentalDueId: item.rentalDueId,
-          amount, updatedBy, updatedAt: nowIST(), index: media.ledger.length
-        });
-        media.markModified("ledger");
+        if (targetType === "current") {
+          media.ledger.push({
+            landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
+            date: entryDate, status: 1, month: rentalDue.dueMonth, cycle: rentalDue.dueDate, rentalDueId: item.rentalDueId,
+            amount, updatedBy, updatedAt: nowIST(), index: media.ledger.length, withGst: effectiveWithGst
+          });
+          media.markModified("ledger");
+        }
 
         const parsed = parseDueMonthLabel(rentalDue.dueMonth);
         const bYear = parsed ? String(parsed.year) : String(new Date(rentalDue.dueDate).getUTCFullYear());
@@ -1953,34 +1979,7 @@ async function executeBulkPaymentBatch(req, batchData) {
 
         mBucket.entries.push({
           landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
-          netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 2, month: rentalDue.dueMonth, cycle: rentalDue.dueDate,
-          paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST()
-        });
-        media.markModified("ledgerHistory");
-        result.dueMonth = rentalDue.dueMonth;
-      }
-      else if (entryType === "rental" && targetType === "pastCycle") {
-        if (!item.rentalDueId) throw new Error("rentalDueId required");
-        const rentalDue = media.rentalDue?.find(d => String(d._id) === String(item.rentalDueId));
-        if (!rentalDue) throw new Error("rentalDue record not found");
-
-        const ownerCat = Number(owner.paymentCategory || 1);
-        let baseAmt = ownerCat === 3 ? (item.paymentMode === "Cash" ? Number(owner.cashAmount || 0) : Number(owner.onlineAmount || 0)) : Number(owner.shareAmount || 0);
-        const tdsToDeduct = item.paymentMode === "Online" ? Number(owner.tdsAmount || 0) : 0;
-        amount = baseAmt - tdsToDeduct;
-
-        const parsed = parseDueMonthLabel(rentalDue.dueMonth);
-        const bYear = parsed ? String(parsed.year) : String(new Date(rentalDue.dueDate).getUTCFullYear());
-        const bMonth = parsed ? MONTH_NAMES[parsed.monthIdx] : MONTH_NAMES[new Date(rentalDue.dueDate).getUTCMonth()];
-
-        let yBucket = (media.ledgerHistory || []).find(y => y.year === bYear);
-        if (!yBucket) { media.ledgerHistory.push({ year: bYear, months: [] }); yBucket = media.ledgerHistory[media.ledgerHistory.length - 1]; }
-        let mBucket = yBucket.months.find(m => m.month === bMonth);
-        if (!mBucket) { yBucket.months.push({ month: bMonth, entries: [] }); mBucket = yBucket.months[yBucket.months.length - 1]; }
-
-        mBucket.entries.push({
-          landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
-          netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 2, month: rentalDue.dueMonth, cycle: rentalDue.dueDate,
+          netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: effectiveWithGst, month: rentalDue.dueMonth, cycle: rentalDue.dueDate,
           paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST()
         });
         media.markModified("ledgerHistory");
@@ -1991,6 +1990,13 @@ async function executeBulkPaymentBatch(req, batchData) {
         const row = media.rentalPayment.rentalOutstandingHistory.id(item.rentalOutstandingId);
         if (!row) throw new Error("rentalOutstandingHistory record not found");
         amount = Number(row.baseRentOutstandingAmount || 0);
+
+        // ✅ NEW: Deduct TDS from Ledger Amounts (Online mode only)
+        if (item.paymentMode === "Online") {
+          const siteTds = (media.landOwners || []).reduce((sum, o) => sum + Number(o.tdsAmount || 0), 0);
+          amount -= siteTds;
+        }
+
         row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
         row.updatedBy = updatedBy; row.updatedAt = nowIST();
         media.markModified("rentalPayment");

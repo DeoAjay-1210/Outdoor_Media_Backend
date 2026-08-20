@@ -1197,6 +1197,7 @@ const landOwnerSiteFilter = async (req, res) => {
       totalLedgerGstAmount: wantTotalLedgerGstAmount,
       totalLedgerPendingAmount: wantTotalLedgerPendingAmount,
       totalGstPendingAmount: wantTotalGstPendingAmount,
+      roleType, // ✅ NEW
     } = req.body || {};
 
     const today = nowIST();
@@ -1264,6 +1265,11 @@ const landOwnerSiteFilter = async (req, res) => {
     // combined regex used against media docs — either explicit
     // mediaSearch, or fall back to the generic `search` term
     const effectiveMediaSearchRegex = mediaSearchRegex || genericSearchRegex;
+
+    const targetRole = roleType ? parseInt(roleType) : null;
+    const [statsMonth, statsYear] = monthFilterApplied.split("-").map(Number);
+    const statsMonthStart = new Date(statsYear, statsMonth - 1, 1);
+    const statsMonthEnd = new Date(statsYear, statsMonth, 0, 23, 59, 59);
 
     let ownerFilter = {};
     if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
@@ -1334,7 +1340,7 @@ const landOwnerSiteFilter = async (req, res) => {
     const mediaProjection =
       "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory";
 
-    const relatedMediaDocs = await MediaOnboarding.find(
+    let relatedMediaDocs = await MediaOnboarding.find(
       {
         "landOwners.landOwnerMasterId": { $in: requestedOwnerIds },
         // ✅ CHANGED — uses effectiveMediaSearchRegex so a plain
@@ -1352,6 +1358,27 @@ const landOwnerSiteFilter = async (req, res) => {
       },
       mediaProjection,
     ).lean();
+
+    // ✅ Filter by roleType if provided (Relevant to Role logic)
+    if (targetRole !== null) {
+      relatedMediaDocs = relatedMediaDocs.filter((media) => {
+        const currentMonthEntry = (media.rentalDue || []).find((e) => {
+          if (!e.dueDate) return false;
+          const d = new Date(e.dueDate);
+          return d >= statsMonthStart && d <= statsMonthEnd;
+        });
+
+        // If no entry for this month, it's not relevant to any role's current action/approval
+        if (!currentMonthEntry) return false;
+
+        const isApprovedOverall = currentMonthEntry.approvalStatus === 3;
+        const roleStep = (currentMonthEntry.approvalSteps || []).find((s) => s.role === targetRole);
+        const hasRoleApproved = roleStep && roleStep.status === 2;
+        const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
+
+        return hasRoleApproved || (!isApprovedOverall && !hasRoleActed);
+      });
+    }
 
     // ✅ Ensure all site cycles are processed for the requested month
     for (const media of relatedMediaDocs) {
@@ -2774,6 +2801,106 @@ const landOwnerSiteFilter = async (req, res) => {
       },
     );
 
+    // ✅ NEW: Calculate Rental Due Stats (Role-based)
+    let approvedCount = 0;
+    let approvedAmountTotal = 0;
+    let pendingCount = 0;
+    let pendingAmountTotal = 0;
+    let overdueSiteCount = 0;
+    let overdueAmountTotal = 0;
+
+    for (const media of globalMediaDocs) {
+      // ── 1) Current Month Logic ──
+      const currentMonthEntry = (media.rentalDue || []).find((e) => {
+        if (!e.dueDate) return false;
+        const d = new Date(e.dueDate);
+        return d >= statsMonthStart && d <= statsMonthEnd;
+      });
+
+      if (currentMonthEntry) {
+        const isApprovedOverall = currentMonthEntry.approvalStatus === 3;
+        const roleStep = (currentMonthEntry.approvalSteps || []).find((s) => s.role === targetRole);
+        const hasRoleApproved = roleStep && roleStep.status === 2;
+        const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
+
+        const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+        const entryGst = Number(currentMonthEntry.gstAmount || 0);
+        const siteGst = Number(media.rentalPayment?.gstAmount || 0);
+        const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+        const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+
+        let base = Number(currentMonthEntry.netPayable || 0);
+        let effectiveAmount = base;
+        if (resolvedGst > 0) {
+          if (base < (Number(media.rentalPayment?.totalRentalAmount || 0) + resolvedGst)) {
+            effectiveAmount = base + resolvedGst;
+          }
+        }
+
+        const isApprovedByRole = targetRole === null ? isApprovedOverall : hasRoleApproved;
+
+        if (isApprovedByRole) {
+          approvedCount++;
+          approvedAmountTotal += effectiveAmount;
+        } else {
+          const shouldCountAsOpen = targetRole === null
+            ? !isApprovedOverall
+            : (!isApprovedOverall && !hasRoleActed);
+
+          if (shouldCountAsOpen) {
+            const isOverdueGlobally = Number(media.rentalPayment?.status) === 3 ||
+                                      (currentMonthEntry.dueDate && new Date(currentMonthEntry.dueDate) < today && !isApprovedOverall);
+
+            if (isOverdueGlobally) {
+              overdueSiteCount++;
+              overdueAmountTotal += effectiveAmount;
+            } else {
+              pendingCount++;
+              pendingAmountTotal += effectiveAmount;
+            }
+          }
+        }
+      }
+
+      // ── 2) Past Pending Logic (Always count as Overdue) ──
+      const pastEntries = (media.rentalDue || []).filter((e) => {
+        if (!e.dueDate) return false;
+        return new Date(e.dueDate) < statsMonthStart;
+      });
+
+      for (const pastEntry of pastEntries) {
+        const isApprovedOverall = pastEntry.approvalStatus === 3;
+        const roleStep = (pastEntry.approvalSteps || []).find((s) => s.role === targetRole);
+        const hasRoleApproved = roleStep && roleStep.status === 2;
+        const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
+
+        const isPendingByRole = targetRole === null
+          ? !isApprovedOverall
+          : (!isApprovedOverall && !hasRoleActed);
+
+        if (isPendingByRole) {
+          const entryGst = Number(pastEntry.gstAmount || 0);
+          const siteGst = Number(media.rentalPayment?.gstAmount || 0);
+          const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+          const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+
+          let base = Number(pastEntry.netPayable || 0);
+          let effectiveAmount = base;
+          if (resolvedGst > 0) {
+            if (base < (Number(media.rentalPayment?.totalRentalAmount || 0) + resolvedGst)) {
+              effectiveAmount = base + resolvedGst;
+            }
+          }
+
+          overdueSiteCount++;
+          overdueAmountTotal += effectiveAmount;
+        }
+      }
+    }
+
+    const totalPendingCount = pendingCount + overdueSiteCount;
+    const totalPendingAmount = pendingAmountTotal + overdueAmountTotal;
+
     const totalCount = entriesForResponse.length;
     const startIdx = (pageNumbers - 1) * pageSize;
     const pagedEntries = entriesForResponse.slice(
@@ -2803,6 +2930,12 @@ const landOwnerSiteFilter = async (req, res) => {
         // ledger APIs' summary block
         ...overallOutstandingTotals,
         overallLedgerSummary,
+        // ✅ NEW: Rental Due Stats
+        overDue: { siteCount: overdueSiteCount, amount: overdueAmountTotal },
+        approvedCount,
+        approvedAmountTotal,
+        pendingCount: totalPendingCount,
+        pendingAmountTotal: totalPendingAmount,
       },
       200,
     );

@@ -143,7 +143,7 @@ const agreementHistorySchema = new mongoose.Schema({
       default: 0,
       min: 0,
     },
-    
+
     paymentFrequency: {
       type: Number,
       enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
@@ -192,7 +192,7 @@ const ledgerSchema = new mongoose.Schema({
   // left null for withGst===1 entries (which live in
   // `media.withGst1Ledger` instead, identified by rentalDueId).
   index: { type: Number, default: null },
-    amount: { type: Number, default: 0, min: 0 },
+  amount: { type: Number, default: 0, min: 0 },
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -220,7 +220,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     // getLedgerHistory / listMediaByLedger can reliably dedupe
     // withGst===2 entries by slot when reading past months.
     index: { type: Number, default: null },
-     amount: { type: Number, default: 0, min: 0 },
+    amount: { type: Number, default: 0, min: 0 },
   },
   { _id: true },
 );
@@ -303,7 +303,12 @@ const gstOutstandingHistorySchema = new mongoose.Schema({
   updatedBy: {
     type: String,
     default: "",
-  },paymentMode: { type: String, enum: ["Cash", "Online", "Cash+Online", null], default: null },
+  },
+  paymentMode: {
+    type: String,
+    enum: ["Cash", "Online", "Cash+Online", null],
+    default: null,
+  },
   utrNumber: { type: String, trim: true, default: null },
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
@@ -327,7 +332,11 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
     default: 0,
     min: 0,
   },
-  paymentMode: { type: String, enum: ["Cash", "Online", "Cash+Online", null], default: null },
+  paymentMode: {
+    type: String,
+    enum: ["Cash", "Online", "Cash+Online", null],
+    default: null,
+  },
   utrNumber: { type: String, trim: true, default: null },
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
@@ -464,7 +473,7 @@ const MediaSchema = new mongoose.Schema(
         default: 0,
       },
       gstOutstandingHistory: [gstOutstandingHistorySchema],
-        rentalOutstandingHistory: [rentalOutstandingHistorySchema],
+      rentalOutstandingHistory: [rentalOutstandingHistorySchema],
       totalRentalAmountWithGst: {
         type: Number,
         default: 0,
@@ -491,7 +500,7 @@ const MediaSchema = new mongoose.Schema(
       nextBillingDate: {
         type: Date,
       },
-       billingStartDate: { type: Date, default: null },
+      billingStartDate: { type: Date, default: null },
       // tdsApplicable: {
       //   type: Number,
       //   enum: [0, 1],
@@ -647,7 +656,7 @@ const MediaSchema = new mongoose.Schema(
           enum: [0, 1], // 0 no  1 yes
           default: 0,
         },
-        
+
         gstPercentage: {
           type: Number,
           min: 0,
@@ -704,16 +713,16 @@ const MediaSchema = new mongoose.Schema(
             shareAmount: { type: Number, default: 0, min: 0 },
             cashAmount: { type: Number, default: 0, min: 0 },
             onlineAmount: { type: Number, default: 0, min: 0 },
-              tdsApplicable: { type: Number, enum: [0, 1], default: 0 },
-    tdsPercentage: { type: Number, min: 0, max: 100, default: 0 },
-    tdsAmount: { type: Number, min: 0, default: 0 },
+            tdsApplicable: { type: Number, enum: [0, 1], default: 0 },
+            tdsPercentage: { type: Number, min: 0, max: 100, default: 0 },
+            tdsAmount: { type: Number, min: 0, default: 0 },
 
-    // ✅ NEW — GST is per-site now, same reasoning as TDS above.
-    // gstAmount already existed; adding the applicable/percentage
-    // flags so the UI can show "why" this site has a GST amount.
-    gstApplicable: { type: Number, enum: [0, 1], default: 0 },
-    gstPercentage: { type: Number, min: 0, default: 0 },
-    gstAmount: { type: Number, default: 0, min: 0 },
+            // ✅ NEW — GST is per-site now, same reasoning as TDS above.
+            // gstAmount already existed; adding the applicable/percentage
+            // flags so the UI can show "why" this site has a GST amount.
+            gstApplicable: { type: Number, enum: [0, 1], default: 0 },
+            gstPercentage: { type: Number, min: 0, default: 0 },
+            gstAmount: { type: Number, default: 0, min: 0 },
             updatedAt: { type: Date, default: null },
           },
         ],
@@ -884,9 +893,9 @@ const MediaSchema = new mongoose.Schema(
       default: 0,
     },
     pastgstApplicableFlag: {
-  type: Number,
-  default: 0,
-},
+      type: Number,
+      default: 0,
+    },
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],
@@ -1305,7 +1314,8 @@ MediaSchema.pre("save", function () {
       // If the NEXT billing date month has already started, advance.
       const nextMonthStarted =
         nextDate.getUTCFullYear() < now.getUTCFullYear() ||
-        (nextDate.getUTCFullYear() === now.getUTCFullYear() && nextDate.getUTCMonth() <= now.getUTCMonth());
+        (nextDate.getUTCFullYear() === now.getUTCFullYear() &&
+          nextDate.getUTCMonth() <= now.getUTCMonth());
 
       if (!nextMonthStarted) break;
 
@@ -1324,13 +1334,23 @@ MediaSchema.pre("save", function () {
     if (!this.isNew && this.isModified("rentalPayment.lastBillPaidDate")) {
       const newLBP = new Date(rp.lastBillPaidDate);
       const monthNames = [
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
       ];
       const dueMonthLabel = `${monthNames[newLBP.getMonth()]} ${newLBP.getFullYear()}`;
 
       const matchingDue = (this.rentalDue || []).find(
-        (d) => d.dueMonth === dueMonthLabel
+        (d) => d.dueMonth === dueMonthLabel,
       );
       if (matchingDue) {
         matchingDue.dueDate = newLBP;
@@ -1386,7 +1406,11 @@ MediaSchema.pre("save", function () {
   }
 });
 MediaSchema.pre("save", function () {
-  if (this.isNew && this.rentalPayment && !this.rentalPayment.billingStartDate) {
+  if (
+    this.isNew &&
+    this.rentalPayment &&
+    !this.rentalPayment.billingStartDate
+  ) {
     this.rentalPayment.billingStartDate = this.rentalPayment.lastBillPaidDate;
   }
 });
@@ -1427,11 +1451,18 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
   const asOfMonthKey = `${asOfDate.getUTCFullYear()}-${asOfDate.getUTCMonth()}`;
 
   for (const media of activeSites) {
-    const { billingStartDate, paymentFrequency, customPaymentFrequency, lastBillPaidDate } =
-      media.rentalPayment || {};
+    const {
+      billingStartDate,
+      paymentFrequency,
+      customPaymentFrequency,
+      lastBillPaidDate,
+    } = media.rentalPayment || {};
 
     if (!billingStartDate || !lastBillPaidDate) {
-      debugLog.push({ mediaName: media.mediaName, skipped: "missing billingStartDate or lastBillPaidDate" });
+      debugLog.push({
+        mediaName: media.mediaName,
+        skipped: "missing billingStartDate or lastBillPaidDate",
+      });
       continue;
     }
 
@@ -1479,6 +1510,11 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
     }
   }
 
-  return { checked: activeSites.length, updated: updatedCount, asOfDateUsed: asOfDate, debugLog };
+  return {
+    checked: activeSites.length,
+    updated: updatedCount,
+    asOfDateUsed: asOfDate,
+    debugLog,
+  };
 };
 module.exports = mongoose.model("MediaOnboarding", MediaSchema);

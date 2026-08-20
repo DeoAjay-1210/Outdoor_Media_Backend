@@ -2125,10 +2125,12 @@ exports.saveRentalDue = async (req, res) => {
     let invoice = null;
     const singleInvoiceFile = files.find((f) => f.fieldname === "invoice");
     if (singleInvoiceFile) {
-      if (singleInvoiceFile.mimetype !== "application/pdf") {
+      const isPdf = singleInvoiceFile.mimetype === "application/pdf";
+      const isImage = singleInvoiceFile.mimetype?.startsWith("image/");
+      if (!isPdf && !isImage) {
         return res.status(400).json({
           success: false,
-          message: "Invoice must be a PDF file",
+          message: "Invoice must be a PDF or image file",
         });
       }
       invoice = req.processFile(singleInvoiceFile);
@@ -2185,11 +2187,13 @@ exports.saveRentalDue = async (req, res) => {
         let entryInvoice = null;
         const invoiceFile = entryInvoiceFileMap[index];
         if (invoiceFile) {
-          if (invoiceFile.mimetype !== "application/pdf") {
+          const isPdf = invoiceFile.mimetype === "application/pdf";
+          const isImage = invoiceFile.mimetype?.startsWith("image/");
+          if (!isPdf && !isImage) {
             results.push({
               success: false,
               mediaId: item.mediaId,
-              message: `entries[${index}].invoice must be a PDF file`,
+              message: `entries[${index}].invoice must be a PDF or image file`,
             });
             continue;
           }
@@ -3285,14 +3289,13 @@ exports.getRentalDueListWithStats = async (req, res) => {
       isPending,
       isApproved,
       isPastPending,
-      roleType,
       edit,
       landOwnerMasterId, // ✅ ADDED — filter to one specific landowner
       mediaId,
       sortOrder,
     } = req.body;
 
-    const targetRole = roleType ? parseInt(roleType) : null;
+    const targetRole = null; // ✅ Role-based filtering moved to landOwnerSiteFilter
 
     if (!dueDate) {
       return res.status(400).json({
