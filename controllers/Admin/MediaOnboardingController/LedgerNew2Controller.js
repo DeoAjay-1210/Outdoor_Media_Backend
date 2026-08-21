@@ -332,10 +332,9 @@ function sumUnpaidRentalOutstanding(media) {
     (sum, row) => {
       if (row.isPaid) return sum;
       let amt = Number(row.baseRentOutstandingAmount || 0);
-      if (row.paymentMode === "Online" || row.paymentMode === "Cash+Online") {
-        const siteTds = owners.reduce((s, o) => s + Number(o.tdsAmount || 0), 0);
-        amt -= siteTds;
-      }
+
+      // Removed TDS deduction here per user request to include TDS in the total amount.
+
       return sum + amt;
     },
     0,
@@ -758,10 +757,7 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
             }
           }
 
-          // ✅ NEW: Deduct TDS from Unpaid Rent (Online mode only)
-          if (mode === "Online") {
-            modeAmount -= Number(owner.tdsAmount || 0);
-          }
+          // Removed TDS deduction here per user request to include TDS in the total amount.
 
           cycleUnpaid += modeAmount;
         });
@@ -1969,8 +1965,8 @@ async function executeBulkPaymentBatch(req, batchData) {
               }
           }
 
-          const tdsToDeduct = item.paymentMode === "Online" ? Number(owner.tdsAmount || 0) : 0;
-          amount = baseAmt - tdsToDeduct;
+          // Removed TDS deduction here per user request to include TDS in the total amount.
+          amount = baseAmt;
 
           if (targetType === "current") {
             media.ledger.push({
@@ -5282,10 +5278,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           );
 
           let resolvedVirtualAmount = baseAmountVirtual;
-          // Deduct TDS for Online payment mode
-          if (mode === "Online") {
-            resolvedVirtualAmount -= Number(owner.tdsAmount || 0);
-          }
+          // Removed TDS deduction here per user request to include TDS in the total amount.
 
           if (appliesGstToThisRow) {
             resolvedVirtualAmount += virtualGstAmount;
@@ -5999,10 +5992,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
           if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
         }
 
-        // ✅ NEW: Deduct TDS from Pending Rent (Online mode only)
-        if (mode === "Online") {
-          modeAmount -= Number(owner.tdsAmount || 0);
-        }
+        // Removed TDS deduction here per user request to include TDS in the total amount.
 
         const bucket = result[String(owner._id)];
         if (!bucket) return;
@@ -6123,10 +6113,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
         }
 
-        // Deduct TDS from Ledger Amounts (Online mode only)
-        if (mode === "Online") {
-          modeAmount -= Number(owner.tdsAmount || 0);
-        }
+        // Removed TDS deduction here per user request to include TDS in the total amount.
 
         // ✅ NEW: Add to this month's generated revenue (Target)
         if (isRequestedMonthCycle) {
@@ -6252,10 +6239,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     let amt = Number(row.baseRentOutstandingAmount || 0);
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
-    if (row.paymentMode === "Online" || row.paymentMode === "Cash+Online") {
-      const siteTds = owners.reduce((sum, o) => sum + Number(o.tdsAmount || 0), 0);
-      amt -= siteTds;
-    }
+    // Removed TDS deduction here per user request to include TDS in the total amount.
 
     if (isPaid) {
       if (row.date) {
