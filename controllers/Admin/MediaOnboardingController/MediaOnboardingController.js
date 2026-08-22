@@ -2300,6 +2300,22 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         if (incomingTime !== existingLBP) {
           // Manual change detected — update anchor to follow the user's shift.
           mediaData.rentalPayment.billingStartDate = toDateOnly(incomingLBP);
+
+          // ✅ NEW: store the previous cycle start when manually shifting LBP
+          if (!mediaData.rentalPayment.previousBillGenerateDate && media.rentalPayment?.lastBillPaidDate) {
+            mediaData.rentalPayment.previousBillGenerateDate = media.rentalPayment.lastBillPaidDate;
+          }
+
+          // ✅ NEW: auto-calculate nextBillingDate if not provided to ensure cycle consistency
+          if (!mediaData.rentalPayment.nextBillingDate) {
+            const pf = mediaData.rentalPayment.paymentFrequency || media.rentalPayment?.paymentFrequency || 1;
+            const cpf = mediaData.rentalPayment.customPaymentFrequency || media.rentalPayment?.customPaymentFrequency || 0;
+            const freqMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+            const monthsToAdd = pf === 6 ? (cpf || 1) : (freqMap[pf] || 1);
+            const nextDate = new Date(toDateOnly(incomingLBP));
+            nextDate.setUTCMonth(nextDate.getUTCMonth() + monthsToAdd);
+            mediaData.rentalPayment.nextBillingDate = nextDate;
+          }
         } else if (existingBSD) {
           // No manual change — preserve the stable anchor.
           mediaData.rentalPayment.billingStartDate = existingBSD;

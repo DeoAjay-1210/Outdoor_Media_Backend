@@ -617,19 +617,36 @@ function getAllDueCycles(media, requestedMonthYear) {
   const anchorRaw = billingStartDate || lastBillPaidDate;
   if (!anchorRaw) return [];
 
+  const cycles = [];
   const cycleMonths = getCycleMonthsForFrequency(
     media.rentalPayment?.paymentFrequency,
     media.rentalPayment?.customPaymentFrequency,
   );
 
   const referenceDate = requestedMonthYear
-    ? new Date(Date.UTC(requestedMonthYear.year, requestedMonthYear.month - 1, 1))
+    ? new Date(
+        Date.UTC(requestedMonthYear.year, requestedMonthYear.month - 1, 1),
+      )
     : new Date();
 
   const anchorDateObj = new Date(anchorRaw);
 
-  const cycles = [];
+  // ✅ FIXED — cycle walk starting point.
+  // If the anchor (lastBillPaidDate) falls within the month we are currently
+  // evaluating (Today, or a requested month), we start the walk from offset 0
+  // so that the anchor cycle itself is included in the list. This ensures
+  // that when a user updates the date in onboarding, they can immediately
+  // see the result in the ledger/GST lists.
+  // Otherwise, we start from the NEXT cycle (offset = cycleMonths) to avoid
+  // showing past-paid months that aren't relevant to the current view.
   let monthOffset = cycleMonths;
+  if (
+    anchorDateObj.getUTCFullYear() === referenceDate.getUTCFullYear() &&
+    anchorDateObj.getUTCMonth() === referenceDate.getUTCMonth()
+  ) {
+    monthOffset = 0;
+  }
+
   let guard = 0;
   while (guard < 240) {
     // ✅ FIXED — use monthOffset from anchorDateObj to preserve the day
@@ -652,6 +669,37 @@ function getAllDueCycles(media, requestedMonthYear) {
     monthOffset += cycleMonths;
     guard++;
   }
+
+  // ✅ NEW — Ensure existing rentalDue records for past months are always
+  // included in the cycle list, even if the billing anchor was advanced
+  // or shifted. This prevents history from "disappearing" when a site
+  // configuration is updated (e.g. July doesn't vanish just because August's
+  // start date was edited).
+  if (Array.isArray(media.rentalDue)) {
+    media.rentalDue.forEach((due) => {
+      if (!due.dueDate) return;
+      const dDate = new Date(due.dueDate);
+      if (Number.isNaN(dDate.getTime())) return;
+
+      const isBeforeOrInRequested =
+        dDate.getUTCFullYear() < referenceDate.getUTCFullYear() ||
+        (dDate.getUTCFullYear() === referenceDate.getUTCFullYear() &&
+          dDate.getUTCMonth() <= referenceDate.getUTCMonth());
+
+      if (isBeforeOrInRequested) {
+        const alreadyIn = cycles.some(
+          (c) =>
+            c.getUTCFullYear() === dDate.getUTCFullYear() &&
+            c.getUTCMonth() === dDate.getUTCMonth(),
+        );
+        if (!alreadyIn) {
+          cycles.push(new Date(dDate));
+        }
+      }
+    });
+  }
+
+  cycles.sort((a, b) => a - b);
   return cycles;
 }
 const MONTH_NAMES_FOR_CYCLES = MONTH_NAMES;
@@ -664,6 +712,14 @@ function getRequiredModesShared(paymentCategory) {
 }
 
 function isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle) {
+  // ✅ NEW — if the cycle date is on or before lastBillPaidDate, it's paid by definition
+  const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
+  if (lastBillPaidDate && cycleDate) {
+    if (new Date(cycleDate).getTime() <= new Date(lastBillPaidDate).getTime()) {
+      return true;
+    }
+  }
+
   if (isLiveCycle) {
     return (media.ledger || []).some(
       (e) =>
@@ -3150,6 +3206,13 @@ for (const media of results) {
             const isOwnerApprovedVirtual = matchedDueForApproval?.approvalStatus === 3;
             const resolvedWithGstVirtual = isOwnerApprovedVirtual ? (matchedDueForApproval?.withGst ?? 0) : 0;
 
+            // ✅ NEW — check if this virtual entry is covered by lastBillPaidDate
+            let virtualStatus = 0;
+            const lbp = mediaObj.rentalPayment?.lastBillPaidDate;
+            if (lbp && cycleDate && new Date(cycleDate).getTime() <= new Date(lbp).getTime()) {
+              virtualStatus = 1;
+            }
+
             // Calculate potential GST amount for display
             let ownerGst = 0;
             let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
@@ -3177,7 +3240,7 @@ for (const media of results) {
               paymentMode: mode,
               utrNumber: "",
               date: null,
-              status: 0,
+              status: virtualStatus,
               dueMonth: cycleMonthLabel,
               cycle: cycleDate,
               rentalDueId: matchedRealDueForLedger?._id || null, // ✅ NEW
@@ -3430,7 +3493,12 @@ latestLedger = latestLedger.sort((a, b) => {
                 const isApproved = matchedDue?.approvalStatus === 3;
                 const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
                 let isPaid = false;
-                if (Number(effectiveWithGst) === 2) {
+                const lbp = mediaObj.rentalPayment?.lastBillPaidDate;
+                if (lbp && cycleDate && new Date(cycleDate).getTime() <= new Date(lbp).getTime()) {
+                    isPaid = true;
+                }
+
+                if (Number(effectiveWithGst) === 2 && !isPaid) {
                     const pc = Number(owner.paymentCategory || 1);
                     isPaid = getRequiredModesShared(pc).every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode));
                 }
@@ -4724,9 +4792,14 @@ function buildSingleMediaHistoryBlock(
       )
     : fullGstBalanceHistoryUnfiltered;
 
-  let fullRentalOutstandingHistory = [
-    ...(media.rentalPayment?.rentalOutstandingHistory || [])
-  ];
+  let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
+    if (h.cycle) return h;
+    const parsed = parseDueMonthLabel(h.dueMonth);
+    return {
+      ...h,
+      cycle: parsed ? new Date(Date.UTC(parsed.year, parsed.monthIdx, 1)) : null
+    };
+  });
 
   const liveCycleKeyForOutstanding = allTimeCycles.length > 0
     ? `${allTimeCycles[allTimeCycles.length - 1].getUTCFullYear()}-${allTimeCycles[allTimeCycles.length - 1].getUTCMonth()}`
@@ -4823,6 +4896,7 @@ function buildSingleMediaHistoryBlock(
       date: isPaid ? maxPaymentDate : null,
       updatedAt: null,
       updatedBy: "",
+      cycle: cycleDate,
     });
   });
 
