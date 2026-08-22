@@ -4768,6 +4768,7 @@ const filteredAgreementDocVerificationHistory = (
           startDate: item.agreement?.startDate,
           endDate: item.agreement?.endDate,
           agreementPDF: item.agreement?.agreementPDF,
+          status: item.agreement?.status,
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,

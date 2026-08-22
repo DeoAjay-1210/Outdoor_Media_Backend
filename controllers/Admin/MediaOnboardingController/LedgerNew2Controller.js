@@ -3450,19 +3450,7 @@ latestLedger = latestLedger.sort((a, b) => {
         const isApproved = matchedDue?.approvalStatus === 3;
         let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
         if (Number(effectiveWithGst) === 2 && !isApproved) effectiveWithGst = 1;
-
-        let isPaid = entry.isPaid;
-        let paymentDate = entry.date;
-        if (Number(effectiveWithGst) === 2 && !isPaid) {
-            const ownerId = entry.ownerId || entry.landOwnerId;
-            const owner = (mediaObj.landOwners || []).find(o => String(o._id) === String(ownerId));
-            const cycleDate = entry.cycle || (entry.date ? new Date(entry.date) : null);
-            const pc = Number(owner?.paymentCategory || 1);
-            const modes = getRequiredModesShared(pc);
-            const allPaid = modes.every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner?._id) && e.paymentMode === mode));
-            if (allPaid) isPaid = true;
-        }
-        return { ...entry, withGst: effectiveWithGst, isPaid, date: paymentDate, rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0 };
+        return { ...entry, withGst: effectiveWithGst, isPaid: entry.isPaid, date: entry.date, rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0 };
       });
 
       if (expectedGstPerCycleTotal > 0) {
@@ -3493,15 +3481,6 @@ latestLedger = latestLedger.sort((a, b) => {
                 const isApproved = matchedDue?.approvalStatus === 3;
                 const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
                 let isPaid = false;
-                const lbp = mediaObj.rentalPayment?.lastBillPaidDate;
-                if (lbp && cycleDate && new Date(cycleDate).getTime() <= new Date(lbp).getTime()) {
-                    isPaid = true;
-                }
-
-                if (Number(effectiveWithGst) === 2 && !isPaid) {
-                    const pc = Number(owner.paymentCategory || 1);
-                    isPaid = getRequiredModesShared(pc).every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode));
-                }
                 fullGstBalanceHistory.push({
                   dueMonth: cycleMonthLabel, cycle: cycleDate, gstAmount: ownerGst, isPaid, isVirtual: true,
                   withGst: effectiveWithGst, ownerId: owner._id, ownerName: owner.name, landOwnerId: owner._id, landOwnerName: owner.name,
@@ -3923,17 +3902,7 @@ latestLedger = latestLedger.sort((a, b) => {
         const isApproved = matchedDue?.approvalStatus === 3;
         let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
         if (Number(effectiveWithGst) === 2 && !isApproved) effectiveWithGst = 1;
-
-        let isPaid = entry.isPaid;
-        if (Number(effectiveWithGst) === 2 && !isPaid) {
-            const ownerId = entry.ownerId || entry.landOwnerId;
-            const owner = (mediaObj.landOwners || []).find(o => String(o._id) === String(ownerId));
-            const pc = Number(owner?.paymentCategory || 1);
-            const modes = getRequiredModesShared(pc);
-            const allPaid = modes.every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner?._id) && e.paymentMode === mode));
-            if (allPaid) isPaid = true;
-        }
-        return { ...entry, isPaid };
+        return { ...entry, isPaid: entry.isPaid };
       });
 
       if (expectedGstPerCycleTotal > 0) {
@@ -3951,10 +3920,6 @@ latestLedger = latestLedger.sort((a, b) => {
               const isApproved = matchedDue?.approvalStatus === 3;
               const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
               let isPaid = false;
-              if (Number(effectiveWithGst) === 2) {
-                  const pc = Number(owner.paymentCategory || 1);
-                  isPaid = getRequiredModesShared(pc).every(mode => (mediaObj.ledger || []).some(e => e.status === 1 && String(e.landOwnerId) === String(owner._id) && e.paymentMode === mode));
-              }
               if (!isPaid) {
                   let ownerGst = 0;
                   let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
@@ -4695,28 +4660,13 @@ function buildSingleMediaHistoryBlock(
         effectiveWithGst = 1; // Treat as tracked GST until appraised.
     }
 
-    let isPaid = entry.isPaid;
-    let paymentDate = entry.date;
-
-    // ✅ if withGst is 2 (Direct), GST is paid if rent is entered
-    if (Number(effectiveWithGst) === 2 && !isPaid) {
-        const ownerId = entry.ownerId || entry.landOwnerId;
-        const owner = (media.landOwners || []).find(o => String(o._id) === String(ownerId));
-        const cycleDate = entry.cycle || (entry.date ? new Date(entry.date) : null);
-        const info = getOwnerPaymentInfo(owner, cycleDate);
-        if (info.isPaid) {
-            isPaid = true;
-            paymentDate = info.date;
-        }
-    }
-
     return {
       ...entry,
       withGst: effectiveWithGst,
       rentalDueId: entry.rentalDueId || matchedDue?._id || null,
       rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ ADDED
-      isPaid,
-      date: paymentDate
+      isPaid: entry.isPaid,
+      date: entry.date
     };
   });
 
@@ -4758,11 +4708,6 @@ function buildSingleMediaHistoryBlock(
 
             let isPaid = false;
             let paymentDate = null;
-            if (Number(effectiveWithGst) === 2) {
-                const info = getOwnerPaymentInfo(owner, cycleDate);
-                isPaid = info.isPaid;
-                paymentDate = info.date;
-            }
 
             fullGstBalanceHistoryUnfiltered.push({
               dueMonth: cycleMonthLabel,
