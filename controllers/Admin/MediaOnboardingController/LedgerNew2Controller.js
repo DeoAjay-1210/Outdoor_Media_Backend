@@ -645,22 +645,7 @@ function getAllDueCycles(media, requestedMonthYear) {
     : new Date();
 
   const anchorDateObj = new Date(anchorRaw);
-
-  // ✅ FIXED — cycle walk starting point.
-  // If the anchor (lastBillPaidDate) falls within the month we are currently
-  // evaluating (Today, or a requested month), we start the walk from offset 0
-  // so that the anchor cycle itself is included in the list. This ensures
-  // that when a user updates the date in onboarding, they can immediately
-  // see the result in the ledger/GST lists.
-  // Otherwise, we start from the NEXT cycle (offset = cycleMonths) to avoid
-  // showing past-paid months that aren't relevant to the current view.
   let monthOffset = cycleMonths;
-  if (
-    anchorDateObj.getUTCFullYear() === referenceDate.getUTCFullYear() &&
-    anchorDateObj.getUTCMonth() === referenceDate.getUTCMonth()
-  ) {
-    monthOffset = 0;
-  }
 
   let guard = 0;
   while (guard < 240) {

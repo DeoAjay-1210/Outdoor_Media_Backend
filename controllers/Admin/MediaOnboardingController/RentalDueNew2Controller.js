@@ -489,14 +489,6 @@ async function generateMissedEntriesForMedia(media, userName) {
   // incrementally from whatever's already saved.
   const dueCycles = [];
   let cursor = addMonthsUTC(anchorMonthStart, cycleMonths);
-  // If the anchor (lastBillPaidDate) is in the current month, we want its entry
-  // to exist so it can be seen in the ledger as a paid record.
-  if (
-    anchorMonthStart.getUTCFullYear() === referenceDate.getUTCFullYear() &&
-    anchorMonthStart.getUTCMonth() === referenceDate.getUTCMonth()
-  ) {
-    cursor = anchorMonthStart;
-  }
 
   let guard = 0;
   while (guard < 240) {
