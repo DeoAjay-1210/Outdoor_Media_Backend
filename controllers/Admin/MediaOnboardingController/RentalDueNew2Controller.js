@@ -2760,18 +2760,24 @@ exports.getOverDueHistoryList = async (req, res) => {
 
     if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
         const [mo, yr] = dueMonth.split("-").map(Number);
-        // User requested 08 -> September (which is index 8)
-        const monthName = monthNames[mo];
+        const monthName = monthNames[mo - 1]; // Reverted to standard 1-based mapping (08 = August)
         if (monthName) {
             filter.dueMonth = `${monthName} ${yr}`;
         }
     } else if (dueMonth || dueYear) {
-        // Support separate dueMonth (e.g. "08") and dueYear (e.g. "2026")
+        // Support separate dueMonth and dueYear
         const mo = parseInt(dueMonth);
         const yr = parseInt(dueYear);
-        const monthName = !isNaN(mo) ? monthNames[mo] : null;
+
+        let monthName = null;
+        if (!isNaN(mo) && mo >= 1 && mo <= 12) {
+            monthName = monthNames[mo - 1]; // Standard 1-based mapping
+        } else if (typeof dueMonth === 'string' && isNaN(mo)) {
+            monthName = dueMonth; // User sent "August"
+        }
+
         if (monthName && !isNaN(yr)) {
-            filter.dueMonth = `${monthName} ${yr}`;
+            filter.dueMonth = new RegExp(`${monthName}.*${yr}`, "i");
         } else if (monthName) {
             filter.dueMonth = { $regex: monthName, $options: "i" };
         } else if (!isNaN(yr)) {
@@ -2848,7 +2854,15 @@ exports.getOverDueHistoryList = async (req, res) => {
                     ]
                   }
                 },
-                totalOverdueAmount: { $sum: { $add: ["$overDueAmount", "$gstAmount"] } }
+                totalOverdueAmount: {
+                  $sum: {
+                    $cond: [
+                      { $eq: ["$withGst", 2] },
+                      "$overDueAmount",
+                      { $add: ["$overDueAmount", "$gstAmount"] }
+                    ]
+                  }
+                }
               }
             }
           ]
@@ -2912,10 +2926,16 @@ exports.getOverDueHistoryList = async (req, res) => {
             }
         }
 
+        const isDirect = withGst === 2;
+        const rentAmount = isDirect ? Math.max((item.overDueAmount || 0) - (item.gstAmount || 0), 0) : (item.overDueAmount || 0);
+        const totalAmount = isDirect ? (item.overDueAmount || 0) : (item.overDueAmount || 0) + (item.gstAmount || 0);
+
         return {
             ...item,
+            rentAmount,
+            overDueAmount: totalAmount,
+            totalAmount: totalAmount,
             overdueDays: dDate ? Math.floor((today - dDate) / 86400000) : 0,
-            totalAmount: (item.overDueAmount || 0) + (item.gstAmount || 0),
             approvalOverdueBy: calcOverdueBy(item.approvedDate),
             ledgerOverdueBy: calcOverdueBy(item.ledgerEntryDate),
             gstOverdueBy: calcOverdueBy(item.gstEntryDate),
