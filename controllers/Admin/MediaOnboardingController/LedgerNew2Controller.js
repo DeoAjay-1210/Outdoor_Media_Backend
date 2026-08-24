@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
+const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -712,14 +713,6 @@ function getRequiredModesShared(paymentCategory) {
 }
 
 function isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle) {
-  // ✅ NEW — if the cycle date is on or before lastBillPaidDate, it's paid by definition
-  const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
-  if (lastBillPaidDate && cycleDate) {
-    if (new Date(cycleDate).getTime() <= new Date(lastBillPaidDate).getTime()) {
-      return true;
-    }
-  }
-
   if (isLiveCycle) {
     return (media.ledger || []).some(
       (e) =>
@@ -1027,6 +1020,32 @@ function isLiveCycleMonthLabel(media, monthLabel) {
   const liveLabel = `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   return String(monthLabel).trim().toLowerCase() === liveLabel.toLowerCase();
 }
+async function syncWithOverDueHistory(mediaId, rentalDueId, entryDate, withGst, userName) {
+  try {
+    if (!rentalDueId) return;
+
+    const updatePayload = {
+      updatedBy: userName,
+      updatedAt: nowIST()
+    };
+
+    // withGst === 1 means GST Payment, withGst === 2 (or other) means Rent/Ledger Payment
+    if (Number(withGst) === 1) {
+      updatePayload.gstEntryDate = entryDate;
+    } else {
+      updatePayload.ledgerEntryDate = entryDate;
+      updatePayload.status = 1; // Mark as Ledger Entered
+    }
+
+    await OverDueHistory.findOneAndUpdate(
+      { mediaId, rentalDueId },
+      { $set: updatePayload }
+    );
+  } catch (err) {
+    console.error("❌ Error syncing OverDue History:", err.message);
+  }
+}
+
 exports.createLedgerEntry = async (req, res) => {
   try {
     // ✅ NEW — handle array of batches
@@ -1270,6 +1289,7 @@ exports.createLedgerEntry = async (req, res) => {
             updatedBy: req.user?.userName || "Admin",
             updatedAt: nowIST(),
             withGst,
+            // isUtrEntry: Number(withGst) === 1, // ✅ ADDED — identifies GST records
             month: item.month || null,
             rentalDueId: item.rentalDueId || null,
             // ✅ NEW field only — amount, when caller supplies it (optional,
@@ -1404,6 +1424,7 @@ exports.createLedgerEntry = async (req, res) => {
             updatedBy: req.user?.userName || "Admin",
             updatedAt: nowIST(),
             withGst,
+            // isUtrEntry: Number(withGst) === 1, // ✅ ADDED — identifies GST records
             month: item.month || null,
             rentalDueId: item.rentalDueId || null,
             index: withGst === 2 ? ledgerEntryData.index : null,
@@ -1766,6 +1787,26 @@ exports.createLedgerEntry = async (req, res) => {
 
     recomputePendingMonths(media);
     await media.save({ timestamps: false });
+
+    // ✅ NEW — Sync with OverDueHistory
+    if (hasEntries) {
+      for (const item of entries) {
+        if (item.rentalDueId) {
+          const eDate = item.date ? new Date(item.date) : new Date();
+          await syncWithOverDueHistory(media._id, item.rentalDueId, eDate, item.withGst, req.user?.userName);
+        }
+      }
+    }
+    if (hasOutstandingEntries) {
+      for (const item of outstandingEntries) {
+        if (item.rentalDueId) {
+           const eDate = item.date ? new Date(item.date) : nowIST();
+           // In outstandingEntries, entryType === "gst" maps to withGst: 1
+           const resolvedWithGst = item.entryType === "gst" ? 1 : 2;
+           await syncWithOverDueHistory(media._id, item.rentalDueId, eDate, resolvedWithGst, req.user?.userName);
+        }
+      }
+    }
 
     // ✅ NEW — outstanding summary + currentBillDate appended to response
     const outstanding = computeOutstandingSummary(media, null); // save response always reflects the site's actual live cycle, not a requested month
@@ -2175,6 +2216,14 @@ async function executeBulkPaymentBatch(req, batchData) {
 
       recomputePendingMonths(media);
       await media.save({ timestamps: false });
+
+      // ✅ NEW — Sync with OverDueHistory for bulk batch
+      for (const item of sitePayments) {
+          if (item.rentalDueId) {
+              const resolvedWithGst = entryType === "gst" ? 1 : 2;
+              await syncWithOverDueHistory(mId, item.rentalDueId, entryDate, resolvedWithGst, updatedBy);
+          }
+      }
 
     } catch (siteError) {
       console.error(`Site ${mId} error:`, siteError);
@@ -6134,52 +6183,18 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
         // Removed TDS deduction here per user request to include TDS in the total amount.
 
-        // ✅ NEW: Add to this month's generated revenue (Target)
-        if (isRequestedMonthCycle) {
-          result.totalDueMonthAmount += modeAmount;
-          if (modeAmount > 0) result.hasDueMonth = true;
-        }
+        // Demand - include current and past months
+        result.totalDueMonthAmount += modeAmount;
+        if (modeAmount > 0) result.hasDueMonth = true;
 
         // Find the payment entry to check date and status
         const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycleIteration);
 
         if (isPaid) {
-          // Identify if it was paid IN the requested month
-          let paymentDate = null;
-          if (isLiveCycleIteration) {
-            const liveLedgerEntry = (media.ledger || []).find(e =>
-              e.status === 1 &&
-              (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)) &&
-              e.paymentMode === mode
-            );
-            if (liveLedgerEntry) paymentDate = liveLedgerEntry.date;
-          } else {
-            const cycleYear = String(cycleDate.getUTCFullYear());
-            const cycleMonthName = MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()];
-            const yearBucket = (media.ledgerHistory || []).find(y => y.year === cycleYear);
-            const monthBucket = yearBucket?.months?.find(m => m.month.toLowerCase() === cycleMonthName.toLowerCase());
-            const histEntry = (monthBucket?.entries || []).find(e =>
-              e.isUtrEntry !== true &&
-              (e.status === 1 || (e.utrNumber && e.utrNumber.trim() !== "")) &&
-              (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)) &&
-              e.paymentMode === mode
-            );
-            if (histEntry) paymentDate = histEntry.date;
-          }
-
-          if (paymentDate) {
-            const pd = new Date(paymentDate);
-            if (pd.getUTCFullYear() === requestedMonthYear.year && (pd.getUTCMonth() + 1) === requestedMonthYear.month) {
-              result.totalLedgerAmount += modeAmount;
-              if (modeAmount > 0) result.hasTotalLedger = true;
-            }
-          } else if (isRequestedMonthCycle) {
-            // Fallback: if it's the requested month's cycle and marked paid but no date, assume it's this month's revenue
-            result.totalLedgerAmount += modeAmount;
-            if (modeAmount > 0) result.hasTotalLedger = true;
-          }
+          result.totalLedgerAmount += modeAmount;
+          if (modeAmount > 0) result.hasTotalLedger = true;
         } else {
-          // CUMULATIVE Pending
+          // Pending - include current and past months
           result.totalLedgerPendingAmount += modeAmount;
           if (modeAmount > 0) result.hasPendingLedger = true;
         }
@@ -6195,24 +6210,14 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         rowsForMonth.forEach((row) => {
           const amt = Number(row.gstAmount || 0);
 
-          // ✅ NEW: Add to this month's generated GST (Target)
-          if (isRequestedMonthCycle) {
-            result.totalDueMonthAmount += amt;
-            if (amt > 0) result.hasDueMonth = true;
-          }
+          // Demand - include current and past months
+          result.totalDueMonthAmount += amt;
+          if (amt > 0) result.hasDueMonth = true;
 
           const paid = isRowPaid(row);
           if (paid) {
-            if (row.date) {
-              const pd = new Date(row.date);
-              if (pd.getUTCFullYear() === requestedMonthYear.year && (pd.getUTCMonth() + 1) === requestedMonthYear.month) {
-                result.totalLedgerGstAmount += amt;
-                if (amt > 0) result.hasTotalGst = true;
-              }
-            } else if (isRequestedMonthCycle) {
-              result.totalLedgerGstAmount += amt;
-              if (amt > 0) result.hasTotalGst = true;
-            }
+            result.totalLedgerGstAmount += amt;
+            if (amt > 0) result.hasTotalGst = true;
           } else {
             // CUMULATIVE Pending
             result.totalGstPendingAmount += amt;
@@ -6220,13 +6225,11 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           }
         });
       } else if (expectedGstPerCycle > 0) {
-        // ✅ NEW: Add to this month's generated GST (Target)
-        if (isRequestedMonthCycle) {
-          result.totalDueMonthAmount += expectedGstPerCycle;
-          if (expectedGstPerCycle > 0) result.hasDueMonth = true;
-        }
+        // Demand - include current and past months
+        result.totalDueMonthAmount += expectedGstPerCycle;
+        if (expectedGstPerCycle > 0) result.hasDueMonth = true;
 
-        // CUMULATIVE Pending
+        // Pending - include current and past months
         result.totalGstPendingAmount += expectedGstPerCycle;
         if (expectedGstPerCycle > 0) result.hasPendingGst = true;
       }
@@ -6239,14 +6242,15 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     const amt = Number(row.gstOutStandingAmount || 0);
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
+    // Note: Legacy outstanding is excluded from overallDueMonthAmount (Target)
+    // because it is not demand generated in the requested month.
+
+    result.totalDueMonthAmount += amt;
+    if (amt > 0) result.hasDueMonth = true;
+
     if (isPaid) {
-      if (row.date) {
-        const d = new Date(row.date);
-        if (d.getUTCFullYear() === requestedMonthYear.year && (d.getUTCMonth() + 1) === requestedMonthYear.month) {
-          result.totalLedgerGstAmount += amt;
-          if (amt > 0) result.hasTotalGst = true;
-        }
-      }
+      result.totalLedgerGstAmount += amt;
+      if (amt > 0) result.hasTotalGst = true;
     } else {
       result.totalGstPendingAmount += amt;
       if (amt > 0) result.hasPendingGst = true;
@@ -6258,16 +6262,17 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     let amt = Number(row.baseRentOutstandingAmount || 0);
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
+    // Note: Legacy outstanding is excluded from overallDueMonthAmount (Target)
+    // because it is not demand generated in the requested month.
+
     // Removed TDS deduction here per user request to include TDS in the total amount.
 
+    result.totalDueMonthAmount += amt;
+    if (amt > 0) result.hasDueMonth = true;
+
     if (isPaid) {
-      if (row.date) {
-        const d = new Date(row.date);
-        if (d.getUTCFullYear() === requestedMonthYear.year && (d.getUTCMonth() + 1) === requestedMonthYear.month) {
-          result.totalLedgerAmount += amt;
-          if (amt > 0) result.hasTotalLedger = true;
-        }
-      }
+      result.totalLedgerAmount += amt;
+      if (amt > 0) result.hasTotalLedger = true;
     } else {
       result.totalLedgerPendingAmount += amt;
       if (amt > 0) result.hasPendingLedger = true;

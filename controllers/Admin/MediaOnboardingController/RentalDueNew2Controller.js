@@ -880,19 +880,13 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     });
     if (existing) return;
 
-    const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
     const entryGst = Number(entry.gstAmount || 0);
     const siteGst = Number(media.rentalPayment?.gstAmount || 0);
     const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
     const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-    let base = Number(entry.netPayable || 0);
-    let effectiveAmount = base;
-    if (resolvedGst > 0) {
-      if (base < (Number(media.rentalPayment?.totalRentalAmount || 0) + resolvedGst)) {
-        effectiveAmount = base + resolvedGst;
-      }
-    }
+    const baseAmount = Number(entry.netPayable || 0);
+    const isGstApplicable = resolvedGst > 0;
 
     await OverDueHistory.create({
       mediaId: media._id,
@@ -901,13 +895,15 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       previousBillDate: media.rentalPayment?.previousBillGenerateDate,
       currentBillDate: entry.dueDate,
       nextBillDate: media.rentalPayment?.nextBillingDate,
-      overDueAmount: effectiveAmount,
+      overDueAmount: baseAmount,
+      gstAmount: resolvedGst,
+      isGstApplicable,
       approvedDate: nowIST(),
       removedDate: nowIST(),
       dueMonth: entry.dueMonth,
       dueDate: entry.dueDate,
       rentalDueId: entry._id,
-      status: entry.status,
+      status: 2, // 2: Pending Entry
       updatedBy: userName,
       createdAt: nowIST(),
       updatedAt: nowIST(),
@@ -2726,11 +2722,11 @@ exports.verifyAgreementDoc = async (req, res) => {
 };
 
 /**
- * ✅ NEW — Dedicated API for OverDue History List
+ * ✅ UPDATED — Dedicated API for OverDue History List with Summary and calculated overdue days
  */
 exports.getOverDueHistoryList = async (req, res) => {
   try {
-    const { pageNumber = 1, count = 10, search } = req.body;
+    const { pageNumber = 1, count = 10, search, dueMonth, status } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
@@ -2742,10 +2738,51 @@ exports.getOverDueHistoryList = async (req, res) => {
       filter.$or = [
         { mediaName: { $regex: search, $options: "i" } },
         { mediaCode: { $regex: search, $options: "i" } },
-        { dueMonth: { $regex: search, $options: "i" } },
       ];
     }
 
+    if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
+        const [mo, yr] = dueMonth.split("-").map(Number);
+        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        filter.dueMonth = `${monthNames[mo - 1]} ${yr}`;
+    }
+
+    if (status !== undefined && status !== null && status !== "") {
+        filter.status = Number(status);
+    }
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    // 1) Summary Statistics
+    const statsAgg = await OverDueHistory.aggregate([
+      {
+        $facet: {
+          totals: [
+            {
+              $group: {
+                _id: null,
+                totalOverdueSites: { $sum: 1 },
+                pendingLedgerEntry: { $sum: { $cond: [{ $eq: ["$status", 2] }, 1, 0] } },
+                ledgerEntered: { $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] } },
+                totalOverdueAmount: { $sum: { $add: ["$overDueAmount", "$gstAmount"] } },
+                avgOverdueDays: { $avg: { $divide: [{ $subtract: [today, "$dueDate"] }, 86400000] } }
+              }
+            }
+          ]
+        }
+      }
+    ]);
+
+    const summary = statsAgg[0]?.totals[0] || {
+      totalOverdueSites: 0,
+      pendingLedgerEntry: 0,
+      ledgerEntered: 0,
+      totalOverdueAmount: 0,
+      avgOverdueDays: 0
+    };
+
+    // 2) Data Fetch
     const [history, totalCount] = await Promise.all([
       OverDueHistory.find(filter)
         .sort({ approvedDate: -1 })
@@ -2755,14 +2792,39 @@ exports.getOverDueHistoryList = async (req, res) => {
       OverDueHistory.countDocuments(filter)
     ]);
 
+    // 3) Enrichment for UI
+    const enrichedHistory = history.map(item => {
+        const dDate = item.dueDate ? new Date(item.dueDate) : null;
+
+        const calcOverdueBy = (date) => {
+            if (!date || !dDate) return "-";
+            const diff = Math.floor((new Date(date) - dDate) / 86400000);
+            return diff > 0 ? `${diff} days` : "0 days";
+        };
+
+        return {
+            ...item,
+            overdueDays: dDate ? Math.floor((today - dDate) / 86400000) : 0,
+            totalAmount: (item.overDueAmount || 0) + (item.gstAmount || 0),
+            approvalOverdueBy: calcOverdueBy(item.approvedDate),
+            ledgerOverdueBy: calcOverdueBy(item.ledgerEntryDate),
+            gstOverdueBy: calcOverdueBy(item.gstEntryDate),
+            statusLabel: item.status === 1 ? "Ledger Entered" : "Pending Entry"
+        };
+    });
+
     return successResponse(res, "OverDue history fetched successfully", {
+      summary: {
+          ...summary,
+          avgOverdueDays: Math.round(summary.avgOverdueDays || 0)
+      },
       pagination: {
         pageNumber: pageNumbers,
         count: pageSize,
         totalCount,
         totalPages: Math.ceil(totalCount / pageSize),
       },
-      overDueHistory: history
+      overDueHistory: enrichedHistory
     }, 200);
 
   } catch (err) {
