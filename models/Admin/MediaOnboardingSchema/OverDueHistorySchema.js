@@ -20,6 +20,7 @@ const overDueHistorySchema = new mongoose.Schema(
     dueMonth: { type: String, trim: true },
     dueDate: { type: Date },
     rentalDueId: { type: mongoose.Schema.Types.ObjectId },
+    withGst: { type: Number, default: 0 },
     ledgerEntryDate: { type: Date, default: null },
     gstEntryDate: { type: Date, default: null },
     status: { type: Number },

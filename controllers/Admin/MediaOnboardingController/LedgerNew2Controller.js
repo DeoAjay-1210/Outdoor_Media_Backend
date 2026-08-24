@@ -5,6 +5,20 @@ const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/Over
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
+/**
+ * ✅ NEW — Combines a provided date string with the current time
+ * to ensure timestamps are preserved even when a backdated date is given.
+ */
+const combineDateWithCurrentTime = (dateInput) => {
+  const now = nowIST();
+  if (!dateInput) return now;
+  const d = new Date(dateInput);
+  if (!isNaN(d.getTime())) {
+    d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+  }
+  return d;
+};
 const MONTH_NAMES = [
   "January",
   "February",
@@ -712,27 +726,48 @@ function getRequiredModesShared(paymentCategory) {
   return ["Cash"];
 }
 
-function isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle) {
-  if (isLiveCycle) {
-    return (media.ledger || []).some(
+function isOwnerModePaidForCycle(media, owner, mode, cycleDate) {
+  const cycleMonthName = MONTH_NAMES[cycleDate.getUTCMonth()];
+  const cycleYear = String(cycleDate.getUTCFullYear());
+  const cycleMonthLabel = `${cycleMonthName} ${cycleYear}`;
+
+  const ownerIdStr = String(owner._id || "");
+  const ownerMasterIdStr = owner.landOwnerMasterId ? String(owner.landOwnerMasterId) : null;
+
+  const matchesOwner = (id) => {
+    const s = String(id || "");
+    return s === ownerIdStr || (ownerMasterIdStr && s === ownerMasterIdStr);
+  };
+
+  // 1) Check active/pending Ledger entries (recently paid but not yet archived)
+  if (Array.isArray(media.ledger)) {
+    const inLedger = media.ledger.some(
       (e) =>
         e.status === 1 &&
-        (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)) &&
-        e.paymentMode === mode,
+        !e.isVirtual && // ✅ Revenue must come from real payment records
+        matchesOwner(e.landOwnerId) &&
+        e.paymentMode === mode &&
+        (String(e.dueMonth || e.month || "").trim().toLowerCase() === cycleMonthLabel.toLowerCase())
     );
+    if (inLedger) return true;
   }
-  const cycleYear = String(cycleDate.getUTCFullYear());
-  const cycleMonthName = MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()];
-  const yearBucket = (media.ledgerHistory || []).find((y) => y.year === cycleYear);
+
+  // 2) Check Ledger History (Archived payments)
+  const yearBucket = (media.ledgerHistory || []).find((y) => String(y.year) === cycleYear);
   const monthBucket = yearBucket?.months?.find(
     (m) => m.month.toLowerCase() === cycleMonthName.toLowerCase(),
   );
-  return (monthBucket?.entries || []).some(
-    (e) =>
-      e.isUtrEntry !== true &&
-      e.paymentMode === mode &&
-      (String(e.landOwnerId) === String(owner._id) || String(e.landOwnerId) === String(owner.landOwnerMasterId)),
-  );
+  if (monthBucket) {
+    const inHistory = (monthBucket.entries || []).some(
+      (e) =>
+        e.isUtrEntry !== true &&
+        e.paymentMode === mode &&
+        matchesOwner(e.landOwnerId)
+    );
+    if (inHistory) return true;
+  }
+
+  return false;
 }
 
 function getUnpaidRentForCycle(media, requestedMonthYear) {
@@ -767,14 +802,13 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
           return new Date(b.updatedAt) - new Date(a.updatedAt);
         })[0];
 
-      const isApproved = Number(matchedDue?.approvalStatus) === 3;
       const effectiveWithGst = matchedDue?.withGst ?? (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
-      const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
+      const isDirectGst = Number(effectiveWithGst) === 2;
 
       owners.forEach((owner) => {
         const paymentCategory = Number(owner.paymentCategory || 1);
         getRequiredModesShared(paymentCategory).forEach((mode) => {
-          const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle);
+          const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
           if (isPaid) return;
 
           let modeAmount =
@@ -782,9 +816,7 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
               ? Number(owner.cashAmount || owner.shareAmount || 0)
               : Number(owner.onlineAmount || owner.shareAmount || 0);
 
-          // ✅ NEW — if "Without GST" (Direct to Owner), add GST to the rent due.
-          // ✅ FIXED — Only fold GST into rent if the owner has appraised the cycle (approvalStatus: 3).
-          if (isOwnerAppraisedDirect) {
+          if (isDirectGst) {
             let gstFlag = Number(media.gstApplicableFlag || 0);
             if (gstFlag === 0) {
                 const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
@@ -794,11 +826,14 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
             }
 
             let ownerGst = 0;
+            const expectedGstPerCycle = resolveExpectedGstForCycle(media);
             if (gstFlag === 1) {
-                const ownerCount = owners.length || 1;
-                ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+                ownerGst = expectedGstPerCycle / (owners.length || 1);
             } else {
                 ownerGst = Number(owner.gstAmount || 0);
+                if (ownerGst <= 0 && owners.length > 0) {
+                   ownerGst = expectedGstPerCycle / owners.length;
+                }
             }
             // Only add GST to the Online row for Category 3, or the single row for others.
             if (paymentCategory !== 3 || mode === "Online") {
@@ -943,6 +978,14 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
         return new Date(b.updatedAt) - new Date(a.updatedAt);
       })[0];
 
+    const effectiveWithGst = matchedRealDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
+    const isDirectGst = Number(effectiveWithGst) === 2;
+
+    let cycleNetPayable = Number(media.rentalPayment?.totalRentalAmount || 0);
+    if (isDirectGst) {
+        cycleNetPayable += resolveExpectedGstForCycle(media);
+    }
+
     let cycleGstAmount = 0;
     const inferredWithGst = expectedGstPerCycle > 0 ? 0 : null;
     const isApproved = Number(matchedRealDue?.approvalStatus) === 3;
@@ -961,7 +1004,7 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
       _id: matchedRealDue?._id || null, // ✅ NEW — real rentalDueId, now that ensureRentalDueForCycles guarantees it exists
       dueMonth: cycleMonthLabel,
       dueDate: cycleDate,
-      netPayable: Number(media.rentalPayment?.totalRentalAmount || 0),
+      netPayable: cycleNetPayable,
       withGst: (matchedRealDue && matchedRealDue.withGst !== null && matchedRealDue.withGst !== undefined)
         ? Number(matchedRealDue.withGst)
         : inferredWithGst,
@@ -1264,7 +1307,7 @@ exports.createLedgerEntry = async (req, res) => {
 
       for (let i = 0; i < entries.length; i++) {
         const item = entries[i];
-        const entryDate = item.date ? new Date(item.date) : new Date();
+        const entryDate = item.date ? combineDateWithCurrentTime(item.date) : nowIST();
         const matchedOwner = item.landOwnerId
           ? media.landOwners.id(item.landOwnerId) ||
             media.landOwners.find(
@@ -1589,7 +1632,7 @@ exports.createLedgerEntry = async (req, res) => {
           }
         }
 
-        const entryDate = date ? new Date(date) : nowIST();
+        const entryDate = date ? combineDateWithCurrentTime(date) : nowIST();
         const updatedBy = req.user?.userName || "Admin";
 
         if (entryType === "gst" && targetType === "pastCycle") {
@@ -1792,7 +1835,7 @@ exports.createLedgerEntry = async (req, res) => {
     if (hasEntries) {
       for (const item of entries) {
         if (item.rentalDueId) {
-          const eDate = item.date ? new Date(item.date) : new Date();
+          const eDate = item.date ? combineDateWithCurrentTime(item.date) : nowIST();
           await syncWithOverDueHistory(media._id, item.rentalDueId, eDate, item.withGst, req.user?.userName);
         }
       }
@@ -1800,7 +1843,7 @@ exports.createLedgerEntry = async (req, res) => {
     if (hasOutstandingEntries) {
       for (const item of outstandingEntries) {
         if (item.rentalDueId) {
-           const eDate = item.date ? new Date(item.date) : nowIST();
+           const eDate = item.date ? combineDateWithCurrentTime(item.date) : nowIST();
            // In outstandingEntries, entryType === "gst" maps to withGst: 1
            const resolvedWithGst = item.entryType === "gst" ? 1 : 2;
            await syncWithOverDueHistory(media._id, item.rentalDueId, eDate, resolvedWithGst, req.user?.userName);
@@ -1980,7 +2023,7 @@ async function executeBulkPaymentBatch(req, batchData) {
   }
 
   // 2) Processing — Group payments by mediaId to avoid stale document state and multiple saves
-  const entryDate = date ? new Date(date) : nowIST();
+  const entryDate = date ? combineDateWithCurrentTime(date) : nowIST();
   const updatedBy = req.user?.userName || "Admin";
   const savedEntries = [];
   let totalAmountSaved = 0;
@@ -5127,7 +5170,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
   }
 
   let ownerGst = 0;
-  if (gstFlag === 1) {
+  if (gstFlag === 1 || (gstFlag === 2 && Number(owner.gstAmount || 0) <= 0)) {
     const ownerCount = matchingLandOwners.length || 1;
     ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
   } else {
@@ -6024,17 +6067,16 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
         if (sB === 3 && sA !== 3) return 1;
         return new Date(b.updatedAt) - new Date(a.updatedAt);
       })[0];
-    const isApproved = Number(matchedDue?.approvalStatus) === 3;
     const effectiveWithGst =
       matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
-    const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
+    const isDirectGst = Number(effectiveWithGst) === 2;
 
     // ── RENT — identical rule to getUnpaidRentForCycle(), per owner ──
     owners.forEach((owner) => {
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         const isPaid = isOwnerModePaidForCycle(
-          media, owner, mode, cycleDate, isLiveCycle,
+          media, owner, mode, cycleDate,
         );
         if (isPaid) return;
 
@@ -6043,7 +6085,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
             ? Number(owner.cashAmount || owner.shareAmount || 0)
             : Number(owner.onlineAmount || owner.shareAmount || 0);
 
-        if (isOwnerAppraisedDirect) {
+        if (isDirectGst) {
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
             const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
@@ -6052,10 +6094,14 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
             else if (siteGst) gstFlag = 1;
           }
           let ownerGst = 0;
+          const expectedGstPerCycle = resolveExpectedGstForCycle(media);
           if (gstFlag === 1) {
-            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1);
+            ownerGst = expectedGstPerCycle / (owners.length || 1);
           } else {
             ownerGst = Number(owner.gstAmount || 0);
+            if (ownerGst <= 0 && owners.length > 0) {
+                ownerGst = expectedGstPerCycle / owners.length;
+            }
           }
           if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
         }
@@ -6070,8 +6116,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     });
 
     // ── GST — identical rule to getGstDueForCycles(), per owner ──
-    // ✅ FIXED — Only skip GST tracking if "Without GST" AND owner appraised.
-    if (matchedDue && Number(matchedDue.withGst) === 2 && isApproved) return; // GST folded into rent above, not tracked separately
+    if (isDirectGst) return; // GST folded into rent above, not tracked separately
 
     const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
     const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
@@ -6129,18 +6174,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
   const expectedGstPerCycle = resolveExpectedGstForCycle(media);
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
 
-  const liveCycleKey = cycles.length > 0
-    ? `${cycles[cycles.length - 1].getUTCFullYear()}-${cycles[cycles.length - 1].getUTCMonth()}`
-    : null;
-
   cycles.forEach((cycleDate) => {
-    const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
-    const isLiveCycleIteration = cycleKey === liveCycleKey;
-
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
-    const isRequestedMonthCycle =
-      cycleDate.getUTCFullYear() === requestedMonthYear.year &&
-      (cycleDate.getUTCMonth() + 1) === requestedMonthYear.month;
 
     // ── best-match rentalDue for this cycle ──
     const matchedDue = (media.rentalDue || [])
@@ -6153,9 +6188,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         return new Date(b.updatedAt) - new Date(a.updatedAt);
       })[0];
 
-    const isApproved = Number(matchedDue?.approvalStatus) === 3;
     const effectiveWithGst = matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
-    const isOwnerAppraisedDirect = Number(effectiveWithGst) === 2 && isApproved;
+    const isDirectGst = Number(effectiveWithGst) === 2;
 
     owners.forEach((owner) => {
       const paymentCategory = Number(owner.paymentCategory || 1);
@@ -6164,7 +6198,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           ? Number(owner.cashAmount || owner.shareAmount || 0)
           : Number(owner.onlineAmount || owner.shareAmount || 0));
 
-        if (isOwnerAppraisedDirect) {
+        if (isDirectGst) {
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
             const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
@@ -6173,10 +6207,14 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
             else if (siteGst) gstFlag = 1;
           }
           let ownerGst = 0;
+          const expectedGstPerCycle = resolveExpectedGstForCycle(media);
           if (gstFlag === 1) {
-            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1);
+            ownerGst = expectedGstPerCycle / (owners.length || 1);
           } else {
             ownerGst = Number(owner.gstAmount || 0);
+            if (ownerGst <= 0 && owners.length > 0) {
+                ownerGst = expectedGstPerCycle / owners.length;
+            }
           }
           if (paymentCategory !== 3 || mode === "Online") modeAmount += ownerGst;
         }
@@ -6188,7 +6226,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         if (modeAmount > 0) result.hasDueMonth = true;
 
         // Find the payment entry to check date and status
-        const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycleIteration);
+        const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
 
         if (isPaid) {
           result.totalLedgerAmount += modeAmount;
@@ -6202,7 +6240,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     });
 
     // GST Tracking
-    if (!(matchedDue && Number(matchedDue.withGst) === 2 && isApproved)) {
+    if (!isDirectGst) {
       const rowsForMonth = dedupedHistory.filter((row) => row.dueMonth === cycleMonthLabel);
       const isRowPaid = (row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 

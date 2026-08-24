@@ -24,6 +24,20 @@ const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
+/**
+ * ✅ NEW — Combines a provided date string with the current time
+ * to ensure timestamps are preserved even when a backdated date is given.
+ */
+const combineDateWithCurrentTime = (dateInput) => {
+  const now = nowIST();
+  if (!dateInput) return now;
+  const d = new Date(dateInput);
+  if (!isNaN(d.getTime())) {
+    d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+  }
+  return d;
+};
+
 // ═════════════════════════════════════════════════════════════
 // UNCHANGED HELPERS — copied verbatim from the existing file
 // ═════════════════════════════════════════════════════════════
@@ -903,6 +917,7 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       dueMonth: entry.dueMonth,
       dueDate: entry.dueDate,
       rentalDueId: entry._id,
+      withGst: Number(entry.withGst || 0),
       status: 2, // 2: Pending Entry
       updatedBy: userName,
       createdAt: nowIST(),
@@ -2726,7 +2741,7 @@ exports.verifyAgreementDoc = async (req, res) => {
  */
 exports.getOverDueHistoryList = async (req, res) => {
   try {
-    const { pageNumber = 1, count = 10, search, dueMonth, status } = req.body;
+    const { pageNumber = 1, count = 10, search, dueMonth, dueYear, status } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
@@ -2741,14 +2756,52 @@ exports.getOverDueHistoryList = async (req, res) => {
       ];
     }
 
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
     if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
         const [mo, yr] = dueMonth.split("-").map(Number);
-        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-        filter.dueMonth = `${monthNames[mo - 1]} ${yr}`;
+        // User requested 08 -> September (which is index 8)
+        const monthName = monthNames[mo];
+        if (monthName) {
+            filter.dueMonth = `${monthName} ${yr}`;
+        }
+    } else if (dueMonth || dueYear) {
+        // Support separate dueMonth (e.g. "08") and dueYear (e.g. "2026")
+        const mo = parseInt(dueMonth);
+        const yr = parseInt(dueYear);
+        const monthName = !isNaN(mo) ? monthNames[mo] : null;
+        if (monthName && !isNaN(yr)) {
+            filter.dueMonth = `${monthName} ${yr}`;
+        } else if (monthName) {
+            filter.dueMonth = { $regex: monthName, $options: "i" };
+        } else if (!isNaN(yr)) {
+            filter.dueMonth = { $regex: String(yr), $options: "i" };
+        }
     }
 
     if (status !== undefined && status !== null && status !== "") {
-        filter.status = Number(status);
+        const s = Number(status);
+        if (s === 0) {
+            // Pending: Both are null
+            filter.ledgerEntryDate = null;
+            filter.gstEntryDate = null;
+        } else if (s === 1) {
+            // Rent Entry only
+            filter.ledgerEntryDate = { $ne: null };
+            filter.gstEntryDate = null;
+        } else if (s === 2) {
+            // GST Entry only
+            filter.ledgerEntryDate = null;
+            filter.gstEntryDate = { $ne: null };
+        } else if (s === 3) {
+            // Complete
+            // We can't easily filter "Complete" with a single condition because it depends on withGst
+            // However, we can approximate or use $or
+            filter.$or = [
+                { ledgerEntryDate: { $ne: null }, gstEntryDate: { $ne: null } },
+                { ledgerEntryDate: { $ne: null }, withGst: 2 }
+            ];
+        }
     }
 
     const today = new Date();
@@ -2756,6 +2809,7 @@ exports.getOverDueHistoryList = async (req, res) => {
 
     // 1) Summary Statistics
     const statsAgg = await OverDueHistory.aggregate([
+      { $match: filter },
       {
         $facet: {
           totals: [
@@ -2763,10 +2817,38 @@ exports.getOverDueHistoryList = async (req, res) => {
               $group: {
                 _id: null,
                 totalOverdueSites: { $sum: 1 },
-                pendingLedgerEntry: { $sum: { $cond: [{ $eq: ["$status", 2] }, 1, 0] } },
-                ledgerEntered: { $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] } },
-                totalOverdueAmount: { $sum: { $add: ["$overDueAmount", "$gstAmount"] } },
-                avgOverdueDays: { $avg: { $divide: [{ $subtract: [today, "$dueDate"] }, 86400000] } }
+                pendingEntry: {
+                  $sum: {
+                    $cond: [
+                      { $and: [{ $eq: ["$ledgerEntryDate", null] }, { $eq: ["$gstEntryDate", null] }] },
+                      1, 0
+                    ]
+                  }
+                },
+                rentEntry: {
+                  $sum: {
+                    $cond: [{ $ne: ["$ledgerEntryDate", null] }, 1, 0]
+                  }
+                },
+                gstEntry: {
+                  $sum: {
+                    $cond: [{ $ne: ["$gstEntryDate", null] }, 1, 0]
+                  }
+                },
+                bothEntry: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $or: [
+                          { $and: [{ $ne: ["$ledgerEntryDate", null] }, { $ne: ["$gstEntryDate", null] }] },
+                          { $and: [{ $ne: ["$ledgerEntryDate", null] }, { $eq: ["$withGst", 2] }] }
+                        ]
+                      },
+                      1, 0
+                    ]
+                  }
+                },
+                totalOverdueAmount: { $sum: { $add: ["$overDueAmount", "$gstAmount"] } }
               }
             }
           ]
@@ -2776,10 +2858,11 @@ exports.getOverDueHistoryList = async (req, res) => {
 
     const summary = statsAgg[0]?.totals[0] || {
       totalOverdueSites: 0,
-      pendingLedgerEntry: 0,
-      ledgerEntered: 0,
-      totalOverdueAmount: 0,
-      avgOverdueDays: 0
+      pendingEntry: 0,
+      rentEntry: 0,
+      gstEntry: 0,
+      bothEntry: 0,
+      totalOverdueAmount: 0
     };
 
     // 2) Data Fetch
@@ -2802,6 +2885,33 @@ exports.getOverDueHistoryList = async (req, res) => {
             return diff > 0 ? `${diff} days` : "0 days";
         };
 
+        const ledgerDate = item.ledgerEntryDate;
+        const gstDate = item.gstEntryDate;
+        const withGst = Number(item.withGst || 0);
+
+        let calculatedStatus = 0;
+        let statusLabel = "Pending";
+
+        if (withGst === 2) {
+            // Rental Only (GST folded or not handled separately)
+            if (ledgerDate) {
+                calculatedStatus = 3;
+                statusLabel = "Rent Entry (Complete)";
+            }
+        } else {
+            // Tracked GST (withGst: 1) or Other
+            if (ledgerDate && gstDate) {
+                calculatedStatus = 3;
+                statusLabel = "Rent + GST Entry";
+            } else if (ledgerDate) {
+                calculatedStatus = 1;
+                statusLabel = "Rent Entry";
+            } else if (gstDate) {
+                calculatedStatus = 2;
+                statusLabel = "GST Entry";
+            }
+        }
+
         return {
             ...item,
             overdueDays: dDate ? Math.floor((today - dDate) / 86400000) : 0,
@@ -2809,7 +2919,8 @@ exports.getOverDueHistoryList = async (req, res) => {
             approvalOverdueBy: calcOverdueBy(item.approvedDate),
             ledgerOverdueBy: calcOverdueBy(item.ledgerEntryDate),
             gstOverdueBy: calcOverdueBy(item.gstEntryDate),
-            statusLabel: item.status === 1 ? "Ledger Entered" : "Pending Entry"
+            calculatedStatus,
+            statusLabel
         };
     });
 
@@ -3372,53 +3483,7 @@ exports.revertRentalApproval = async (req, res) => {
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
-// async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
-//   const updated = await Media.findOneAndUpdate(
-//     {
-//       _id: mediaId,
-//       rentalDue: {
-//         $elemMatch: { dueMonth: newEntry.dueMonth, approvalStatus: { $ne: 3 } },
-//       },
-//     },
-//     {
-//       $set: {
-//         "rentalDue.$[elem].dueDate": newEntry.dueDate,
-//         updatedAt: nowIST(),
-//       },
-//     },
-//     {
-//       new: true,
-//       arrayFilters: [
-//         { "elem.dueMonth": newEntry.dueMonth, "elem.approvalStatus": { $ne: 3 } },
-//       ],
-//     },
-//   );
-//   if (updated) return { result: updated, action: "updated" };
 
-//   const created = await Media.findOneAndUpdate(
-//     {
-//       _id: mediaId,
-//       rentalDue: { $not: { $elemMatch: { dueMonth: newEntry.dueMonth } } },
-//     },
-//     {
-//       $push: { rentalDue: newEntry },
-//       $set: { updatedAt: nowIST() },
-//     },
-//     { new: true },
-//   );
-//   return created ? { result: created, action: "created" } : { result: null, action: "none" };
-// }
-// ═════════════════════════════════════════════════════════════
-// NEW ENDPOINT — landowner-grouped rental due list
-// SAME full filter set as getRentalDueListWithStats:
-//   dueDate (required), city, mediaType, frequency, status, search,
-//   pageNumber, count, isOverdue, isPending, isApproved,
-//   isPastPending, roleType, edit
-// Difference: instead of returning one row per SITE, this groups the
-// filtered sites by landOwnerMasterId and returns one row per OWNER,
-// each carrying the sites (that matched the filters) they're on.
-// Pagination (pageNumber/count) applies to the OWNER list, not sites.
-// ═════════════════════════════════════════════════════════════
 async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   const updated = await Media.findOneAndUpdate(
     {
