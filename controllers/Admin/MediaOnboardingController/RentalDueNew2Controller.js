@@ -986,134 +986,285 @@ function computeGstSplit(media, withGst) {
   };
 }
 
-async function sendRentalDueApprovalMail(media, entry) {
+async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
   try {
     const toMail = process.env.T0_EMail;
     const ccMail = process.env.CC_EMail;
     const mailMode = process.env.MAIL_MODE || "development";
-    const formatDMY = (date) =>
-      date
-        ? new Date(date).toLocaleDateString("en-GB").replace(/\//g, "-")
-        : null;
 
-    const rp = media.rentalPayment || {};
-    const appraisal = media.appraisal || {};
-    const agreement = media.agreement || {};
+    const formatYMD = (date) =>
+      date ? new Date(date).toISOString().split("T")[0] : null;
 
-    const gstHoldValue = Number(entry?.withGst) === 1 ? 1 : 0;
+    const targetDueMonth = entry.dueMonth;
 
-    const landOwnersPayload = (media.landOwners || []).map((owner) => ({
-      name: owner.name || "",
-      phone: owner.phone || "",
-      bankName: owner.bankName || "",
-      ifsc: owner.ifsc || "",
-      accountNumber: owner.accountNumber || "",
-      panNumber: owner.panNumber || "",
-      paymentCategory: owner.paymentCategory || 0,
-      typeShare: owner.typeShare || 0,
-      shareAmount: owner.shareAmount || 0,
-      onlineMode: owner.onlineMode || 0,
-      onlineAmount: owner.onlineAmount || 0,
-      cashAmount: owner.cashAmount || 0,
-      gstApplicable: owner.gstApplicable || 0,
-      gstPercentage: owner.gstPercentage || 0,
-      gstAmount: owner.gstAmount || 0,
-      tdsApplicable: owner.tdsApplicable || 0,
-      tdsPercentage: owner.tdsPercentage || 0,
-      tdsAmount: owner.tdsAmount || 0,
-      totalAmountWithGst: owner.totalAmountWithGst || 0,
-      tdsHold: 0,
-      gstHold: gstHoldValue,
-    }));
-
-    let previousRentValue = 0;
-    if (appraisal.lastAppraisalDate && Array.isArray(appraisal.history)) {
-      const lastAppraisalKey = new Date(appraisal.lastAppraisalDate).getTime();
-      const matchingEntry = appraisal.history.find(
-        (h) =>
-          h.appraisalDate &&
-          new Date(h.appraisalDate).getTime() === lastAppraisalKey,
-      );
-      previousRentValue = Number(matchingEntry?.previousRent || 0);
+    // ── GROUPING LOGIC ──
+    // ✅ FIXED — Removed automatic DB lookup for other sites.
+    // If batchSites is provided (from batch approval), use them.
+    // Otherwise, it's a single site mail as requested.
+    let sitesInGroupData = [];
+    if (Array.isArray(batchSites) && batchSites.length > 0) {
+      sitesInGroupData = batchSites;
+    } else {
+      sitesInGroupData = [{ media, entry }];
     }
 
-    let appraisalPayload = {};
-    if (appraisal.lastAppraisalDate) {
-      const lastAppraisalDate = new Date(appraisal.lastAppraisalDate);
-      const today = new Date();
-      const isCurrentMonth =
-        lastAppraisalDate.getUTCFullYear() === today.getUTCFullYear() &&
-        lastAppraisalDate.getUTCMonth() === today.getUTCMonth();
+    // Identify unique landowners across the provided sites
+    const uniqueOwnersMap = new Map();
+    sitesInGroupData.forEach(({ media: siteMedia }) => {
+      (siteMedia.landOwners || []).forEach((owner) => {
+        if (owner.landOwnerMasterId) {
+          const key = String(owner.landOwnerMasterId);
+          if (!uniqueOwnersMap.has(key)) {
+            uniqueOwnersMap.set(key, owner.toObject ? owner.toObject() : owner);
+          }
+        }
+      });
+    });
 
-      if (isCurrentMonth) {
-        appraisalPayload = {
-          applicable: appraisal.applicable || 0,
-          type: appraisal.type || 0,
-          percentage: appraisal.percentage || 0,
-          fixedAmount: appraisal.fixedAmount || 0,
-          frequency: appraisal.frequency || 0,
-          currentRent: previousRentValue,
-          appraisalAmount: appraisal.appraisalAmount || 0,
-          totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
-          lastAppraisalDate: formatDMY(appraisal.lastAppraisalDate),
-          nextAppraisalDate: formatDMY(appraisal.nextAppraisalDate),
-        };
+    const uniqueOwners = Array.from(uniqueOwnersMap.values());
+    const ownerRefs = {};
+    uniqueOwners.forEach((owner, idx) => {
+      const ref = `LO-${String(idx + 1).padStart(2, "0")}`;
+      ownerRefs[String(owner.landOwnerMasterId)] = ref;
+      owner.ownerRef = ref;
+    });
+
+    // ── BUILD SITES PAYLOAD ──
+    const allProofs = [];
+    const allInvoices = [];
+    const sitesPayload = sitesInGroupData.map(({ media: site, entry: siteInputEntry }) => {
+      const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
+      const rp = site.rentalPayment || {};
+      const agreement = site.agreement || {};
+      const appraisal = site.appraisal || {};
+
+      const proof = siteEntry?.proofOfCampaign?.filePath;
+      if (proof) allProofs.push(proof);
+
+      const inv = siteEntry?.invoice?.filePath;
+      if (inv) allInvoices.push(inv);
+
+      const siteGstAmount = Number(siteEntry?.gstAmount || 0);
+      const siteGstApplicable = Number(rp.gstApplicable) === 1 ? 1 : 0;
+      const siteBaseRent = Number(rp.totalRentalAmount || 0);
+
+      // ✅ Site specific appraisal logic
+      let siteAppraisalPayload = {};
+      // ... (rest of siteAppraisalPayload logic same as before)
+      if (appraisal.lastAppraisalDate) {
+        const lastAppDate = new Date(appraisal.lastAppraisalDate);
+        const today = new Date();
+        if (
+          lastAppDate.getUTCFullYear() === today.getUTCFullYear() &&
+          lastAppDate.getUTCMonth() === today.getUTCMonth()
+        ) {
+          let prevRentValue = 0;
+          if (Array.isArray(appraisal.history)) {
+            const lastKey = lastAppDate.getTime();
+            const matchH = appraisal.history.find(
+              (h) => h.appraisalDate && new Date(h.appraisalDate).getTime() === lastKey
+            );
+            prevRentValue = Number(matchH?.previousRent || 0);
+          }
+          siteAppraisalPayload = {
+            applicable: appraisal.applicable || 0,
+            type: appraisal.type || 0,
+            percentage: appraisal.percentage || 0,
+            fixedAmount: appraisal.fixedAmount || 0,
+            frequency: appraisal.frequency || 0,
+            currentRent: prevRentValue,
+            appraisalAmount: appraisal.appraisalAmount || 0,
+            totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
+            lastAppraisalDate: formatYMD(appraisal.lastAppraisalDate),
+            nextAppraisalDate: formatYMD(appraisal.nextAppraisalDate),
+          };
+        }
       }
-    }
-    const proofOfCampaignPayload = entry?.proofOfCampaign?.filePath
-      ? [entry.proofOfCampaign.filePath]
-      : [];
-    const mailPayload = {
-      mailtype: "cmdapproval",
-      to: [toMail],
-      data: {
-        _id: media._id,
-        mediaCode: media.mediaCode || "",
-        mediaName: media.mediaName || "",
-        mediaType: media.mediaType || "",
-        state: media.state || "",
-        city: media.city || "",
-        location: media.location || "",
-        width: media.width || 0,
-        height: media.height || 0,
-        status: media.status || 0,
-        totalSqFt: media.totalSqFt || 0,
-        numberOfLandOwners: media.numberOfLandOwners || 0,
-        proof_of_campaign: proofOfCampaignPayload,
+
+      const siteOwnerGst = (site.landOwners || []).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+      const siteLandOwners = (site.landOwners || []).map((o) => {
+        return {
+          ownerRef: ownerRefs[String(o.landOwnerMasterId)],
+          name: o.name || "",
+          phone: o.phone || "",
+          bankName: o.bankName || "",
+          ifsc: o.ifsc || "",
+          accountNumber: o.accountNumber || "",
+          panNumber: o.panNumber || "",
+          paymentCategory: o.paymentCategory || 0,
+          onlineMode: o.onlineMode || 0,
+          shareAmount: o.shareAmount || 0,
+          onlineAmount: o.onlineAmount || 0,
+          cashAmount: o.cashAmount || 0,
+          tdsApplicable: o.tdsApplicable || 0,
+          tdsPercentage: o.tdsPercentage || 0,
+          tdsAmount: o.tdsAmount || 0,
+          tdsHold: 0,
+          gstHold: Number(siteEntry?.withGst) === 1 ? 1 : 0,
+          gstApplicable: o.gstApplicable || 0,
+          gstNumber: o.gstNumber || "",
+          gstPercentage: o.gstPercentage || 0,
+          gstAmount: o.gstAmount || 0,
+          totalAmountWithGst: Number(o.totalAmountWithGst || (Number(o.shareAmount || 0) + Number(o.gstAmount || 0))),
+        };
+      });
+
+      const siteNetPayable = siteBaseRent + siteGstAmount + siteOwnerGst;
+      const siteLandOwnerRefs = (site.landOwners || [])
+        .map((o) => ownerRefs[String(o.landOwnerMasterId)])
+        .filter(Boolean);
+
+      return {
+        mediaCode: site.mediaCode || "",
+        mediaName: site.mediaName || "",
+        mediaType: site.mediaType || "",
+        state: site.state || "",
+        city: site.city || "",
+        location: site.location || "",
+        width: site.width || 0,
+        height: site.height || 0,
+        totalSqFt: site.totalSqFt || 0,
+        status: site.status || 0, // ✅ MOVED — now inside site object
         rentalPayment: {
-          totalRentalAmount: rp.totalRentalAmount || 0,
-          gstApplicable: rp.gstApplicable || 0,
+          totalRentalAmount: siteBaseRent,
+          gstApplicable: siteGstApplicable,
           gstNumber: rp.gstNumber || "",
           gstPercentage: rp.gstPercentage || 0,
-          gstAmount: rp.gstAmount || 0,
-          totalRentalAmountWithGst: rp.totalRentalAmountWithGst || 0,
-          netPayable: rp.netPayable || 0,
-          paymentFrequency: rp.paymentFrequency || 0,
-          customPaymentFrequency: rp.rentalPayment || 0,
-          lastBillPaidDate: formatDMY(rp.lastBillPaidDate),
-          nextBillingDate: formatDMY(rp.nextBillingDate),
-          balanceGstAmount: rp.balanceGstAmount || 0,
-          status: rp.status || 0,
+          gstAmount: siteGstAmount,
+          netPayable: siteNetPayable,
+          paymentFrequency: siteEntry?.paymentFrequency || rp.paymentFrequency || 0,
+          lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+          nextBillingDate: formatYMD(rp.nextBillingDate),
         },
-        appraisal: appraisalPayload,
         agreement: {
-          startDate: formatDMY(agreement.startDate),
-          endDate: formatDMY(agreement.endDate),
+          startDate: formatYMD(agreement.startDate),
+          endDate: formatYMD(agreement.endDate),
           reminderBeforeExpiry: agreement.reminderBeforeExpiry || 0,
           advanceRent: agreement.advanceRent || 0,
           status: agreement.status || 0,
         },
-        landOwners: landOwnersPayload,
-      },
+        appraisal: siteAppraisalPayload,
+        landOwners: siteLandOwners,
+        proof_of_campaign: proof ? [proof] : [],
+        invoice: inv ? [inv] : [],
+        landOwnerRefs: uniqueOwners.length > 1 ? siteLandOwnerRefs : undefined,
+      };
+    });
+
+    // ── BUILD LANDOWNERS PAYLOAD ──
+    // const landOwnersPayload = uniqueOwners.map((owner) => {
+    //   let totalShareAmount = 0;
+    //   let totalOnlineAmount = 0;
+    //   let totalCashAmount = 0;
+    //   let totalGstAmount = 0;
+    //   let totalTdsAmount = 0;
+    //   let totalAmountWithGst = 0;
+
+    //   // ✅ ADDED — capture GST specific details for the owner
+    //   let ownerGstApplicable = 0;
+    //   let ownerGstNumber = "";
+    //   let ownerGstPercentage = 0;
+
+    //   const siteRentBreakdown = [];
+
+    //   sitesInGroupData.forEach(({ media: site }) => {
+    //     const matchedOwner = (site.landOwners || []).find(
+    //       (o) =>
+    //         o.landOwnerMasterId &&
+    //         String(o.landOwnerMasterId) === String(owner.landOwnerMasterId)
+    //     );
+    //     if (matchedOwner) {
+    //       const share = Number(matchedOwner.shareAmount || 0);
+    //       totalShareAmount += share;
+    //       totalOnlineAmount += Number(matchedOwner.onlineAmount || 0);
+    //       totalCashAmount += Number(matchedOwner.cashAmount || 0);
+
+    //       const ownerGst = Number(matchedOwner.gstAmount || 0);
+    //       totalGstAmount += ownerGst;
+
+    //       totalTdsAmount += Number(matchedOwner.tdsAmount || 0);
+
+    //       totalAmountWithGst += Number(matchedOwner.totalAmountWithGst || (share + ownerGst));
+
+    //       // ✅ Capture details from the owner record
+    //       if (!ownerGstNumber) ownerGstNumber = matchedOwner.gstNumber || "";
+    //       if (!ownerGstPercentage) ownerGstPercentage = Number(matchedOwner.gstPercentage || 0);
+    //       if (Number(matchedOwner.gstApplicable) === 1) ownerGstApplicable = 1;
+
+    //       siteRentBreakdown.push({
+    //         mediaCode: site.mediaCode,
+    //         shareAmount: share,
+    //       });
+    //     }
+    //   });
+
+    //   const ownerObj = {
+    //     ownerRef: owner.ownerRef,
+    //     name: owner.name || "",
+    //     phone: owner.phone || "",
+    //     bankName: owner.bankName || "",
+    //     ifsc: owner.ifsc || "",
+    //     accountNumber: owner.accountNumber || "",
+    //     panNumber: owner.panNumber || "",
+    //     paymentCategory: owner.paymentCategory || 0,
+    //     onlineMode: owner.onlineMode || 0,
+    //     shareAmount: totalShareAmount,
+    //     onlineAmount: totalOnlineAmount,
+    //     cashAmount: totalCashAmount,
+    //     tdsApplicable: owner.tdsApplicable || 0,
+    //     tdsPercentage: owner.tdsPercentage || 0,
+    //     tdsAmount: totalTdsAmount,
+    //     tdsHold: 0,
+    //     gstHold: Number(entry?.withGst) === 1 ? 1 : 0,
+    //     // ✅ NEW — explicitly include GST fields as requested
+    //     gstApplicable: ownerGstApplicable,
+    //     gstNumber: ownerGstNumber,
+    //     gstPercentage: ownerGstPercentage,
+    //     gstAmount: totalGstAmount,
+    //     totalAmountWithGst: totalAmountWithGst,
+    //   };
+
+    //   if (sitesInGroupData.length > 1) {
+    //     ownerObj.siteRentBreakdown = siteRentBreakdown;
+    //   }
+    //   return ownerObj;
+    // });
+
+    const isSingleBill = media.siteBillMode === 1;
+    const data = {
+      billingType: isSingleBill ? "single_bill" : "separate_bill",
+    };
+
+    if (isSingleBill) {
+      data.numberOfSites = sitesPayload.length;
+    }
+
+    data.numberOfLandOwners = uniqueOwners.length;
+    // status removed from here
+
+    if (isSingleBill) {
+      data.sites = sitesPayload;
+    } else {
+      const s = sitesPayload[0];
+      Object.assign(data, s);
+    }
+
+
+    const mailPayload = {
+      mailtype: "cmdapproval",
+      to: [toMail],
+       cc: [ccMail],
+      data: data,
     };
 
     console.log(
       "📧 RENTAL DUE MAIL PAYLOAD:",
-      JSON.stringify(mailPayload, null, 2),
+      JSON.stringify(mailPayload, null, 2)
     );
+
     if (mailMode !== "production") {
       console.log(
-        `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`,
+        `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
       );
       return {
         mailtype: "cmdapproval",
@@ -1126,11 +1277,14 @@ async function sendRentalDueApprovalMail(media, entry) {
         data: mailPayload.data,
       };
     }
+
     const response = await axios.post(
       "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
       mailPayload,
-      { headers: { "Content-Type": "application/json" } },
+      { headers: { "Content-Type": "application/json" } }
     );
+
+    console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
 
     const isMailSuccess =
       response.data &&
@@ -1153,7 +1307,7 @@ async function sendRentalDueApprovalMail(media, entry) {
   } catch (mailErr) {
     console.error(
       "❌ Rental due approval mail error:",
-      mailErr?.message || mailErr,
+      mailErr?.message || mailErr
     );
     return {
       mailtype: "cmdapproval",
@@ -1168,78 +1322,7 @@ async function sendRentalDueApprovalMail(media, entry) {
   }
 }
 
-// function addGstToBalanceIfApplicable(media, entry, userName) {
-//   if (entry.gstAddedToBalance) return;
 
-//   if (entry?.withGst === 1 && entry.gstAmount > 0) {
-//     if (!Array.isArray(media.gstBalanceHistory)) {
-//       media.gstBalanceHistory = [];
-//     }
-
-//     media.gstBalanceHistory.push({
-//       rentalDueId: entry._id,
-//       dueMonth: entry.dueMonth,
-//       cycle: entry.dueDate,
-//       gstAmount: entry.gstAmount,
-//       isPaid: false,
-//       paidAmount: 0,
-//       paidAt: null,
-//       paidBy: "",
-//       createdAt: nowIST(),
-//       createdBy: userName,
-//       source: "rental",
-//       ownerId: null,
-//       ownerName: "",
-//     });
-//     media.markModified("gstBalanceHistory");
-
-//     entry.gstAddedToBalance = true;
-
-//     recomputeBalanceGstAmount(media);
-//   }
-// }
-
-// function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
-//   if (entry.ownerGstAddedToBalance) return;
-//   if (entry.withGst !== 1) return;
-//   if (!Array.isArray(media.landOwners) || media.landOwners.length === 0) return;
-
-//   if (!Array.isArray(media.gstBalanceHistory)) {
-//     media.gstBalanceHistory = [];
-//   }
-
-//   let anyAdded = false;
-
-//   media.landOwners.forEach((owner) => {
-//     const ownerGstApplicable = Number(owner.gstApplicable || 0);
-//     const ownerGstAmount = Number(owner.gstAmount || 0);
-
-//     if (ownerGstApplicable === 1 && ownerGstAmount > 0) {
-//       media.gstBalanceHistory.push({
-//         rentalDueId: entry._id,
-//         dueMonth: entry.dueMonth,
-//         cycle: entry.dueDate,
-//         gstAmount: ownerGstAmount,
-//         isPaid: false,
-//         paidAmount: 0,
-//         paidAt: null,
-//         paidBy: "",
-//         createdAt: nowIST(),
-//         createdBy: userName,
-//         source: "owner",
-//         ownerId: owner._id,
-//         ownerName: owner.name,
-//       });
-//       anyAdded = true;
-//     }
-//   });
-
-//   if (anyAdded) {
-//     media.markModified("gstBalanceHistory");
-//     entry.ownerGstAddedToBalance = true;
-//     recomputeBalanceGstAmount(media);
-//   }
-// }
 function addGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.gstAddedToBalance) return;
 
@@ -1535,16 +1618,17 @@ const isSameCycle = (a, b) => {
 // ── saveRentalDue — one site ───────────────────────────────────
 async function processSingleRentalDue({
   mediaId,
-  rentalDueId, // ✅ ADDED — optional, targets a specific month's entry
+  rentalDueId,
   campaignName,
   withGst,
   gstApplicableFlag,
   pastgstApplicableFlag: requestedPastFlag,
   proofOfCampaign,
-  invoice, // ✅ ADDED
+  invoice,
   userType,
   userId,
   userName,
+  skipMail = false, // ✅ ADDED
 }) {
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
     return { success: false, mediaId, message: "A valid mediaId is required" };
@@ -1776,8 +1860,6 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       }
       addGstToBalanceIfApplicable(media, entry, userName);
       addOwnerGstToBalanceIfApplicable(media, entry, userName);
-      addGstToBalanceIfApplicable(media, entry, userName);
-      addOwnerGstToBalanceIfApplicable(media, entry, userName);
       // ✅ CHANGED — date advancement removed. lastBillPaidDate/
       // nextBillingDate now auto-advance on schedule via
       // generateMissedEntriesForMedia (called earlier this same
@@ -1876,15 +1958,17 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     await media.save({ timestamps: false });
 
     let mailSentFlag = entry.mailSent;
-    if (userType === ROLE.OWNER && entry.approvalStatus === 3) {
+    if (!skipMail && userType === ROLE.OWNER && entry.approvalStatus === 3) {
       const mailResult = await sendRentalDueApprovalMail(media, entry);
       entry.mailSent = !!mailResult.sent;
       mailSentFlag = entry.mailSent;
       await media.save({ timestamps: false });
     }
-const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
+    const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
     return {
       success: true,
+      mediaDoc: media, // ✅ Return the doc for batch processing
+      entryDoc: entry, // ✅ Return the entry for batch processing
       mediaId: media._id,
       mediaName: media.mediaName,
       rentalDueId: entry._id,
@@ -2131,16 +2215,18 @@ const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.p
   await media.save({ timestamps: false });
 
   let mailSentFlag = savedEntry.mailSent;
-  if (isOwnerOverride && savedEntry.approvalStatus === 3) {
+  if (!skipMail && isOwnerOverride && savedEntry.approvalStatus === 3) {
     const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
     savedEntry.mailSent = !!mailResult.sent;
     mailSentFlag = savedEntry.mailSent;
     await media.save({ timestamps: false });
   }
-const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
+  const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
   return {
     success: true,
     isNew: true,
+    mediaDoc: media, // ✅ Return doc
+    entryDoc: savedEntry, // ✅ Return entry
     rentalDueId: savedEntry._id,
     mediaId: media._id,
     mediaName: media.mediaName,
@@ -2246,6 +2332,8 @@ exports.saveRentalDue = async (req, res) => {
       });
 
       const results = [];
+      const batchApprovedSites = [];
+
       for (let index = 0; index < entries.length; index++) {
         const item = entries[index];
 
@@ -2292,8 +2380,25 @@ exports.saveRentalDue = async (req, res) => {
           userType,
           userId,
           userName,
+          skipMail: true, // ✅ Skip single mail during batch loop
         });
         results.push(result);
+
+        if (result.success && result.mediaDoc && result.entryDoc && result.approvalStatus === 3) {
+          batchApprovedSites.push({ media: result.mediaDoc, entry: result.entryDoc });
+        }
+      }
+
+      // ✅ Send one grouped mail if multiple sites were fully approved together
+      if (batchApprovedSites.length > 0) {
+        const first = batchApprovedSites[0];
+        const mailRes = await sendRentalDueApprovalMail(first.media, first.entry, batchApprovedSites);
+
+        // Mark all as sent in DB
+        for (const item of batchApprovedSites) {
+          item.entry.mailSent = !!mailRes.sent;
+          await item.media.save({ timestamps: false });
+        }
       }
 
       // ── landOwnerSummary — per-owner rollup across every successful entry ──
