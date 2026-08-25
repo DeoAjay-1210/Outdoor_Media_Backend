@@ -5022,117 +5022,160 @@ const filteredAgreementDocVerificationHistory = (
       };
     };
 
-    const ownerMap = new Map();
+    // ✅ REFACTORED — Unified Grouping Logic (Connected Components)
+    // Identical grouping strategy as landOwnerSiteFilter: Owners who share at
+    // least one site are grouped together, and ALL sites belonging to those
+    // owners are included in their group entry.
+    const ownerToSites = new Map();
+    const allOwnersInSet = new Set();
+    const mediaToOwners = new Map();
 
     for (const site of sites) {
       if (!Array.isArray(site.landOwners)) continue;
+      const oIds = site.landOwners
+        .filter((o) => o.landOwnerMasterId)
+        .map((o) => String(o.landOwnerMasterId));
+      mediaToOwners.set(String(site._id), oIds);
 
-      // Build the full site detail ONCE per site — reused for every
-      // owner on that site, so the (potentially large) history arrays
-      // aren't recomputed per-owner.
-      const fullSiteDetail = buildFullSiteDetail(site);
+      oIds.forEach((oid) => {
+        if (!ownerToSites.has(oid)) ownerToSites.set(oid, new Set());
+        ownerToSites.get(oid).add(site);
+        allOwnersInSet.add(oid);
+      });
+    }
 
-      for (const owner of site.landOwners) {
-        if (!owner.landOwnerMasterId) continue;
-        const key = String(owner.landOwnerMasterId);
+    const processedOwners = new Set();
+    const ownerGroups = [];
 
-        // ✅ ADDED — when landOwnerMasterId filter is active, only
-        // build the entry for THAT owner. Without this, a shared site
-        // (e.g. Site B with Ramesh + Suresh) would still leak the
-        // OTHER co-owner into the response even though only one was
-        // requested.
-        if (
-          landOwnerMasterIdList.length > 0 &&
-          !landOwnerMasterIdList.map(String).includes(key)
-        )
-          continue;
+    allOwnersInSet.forEach((startOwner) => {
+      if (processedOwners.has(startOwner)) return;
 
-          if (!ownerMap.has(key)) {
-          ownerMap.set(key, {
-            landOwnerMasterId: owner.landOwnerMasterId,
-            landOwnerName: owner.name,
-            phone: owner.phone,
-            totalSites: 0,
-            totalShareAmount: 0,
-            // ✅ RENAMED — was totalGstAmount, now explicitly
-            // totalOwnerGstAmount, to sit alongside the NEW
-            // totalSiteGstAmount below without any ambiguity about
-            // which "GST total" each one means.
-            totalOwnerGstAmount: 0,
-            // ✅ ADDED — sum of each SITE's own gstAmount (the
-            // property's total GST, e.g. 10800), separate from the
-            // owner's personal GST above.
-            totalSiteGstAmount: 0,
-            totalNetPayableToOwner: 0,
-            latestUpdatedAt: site.updatedAt,
-            sites: [],
+      const groupOwners = new Set();
+      const groupSites = new Set();
+      const queue = [startOwner];
+      processedOwners.add(startOwner);
+
+      while (queue.length > 0) {
+        const ownerId = queue.shift();
+        groupOwners.add(ownerId);
+
+        const groupMedia = ownerToSites.get(ownerId) || [];
+        groupMedia.forEach((site) => {
+          groupSites.add(site);
+          const neighbors = mediaToOwners.get(String(site._id)) || [];
+          neighbors.forEach((neighbor) => {
+            if (!processedOwners.has(neighbor)) {
+              processedOwners.add(neighbor);
+              queue.push(neighbor);
+            }
           });
-        }
-
-        const bucket = ownerMap.get(key);
-        bucket.totalSites += 1;
-        bucket.totalShareAmount += owner.shareAmount || 0;
-        bucket.totalOwnerGstAmount += owner.gstAmount || 0; // ✅ RENAMED
-        // ✅ ADDED — accumulate the SITE's own gstAmount (from
-        // fullSiteDetail, computed with the earlier netPayable
-        // fallback fix), not the owner's personal GST.
-        bucket.totalSiteGstAmount += fullSiteDetail.gstAmount || 0;
-        bucket.totalNetPayableToOwner += owner.netPayableToOwner || 0;
-        if (new Date(site.updatedAt) > new Date(bucket.latestUpdatedAt)) {
-          bucket.latestUpdatedAt = site.updatedAt;
-        }
-
-        // ✅ MERGED — full site detail (mediaType, totalSqFt, appraisal,
-        // frontView, full landOwners[], history arrays, etc.) PLUS the
-        // owner-specific slice (paymentCategory, shareAmount,
-        // ownerGstAmount, tdsAmount, netPayableToOwner) laid on top.
-        bucket.sites.push({
-          ...fullSiteDetail,
-          mediaId: site._id,
-          paymentCategory: owner.paymentCategory,
-          shareAmount: owner.shareAmount || 0,
-          // ✅ RENAMED — was gstAmount (which overwrote
-          // fullSiteDetail.gstAmount, the site's own GST). Now
-          // ownerGstAmount, so both coexist without collision.
-          ownerGstAmount: owner.gstAmount || 0,
-          tdsAmount: owner.tdsAmount || 0,
-          netPayableToOwner: owner.netPayableToOwner || 0,
         });
       }
-    }
+      ownerGroups.push({
+        ownerIds: Array.from(groupOwners),
+        sites: Array.from(groupSites),
+      });
+    });
 
-    let allOwners = Array.from(ownerMap.values());
+    const finalEntries = [];
 
-    // ✅ edit-mode stability — same principle as the site-based list:
-    // when edit === 1, sort by landOwnerMasterId (stable, never
-    // reshuffles) instead of latestUpdatedAt (which jumps the moment
-    // any of the owner's sites gets edited).
-  if (Number(sortOrder) === 1) {
-      allOwners.sort(
-        (a, b) => (a.totalNetPayableToOwner || 0) - (b.totalNetPayableToOwner || 0),
-      );
+    ownerGroups.forEach((group) => {
+      // ✅ Filter: Only include groups that contain at least one of the
+      // requested owners (if landOwnerMasterId filter was active).
+      if (landOwnerMasterIdList.length > 0) {
+        const hasRequested = group.ownerIds.some((id) =>
+          landOwnerMasterIdList.map(String).includes(id),
+        );
+        if (!hasRequested) return;
+      }
+
+      let latestUpdatedAt = group.sites[0].updatedAt;
+      let groupTotalShareAmount = 0;
+      let groupTotalOwnerGstAmount = 0;
+      let groupTotalSiteGstAmount = 0;
+      let groupTotalNetPayableToOwner = 0;
+
+      const groupLandOwners = group.ownerIds
+        .map((ownerId) => {
+          const firstSiteWithOwner = group.sites.find((s) =>
+            (s.landOwners || []).some(
+              (o) => String(o.landOwnerMasterId) === ownerId,
+            ),
+          );
+          const ownerRef = firstSiteWithOwner.landOwners.find(
+            (o) => String(o.landOwnerMasterId) === ownerId,
+          );
+
+          let totalShareAmount = 0;
+          let totalGstAmount = 0;
+          let totalNetPayableToOwner = 0;
+
+          group.sites.forEach((site) => {
+            const od = (site.landOwners || []).find(
+              (o) => String(o.landOwnerMasterId) === ownerId,
+            );
+            if (od) {
+              totalShareAmount += od.shareAmount || 0;
+              totalGstAmount += od.gstAmount || 0;
+              totalNetPayableToOwner += od.netPayableToOwner || 0;
+            }
+          });
+
+          groupTotalShareAmount += totalShareAmount;
+          groupTotalOwnerGstAmount += totalGstAmount;
+          groupTotalNetPayableToOwner += totalNetPayableToOwner;
+
+          return {
+            landOwnerMasterId: ownerId,
+            landOwnerName: ownerRef.name,
+            phone: ownerRef.phone,
+            totalShareAmount,
+            totalGstAmount,
+            totalNetPayableToOwner,
+          };
+        })
+        .sort((a, b) => a.landOwnerName.localeCompare(b.landOwnerName));
+
+      const groupSites = group.sites.map((site) => {
+        if (new Date(site.updatedAt) > new Date(latestUpdatedAt)) {
+          latestUpdatedAt = site.updatedAt;
+        }
+        const fullDetail = buildFullSiteDetail(site);
+        groupTotalSiteGstAmount += fullDetail.gstAmount || 0;
+
+        return {
+          ...fullDetail,
+          mediaId: site._id,
+        };
+      });
+
+      finalEntries.push({
+        entryType: group.ownerIds.length > 1 ? "shared" : "single",
+        landOwnerMasterId: group.ownerIds.length === 1 ? group.ownerIds[0] : undefined,
+        landOwnerName: group.ownerIds.length === 1 ? groupLandOwners[0].landOwnerName : groupLandOwners.map(o => o.landOwnerName).join(", "),
+        totalLandOwners: group.ownerIds.length,
+        totalSites: group.sites.length,
+        totalShareAmount: groupTotalShareAmount,
+        totalOwnerGstAmount: groupTotalOwnerGstAmount,
+        totalSiteGstAmount: groupTotalSiteGstAmount,
+        totalNetPayableToOwner: groupTotalNetPayableToOwner,
+        latestUpdatedAt,
+        landOwners: groupLandOwners,
+        sites: groupSites,
+      });
+    });
+
+    if (Number(sortOrder) === 1) {
+      finalEntries.sort((a, b) => a.totalNetPayableToOwner - b.totalNetPayableToOwner);
     } else if (Number(sortOrder) === 2) {
-      allOwners.sort(
-        (a, b) => (b.totalNetPayableToOwner || 0) - (a.totalNetPayableToOwner || 0),
-      );
-    }
-    // ✅ edit-mode stability — same principle as the site-based list:
-    // when edit === 1 AND sortOrder was NOT sent, sort by
-    // landOwnerMasterId (stable, never reshuffles) instead of
-    // latestUpdatedAt (which jumps the moment any of the owner's
-    // sites gets edited).
-    else if (Number(edit) === 1) {
-      allOwners.sort((a, b) =>
-        String(a.landOwnerMasterId).localeCompare(String(b.landOwnerMasterId)),
-      );
+      finalEntries.sort((a, b) => b.totalNetPayableToOwner - a.totalNetPayableToOwner);
     } else {
-      allOwners.sort((a, b) => new Date(b.latestUpdatedAt) - new Date(a.latestUpdatedAt));
+      finalEntries.sort((a, b) => new Date(b.latestUpdatedAt) - new Date(a.latestUpdatedAt));
     }
-
-    allOwners = allOwners.map(({ latestUpdatedAt, ...rest }) => rest);
 
     const startIdx = (pageNumbers - 1) * pageSize;
-    const pagedOwners = allOwners.slice(startIdx, startIdx + pageSize);
+    const pagedOwners = finalEntries.slice(startIdx, startIdx + pageSize);
+    const resultData = pagedOwners.map(({ latestUpdatedAt, ...rest }) => rest);
 
     // ═══════════════════════════════════════════════════════════
     // SECTION C — RESPONSE — `value` block UNCHANGED, `data` is the
@@ -5216,11 +5259,11 @@ const filteredAgreementDocVerificationHistory = (
         pagination: {
           count: pageSize,
           pageNumber: pageNumbers,
-          totalCount: allOwners.length,
-          totalPages: Math.ceil(allOwners.length / pageSize),
+          totalCount: finalEntries.length,
+          totalPages: Math.ceil(finalEntries.length / pageSize),
         },
       },
-      data: pagedOwners,
+      data: resultData,
     });
   } catch (err) {
     return res

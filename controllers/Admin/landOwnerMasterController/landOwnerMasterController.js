@@ -2286,231 +2286,60 @@ const landOwnerSiteFilter = async (req, res) => {
       };
     };
 
-    const soleOwnedSitesByOwner = new Map();
-    const multiOwnerSites = [];
-
+    // ✅ REFACTORED — Grouping logic: merge owners who share at least one site.
+    // This uses a simple connected-component approach to find "Agreement Groups".
+    const ownerToSites = new Map();
+    const allOwnersInSet = new Set();
     siteMap.forEach((site) => {
-      if (site.ownerIds.length <= 1) {
-        const soloOwnerId = site.ownerIds[0];
-        if (soloOwnerId) {
-          if (!soleOwnedSitesByOwner.has(soloOwnerId)) {
-            soleOwnedSitesByOwner.set(soloOwnerId, []);
-          }
-          soleOwnedSitesByOwner.get(soloOwnerId).push(site);
-        }
-      } else {
-        multiOwnerSites.push(site);
-      }
+      site.ownerIds.forEach((oid) => {
+        if (!ownerToSites.has(oid)) ownerToSites.set(oid, new Set());
+        ownerToSites.get(oid).add(site);
+        allOwnersInSet.add(oid);
+      });
     });
 
-    const signatureGroups = new Map();
+    const processedOwners = new Set();
+    const ownerGroups = [];
 
-    multiOwnerSites.forEach((site) => {
-      const signature = [...site.ownerIds].sort().join(",");
-      if (!signatureGroups.has(signature)) {
-        signatureGroups.set(signature, { ownerIds: site.ownerIds, sites: [] });
+    allOwnersInSet.forEach((startOwner) => {
+      if (processedOwners.has(startOwner)) return;
+
+      const groupOwners = new Set();
+      const groupSites = new Set();
+      const queue = [startOwner];
+      processedOwners.add(startOwner);
+
+      while (queue.length > 0) {
+        const ownerId = queue.shift();
+        groupOwners.add(ownerId);
+
+        const sites = ownerToSites.get(ownerId) || [];
+        sites.forEach((site) => {
+          groupSites.add(site);
+          site.ownerIds.forEach((neighbor) => {
+            if (!processedOwners.has(neighbor)) {
+              processedOwners.add(neighbor);
+              queue.push(neighbor);
+            }
+          });
+        });
       }
-      signatureGroups.get(signature).sites.push(site);
+      ownerGroups.push({
+        ownerIds: Array.from(groupOwners),
+        sites: Array.from(groupSites),
+      });
     });
 
     const entries = [];
 
-    requestedOwnerIds.forEach((ownerId) => {
-      const sites = soleOwnedSitesByOwner.get(ownerId);
-      if (!sites || sites.length === 0) return;
-      let totalShareAmount = 0;
-      let totalGstAmount = 0;
-      let totalNetPayableToOwner = 0;
-      let totalOnlineAmount = 0;
-      let totalCashAmount = 0;
-      let totalTdsAmount = 0;
-      let lastPaymentCategory = null;
-      // ✅ ADDED — tracks max(owner.updatedAt, every site.updatedAt),
-      // used to sort entries by most-recent activity before pagination.
-      let latestActivityAt = ownerUpdatedAtById[ownerId] || null;
+    ownerGroups.forEach((group) => {
+      // ✅ Filter: Only include groups that contain at least one of the
+      // requested owners (or if none requested, show all).
+      const hasRequestedOwner = requestedOwnerIds.some((reqId) =>
+        group.ownerIds.includes(reqId),
+      );
+      if (requestedOwnerIds.length > 0 && !hasRequestedOwner) return;
 
-      // ✅ ADDED — accumulate ledger/GST data across this owner's sole-owned sites
-      const combinedLedger = {
-        currentMonthEntries: [],
-        pastMonthEntries: [],
-        currentPendingRentEntries: [],
-        pastRentalPendingEntries: [],
-        currentGst: 0,
-        pastGst: 0,
-        currentGstPending: 0,
-        pastGstPending: 0,
-        currentRentPending: 0, // ✅ ADDED
-        pastRentPending: 0, // ✅ ADDED
-        hasTotalLedger: false, // ✅ NEW
-        hasTotalGst: false,    // ✅ NEW
-        hasPendingLedger: false, // ✅ NEW
-        hasPendingGst: false    // ✅ NEW
-      };
-      // ✅ NEW: Rental Status accumulation
-      const rentalStatusMatch = {
-        hasApproved: false,
-        hasPending: false,
-        isOverDue: false,
-      };
-
-      sites.forEach((site) => {
-        const ownerDetail = site.ownersDetail?.find(
-          (od) => od.landOwnerMasterId === ownerId,
-        );
-        if (ownerDetail) {
-          totalShareAmount += ownerDetail.shareAmount;
-          totalGstAmount += ownerDetail.gstAmount;
-          totalNetPayableToOwner += ownerDetail.netPayableToOwner;
-          totalOnlineAmount += ownerDetail.onlineAmount;
-          totalCashAmount += ownerDetail.cashAmount;
-          totalTdsAmount += ownerDetail.tdsAmount;
-          lastPaymentCategory = ownerDetail.paymentCategory;
-        }
-        // ✅ ADDED
-        if (
-          site.updatedAt &&
-          (!latestActivityAt ||
-            new Date(site.updatedAt) > new Date(latestActivityAt))
-        ) {
-          latestActivityAt = site.updatedAt;
-        }
-
-        if (site.rentalStatus.hasApprovedSite)
-          rentalStatusMatch.hasApproved = true;
-        if (site.rentalStatus.hasPendingSite)
-          rentalStatusMatch.hasPending = true;
-        if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
-
-        if (site._overallSummary) {
-          if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
-          if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
-          if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
-          if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
-        }
-
-        if (needsLedgerFields) {
-          const siteBucket = getLedgerBucketsForSite(String(site.mediaId), [
-            ownerId,
-          ]);
-          combinedLedger.currentMonthEntries.push(
-            ...siteBucket.currentMonthEntries,
-          );
-          combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
-          combinedLedger.currentPendingRentEntries.push(
-            ...siteBucket.currentPendingRentEntries,
-          );
-          combinedLedger.pastRentalPendingEntries.push(
-            ...siteBucket.pastRentalPendingEntries,
-          );
-          combinedLedger.currentGst += siteBucket.currentGst;
-          combinedLedger.pastGst += siteBucket.pastGst;
-          combinedLedger.currentGstPending += siteBucket.currentGstPending;
-          combinedLedger.pastGstPending += siteBucket.pastGstPending;
-          combinedLedger.currentRentPending +=
-            siteBucket.currentRentPending || 0; // ✅ ADDED
-          combinedLedger.pastRentPending += siteBucket.pastRentPending || 0; // ✅ ADDED
-        }
-      });
-
-      const entryPayload = {
-        entryType: "single",
-        landOwnerMasterId: ownerId,
-        totalSites: sites.length,
-        totalLandOwners: 1,
-        ...buildAmounts(sites),
-        landOwners: [
-          {
-            landOwnerMasterId: ownerId,
-            name: ownerNameById[ownerId] || "Unknown",
-            paymentCategory: lastPaymentCategory,
-            totalShareAmount,
-            totalGstAmount,
-            totalNetPayableToOwner,
-            totalOnlineAmount,
-            totalCashAmount,
-            totalTdsAmount,
-          },
-        ],
-        sites: sites.map((site) => toSiteResponseShape(site, ownerId)),
-        latestActivityAt, // ✅ ADDED — internal sort key, stripped before response
-      };
-
-      // ✅ ADDED — attach requested ledger/GST fields, conditionally
-      if (includeCurrentLedger || includeCurrentPendingRent) {
-        entryPayload.currentMonthLedgerEntries = includeCurrentPendingRent
-          ? combinedLedger.currentPendingRentEntries
-          : combinedLedger.currentMonthEntries;
-      }
-      if (includePastLedger || includePastRentalPending) {
-        entryPayload.pastMonthLedgerEntries = includePastRentalPending
-          ? combinedLedger.pastRentalPendingEntries
-          : combinedLedger.pastMonthEntries;
-      }
-      if (
-        includeCurrentGst ||
-        includePastGst ||
-        includeCurrentGstPending ||
-        includePastGstPending
-      ) {
-        entryPayload.gstSummary = {};
-        if (includeCurrentGst || includeCurrentGstPending)
-          entryPayload.gstSummary.currentGst = includeCurrentGstPending
-            ? combinedLedger.currentGstPending
-            : combinedLedger.currentGst;
-        if (includePastGst || includePastGstPending)
-          entryPayload.gstSummary.pastGst = includePastGstPending
-            ? combinedLedger.pastGstPending
-            : combinedLedger.pastGst;
-      }
-
-      // ✅ ADDED — reconciled rent-pending numeric totals, same source
-      // as overallCurrentBaseRentDue / overallPreviousBaseRentDue.
-      if (includeCurrentPendingRent || includePastRentalPending) {
-        entryPayload.rentPendingSummary = {};
-        if (includeCurrentPendingRent)
-          entryPayload.rentPendingSummary.currentRentPending =
-            combinedLedger.currentRentPending;
-        if (includePastRentalPending)
-          entryPayload.rentPendingSummary.pastRentPending =
-            combinedLedger.pastRentPending;
-      }
-
-      if (isAnyFilterActive) {
-        // ✅ CHANGED — match against the reconciled numeric totals,
-        // not the (separately-sourced) virtual-entry array length
-        const ledgerMatch = needsLedgerFields
-          ? (includeCurrentLedger &&
-              combinedLedger.currentMonthEntries.length > 0) ||
-            (includePastLedger && combinedLedger.pastMonthEntries.length > 0) ||
-            (includeCurrentGst && combinedLedger.currentGst > 0) ||
-            (includePastGst && combinedLedger.pastGst > 0) ||
-            (includeCurrentPendingRent &&
-              combinedLedger.currentRentPending > 0) ||
-            (includePastRentalPending && combinedLedger.pastRentPending > 0) ||
-            (includeCurrentGstPending &&
-              combinedLedger.currentGstPending > 0) ||
-            (includePastGstPending && combinedLedger.pastGstPending > 0) ||
-            (includeTotalLedgerAmount && combinedLedger.hasTotalLedger) ||
-            (includeTotalLedgerGstAmount && combinedLedger.hasTotalGst) ||
-            (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
-            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst)
-          : false;
-
-        const rentalMatch = needsRentalStatusFields
-          ? (includeApprovalSite && rentalStatusMatch.hasApproved) ||
-            (includePendingSites && rentalStatusMatch.hasPending) ||
-            (includeOverDue && rentalStatusMatch.isOverDue) // ✅ isOverDue now includes past pending
-          : false;
-
-        if (!ledgerMatch && !rentalMatch) return; // skip this owner — nothing to show for the requested flag(s)
-      }
-
-      entries.push(entryPayload);
-    });
-
-    signatureGroups.forEach((group) => {
-      // ✅ ADDED — same latest-activity tracking across all owners +
-      // all sites in this group.
       let latestActivityAt = null;
       group.ownerIds.forEach((id) => {
         const ownerUpdatedAt = ownerUpdatedAtById[id];
@@ -2523,44 +2352,45 @@ const landOwnerSiteFilter = async (req, res) => {
         }
       });
 
-      const landOwners = group.ownerIds.map((id) => {
-        let totalShareAmount = 0;
-        let totalGstAmount = 0;
-        let totalNetPayableToOwner = 0;
-        let totalOnlineAmount = 0;
-        let totalCashAmount = 0;
-        let totalTdsAmount = 0;
-        let lastPaymentCategory = null;
+      const landOwners = group.ownerIds
+        .map((id) => {
+          let totalShareAmount = 0;
+          let totalGstAmount = 0;
+          let totalNetPayableToOwner = 0;
+          let totalOnlineAmount = 0;
+          let totalCashAmount = 0;
+          let totalTdsAmount = 0;
+          let lastPaymentCategory = null;
 
-        group.sites.forEach((site) => {
-          const ownerDetail = site.ownersDetail?.find(
-            (od) => od.landOwnerMasterId === id,
-          );
-          if (ownerDetail) {
-            totalShareAmount += ownerDetail.shareAmount;
-            totalGstAmount += ownerDetail.gstAmount;
-            totalNetPayableToOwner += ownerDetail.netPayableToOwner;
-            totalOnlineAmount += ownerDetail.onlineAmount;
-            totalCashAmount += ownerDetail.cashAmount;
-            totalTdsAmount += ownerDetail.tdsAmount;
-            lastPaymentCategory = ownerDetail.paymentCategory;
-          }
-        });
+          group.sites.forEach((site) => {
+            const ownerDetail = site.ownersDetail?.find(
+              (od) => od.landOwnerMasterId === id,
+            );
+            if (ownerDetail) {
+              totalShareAmount += ownerDetail.shareAmount;
+              totalGstAmount += ownerDetail.gstAmount;
+              totalNetPayableToOwner += ownerDetail.netPayableToOwner;
+              totalOnlineAmount += ownerDetail.onlineAmount;
+              totalCashAmount += ownerDetail.cashAmount;
+              totalTdsAmount += ownerDetail.tdsAmount;
+              lastPaymentCategory = ownerDetail.paymentCategory;
+            }
+          });
 
-        return {
-          landOwnerMasterId: id,
-          name: ownerNameById[id] || "Unknown",
-          paymentCategory: lastPaymentCategory,
-          totalShareAmount,
-          totalGstAmount,
-          totalNetPayableToOwner,
-          totalOnlineAmount,
-          totalCashAmount,
-          totalTdsAmount,
-        };
-      });
+          return {
+            landOwnerMasterId: id,
+            name: ownerNameById[id] || "Unknown",
+            paymentCategory: lastPaymentCategory,
+            totalShareAmount,
+            totalGstAmount,
+            totalNetPayableToOwner,
+            totalOnlineAmount,
+            totalCashAmount,
+            totalTdsAmount,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
 
-      // ✅ ADDED — fold in every site's own updatedAt too
       group.sites.forEach((site) => {
         if (
           site.updatedAt &&
@@ -2574,7 +2404,6 @@ const landOwnerSiteFilter = async (req, res) => {
       const amounts = buildAmounts(group.sites);
       const anyGstApplicable = group.sites.some((s) => s.gstApplicable === 1);
 
-      // ✅ ADDED — accumulate ledger/GST across ALL owners + ALL sites in this group
       const combinedLedger = {
         currentMonthEntries: [],
         pastMonthEntries: [],
@@ -2584,66 +2413,63 @@ const landOwnerSiteFilter = async (req, res) => {
         pastGst: 0,
         currentGstPending: 0,
         pastGstPending: 0,
-        currentRentPending: 0, // ✅ ADDED — was missing, left rentPendingSummary undefined for shared entries
-        pastRentPending: 0, // ✅ ADDED
-        hasTotalLedger: false, // ✅ NEW
-        hasTotalGst: false,    // ✅ NEW
-        hasPendingLedger: false, // ✅ NEW
-        hasPendingGst: false    // ✅ NEW
+        currentRentPending: 0,
+        pastRentPending: 0,
+        hasTotalLedger: false,
+        hasTotalGst: false,
+        hasPendingLedger: false,
+        hasPendingGst: false,
       };
-      // ✅ NEW: Rental Status accumulation
+
       const rentalStatusMatch = {
         hasApproved: false,
         hasPending: false,
         isOverDue: false,
       };
 
-      if (needsLedgerFields || needsRentalStatusFields) {
-        group.sites.forEach((site) => {
-          if (site.rentalStatus.hasApprovedSite)
-            rentalStatusMatch.hasApproved = true;
-          if (site.rentalStatus.hasPendingSite)
-            rentalStatusMatch.hasPending = true;
-          if (site.rentalStatus.isOverDueSite)
-            rentalStatusMatch.isOverDue = true;
+      group.sites.forEach((site) => {
+        if (site.rentalStatus.hasApprovedSite)
+          rentalStatusMatch.hasApproved = true;
+        if (site.rentalStatus.hasPendingSite)
+          rentalStatusMatch.hasPending = true;
+        if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
 
-          if (site._overallSummary) {
-            if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
-            if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
-            if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
-            if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
-          }
+        if (site._overallSummary) {
+          if (site._overallSummary.hasTotalLedger)
+            combinedLedger.hasTotalLedger = true;
+          if (site._overallSummary.hasTotalGst)
+            combinedLedger.hasTotalGst = true;
+          if (site._overallSummary.hasPendingLedger)
+            combinedLedger.hasPendingLedger = true;
+          if (site._overallSummary.hasPendingGst)
+            combinedLedger.hasPendingGst = true;
+        }
 
-          if (needsLedgerFields) {
-            const siteBucket = getLedgerBucketsForSite(
-              String(site.mediaId),
-              group.ownerIds,
-            );
-            combinedLedger.currentMonthEntries.push(
-              ...siteBucket.currentMonthEntries,
-            );
-            combinedLedger.pastMonthEntries.push(
-              ...siteBucket.pastMonthEntries,
-            );
-            combinedLedger.currentPendingRentEntries.push(
-              ...siteBucket.currentPendingRentEntries,
-            );
-            combinedLedger.pastRentalPendingEntries.push(
-              ...siteBucket.pastRentalPendingEntries,
-            );
-            combinedLedger.currentGst += siteBucket.currentGst;
-            combinedLedger.pastGst += siteBucket.pastGst;
-            combinedLedger.currentGstPending += siteBucket.currentGstPending;
-            combinedLedger.pastGstPending += siteBucket.pastGstPending;
-            combinedLedger.currentRentPending +=
-              siteBucket.currentRentPending || 0; // ✅ ADDED
-            combinedLedger.pastRentPending += siteBucket.pastRentPending || 0; // ✅ ADDED
-          }
-        });
-      }
+        const siteBucket = getLedgerBucketsForSite(
+          String(site.mediaId),
+          group.ownerIds,
+        );
+        combinedLedger.currentMonthEntries.push(
+          ...siteBucket.currentMonthEntries,
+        );
+        combinedLedger.pastMonthEntries.push(...siteBucket.pastMonthEntries);
+        combinedLedger.currentPendingRentEntries.push(
+          ...siteBucket.currentPendingRentEntries,
+        );
+        combinedLedger.pastRentalPendingEntries.push(
+          ...siteBucket.pastRentalPendingEntries,
+        );
+        combinedLedger.currentGst += siteBucket.currentGst;
+        combinedLedger.pastGst += siteBucket.pastGst;
+        combinedLedger.currentGstPending += siteBucket.currentGstPending;
+        combinedLedger.pastGstPending += siteBucket.pastGstPending;
+        combinedLedger.currentRentPending += siteBucket.currentRentPending || 0;
+        combinedLedger.pastRentPending += siteBucket.pastRentPending || 0;
+      });
 
       const entryPayload = {
-        entryType: "shared",
+        entryType: group.ownerIds.length > 1 ? "shared" : "single",
+        landOwnerMasterId: group.ownerIds.length === 1 ? group.ownerIds[0] : undefined,
         totalLandOwners: landOwners.length,
         totalSites: group.sites.length,
         gstApplicable: anyGstApplicable ? 1 : 0,
@@ -2653,7 +2479,6 @@ const landOwnerSiteFilter = async (req, res) => {
         latestActivityAt, // ✅ ADDED — internal sort key, stripped before response
       };
 
-      // ✅ ADDED — attach requested ledger/GST fields, conditionally
       if (includeCurrentLedger || includeCurrentPendingRent) {
         entryPayload.currentMonthLedgerEntries = includeCurrentPendingRent
           ? combinedLedger.currentPendingRentEntries
@@ -2681,10 +2506,6 @@ const landOwnerSiteFilter = async (req, res) => {
             : combinedLedger.pastGst;
       }
 
-      // ✅ ADDED — was missing on shared/multi-owner entries; only the
-      // single-owner block had this. Same reconciled rent-pending
-      // totals, so shared sites now report currentPendingRent /
-      // pastRentalPending consistently with single entries.
       if (includeCurrentPendingRent || includePastRentalPending) {
         entryPayload.rentPendingSummary = {};
         if (includeCurrentPendingRent)
@@ -2696,9 +2517,6 @@ const landOwnerSiteFilter = async (req, res) => {
       }
 
       if (isAnyFilterActive) {
-        // ✅ CHANGED — match against the reconciled numeric totals,
-        // same as the single-owner block, instead of raw entry-array
-        // length which came from the separate manual scan.
         const ledgerMatch = needsLedgerFields
           ? (includeCurrentLedger &&
               combinedLedger.currentMonthEntries.length > 0) ||
@@ -2713,14 +2531,15 @@ const landOwnerSiteFilter = async (req, res) => {
             (includePastGstPending && combinedLedger.pastGstPending > 0) ||
             (includeTotalLedgerAmount && combinedLedger.hasTotalLedger) ||
             (includeTotalLedgerGstAmount && combinedLedger.hasTotalGst) ||
-            (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
+            (includeTotalLedgerPendingAmount &&
+              combinedLedger.hasPendingLedger) ||
             (includeTotalGstPendingAmount && combinedLedger.hasPendingGst)
           : false;
 
         const rentalMatch = needsRentalStatusFields
           ? (includeApprovalSite && rentalStatusMatch.hasApproved) ||
             (includePendingSites && rentalStatusMatch.hasPending) ||
-            (includeOverDue && rentalStatusMatch.isOverDue) // ✅ isOverDue now includes past pending
+            (includeOverDue && rentalStatusMatch.isOverDue)
           : false;
 
         if (!ledgerMatch && !rentalMatch) return;
@@ -2732,6 +2551,7 @@ const landOwnerSiteFilter = async (req, res) => {
     // ✅ ADDED — sort by latestActivityAt descending (most recently
     // touched — owner OR any of their sites — first). Previously
     // entries had no sort at all; order was purely insertion order.
+    // This now correctly captures approval/verification actions as activity.
     entries.sort((a, b) => {
       const aTime = a.latestActivityAt
         ? new Date(a.latestActivityAt).getTime()
@@ -2742,7 +2562,7 @@ const landOwnerSiteFilter = async (req, res) => {
       return bTime - aTime;
     });
 
-    // ✅ ADDED — strip the internal sort key before sending the response
+    // ✅ ADDED — strip the internal sort keys before sending the response
     const entriesForResponse = entries.map(
       ({ latestActivityAt, ...rest }) => rest,
     );

@@ -2369,39 +2369,30 @@ exports.listMediaByLedger = async (req, res) => {
       ];
     }
 
-    // ✅ NEW — mediaId[] filter
+    // ✅ REFACTORED — mediaId[] filter (Robust validation)
     if (Array.isArray(mediaId) && mediaId.length > 0) {
-      const validMediaIds = mediaId.filter((id) =>
-        mongoose.Types.ObjectId.isValid(id),
-      );
-      if (validMediaIds.length !== mediaId.length) {
-        return errorResponse(
-          res,
-          "mediaId array contains an invalid ObjectId",
-          null,
-          400,
-        );
+      const validMediaIds = mediaId
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id).trim()))
+        .map((id) => new mongoose.Types.ObjectId(String(id).trim()));
+
+      if (validMediaIds.length === 0) {
+        // If they sent IDs but none were valid, better to return empty than 400
+        // or just ignore the filter. Let's keep it safe.
+        filter._id = { $in: [new mongoose.Types.ObjectId()] };
+      } else {
+        filter._id = { $in: validMediaIds };
       }
-      filter._id = {
-        $in: validMediaIds.map((id) => new mongoose.Types.ObjectId(id)),
-      };
     }
 
+    // ✅ REFACTORED — landOwnerMasterId[] filter (Robust validation)
     if (Array.isArray(landOwnerMasterId) && landOwnerMasterId.length > 0) {
-      const validOwnerIds = landOwnerMasterId.filter((id) =>
-        mongoose.Types.ObjectId.isValid(id),
-      );
-      if (validOwnerIds.length !== landOwnerMasterId.length) {
-        return errorResponse(
-          res,
-          "landOwnerMasterId array contains an invalid ObjectId",
-          null,
-          400,
-        );
+      const validOwnerIds = landOwnerMasterId
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id).trim()))
+        .map((id) => new mongoose.Types.ObjectId(String(id).trim()));
+
+      if (validOwnerIds.length > 0) {
+        filter["landOwners.landOwnerMasterId"] = { $in: validOwnerIds };
       }
-      filter["landOwners.landOwnerMasterId"] = {
-        $in: validOwnerIds.map((id) => new mongoose.Types.ObjectId(id)),
-      };
     }
 
     // ✅ NEW — snapshot the base filter BEFORE any status-specific (0-5)
@@ -4204,6 +4195,109 @@ latestLedger = latestLedger.sort((a, b) => {
       },
     );
 
+    // ✅ REFACTORED — Unified Grouping Logic (Connected Components)
+    // Same grouping strategy as landOwnerSiteFilter: Owners who share at
+    // least one site are grouped together, and ALL sites belonging to those
+    // owners are included in their group entry.
+    const ownerToSites = new Map();
+    const allOwnersInSet = new Set();
+    const mediaToOwners = new Map();
+
+    for (const siteData of finalMediaListData) {
+      if (!Array.isArray(siteData.landOwners)) continue;
+      const oIds = siteData.landOwners
+        .filter((o) => o.landOwnerMasterId)
+        .map((o) => String(o.landOwnerMasterId));
+      mediaToOwners.set(String(siteData._id), oIds);
+
+      oIds.forEach((oid) => {
+        if (!ownerToSites.has(oid)) ownerToSites.set(oid, new Set());
+        ownerToSites.get(oid).add(siteData);
+        allOwnersInSet.add(oid);
+      });
+    }
+
+    const processedOwners = new Set();
+    const ownerGroups = [];
+
+    allOwnersInSet.forEach((startOwner) => {
+      if (processedOwners.has(startOwner)) return;
+
+      const groupOwners = new Set();
+      const groupSites = new Set();
+      const queue = [startOwner];
+      processedOwners.add(startOwner);
+
+      while (queue.length > 0) {
+        const ownerId = queue.shift();
+        groupOwners.add(ownerId);
+
+        const groupMedia = ownerToSites.get(ownerId) || [];
+        groupMedia.forEach((site) => {
+          groupSites.add(site);
+          const neighbors = mediaToOwners.get(String(site._id)) || [];
+          neighbors.forEach((neighbor) => {
+            if (!processedOwners.has(neighbor)) {
+              processedOwners.add(neighbor);
+              queue.push(neighbor);
+            }
+          });
+        });
+      }
+      ownerGroups.push({
+        ownerIds: Array.from(groupOwners),
+        sites: Array.from(groupSites),
+      });
+    });
+
+    const finalGroupedLedgerEntries = [];
+
+    ownerGroups.forEach((group) => {
+      let latestUpdatedAt = group.sites[0].updatedAt;
+      let groupTotalOutstanding = 0;
+
+      const groupLandOwners = group.ownerIds.map((ownerId) => {
+        const firstSiteWithOwner = group.sites.find((s) =>
+          (s.landOwners || []).some((o) => String(o.landOwnerMasterId) === ownerId)
+        );
+        const ownerRef = firstSiteWithOwner.landOwners.find(
+          (o) => String(o.landOwnerMasterId) === ownerId
+        );
+
+        return {
+          landOwnerMasterId: ownerId,
+          landOwnerName: ownerRef.name,
+          phone: ownerRef.phone,
+        };
+      }).sort((a, b) => a.landOwnerName.localeCompare(b.landOwnerName));
+
+      const groupSites = group.sites.map((site) => {
+        if (new Date(site.updatedAt) > new Date(latestUpdatedAt)) {
+          latestUpdatedAt = site.updatedAt;
+        }
+        groupTotalOutstanding += (site.outstanding?.totalOutstandingAmount || 0);
+        // ✅ ADDED — Ensure mediaId field is present in response (matches RentalDue behavior)
+        return {
+          ...site,
+          mediaId: site._id,
+        };
+      });
+
+      finalGroupedLedgerEntries.push({
+        entryType: group.ownerIds.length > 1 ? "shared" : "single",
+        landOwnerMasterId: group.ownerIds.length === 1 ? group.ownerIds[0] : undefined,
+        landOwnerName: group.ownerIds.length === 1 ? groupLandOwners[0].landOwnerName : groupLandOwners.map(o => o.landOwnerName).join(", "),
+        totalLandOwners: group.ownerIds.length,
+        totalSites: group.sites.length,
+        totalOutstanding: groupTotalOutstanding,
+        latestUpdatedAt,
+        landOwners: groupLandOwners,
+        sites: groupSites,
+      });
+    });
+
+    finalGroupedLedgerEntries.sort((a, b) => new Date(b.latestUpdatedAt) - new Date(a.latestUpdatedAt));
+
     const overallLedgerSummary = calculateOverallLedgerSummary(
       globalMediaDocs,
       requestedMonthYearParsed,
@@ -4224,11 +4318,11 @@ latestLedger = latestLedger.sort((a, b) => {
         TDSPeningCount,
         ...overallOutstandingTotals, // ✅ NEW
         overallLedgerSummary, // ✅ NEW
-        // billGroups, // ✅ NEW
-        mediaList: finalMediaListData,
+        mediaList: finalGroupedLedgerEntries,
       },
       200,
     );
+
   } catch (error) {
     console.error("listMediaByLedger error:", error);
     return errorResponse(
@@ -4270,16 +4364,13 @@ exports.getLedgerHistory = async (req, res) => {
     if (!Array.isArray(mediaId) || mediaId.length === 0) {
       return errorResponse(res, "mediaId must be a non-empty array", null, 400);
     }
-    const validMediaIds = mediaId.filter((id) =>
-      mongoose.Types.ObjectId.isValid(id),
-    );
-    if (validMediaIds.length !== mediaId.length) {
-      return errorResponse(
-        res,
-        "mediaId array contains an invalid ObjectId",
-        null,
-        400,
-      );
+    // ✅ REFACTORED — Robust validation
+    const validMediaIds = mediaId
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id).trim()))
+      .map((id) => String(id).trim());
+
+    if (validMediaIds.length === 0) {
+       return errorResponse(res, "No valid mediaId provided in array", null, 400);
     }
 
     let ownerMasterIdFilter = null;
