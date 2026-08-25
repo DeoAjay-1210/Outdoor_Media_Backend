@@ -1339,7 +1339,7 @@ const landOwnerSiteFilter = async (req, res) => {
 
     // ✅ CHANGED — always include ledger fields for overall summaries
     const mediaProjection =
-      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory";
+      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory agreementDocVerification";
 
     let relatedMediaDocs = await MediaOnboarding.find(
       {
@@ -2160,7 +2160,52 @@ const landOwnerSiteFilter = async (req, res) => {
         year: referenceYear,
         month: referenceMonthIdx + 1,
       });
+// ✅ Compute the "real" latest activity across this site and its sub-docs
+      // (approval steps, verification records, etc.) since Mongoose updatedAt
+      // might be bypassed with { timestamps: false }.
+      let siteLatestActivityAt = mediaDoc.updatedAt;
 
+      if (Array.isArray(mediaDoc.agreementDocVerification)) {
+        mediaDoc.agreementDocVerification.forEach((v) => {
+          if (
+            v.verifiedAt &&
+            (!siteLatestActivityAt ||
+              new Date(v.verifiedAt) > new Date(siteLatestActivityAt))
+          ) {
+            siteLatestActivityAt = v.verifiedAt;
+          }
+        });
+      }
+
+      if (Array.isArray(rentalDue)) {
+        rentalDue.forEach((e) => {
+          if (
+            e.updatedAt &&
+            (!siteLatestActivityAt ||
+              new Date(e.updatedAt) > new Date(siteLatestActivityAt))
+          ) {
+            siteLatestActivityAt = e.updatedAt;
+          }
+          if (
+            e.ownerApprovalDate &&
+            (!siteLatestActivityAt ||
+              new Date(e.ownerApprovalDate) > new Date(siteLatestActivityAt))
+          ) {
+            siteLatestActivityAt = e.ownerApprovalDate;
+          }
+          if (Array.isArray(e.approvalSteps)) {
+            e.approvalSteps.forEach((s) => {
+              if (
+                s.approvedAt &&
+                (!siteLatestActivityAt ||
+                  new Date(s.approvedAt) > new Date(siteLatestActivityAt))
+              ) {
+                siteLatestActivityAt = s.approvedAt;
+              }
+            });
+          }
+        });
+      }
       siteMap.set(String(mediaDoc._id), {
         mediaId: mediaDoc._id,
         mediaCode: mediaDoc.mediaCode,
@@ -2168,7 +2213,8 @@ const landOwnerSiteFilter = async (req, res) => {
         totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
         gstAmount: resolvedSiteGstAmount,
         gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
-        updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
+        // updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
+        updatedAt: siteLatestActivityAt, // ✅ ADDED — needed for latestActivityAt sort below
         ownerIds: ownerIdsOnThisSite,
         _overallSummary: overallSummary, // ✅ ADDED for filtering
         rentalStatus: {
@@ -2433,6 +2479,8 @@ const landOwnerSiteFilter = async (req, res) => {
         ],
         sites: sites.map((site) => toSiteResponseShape(site, ownerId)),
         latestActivityAt, // ✅ ADDED — internal sort key, stripped before response
+        hasApproved: rentalStatusMatch.hasApproved, // ✅ ADDED — internal sort key
+
       };
 
       // ✅ ADDED — attach requested ledger/GST fields, conditionally
@@ -2598,7 +2646,7 @@ const landOwnerSiteFilter = async (req, res) => {
         isOverDue: false,
       };
 
-      if (needsLedgerFields || needsRentalStatusFields) {
+      // if (needsLedgerFields || needsRentalStatusFields) {
         group.sites.forEach((site) => {
           if (site.rentalStatus.hasApprovedSite)
             rentalStatusMatch.hasApproved = true;
@@ -2640,7 +2688,7 @@ const landOwnerSiteFilter = async (req, res) => {
             combinedLedger.pastRentPending += siteBucket.pastRentPending || 0; // ✅ ADDED
           }
         });
-      }
+      // }
 
       const entryPayload = {
         entryType: "shared",
@@ -2651,6 +2699,8 @@ const landOwnerSiteFilter = async (req, res) => {
         landOwners,
         sites: group.sites.map((site) => toSiteResponseShape(site)),
         latestActivityAt, // ✅ ADDED — internal sort key, stripped before response
+        hasApproved: rentalStatusMatch.hasApproved, // ✅ ADDED — internal sort key
+
       };
 
       // ✅ ADDED — attach requested ledger/GST fields, conditionally
@@ -2744,7 +2794,7 @@ const landOwnerSiteFilter = async (req, res) => {
 
     // ✅ ADDED — strip the internal sort key before sending the response
     const entriesForResponse = entries.map(
-      ({ latestActivityAt, ...rest }) => rest,
+      ({ latestActivityAt,hasApproved, ...rest }) => rest,
     );
 
     // ✅ NEW — Filter relatedMediaDocs to only include those that passed the filters
