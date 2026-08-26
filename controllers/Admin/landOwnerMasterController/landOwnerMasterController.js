@@ -52,6 +52,32 @@ const findMasterByPriority = async (owner, session) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// FIND EXACT DUPLICATE — check if panNumber OR aadharCardNumber already exists.
+// Used in landOwnerSave to block save if either matches another record.
+// ─────────────────────────────────────────────────────────────
+const findExactDuplicate = async (owner, session, excludeId = null) => {
+  const pan = (owner.panNumber || "").trim().toUpperCase();
+  const aadhar = (owner.aadharCardNumber || "").trim();
+
+  // Only perform check if at least one field is provided
+  if (!pan && !aadhar) {
+    return null;
+  }
+
+  const conditions = [];
+  if (pan) conditions.push({ panNumber: pan });
+  if (aadhar) conditions.push({ aadharCardNumber: aadhar });
+
+  const query = { $or: conditions };
+
+  if (excludeId && mongoose.Types.ObjectId.isValid(excludeId)) {
+    query._id = { $ne: new mongoose.Types.ObjectId(String(excludeId)) };
+  }
+
+  return await LandOwnerMaster.findOne(query).session(session || null);
+};
+
+// ─────────────────────────────────────────────────────────────
 // PUSH UPDATED PROFILE FIELDS INTO EVERY MEDIA DOC THAT
 // REFERENCES THIS MASTER — matched via
 // media.landOwners[].landOwnerMasterId === landOwner._id
@@ -527,6 +553,16 @@ const saveSingleLandOwner = async (owner, userName, session) => {
     // update, instead of being overwritten/cleared.
     applyOwnerFileFields(landOwner, owner);
 
+    // ✅ DUPLICATE CHECK — ensure the updated PAN/Aadhaar don't conflict with another record
+    const duplicate = await findExactDuplicate(landOwner, session, landOwner._id);
+    if (duplicate) {
+      const err = new Error(
+        `Another LandOwner already exists with the same PAN or Aadhaar Card Number`,
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
     // client-sent gstPercentage/tdsPercentage above are used only as
     // FALLBACK inputs inside computeFinancialFields() — see that
     // function for the exact .env-priority logic.
@@ -547,14 +583,14 @@ const saveSingleLandOwner = async (owner, userName, session) => {
     await syncLandOwnerToMedia(landOwner, session);
   } else {
     // ── CREATE ──────────────────────────────────────────────
-    const existing = await findMasterByPriority(owner, session);
-    // if (existing) {
-    //   const err = new Error(
-    //     `LandOwner already exists with this phone/PAN/Aadhaar (id: ${existing._id})`,
-    //   );
-    //   err.statusCode = 400;
-    //   throw err;
-    // }
+    const existingExact = await findExactDuplicate(owner, session);
+    if (existingExact) {
+      const err = new Error(
+        `LandOwner already exists with the same PAN or Aadhaar Card Number`,
+      );
+      err.statusCode = 400;
+      throw err;
+    }
 
     landOwner = new LandOwnerMaster(owner);
 
