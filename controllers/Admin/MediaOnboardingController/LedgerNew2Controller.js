@@ -4814,14 +4814,25 @@ function buildSingleMediaHistoryBlock(
       )
     : fullGstBalanceHistoryUnfiltered;
 
-  let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
-    if (h.cycle) return h;
-    const parsed = parseDueMonthLabel(h.dueMonth);
-    return {
-      ...h,
-      cycle: parsed ? new Date(Date.UTC(parsed.year, parsed.monthIdx, 1)) : null
-    };
-  });
+  // let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
+  //   if (h.cycle) return h;
+  //   const parsed = parseDueMonthLabel(h.dueMonth);
+  //   return {
+  //     ...h,
+  //     cycle: parsed ? new Date(Date.UTC(parsed.year, parsed.monthIdx, 1)) : null
+  //   };
+  // });
+let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
+  const parsed = parseDueMonthLabel(h.dueMonth);
+  const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === h.dueMonth);
+  const inferredWithGst = matchedDue ? matchedDue.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
+
+  return {
+    ...h,
+    withGst: h.withGst ?? inferredWithGst,
+    cycle: h.cycle || (parsed ? new Date(Date.UTC(parsed.year, parsed.monthIdx, 1)) : null)
+  };
+});
 
   const liveCycleKeyForOutstanding = allTimeCycles.length > 0
     ? `${allTimeCycles[allTimeCycles.length - 1].getUTCFullYear()}-${allTimeCycles[allTimeCycles.length - 1].getUTCMonth()}`
@@ -4838,13 +4849,14 @@ function buildSingleMediaHistoryBlock(
     let cycleUnpaid = 0;
     let cycleTds = 0;
     let maxPaymentDate = null;
-
+const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
     matchingLandOwners.forEach((owner) => {
       const paymentCategory = Number(owner.paymentCategory || 1);
       cycleTds += Number(owner.tdsAmount || 0);
 
-      const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
-      const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
+      // const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+      // const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
 
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         let amt = (mode === "Cash"
@@ -4912,6 +4924,7 @@ function buildSingleMediaHistoryBlock(
     fullRentalOutstandingHistory.push({
       dueMonth: cycleMonthLabel,
       baseRentOutstandingAmount: cycleTotal,
+      withGst: effectiveWithGstForMonth,
       tdsAmount: cycleTds,
       isPaid,
       isVirtual: true,

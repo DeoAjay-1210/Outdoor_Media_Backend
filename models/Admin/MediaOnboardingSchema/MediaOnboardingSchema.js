@@ -177,7 +177,7 @@ const ledgerSchema = new mongoose.Schema({
     enum: [0, 1], // 0=not Approve 1=Approve
     default: 0,
   },
-  withGst: { type: Number, enum: [0, 1, 2], default: null }, // 0 Pending 1 withGST 2. withOutGST
+  withGst: { type: Number, enum: [0, 1, 2], default: 0 }, // 0 Pending 1 withGST 2. withOutGST
   month: {
     type: String,
     trim: true,
@@ -207,7 +207,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     lastBillPaidDate: { type: Date },
     utrNumber: { type: String, trim: true },
     paymentMode: { type: String, enum: ["Cash", "Online"], default: null },
-    withGst: { type: Number, enum: [0, 1, 2], default: null }, // 0 Pending 1 withGST 2. withOutGST
+    withGst: { type: Number, enum: [0, 1, 2], default: 0 }, // 0 Pending 1 withGST 2. withOutGST
     month: {
       type: String,
       trim: true,
@@ -334,6 +334,8 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
     default: 0,
     min: 0,
   },
+  withGst: { type: Number, enum: [0, 1, 2], default: 0 }, // 0 Pending 1 withGST 2. withOutGST
+
   paymentMode: {
     type: String,
     enum: ["Cash", "Online", "Cash+Online", null],
