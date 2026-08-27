@@ -135,6 +135,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     mailSent: { type: Boolean, default: false },
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
+    reason: { type: String, trim: true },
     proofOfCampaign: {
       originalName: { type: String },
       fileName: { type: String },
@@ -150,7 +151,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
       filePath: { type: String },
       mimeType: { type: String },
       size: { type: Number },
-      fileType: { type: String, enum: ["pdf", "image"], default: "pdf" },
+      fileType: { type: String, enum: ["pdf"], default: "pdf" },
       uploadedAt: { type: Date, default: Date.now },
     },
 
@@ -195,6 +196,7 @@ const rentalDueHistoryEntrySchema = new mongoose.Schema(
     rentalDueId: { type: mongoose.Schema.Types.ObjectId },
     siteName: { type: String, trim: true },
     campaignName: { type: String, trim: true },
+    reason: { type: String, trim: true },
     dueDate: { type: Date },
     netPayable: { type: Number },
     approvalStatus: { type: Number, enum: [1, 2, 3, 4] },

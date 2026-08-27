@@ -4353,7 +4353,7 @@ exports.getLedgerHistory = async (req, res) => {
 
     const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, status: 1 })
       .select(
-        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths status",
+        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths status previousLedger",
       )
       .lean();
 
@@ -4571,6 +4571,7 @@ function buildSingleMediaHistoryBlock(
       outStantStatus: media.rentalPayment?.outStantStatus ?? 0,
       gstOutstandingHistory: [],
       rentalOutstandingHistory: [],
+      previousLedger: media.previousLedger || null,
       note: "No landOwner on this media matches the requested landOwnerMasterId — media included with empty history rather than silently dropped.",
     };
   }
@@ -6024,6 +6025,7 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     gstOutstandingHistory: media.rentalPayment?.gstOutstandingHistory || [],
     gstBalanceHistory: fullGstBalanceHistory,
     rentalOutstandingHistory: fullRentalOutstandingHistory,
+    previousLedger: media.previousLedger || null,
   };
 }
 

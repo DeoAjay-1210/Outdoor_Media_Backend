@@ -690,6 +690,7 @@ const generatedEntries = [];
       mailSent: false,
       gstAddedToBalance: false,
       campaignName: "",
+      reason: "",
       proofOfCampaign: null,
       savedBy: {
         userId: null,
@@ -757,6 +758,7 @@ const generatedEntries = [];
       rentalDueId: savedEntry._id,
       siteName: media.mediaName,
       campaignName: "",
+      reason: "",
       dueDate: new Date(candidateDate),
       netPayable: Number(newEntry.netPayable) || 0,
       approvalStatus: newEntry.approvalStatus,
@@ -1620,6 +1622,7 @@ async function processSingleRentalDue({
   mediaId,
   rentalDueId,
   campaignName,
+  reason,
   withGst,
   gstApplicableFlag,
   pastgstApplicableFlag: requestedPastFlag,
@@ -1782,6 +1785,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     }
 
     if (campaignName) entry.campaignName = campaignName;
+    if (reason) entry.reason = reason;
     if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
     if (invoice) entry.invoice = invoice; // ✅ ADDED
 
@@ -1974,6 +1978,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
       rentalDueId: entry._id,
       dueMonth: entry.dueMonth, // ✅ ADDED — makes it explicit which month this response is for
       campaignName: entry.campaignName,
+      reason: entry.reason,
       proofOfCampaign: entry.proofOfCampaign,
       invoice: entry.invoice, // ✅ ADDED
       approvalSteps: entry.approvalSteps,
@@ -2127,6 +2132,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     mailSent: false,
     gstAddedToBalance: false,
     campaignName,
+    reason,
     proofOfCampaign: proofOfCampaign,
     invoice: invoice, // ✅ ADDED
     savedBy: { userId, userName, role: userType, savedAt: nowIST() },
@@ -2203,6 +2209,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     rentalDueId: savedEntry._id,
     siteName: media.mediaName,
     campaignName,
+    reason,
     dueDate: dueDateObj,
     netPayable: Number(newEntry.netPayable) || 0,
     approvalStatus: newEntry.approvalStatus,
@@ -2231,6 +2238,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     mediaId: media._id,
     mediaName: media.mediaName,
     campaignName,
+    reason,
     proofOfCampaign,
     invoice, // ✅ ADDED
     dueDate: dueDateObj,
@@ -2265,7 +2273,7 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
-    const { mediaId, rentalDueId, campaignName, withGst, gstApplicableFlag,pastgstApplicableFlag, entries } =
+    const { mediaId, rentalDueId, campaignName,reason, withGst, gstApplicableFlag,pastgstApplicableFlag, entries } =
       req.body;
 
     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
@@ -2372,6 +2380,7 @@ exports.saveRentalDue = async (req, res) => {
           mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
           rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
           campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
+          reason: typeof item.reason === "string" ? item.reason.trim() : item.reason,
           withGst: item.withGst,
           gstApplicableFlag: item.gstApplicableFlag,
           pastgstApplicableFlag: item.pastgstApplicableFlag, // ✅ NEW
@@ -2475,6 +2484,7 @@ exports.saveRentalDue = async (req, res) => {
       mediaId: trimmedMediaId,
       rentalDueId: typeof rentalDueId === "string" ? rentalDueId.trim() : rentalDueId,
       campaignName: typeof campaignName === "string" ? campaignName.trim() : campaignName,
+      reason: typeof reason === "string" ? reason.trim() : reason,
       withGst,
       gstApplicableFlag,
       pastgstApplicableFlag,

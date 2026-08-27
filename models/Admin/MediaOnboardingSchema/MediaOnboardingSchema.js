@@ -750,8 +750,8 @@ const MediaSchema = new mongoose.Schema(
       },
       status: {
         type: Number,
-        enum: [1, 2, 3], // 1=Active 2=Expire Soon 3=Expired
-        default: 1,
+        enum: [0,1, 2, 3], // 1=Active 2=Expire Soon 3=Expired
+        default: 0,
       },
       reason: { type: String, trim: true },
       agreementPDF: {
@@ -850,24 +850,33 @@ const MediaSchema = new mongoose.Schema(
       fileType: { type: String, enum: ["image"], default: "image" },
       uploadedAt: { type: Date, default: null },
     },
-    sideView: {
-      originalName: { type: String },
-      fileName: { type: String },
-      filePath: { type: String },
-      mimeType: { type: String },
-      size: { type: Number },
-      fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: null },
-    },
-    locationView: {
-      originalName: { type: String },
-      fileName: { type: String },
-      filePath: { type: String },
-      mimeType: { type: String },
-      size: { type: Number },
-      fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: null },
-    },
+    previousLedger: {
+        originalName: { type: String },
+        fileName: { type: String },
+        filePath: { type: String },
+        mimeType: { type: String },
+        size: { type: Number },
+        fileType: { type: String, enum: ["pdf"], default: "pdf" },
+        uploadedAt: { type: Date, default: null },
+      },
+    // sideView: {
+    //   originalName: { type: String },
+    //   fileName: { type: String },
+    //   filePath: { type: String },
+    //   mimeType: { type: String },
+    //   size: { type: Number },
+    //   fileType: { type: String, enum: ["image"], default: "image" },
+    //   uploadedAt: { type: Date, default: null },
+    // },
+    // locationView: {
+    //   originalName: { type: String },
+    //   fileName: { type: String },
+    //   filePath: { type: String },
+    //   mimeType: { type: String },
+    //   size: { type: Number },
+    //   fileType: { type: String, enum: ["image"], default: "image" },
+    //   uploadedAt: { type: Date, default: null },
+    // },
     additionalImages: {
       originalName: { type: String },
       fileName: { type: String },

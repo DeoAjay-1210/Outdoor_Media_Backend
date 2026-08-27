@@ -16,8 +16,9 @@ const protect = require("../../../middleware/authMiddleware");
 const { upload, processFile } = createUploader("mediaImages", {
   "agreement[agreementPDF]": "agreementPDF",
   frontView: "mediaImages", // Save in mediaImages folder
-  sideView: "mediaImages",
-  locationView: "mediaImages",
+  // sideView: "mediaImages",
+  // locationView: "mediaImages",
+  previousLedger: "previousLedger", // Save in previousLedger folder
   additionalImages: "mediaImages",
   bankPassbook: "mediaImages",
   cancelCheckLeaf: "mediaImages",

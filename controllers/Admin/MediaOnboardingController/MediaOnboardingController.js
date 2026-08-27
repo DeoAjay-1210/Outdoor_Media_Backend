@@ -1616,8 +1616,9 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
     ];
     const FILE_OBJECT_FIELDS = [
       "frontView",
-      "sideView",
-      "locationView",
+      "previousLedger",
+      // "sideView",
+      // "locationView",
       "additionalImages",
     ];
     if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
@@ -2046,8 +2047,11 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       mediaData.agreement.agreementPDF = req.processFile(uploadedAgreementPDF);
     }
 
-    const frontViewFile = findOtherFile("frontView");
-    if (frontViewFile) mediaData.frontView = req.processFile(frontViewFile);
+      const frontViewFile = findOtherFile("frontView");
+      if (frontViewFile) mediaData.frontView = req.processFile(frontViewFile);
+
+    const previousLedgerFile = findOtherFile("previousLedger");
+    if (previousLedgerFile) mediaData.previousLedger = req.processFile(previousLedgerFile);
 
     const sideViewFile = findOtherFile("sideView");
     if (sideViewFile) mediaData.sideView = req.processFile(sideViewFile);
@@ -2071,13 +2075,15 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       ) {
         const urlValue = mediaData[field].trim();
         if (urlValue.startsWith("http")) {
+          // ✅ FIX — previousLedger is a PDF, but the generic loop was forcing "image"
+          const isPdf = field === "previousLedger";
           mediaData[field] = {
             originalName: urlValue.split("/").pop(),
             fileName: urlValue.split("/").pop(),
             filePath: urlValue,
-            mimeType: null,
+            mimeType: isPdf ? "application/pdf" : null,
             size: null,
-            fileType: "image",
+            fileType: isPdf ? "pdf" : "image",
             uploadedAt: nowIST(),
           };
         } else {
