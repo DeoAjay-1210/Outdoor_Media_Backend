@@ -133,6 +133,10 @@ const rentalDueEntrySchema = new mongoose.Schema(
     ownerApprovalDate: { type: Date, default: null },
     // ✅ NEW — cycle-based mail status for this entry's approval mail
     mailSent: { type: Boolean, default: false },
+
+    // ✅ NEW — identifies which face this entry belongs to (Separate Bill mode)
+    mediaDetailId: { type: mongoose.Schema.Types.ObjectId, default: null },
+
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
     reason: { type: String, trim: true },

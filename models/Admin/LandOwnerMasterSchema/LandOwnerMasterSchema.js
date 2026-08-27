@@ -154,8 +154,10 @@ const LandOwnerMasterSchema = new mongoose.Schema(
           type: mongoose.Schema.Types.ObjectId,
           ref: "MediaOnboarding",
         },
+        mediaDetailId: { type: mongoose.Schema.Types.ObjectId }, // ✅ NEW: Tracks individual face
         mediaCode: { type: String, trim: true },
         mediaName: { type: String, trim: true },
+        mediaDetailsCount: { type: Number, default: 0 }, // ✅ ADDED
          siteBillMode: {
           // ← ADDED
           type: Number,

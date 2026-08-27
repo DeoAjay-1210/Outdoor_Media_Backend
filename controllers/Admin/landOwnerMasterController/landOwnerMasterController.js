@@ -126,40 +126,31 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
     landOwnerMaster.linkedSites = [];
   }
 
-  const existingIdx = landOwnerMaster.linkedSites.findIndex(
-    (site) => String(site.mediaId) === String(mediaInfo.mediaId),
-  );
-
   const now = nowIST();
+  const mediaIdStr = String(mediaInfo.mediaId);
+  const incomingFaces = Array.isArray(mediaInfo.faces) ? mediaInfo.faces : [];
 
-  if (existingIdx !== -1) {
-    const site = landOwnerMaster.linkedSites[existingIdx];
-    site.mediaCode = mediaInfo.mediaCode ?? site.mediaCode;
-    site.mediaName = mediaInfo.mediaName ?? site.mediaName;
-    site.siteBillMode = mediaInfo.siteBillMode ?? site.siteBillMode;
-    site.paymentCategory = Number(
-      owner.paymentCategory || site.paymentCategory || 1,
+  // ✅ 1. Remove entries for this mediaId that are no longer in the incoming faces list
+  const validFaceIds = new Set(incomingFaces.map(f => String(f._id)));
+  landOwnerMaster.linkedSites = landOwnerMaster.linkedSites.filter(site => {
+    if (String(site.mediaId) !== mediaIdStr) return true; // keep other properties
+    return site.mediaDetailId && validFaceIds.has(String(site.mediaDetailId)); // only keep existing faces that are still present
+  });
+
+  // ✅ 2. Upsert each face
+  incomingFaces.forEach(face => {
+    const faceIdStr = String(face._id);
+    const existingIdx = landOwnerMaster.linkedSites.findIndex(
+      (site) => String(site.mediaId) === mediaIdStr && String(site.mediaDetailId) === faceIdStr,
     );
-    site.shareAmount = Number(owner.shareAmount ?? site.shareAmount ?? 0);
-    site.cashAmount = Number(owner.cashAmount ?? site.cashAmount ?? 0);
-    site.onlineAmount = Number(owner.onlineAmount ?? site.onlineAmount ?? 0);
-    site.tdsApplicable = Number(owner.tdsApplicable ?? site.tdsApplicable ?? 0);
-    site.tdsPercentage = Number(owner.tdsPercentage ?? site.tdsPercentage ?? 0);
-    site.tdsAmount = Number(owner.tdsAmount ?? site.tdsAmount ?? 0);
-    // ✅ FIX — GST applicable/percentage were never copied before, only gstAmount was
-    site.gstApplicable = Number(owner.gstApplicable ?? site.gstApplicable ?? 0);
-    site.gstPercentage = Number(owner.gstPercentage ?? site.gstPercentage ?? 0);
-    site.gstAmount = Number(owner.gstAmount ?? site.gstAmount ?? 0); // ← ADDED
-    site.netPayableToOwner = Number(
-      owner.netPayableToOwner ?? site.netPayableToOwner ?? 0,
-    ); // ← ADDED
-    site.updatedAt = now;
-  } else {
-    landOwnerMaster.linkedSites.push({
+
+    const siteData = {
       mediaId: mediaInfo.mediaId,
-      mediaCode: mediaInfo.mediaCode || "",
-      mediaName: mediaInfo.mediaName || "",
-      siteBillMode: mediaInfo.siteBillMode || "",
+      mediaDetailId: face._id,
+      mediaCode: face.mediaCode,
+      mediaName: face.mediaName,
+      mediaDetailsCount: 1, // Individual face
+      siteBillMode: mediaInfo.siteBillMode || face.siteBillMode || null,
       paymentCategory: Number(owner.paymentCategory || 1),
       shareAmount: Number(owner.shareAmount || 0),
       cashAmount: Number(owner.cashAmount || 0),
@@ -169,25 +160,38 @@ const upsertLinkedSite = (landOwnerMaster, mediaInfo, owner) => {
       tdsAmount: Number(owner.tdsAmount || 0),
       gstApplicable: Number(owner.gstApplicable || 0),
       gstPercentage: Number(owner.gstPercentage || 0),
-      gstAmount: Number(owner.gstAmount || 0), // ← ADDED
-      netPayableToOwner: Number(owner.netPayableToOwner || 0), // ← ADDED
+      gstAmount: Number(owner.gstAmount || 0),
+      netPayableToOwner: Number(owner.netPayableToOwner || 0),
       updatedAt: now,
-    });
-  }
+    };
 
-  landOwnerMaster.linkedMediaCount = landOwnerMaster.linkedSites.length;
-  landOwnerMaster.totalShareAmount = landOwnerMaster.linkedSites.reduce(
-    (sum, s) => sum + Number(s.shareAmount || 0),
-    0,
-  );
-  landOwnerMaster.totalGstAmount = landOwnerMaster.linkedSites.reduce(
-    (sum, s) => sum + Number(s.gstAmount || 0),
-    0,
-  );
-  landOwnerMaster.totalNetPayableToOwner = landOwnerMaster.linkedSites.reduce(
-    (sum, s) => sum + Number(s.netPayableToOwner || 0),
-    0,
-  );
+    if (existingIdx !== -1) {
+      // Update existing face entry
+      Object.assign(landOwnerMaster.linkedSites[existingIdx], siteData);
+    } else {
+      // Push new face entry
+      landOwnerMaster.linkedSites.push(siteData);
+    }
+  });
+
+  // ✅ 3. Update Master-level aggregates
+  const uniqueMediaIds = new Set(landOwnerMaster.linkedSites.map(s => String(s.mediaId)));
+  landOwnerMaster.linkedMediaCount = uniqueMediaIds.size;
+
+  // Re-calculate totals from unique documents to avoid doubling (since each face currently carries doc-level amounts)
+  const uniqueDocEntries = [];
+  const seen = new Set();
+  landOwnerMaster.linkedSites.forEach(s => {
+      const mid = String(s.mediaId);
+      if (!seen.has(mid)) {
+          uniqueDocEntries.push(s);
+          seen.add(mid);
+      }
+  });
+
+  landOwnerMaster.totalShareAmount = uniqueDocEntries.reduce((sum, s) => sum + Number(s.shareAmount || 0), 0);
+  landOwnerMaster.totalGstAmount = uniqueDocEntries.reduce((sum, s) => sum + Number(s.gstAmount || 0), 0);
+  landOwnerMaster.totalNetPayableToOwner = uniqueDocEntries.reduce((sum, s) => sum + Number(s.netPayableToOwner || 0), 0);
 };
 
 const syncOrLinkMediaOwnerToMaster = async (
@@ -612,7 +616,7 @@ const saveSingleLandOwner = async (owner, userName, session) => {
 };
 
 const buildResponsePayload = (savedOwner, owner, isNew) => {
-  const responseData =
+  const data =
     typeof savedOwner.toObject === "function"
       ? savedOwner.toObject()
       : { ...savedOwner };
@@ -620,12 +624,20 @@ const buildResponsePayload = (savedOwner, owner, isNew) => {
   if (!isNew) {
     OWNER_FILE_FIELDS.forEach((field) => {
       if (owner[field] === undefined) {
-        delete responseData[field];
+        delete data[field];
       }
     });
   }
 
-  return responseData;
+  // ✅ Add summary fields for consistency with landOwnerList
+  const sites = Array.isArray(data.linkedSites) ? data.linkedSites : [];
+  data.sites = sites;
+  data.totalSites = sites.reduce(
+    (sum, s) => sum + (Number(s.mediaDetailsCount) || 1),
+    0,
+  );
+
+  return data;
 };
 
 const landOwnerSave = async (req, res) => {
@@ -752,12 +764,56 @@ const landOwnerList = async (req, res) => {
       { $limit: pageSize },
     ]);
 
-    const landOwnerListData = landOwnerListRaw.map((owner) => ({
-      ...owner,
-      totalSites: Array.isArray(owner.linkedSites)
-        ? owner.linkedSites.length
-        : 0,
-    }));
+    const ownerIds = landOwnerListRaw.map((o) => o._id);
+
+    // ✅ FETCH LIVE DATA — query MediaOnboarding directly to ensure all faces/sites
+    // are counted correctly, even if the cache in LandOwnerMaster is old.
+    const liveMediaDocs = await MediaOnboarding.find({
+      "landOwners.landOwnerMasterId": { $in: ownerIds },
+    }).lean();
+
+    const landOwnerListData = landOwnerListRaw.map((owner) => {
+      const ownerIdStr = String(owner._id);
+
+      // Rebuild the sites array from the live Media documents
+      const liveFaces = [];
+      liveMediaDocs.forEach((media) => {
+        const ownerEntry = (media.landOwners || []).find(
+          (lo) => String(lo.landOwnerMasterId) === ownerIdStr,
+        );
+
+        if (ownerEntry) {
+          (media.mediaDetails || []).forEach((face) => {
+            liveFaces.push({
+              mediaId: media._id,
+              mediaDetailId: face._id,
+              mediaCode: face.mediaCode,
+              mediaName: face.mediaName,
+              siteBillMode: face.siteBillMode,
+              paymentCategory: ownerEntry.paymentCategory,
+              shareAmount: ownerEntry.shareAmount,
+              cashAmount: ownerEntry.cashAmount,
+              onlineAmount: ownerEntry.onlineAmount,
+              tdsApplicable: ownerEntry.tdsApplicable,
+              tdsPercentage: ownerEntry.tdsPercentage,
+              tdsAmount: ownerEntry.tdsAmount,
+              gstApplicable: ownerEntry.gstApplicable,
+              gstPercentage: ownerEntry.gstPercentage,
+              gstAmount: ownerEntry.gstAmount,
+              netPayableToOwner: ownerEntry.netPayableToOwner,
+              updatedAt: media.updatedAt,
+            });
+          });
+        }
+      });
+
+      return {
+        ...owner,
+        linkedSites: liveFaces, // Update the cache-based field in the response
+        sites: liveFaces, // Provide the alias for the frontend
+        totalSites: liveFaces.length, // Live count of individual faces
+      };
+    });
 
     return successResponse(
       res,
@@ -1319,8 +1375,8 @@ const landOwnerSiteFilter = async (req, res) => {
       const mediaMatchDocs = await MediaOnboarding.find(
         {
           $or: [
-            { mediaName: genericSearchRegex },
-            { mediaCode: genericSearchRegex },
+            { "mediaDetails.mediaName": genericSearchRegex },
+            { "mediaDetails.mediaCode": genericSearchRegex },
             { "landOwners.name": genericSearchRegex },
           ],
         },
@@ -1377,7 +1433,7 @@ const landOwnerSiteFilter = async (req, res) => {
 
     // ✅ CHANGED — always include ledger fields for overall summaries
     const mediaProjection =
-      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory agreementDocVerification";
+      "gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory agreementDocVerification";
 
     let relatedMediaDocs = await MediaOnboarding.find(
       {
@@ -1389,8 +1445,8 @@ const landOwnerSiteFilter = async (req, res) => {
         ...(effectiveMediaSearchRegex
           ? {
               $or: [
-                { mediaName: effectiveMediaSearchRegex },
-                { mediaCode: effectiveMediaSearchRegex },
+                { "mediaDetails.mediaName": effectiveMediaSearchRegex },
+                { "mediaDetails.mediaCode": effectiveMediaSearchRegex },
                 { "landOwners.name": effectiveMediaSearchRegex },
 
               ],
@@ -2244,63 +2300,68 @@ const landOwnerSiteFilter = async (req, res) => {
           }
         });
       }
-      siteMap.set(String(mediaDoc._id), {
-        mediaId: mediaDoc._id,
-        mediaCode: mediaDoc.mediaCode,
-        mediaName: mediaDoc.mediaName,
-        totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
-        gstAmount: resolvedSiteGstAmount,
-        gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
-        // updatedAt: mediaDoc.updatedAt, // ✅ ADDED — needed for latestActivityAt sort below
-        updatedAt: siteLatestActivityAt, // ✅ ADDED — needed for latestActivityAt sort below
-        ownerIds: ownerIdsOnThisSite,
-        _overallSummary: overallSummary, // ✅ ADDED for filtering
-        rentalStatus: {
-          hasApprovedSite,
-          hasPendingSite,
-          isOverDueSite,
-        },
-        ownersDetail: ownersOnThisSite.map((o) => {
-          const pc = Number(o.paymentCategory || 1);
-          const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
-          const calcOwnerGst = (owner) => {
-            let base = 0;
-            if (pc === 2) base = Number(owner.shareAmount || 0);
-            else if (pc === 3) base = Number(owner.onlineAmount || 0);
-            return Math.round((base * envGstPct) / 100);
-          };
+      const details = mediaDoc.mediaDetails || [];
+      details.forEach((face) => {
+        const faceId = String(face._id);
+        const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
 
-          let oGst = Number(o.gstAmount || 0);
+        siteMap.set(uniqueFaceKey, {
+          mediaId: mediaDoc._id,
+          mediaDetailId: face._id,
+          mediaCode: face.mediaCode,
+          mediaName: face.mediaName,
+          mediaDetailsCount: 1,
+          totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
+          gstAmount: resolvedSiteGstAmount,
+          gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
+          updatedAt: siteLatestActivityAt,
+          ownerIds: ownerIdsOnThisSite,
+          _overallSummary: overallSummary,
+          rentalStatus: {
+            hasApprovedSite,
+            hasPendingSite,
+            isOverDueSite,
+          },
+          ownersDetail: ownersOnThisSite.map((o) => {
+            const pc = Number(o.paymentCategory || 1);
+            const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
+            const calcOwnerGst = (owner) => {
+              let base = 0;
+              if (pc === 2) base = Number(owner.shareAmount || 0);
+              else if (pc === 3) base = Number(owner.onlineAmount || 0);
+              return Math.round((base * envGstPct) / 100);
+            };
 
-          // Strategy 1: Explicitly applicable
-          if (oGst === 0 && Number(o.gstApplicable) === 1) {
-            oGst = calcOwnerGst(o);
-          }
+            let oGst = Number(o.gstAmount || 0);
 
-          // Strategy 2: Site has GST but owner is missing it (e.g. site-level flag 1 or 0)
-          if (oGst === 0 && resolvedSiteGstAmount > 0) {
-            // If site-level GST, split it. If owner-level, re-calc if they are likely candidates
-            if (siteGstFlag === 1 || siteGstFlag === 0) {
-              oGst = Math.round(
-                resolvedSiteGstAmount / (ownersOnThisSite.length || 1),
-              );
-            } else if (siteGstFlag === 2 && Number(o.gstApplicable) === 1) {
+            if (oGst === 0 && Number(o.gstApplicable) === 1) {
               oGst = calcOwnerGst(o);
             }
-          }
 
-          return {
-            landOwnerMasterId: String(o.landOwnerMasterId),
-            paymentCategory: o.paymentCategory,
-            shareAmount: o.shareAmount || 0,
-            gstAmount: oGst,
-            netPayableToOwner: (o.shareAmount || 0) + oGst,
-            onlineAmount: o.onlineAmount || 0,
-            cashAmount: o.cashAmount || 0,
-            tdsAmount: o.tdsAmount || 0,
-          };
-        }),
-        rentalDue: rentalDue, // ✅ STORE FOR RESPONSE
+            if (oGst === 0 && resolvedSiteGstAmount > 0) {
+              if (siteGstFlag === 1 || siteGstFlag === 0) {
+                oGst = Math.round(
+                  resolvedSiteGstAmount / (ownersOnThisSite.length || 1),
+                );
+              } else if (siteGstFlag === 2 && Number(o.gstApplicable) === 1) {
+                oGst = calcOwnerGst(o);
+              }
+            }
+
+            return {
+              landOwnerMasterId: String(o.landOwnerMasterId),
+              paymentCategory: o.paymentCategory,
+              shareAmount: o.shareAmount || 0,
+              gstAmount: oGst,
+              netPayableToOwner: (o.shareAmount || 0) + oGst,
+              onlineAmount: o.onlineAmount || 0,
+              cashAmount: o.cashAmount || 0,
+              tdsAmount: o.tdsAmount || 0,
+            };
+          }),
+          rentalDue: rentalDue,
+          isFaceEntry: true,
+        });
       });
     });
 
@@ -2334,6 +2395,7 @@ const landOwnerSiteFilter = async (req, res) => {
 
       return {
         mediaId: site.mediaId,
+        mediaDetailId: site.mediaDetailId, // ✅ ADDED
         mediaCode: site.mediaCode,
         mediaName: site.mediaName,
         baseRent: site.totalRentalAmount,
@@ -2348,12 +2410,22 @@ const landOwnerSiteFilter = async (req, res) => {
     };
 
     const buildAmounts = (sites) => {
-      const totalBaseRent = sites.reduce(
+      // ✅ Use unique Media IDs for financial totals to avoid doubling amounts for multi-face docs
+      const uniqueDocs = [];
+      const seenIds = new Set();
+      sites.forEach(s => {
+          if (!seenIds.has(String(s.mediaId))) {
+              uniqueDocs.push(s);
+              seenIds.add(String(s.mediaId));
+          }
+      });
+
+      const totalBaseRent = uniqueDocs.reduce(
         (s, site) => s + site.totalRentalAmount,
         0,
       );
-      const gstHoldTotal = sites.reduce((s, site) => s + site.gstAmount, 0);
-      const tdsHoldTotal = sites.reduce((s, site) => {
+      const gstHoldTotal = uniqueDocs.reduce((s, site) => s + site.gstAmount, 0);
+      const tdsHoldTotal = uniqueDocs.reduce((s, site) => {
         return (
           s +
           (site.ownersDetail || []).reduce(
@@ -2437,7 +2509,9 @@ const landOwnerSiteFilter = async (req, res) => {
         isOverDue: false,
       };
 
+      const processedDocIds = new Set();
       sites.forEach((site) => {
+        const docIdStr = String(site.mediaId);
         const ownerDetail = site.ownersDetail?.find(
           (od) => od.landOwnerMasterId === ownerId,
         );
@@ -2450,7 +2524,7 @@ const landOwnerSiteFilter = async (req, res) => {
           totalTdsAmount += ownerDetail.tdsAmount;
           lastPaymentCategory = ownerDetail.paymentCategory;
         }
-        // ✅ ADDED
+
         if (
           site.updatedAt &&
           (!latestActivityAt ||
@@ -2465,15 +2539,15 @@ const landOwnerSiteFilter = async (req, res) => {
           rentalStatusMatch.hasPending = true;
         if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
 
-        if (site._overallSummary) {
+        if (site._overallSummary && !processedDocIds.has(docIdStr)) {
           if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
           if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
           if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
           if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
         }
 
-        if (needsLedgerFields) {
-          const siteBucket = getLedgerBucketsForSite(String(site.mediaId), [
+        if (needsLedgerFields && !processedDocIds.has(docIdStr)) {
+          const siteBucket = getLedgerBucketsForSite(docIdStr, [
             ownerId,
           ]);
           combinedLedger.currentMonthEntries.push(
@@ -2491,15 +2565,16 @@ const landOwnerSiteFilter = async (req, res) => {
           combinedLedger.currentGstPending += siteBucket.currentGstPending;
           combinedLedger.pastGstPending += siteBucket.pastGstPending;
           combinedLedger.currentRentPending +=
-            siteBucket.currentRentPending || 0; // ✅ ADDED
-          combinedLedger.pastRentPending += siteBucket.pastRentPending || 0; // ✅ ADDED
+            siteBucket.currentRentPending || 0;
+          combinedLedger.pastRentPending += siteBucket.pastRentPending || 0;
         }
+        processedDocIds.add(docIdStr);
       });
 
       const entryPayload = {
         entryType: "single",
         landOwnerMasterId: ownerId,
-        totalSites: sites.length,
+        totalSites: sites.reduce((sum, s) => sum + (s.mediaDetailsCount || 0), 0), // ✅ CHANGED
         totalLandOwners: 1,
         ...buildAmounts(sites),
         landOwners: [
@@ -2685,7 +2760,9 @@ const landOwnerSiteFilter = async (req, res) => {
       };
 
       // if (needsLedgerFields || needsRentalStatusFields) {
+      const processedDocIds = new Set();
         group.sites.forEach((site) => {
+          const docIdStr = String(site.mediaId);
           if (site.rentalStatus.hasApprovedSite)
             rentalStatusMatch.hasApproved = true;
           if (site.rentalStatus.hasPendingSite)
@@ -2693,16 +2770,16 @@ const landOwnerSiteFilter = async (req, res) => {
           if (site.rentalStatus.isOverDueSite)
             rentalStatusMatch.isOverDue = true;
 
-          if (site._overallSummary) {
+          if (site._overallSummary && !processedDocIds.has(docIdStr)) {
             if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
             if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
             if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
             if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
           }
 
-          if (needsLedgerFields) {
+          if (needsLedgerFields && !processedDocIds.has(docIdStr)) {
             const siteBucket = getLedgerBucketsForSite(
-              String(site.mediaId),
+              docIdStr,
               group.ownerIds,
             );
             combinedLedger.currentMonthEntries.push(
@@ -2722,16 +2799,17 @@ const landOwnerSiteFilter = async (req, res) => {
             combinedLedger.currentGstPending += siteBucket.currentGstPending;
             combinedLedger.pastGstPending += siteBucket.pastGstPending;
             combinedLedger.currentRentPending +=
-              siteBucket.currentRentPending || 0; // ✅ ADDED
-            combinedLedger.pastRentPending += siteBucket.pastRentPending || 0; // ✅ ADDED
+              siteBucket.currentRentPending || 0;
+            combinedLedger.pastRentPending += siteBucket.pastRentPending || 0;
           }
+          processedDocIds.add(docIdStr);
         });
       // }
 
       const entryPayload = {
         entryType: "shared",
         totalLandOwners: landOwners.length,
-        totalSites: group.sites.length,
+        totalSites: group.sites.reduce((sum, s) => sum + (s.mediaDetailsCount || 0), 0), // ✅ CHANGED
         gstApplicable: anyGstApplicable ? 1 : 0,
         ...amounts,
         landOwners,
@@ -2853,8 +2931,8 @@ const landOwnerSiteFilter = async (req, res) => {
     };
 
     const globalMediaDocs = await MediaOnboarding.find(
-      { status: 1 },
-      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
+      { "mediaDetails.status": 1 },
+      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
     ).lean();
 
     // ✅ ensure rentalDue exists for global docs to ensure system-wide accuracy

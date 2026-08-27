@@ -10,6 +10,7 @@ const {
   syncOrLinkMediaOwnerToMaster,
   correctLinkedSiteAmounts,
 } = require("../landOwnerMasterController/landOwnerMasterController");
+const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
 
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
@@ -1529,6 +1530,7 @@ const mediaOnboarding = async (req, res) => {
     const userName = req.user?.userName || "Admin";
 
     const jsonFields = [
+      "mediaDetails",
       "landOwners",
       "rentalPayment",
       "agreement",
@@ -1819,13 +1821,18 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
     }
 
-    if (mediaData.width) mediaData.width = Number(mediaData.width);
-    if (mediaData.height) mediaData.height = Number(mediaData.height);
-    if (mediaData.status) mediaData.status = Number(mediaData.status);
+    if (mediaData.mediaDetails && Array.isArray(mediaData.mediaDetails)) {
+      mediaData.mediaDetails = mediaData.mediaDetails.map((detail) => ({
+        ...detail,
+        width: detail.width !== undefined ? Number(detail.width) : detail.width,
+        height: detail.height !== undefined ? Number(detail.height) : detail.height,
+        status: detail.status !== undefined ? Number(detail.status) : detail.status,
+        siteBillMode: detail.siteBillMode !== undefined ? Number(detail.siteBillMode) : detail.siteBillMode,
+      }));
+    }
+
     if (mediaData.numberOfLandOwners)
       mediaData.numberOfLandOwners = Number(mediaData.numberOfLandOwners);
-    if (mediaData.siteBillMode)
-      mediaData.siteBillMode = Number(mediaData.siteBillMode);
     let existingMediaForValidation = null;
     if (id) {
       existingMediaForValidation = await MediaOnboarding.findById(id);
@@ -2194,11 +2201,17 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       // edits (name, amounts, GST/TDS, etc.) into the linked Master
       // record. Owners without a landOwnerMasterId are skipped.
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        const details = mediaData.mediaDetails || media.mediaDetails || [];
         const mediaInfo = {
           mediaId: media._id,
-          mediaCode: mediaData.mediaCode || media.mediaCode,
-          mediaName: mediaData.mediaName || media.mediaName,
-          siteBillMode: mediaData.siteBillMode || media.siteBillMode,
+          faces: details.map(d => ({
+            _id: d._id,
+            mediaCode: d.mediaCode,
+            mediaName: d.mediaName,
+            totalSqFt: d.totalSqFt,
+            siteBillMode: d.siteBillMode
+          })),
+          siteBillMode: details[0]?.siteBillMode,
         };
 
         for (const owner of mediaData.landOwners) {
@@ -2219,18 +2232,21 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
             // );
             const otherSites = linkedMaster.linkedSites;
             // ✅ CHANGED — full field parity with LandOwnerMaster.linkedSites
-            owner.linkedSites = otherSites.map((site) => ({
-              mediaId: site.mediaId,
-              mediaCode: site.mediaCode,
-              mediaName: site.mediaName,
-              siteBillMode: site.siteBillMode,
-              paymentCategory: site.paymentCategory,
-              shareAmount: site.shareAmount,
-              cashAmount: site.cashAmount,
-              onlineAmount: site.onlineAmount,
-              updatedAt: site.updatedAt,
-            }));
-            owner.linkedMediaCount = otherSites.length;
+            owner.linkedSites = otherSites.map((site) => {
+              return {
+                mediaId: site.mediaId,
+                mediaDetailId: site.mediaDetailId, // ✅ Individual face ID
+                mediaCode: site.mediaCode,
+                mediaName: site.mediaName,
+                siteBillMode: site.siteBillMode,
+                paymentCategory: site.paymentCategory,
+                shareAmount: site.shareAmount,
+                cashAmount: site.cashAmount,
+                onlineAmount: site.onlineAmount,
+                updatedAt: site.updatedAt,
+              };
+            });
+            owner.linkedMediaCount = linkedMaster.linkedMediaCount;
           } else {
             owner.linkedSites = [];
             owner.linkedMediaCount = 0;
@@ -2348,7 +2364,8 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       });
       media.updatedAt = nowIST();
       await media.save({ timestamps: false });
-      media = await MediaOnboarding.findById(media._id).lean();
+      await generateMissedEntriesForMedia(media, userName);
+      media = (await MediaOnboarding.findById(media._id)).toObject({ virtuals: true });
       if (media.landOwners && Array.isArray(media.landOwners)) {
         for (const savedOwner of media.landOwners) {
           if (savedOwner.landOwnerMasterId) {
@@ -2398,11 +2415,17 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         const generatedMediaId = new mongoose.Types.ObjectId();
         mediaData._id = generatedMediaId;
 
+        const details = mediaData.mediaDetails || [];
         const mediaInfo = {
           mediaId: generatedMediaId,
-          mediaCode: mediaData.mediaCode,
-          mediaName: mediaData.mediaName,
-          siteBillMode: mediaData.siteBillMode,
+          faces: details.map(d => ({
+            _id: d._id,
+            mediaCode: d.mediaCode,
+            mediaName: d.mediaName,
+            totalSqFt: d.totalSqFt,
+            siteBillMode: d.siteBillMode
+          })),
+          siteBillMode: details[0]?.siteBillMode,
         };
 
         for (const owner of mediaData.landOwners) {
@@ -2419,18 +2442,21 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
             //   (site) => String(site.mediaId) !== String(mediaInfo.mediaId),
             // );
             const otherSites = linkedMaster.linkedSites;
-            owner.linkedSites = otherSites.map((site) => ({
-              mediaId: site.mediaId,
-              mediaCode: site.mediaCode,
-              mediaName: site.mediaName,
-              siteBillMode: site.siteBillMode,
-              paymentCategory: site.paymentCategory,
-              shareAmount: site.shareAmount,
-              cashAmount: site.cashAmount,
-              onlineAmount: site.onlineAmount,
-              updatedAt: site.updatedAt,
-            }));
-            owner.linkedMediaCount = otherSites.length;
+            owner.linkedSites = otherSites.map((site) => {
+              return {
+                mediaId: site.mediaId,
+                mediaCode: site.mediaCode,
+                mediaName: site.mediaName,
+                mediaDetailsCount: site.mediaDetailsCount,
+                siteBillMode: site.siteBillMode,
+                paymentCategory: site.paymentCategory,
+                shareAmount: site.shareAmount,
+                cashAmount: site.cashAmount,
+                onlineAmount: site.onlineAmount,
+                updatedAt: site.updatedAt,
+              };
+            });
+            owner.linkedMediaCount = linkedMaster.linkedMediaCount; // ✅ Uses the Master's aggregated count
           } else {
             owner.linkedSites = [];
             owner.linkedMediaCount = 0;
@@ -2497,7 +2523,8 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       mediaData.updatedAt = nowIST();
       media = new MediaOnboarding(mediaData);
       await media.save({ timestamps: false });
-      media = await MediaOnboarding.findById(media._id).lean();
+      await generateMissedEntriesForMedia(media, userName);
+      media = (await MediaOnboarding.findById(media._id)).toObject({ virtuals: true });
       // ✅ ADDED — same pass-2 correction as UPDATE branch.
       if (media.landOwners && Array.isArray(media.landOwners)) {
         for (const savedOwner of media.landOwners) {
@@ -3072,12 +3099,13 @@ const mediaList = async (req, res) => {
       searchFilter = {
         $or: [
           { mediaId: searchRegex },
-          { mediaCode: searchRegex },
-          { mediaName: searchRegex },
-          { mediaType: searchRegex },
-          { state: searchRegex },
-          { city: searchRegex },
-          { location: searchRegex },
+          { "mediaDetails.mediaCode": searchRegex },
+          { "mediaDetails.mediaName": searchRegex },
+          { "mediaDetails.mediaType": searchRegex },
+          { "mediaDetails.state": searchRegex },
+          { "mediaDetails.city": searchRegex },
+          { "mediaDetails.location": searchRegex },
+          { "landOwners.name": searchRegex },
         ],
       };
     }
@@ -3087,9 +3115,9 @@ const mediaList = async (req, res) => {
     // ===============================
 
     const filter = {};
-    if (city) filter.city = Array.isArray(city) ? { $in: city } : city;
+    if (city) filter["mediaDetails.city"] = Array.isArray(city) ? { $in: city } : city;
     if (mediaType) {
-      filter.mediaType = Array.isArray(mediaType)
+      filter["mediaDetails.mediaType"] = Array.isArray(mediaType)
         ? { $in: mediaType }
         : mediaType;
     }
@@ -3125,7 +3153,7 @@ if (landOwnerMasterId) {
       const orConditions = [];
 
       if (regularStatuses.length > 0) {
-        orConditions.push({ status: { $in: regularStatuses } });
+        orConditions.push({ "mediaDetails.status": { $in: regularStatuses } });
       }
       if (statusNums.includes(4)) {
         orConditions.push({ "agreement.status": 2 });
@@ -3174,8 +3202,17 @@ if (landOwnerMasterId) {
       .limit(pageSize)
       .lean();
 
-    // ✅ Sort rentalAmountHistory by updatedAt DESC for each media item
+    // ✅ Process each media item to provide aggregated summary fields
     mediaListData.forEach((item) => {
+      if (Array.isArray(item.mediaDetails)) {
+        item.mediaName = item.mediaDetails.map(d => d.mediaName).join(", ");
+        item.mediaCode = item.mediaDetails.map(d => d.mediaCode).join(" / ");
+        item.totalSqFt = item.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
+        item.mediaType = item.mediaDetails[0]?.mediaType;
+        item.city = item.mediaDetails[0]?.city;
+        item.state = item.mediaDetails[0]?.state;
+        item.location = item.mediaDetails[0]?.location;
+      }
       if (item.rentalPayment?.rentalAmountHistory) {
         item.rentalPayment.rentalAmountHistory.sort(
           (a, b) => b.updatedAt - a.updatedAt
@@ -3211,7 +3248,7 @@ if (landOwnerMasterId) {
     // Get active count - using numeric status value (adjust based on your schema)
     // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
     const activeCount = await MediaOnboarding.countDocuments({
-      status: 1, // Change this to match your active status number
+      "mediaDetails.status": 1, // Change this to match your active status number
     });
 
     // Get agreement expired count (agreement.status = 3)
@@ -3245,14 +3282,14 @@ if (landOwnerMasterId) {
 
     const allData = await MediaOnboarding.find(
       {},
-      "city mediaType status landOwners.name",
+      "mediaDetails.city mediaDetails.mediaType mediaDetails.status landOwners.name",
     ).lean();
 
-    const cityFilter = [...new Set(allData.map((item) => item.city))].filter(
+    const cityFilter = [...new Set(allData.flatMap((item) => (item.mediaDetails || []).map(d => d.city)))].filter(
       Boolean,
     );
     const mediaTypeFilter = [
-      ...new Set(allData.map((item) => item.mediaType)),
+      ...new Set(allData.flatMap((item) => (item.mediaDetails || []).map(d => d.mediaType))),
     ].filter(Boolean);
 const allLandOwnersForNameFilter = await LandOwnerMaster.find({})
   .select("name updatedAt")
@@ -3302,6 +3339,17 @@ const getMediaById = async (req, res) => {
     // Check if media exists
     if (!mediaData) {
       return errorResponse(res, "Media not found", null, 404);
+    }
+
+    // ✅ Aggregated summary fields
+    if (Array.isArray(mediaData.mediaDetails)) {
+      mediaData.mediaName = mediaData.mediaDetails.map(d => d.mediaName).join(", ");
+      mediaData.mediaCode = mediaData.mediaDetails.map(d => d.mediaCode).join(" / ");
+      mediaData.totalSqFt = mediaData.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
+      mediaData.mediaType = mediaData.mediaDetails[0]?.mediaType;
+      mediaData.city = mediaData.mediaDetails[0]?.city;
+      mediaData.state = mediaData.mediaDetails[0]?.state;
+      mediaData.location = mediaData.mediaDetails[0]?.location;
     }
 
     // ✅ Sort rentalAmountHistory by updatedAt DESC
@@ -3435,30 +3483,35 @@ const uploadExcel = async (req, res) => {
         continue;
       }
 
-      mapped.width = Math.floor(Number(mapped.width) || 0);
-      mapped.height = Math.floor(Number(mapped.height) || 0);
-      mapped.totalSqFt = Math.floor((mapped.width * mapped.height).toFixed(2));
-      mapped.excelRowNumber = excelRow;
+      const mediaDetail = {
+        mediaCode: mapped.mediaCode,
+        mediaName: mapped.mediaName,
+        mediaType: mapped.mediaType,
+        state: mapped.state,
+        city: mapped.city,
+        location: mapped.location || "",
+        width: Math.floor(Number(mapped.width) || 0),
+        height: Math.floor(Number(mapped.height) || 0),
+      };
+      mediaDetail.totalSqFt = mediaDetail.width * mediaDetail.height;
 
-      // ── Assign unique mediaId from in-memory counter ──
-      mapped.mediaId = `${prefix}MED#${nextNumber}`;
-
-      // ✅ Reversed index-based offset: first row gets HIGHEST timestamp
-      // so it appears at the TOP of the dashboard (sort: { updatedAt: -1 })
-      const rowTimestamp = new Date(today.getTime() + (rows.length - index));
-      mapped.createdAt = rowTimestamp;
-      mapped.updatedAt = rowTimestamp;
+      const mediaDocData = {
+        mediaId: `${prefix}MED#${nextNumber}`,
+        mediaDetails: [mediaDetail],
+        excelRowNumber: excelRow,
+        createdAt: new Date(today.getTime() + (rows.length - index)),
+        updatedAt: new Date(today.getTime() + (rows.length - index)),
+      };
 
       nextNumber++;
-      // ─────────────────────────────────────────────────
 
-      const { mediaCode, createdAt, mediaId, ...dataToUpdate } = mapped;
       bulkOps.push({
         updateOne: {
-          filter: { mediaCode },
+          filter: { "mediaDetails.mediaCode": mapped.mediaCode },
           update: {
-            $set: dataToUpdate,
-            $setOnInsert: { createdAt, mediaId },
+            $set: {
+              ...mediaDocData,
+            },
           },
           upsert: true,
         },

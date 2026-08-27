@@ -302,17 +302,16 @@ function getCurrentBillDate(media, requestedMonthYear) {
     // caller explicitly wants a specific month evaluated
     liveMonthLabel = `${MONTH_NAMES[requestedMonthYear.month - 1]} ${requestedMonthYear.year}`;
   } else {
-    const nextBillingDate = media.rentalPayment?.nextBillingDate;
-    if (!nextBillingDate) return media.rentalPayment?.lastBillPaidDate || "";
-    const d = new Date(nextBillingDate);
-    if (Number.isNaN(d.getTime())) return media.rentalPayment?.lastBillPaidDate || "";
+    // ✅ FIXED — use lastBillPaidDate as the anchor for "Current Bill" when no month requested.
+    // nextBillingDate is usually the FUTURE cycle which might not have an entry yet.
+    const anchorDate = media.rentalPayment?.lastBillPaidDate || media.rentalPayment?.nextBillingDate;
+    if (!anchorDate) return "";
+    const d = new Date(anchorDate);
+    if (Number.isNaN(d.getTime())) return "";
     liveMonthLabel = `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   }
 
-  // ✅ dueMonth-based match — same label comparison style as
-  // classifyDueMonthTargetType/isLiveCycleMonthLabel elsewhere in
-  // this file.
-  // ✅ FIXED — pick best match (Approved wins) if duplicates exist
+  // ✅ dueMonth-based match
   const matchedDue = (media.rentalDue || [])
     .filter(
       (due) =>
@@ -327,7 +326,9 @@ function getCurrentBillDate(media, requestedMonthYear) {
       return new Date(b.updatedAt) - new Date(a.updatedAt);
     })[0];
 
-  return matchedDue ? media.rentalPayment?.lastBillPaidDate || "" : "";
+  // ✅ FIXED — return the actual dueDate of the matched entry,
+  // falling back to lastBillPaidDate ONLY if no entry matched.
+  return matchedDue ? matchedDue.dueDate : (media.rentalPayment?.lastBillPaidDate || "");
 }
 /** Sum of unpaid rows in rentalPayment.gstOutstandingHistory (pre-onboarding legacy GST debt) */
 function sumUnpaidGstOutstanding(media) {
@@ -490,7 +491,7 @@ function sumUnpaidPastCycleRent(media, requestedMonthYear) {
 }
 
 function computeOutstandingSummary(media, requestedMonthYear) {
-  if (media.status !== 1) {
+  if (!media.mediaDetails?.some(d => d.status === 1)) {
     return {
       currentBaseRent: 0,
       currentGSTDue: 0,
@@ -1148,7 +1149,8 @@ exports.createLedgerEntry = async (req, res) => {
     if (!media)
       return errorResponse(res, "Media not found for given mediaId", null, 404);
 
-    if (media.status !== 1) {
+    const isActive = (media.mediaDetails || []).some(d => d.status === 1);
+    if (!isActive) {
       return errorResponse(res, "Ledger can only be created for active media", null, 400);
     }
 
@@ -1441,7 +1443,7 @@ exports.createLedgerEntry = async (req, res) => {
           monthBucket.entries.push({
             landOwnerId: matchedOwner ? matchedOwner._id : null,
             landOwnerName: matchedOwner ? matchedOwner.name : "",
-            mediaName: media.mediaName,
+            mediaName: media.mediaDetails?.map(d => d.mediaName).join(", ") || "",
             paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: media.rentalPayment.netPayable,
             nextBillingDate: media.rentalPayment.nextBillingDate,
@@ -2025,7 +2027,13 @@ async function executeBulkPaymentBatch(req, batchData) {
     try {
       const media = await Media.findById(mId);
       if (!media) throw new Error(`Media not found: ${mId}`);
-      if (media.status !== 1) throw new Error(`Active media required: ${media.mediaName}`);
+
+      // ✅ FIXED — Status and Name check for MediaOnboardingSchema structure
+      const details = media.mediaDetails || [];
+      const isActive = details.some(d => d.status === 1);
+      const siteDisplayName = details.map(d => d.mediaName).join(", ") || "Unknown Site";
+
+      if (!isActive) throw new Error(`Active media required: ${siteDisplayName}`);
 
       // ✅ Initialize arrays if missing
       if (!Array.isArray(media.ledger)) media.ledger = [];
@@ -2357,15 +2365,15 @@ exports.listMediaByLedger = async (req, res) => {
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
 
-    const filter = { status: 1 };
+    const filter = { "mediaDetails.status": 1 };
     if (!(Array.isArray(req.body.mediaId) && req.body.mediaId.length > 0)) {
       filter.rentalStatus = 3;
     }
 
     if (search) {
       filter.$or = [
-        { mediaName: { $regex: search, $options: "i" } },
-        { mediaCode: { $regex: search, $options: "i" } },
+        { "mediaDetails.mediaName": { $regex: search, $options: "i" } },
+        { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
       ];
     }
 
@@ -2435,11 +2443,14 @@ exports.listMediaByLedger = async (req, res) => {
           $elemMatch: { status: 1 },
         };
       } else if (statusNum === 0) {
-        filter.$or = [
-          { ledger: { $exists: false } },
-          { ledger: { $size: 0 } },
-          { "ledger.status": 0 },
-        ];
+        if (!filter.$and) filter.$and = [];
+        filter.$and.push({
+          $or: [
+            { ledger: { $exists: false } },
+            { ledger: { $size: 0 } },
+            { "ledger.status": 0 },
+          ],
+        });
       } else if (statusNum === 2) {
         filter["gstBalanceHistory"] = {
           $exists: true,
@@ -2624,19 +2635,19 @@ exports.listMediaByLedger = async (req, res) => {
       needsFullFetch
         ? Media.find(filter)
             .select(
-              "mediaCode mediaName mediaType state status gstApplicableFlag siteBillMode city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
+              "mediaDetails gstApplicableFlag rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
             )
             .sort({ updatedAt: -1, _id: -1 })
         : Media.find(filter)
             .select(
-              "mediaCode mediaName mediaType state status gstApplicableFlag siteBillMode city location rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
+              "mediaDetails gstApplicableFlag rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
             )
             .sort({ updatedAt: -1, _id: -1 })
             .skip(skip)
             .limit(pageSize),
       Media.countDocuments(filter),
       Media.find(baseFilterForOverallCounts).select(
-        "status gstApplicableFlag rentalPayment ledgerHistory landOwners rentalDue gstBalanceHistory tdsBalanceHistory ledger",
+        "gstApplicableFlag rentalPayment ledgerHistory landOwners rentalDue gstBalanceHistory tdsBalanceHistory ledger mediaDetails",
       ),
     ]);
     const ownerMasterIdsInResults = [
@@ -2657,7 +2668,7 @@ exports.listMediaByLedger = async (req, res) => {
           },
         })
           .select(
-            "mediaCode mediaName siteBillMode landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.shareAmount landOwners.cashAmount landOwners.onlineAmount landOwners.updatedAt",
+            "mediaDetails landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.shareAmount landOwners.cashAmount landOwners.onlineAmount landOwners.updatedAt",
           )
           .lean()
       : [];
@@ -3777,11 +3788,12 @@ latestLedger = latestLedger.sort((a, b) => {
               (o) =>
                 String(o.landOwnerMasterId) === String(owner.landOwnerMasterId),
             );
+            const details = m.mediaDetails || [];
             return {
               mediaId: m._id,
-              mediaCode: m.mediaCode,
-              mediaName: m.mediaName,
-              siteBillMode: m.siteBillMode,
+              mediaCode: details.map(d => d.mediaCode).join(" / "),
+              mediaName: details.map(d => d.mediaName).join(", "),
+              siteBillMode: details[0]?.siteBillMode,
               paymentCategory: matchedOwnerOnThatSite?.paymentCategory,
               shareAmount: matchedOwnerOnThatSite?.shareAmount || 0,
               cashAmount: matchedOwnerOnThatSite?.cashAmount || 0,
@@ -3796,8 +3808,16 @@ latestLedger = latestLedger.sort((a, b) => {
           linkedSites: trueLinkedSites,
         };
       });
+      const details = mediaObj.mediaDetails || [];
       return {
         ...restOfMediaObj,
+        // mediaCode: details.map(d => d.mediaCode).join(" / "),
+        // mediaName: details.map(d => d.mediaName).join(", "),
+        // mediaType: details[0]?.mediaType,
+        // city: details[0]?.city,
+        // state: details[0]?.state,
+        // location: details[0]?.location,
+        // totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
         landOwners: correctedLandOwners,
         ledger: latestLedger,
         withGst1Ledger: withGst1Ledger,
@@ -4161,8 +4181,8 @@ latestLedger = latestLedger.sort((a, b) => {
     );
 
     const globalMediaDocs = await Media.find(
-      { status: 1 },
-      "status gstApplicableFlag mediaCode mediaName updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
+      { "mediaDetails.status": 1 },
+      "gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
     ).lean();
 
     // ✅ ensure rentalDue exists for global docs to ensure system-wide accuracy
@@ -4351,9 +4371,9 @@ exports.getLedgerHistory = async (req, res) => {
       rangeEnd = autoCurrentMonthYM;
     }
 
-    const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, status: 1 })
+    const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, "mediaDetails.status": 1 })
       .select(
-        "mediaName city mediaType mediaCode rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths status previousLedger",
+        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger",
       )
       .lean();
 
@@ -4553,12 +4573,15 @@ function buildSingleMediaHistoryBlock(
       previousGSTDue: 0,
       totalOutstandingAmount: 0,
     };
+    const details = media.mediaDetails || [];
     return {
-      mediaId: media._id,
-      mediaName: media.mediaName,
-      mediaType: media.mediaType,
-      mediaCode: media.mediaCode,
-      city: media.city,
+      // mediaId: media._id,
+      // mediaName: details.map(d => d.mediaName).join(", "),
+      // mediaType: details[0]?.mediaType,
+      // mediaCode: details.map(d => d.mediaCode).join(" / "),
+      // city: details[0]?.city,
+      // totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+      mediaDetails: details,
       landOwners: [],
       ledgerHistory: [],
        rentalDueEntries: buildAutoRentalDueEntries(media, autoCurrentMonthYM),
@@ -5980,12 +6003,15 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
   const currentBillDate = getCurrentBillDate(media, autoCurrentMonthYM);
 
+  const details = media.mediaDetails || [];
   return {
-    mediaId: media._id,
-    mediaName: media.mediaName,
-    mediaType: media.mediaType,
-    mediaCode: media.mediaCode,
-    city: media.city,
+    // mediaId: media._id,
+    // mediaName: details.map(d => d.mediaName).join(", "),
+    // mediaType: details[0]?.mediaType,
+    // mediaCode: details.map(d => d.mediaCode).join(" / "),
+    // city: details[0]?.city,
+    // totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+    mediaDetails: details,
     rentalPayment: media.rentalPayment,
     landOwners: matchingLandOwners,
     agreement: media.agreement,
@@ -6043,7 +6069,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     };
   });
 
-  if (media.status !== 1 || owners.length === 0) return result;
+  if (!media.mediaDetails?.some(d => d.status === 1) || owners.length === 0) return result;
 
   const cycles = getAllDueCycles(media, requestedMonthYear);
   if (cycles.length === 0) return result;
@@ -6169,7 +6195,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     hasDueMonth: false      // ✅ NEW
   };
 
-  if (media.status !== 1 || cycles.length === 0) return result;
+  if (!media.mediaDetails?.some(d => d.status === 1) || cycles.length === 0) return result;
 
   const expectedGstPerCycle = resolveExpectedGstForCycle(media);
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);

@@ -366,62 +366,65 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
 // ─────────────────────────────────────────────────────────────
 const MediaSchema = new mongoose.Schema(
   {
-    mediaCode: {
-      type: String,
-      required: true,
-    },
-    mediaName: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    mediaType: {
-      type: String,
-      required: true,
-    },
-    state: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    city: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    location: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    width: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    height: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    totalSqFt: {
-      type: Number,
-      min: 0,
-    },
-    status: {
-      type: Number,
-      enum: [1, 2, 3], // 1=Active 2=InActive 3=Hold
-      default: 2,
-    },
+    mediaDetails: [
+      {
+        mediaCode: {
+          type: String,
+          required: true,
+        },
+        mediaName: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        mediaType: {
+          type: String,
+          required: true,
+        },
+        state: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        city: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        location: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        width: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+        height: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+        totalSqFt: {
+          type: Number,
+          min: 0,
+        },
+        status: {
+          type: Number,
+          enum: [1, 2, 3], // 1=Active 2=InActive 3=Hold
+          default: 2,
+        },
+        siteBillMode: {
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
+      },
+    ],
     numberOfLandOwners: {
       type: Number,
       min: 1,
-    },
-    siteBillMode: {
-      // ← ADDED
-      type: Number,
-      enum: [1, 2], // 1 = single, 2 = seperate
-      default: null,
     },
     landOwnerMasterIds: [
       // ← ADD THIS
@@ -910,8 +913,13 @@ const MediaSchema = new mongoose.Schema(
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
   },
-  { timestamps: false },
+  { timestamps: false, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );
+
+// ✅ NEW: Alias for backward compatibility with controllers expecting rentalDueEntries
+MediaSchema.virtual("rentalDueEntries").get(function () {
+  return this.rentalDue || [];
+});
 
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 1 — Total Sq Ft
@@ -923,7 +931,11 @@ MediaSchema.post("init", function (doc) {
 });
 
 MediaSchema.pre("save", function () {
-  this.totalSqFt = this.width * this.height;
+  if (Array.isArray(this.mediaDetails)) {
+    this.mediaDetails.forEach((detail) => {
+      detail.totalSqFt = (detail.width || 0) * (detail.height || 0);
+    });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1317,25 +1329,10 @@ MediaSchema.pre("save", function () {
     let nextDate = new Date(cursor);
     nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
 
-    let safety = 0;
-    while (safety < 240) {
-      // If the NEXT billing date month has already started, advance.
-      const nextMonthStarted =
-        nextDate.getUTCFullYear() < now.getUTCFullYear() ||
-        (nextDate.getUTCFullYear() === now.getUTCFullYear() &&
-          nextDate.getUTCMonth() <= now.getUTCMonth());
-
-      if (!nextMonthStarted) break;
-
-      rp.previousBillGenerateDate = new Date(cursor);
-      cursor = new Date(nextDate);
-      nextDate = new Date(cursor);
-      nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
-
-      rp.lastBillPaidDate = cursor;
-      safety++;
-    }
-
+    // ✅ FIXED: removed auto-catchup loop that was silently advancing lastBillPaidDate
+    // and skipping cycles without creating rentalDue records.
+    // The actual advancement is now handled by the controllers via generateMissedEntriesForMedia
+    // which ensures records are created for every elapsed cycle.
     rp.nextBillingDate = nextDate;
 
     // ✅ NEW: Sync rentalDue entry if lastBillPaidDate was manually tweaked
@@ -1507,10 +1504,10 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
       media.rentalPayment.nextBillingDate = addMonthsUTC(cursor, cycleMonths);
       await media.save({ timestamps: false });
       updatedCount++;
-      debugLog.push({ mediaName: media.mediaName, advancedTo: cursor });
+      debugLog.push({ mediaName: mediaName, advancedTo: cursor });
     } else {
       debugLog.push({
-        mediaName: media.mediaName,
+        mediaName: mediaName,
         notAdvanced: true,
         lastBillPaidDate,
         nextCycleWouldBe: addMonthsUTC(new Date(lastBillPaidDate), cycleMonths),

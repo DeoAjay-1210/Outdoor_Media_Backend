@@ -434,30 +434,37 @@ function ensureNextBillingDateSeed(media) {
 // controllers derive the identical cycle list from the identical
 // anchor, so rental-list is self-sufficient on the very first call.
 async function generateMissedEntriesForMedia(media, userName) {
-  if (Number(media.status) !== 1) {
+  if (!media.mediaDetails?.some(d => d.status === 1)) {
     return { generatedEntries: [] };
   }
 
   if (!Array.isArray(media.rentalDue)) media.rentalDue = [];
   if (!Array.isArray(media.rentalDueHistory)) media.rentalDueHistory = [];
 
+  const siteBillMode = media.siteBillMode || media.mediaDetails?.[0]?.siteBillMode || 1;
+
   if (media.rentalPayment?.lastBillPaidDate) {
     const lbpDate = new Date(media.rentalPayment.lastBillPaidDate);
     if (!Number.isNaN(lbpDate.getTime())) {
       const lbpMonthLabel = getDueMonthLabel(lbpDate);
-      const matchingEntry = media.rentalDue.find(
-        (e) => e.dueMonth === lbpMonthLabel,
-      );
-      if (
-        matchingEntry &&
-        new Date(matchingEntry.dueDate).getTime() !== lbpDate.getTime()
-      ) {
-        const syncResult = await atomicallyEnsureOrUpdateRentalDueEntry(
-          media._id,
-          { dueMonth: lbpMonthLabel, dueDate: lbpDate },
+
+      const facesToSync = siteBillMode === 2 ? media.mediaDetails : [null];
+      for (const face of facesToSync) {
+        const faceId = face ? face._id : null;
+        const matchingEntry = media.rentalDue.find(
+          (e) => e.dueMonth === lbpMonthLabel && String(e.mediaDetailId || "") === String(faceId || ""),
         );
-        if (syncResult.result) {
-          media.rentalDue = syncResult.result.rentalDue;
+        if (
+          matchingEntry &&
+          new Date(matchingEntry.dueDate).getTime() !== lbpDate.getTime()
+        ) {
+          const syncResult = await atomicallyEnsureOrUpdateRentalDueEntry(
+            media._id,
+            { dueMonth: lbpMonthLabel, dueDate: lbpDate, mediaDetailId: faceId },
+          );
+          if (syncResult.result) {
+            media.rentalDue = syncResult.result.rentalDue;
+          }
         }
       }
     }
@@ -466,15 +473,12 @@ async function generateMissedEntriesForMedia(media, userName) {
   const cycleMonths = getCycleMonthsForFrequency(media);
   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
 
-  // ✅ SAME anchor priority as getAllDueCycles: billingStartDate first,
-  // lastBillPaidDate as fallback for older docs.
   const billingStartDate = media.rentalPayment?.billingStartDate;
   const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
   const anchorRaw = billingStartDate || lastBillPaidDate;
   if (!anchorRaw) return { generatedEntries: [] };
 
   const anchorDateObj = new Date(anchorRaw);
-  // Use Date.UTC to create a date at midnight UTC, avoiding timezone shifts.
   const anchorMonthStart = new Date(Date.UTC(
     anchorDateObj.getUTCFullYear(),
     anchorDateObj.getUTCMonth(),
@@ -482,11 +486,8 @@ async function generateMissedEntriesForMedia(media, userName) {
   ));
 
   const today = new Date();
-  const referenceDate = today; // this sweep always targets "now" — same as getAllDueCycles with no requestedMonthYear
+  const referenceDate = today;
 
-  // ✅ SAME full-walk-from-anchor logic as getAllDueCycles — computes
-  // the complete list of due cycles in one pass, not extended
-  // incrementally from whatever's already saved.
   const dueCycles = [];
   let cursor = addMonthsUTC(anchorMonthStart, cycleMonths);
 
@@ -512,277 +513,127 @@ async function generateMissedEntriesForMedia(media, userName) {
 
   if (dueCycles.length === 0) return { generatedEntries: [] };
 
-  const existingDueMonthKeys = new Set(
-    media.rentalDue.filter((e) => e.dueMonth).map((e) => e.dueMonth),
-  );
-
-//   const generatedEntries = [];
-//   let latestCycleDate = null;
-
-//   for (const candidateDate of dueCycles) {
-//     latestCycleDate = candidateDate;
-//     const candidateKey = candidateDate.getTime();
-//     if (existingDueDateKeys.has(candidateKey)) continue; // already saved — skip, never overwrite
-
-//     const chainSteps = buildApprovalSteps(2);
-//     const steps = [
-//       {
-//         role: ROLE.STAFF,
-//         userId: null,
-//         userName: "",
-//         approvedAt: null,
-//         status: 1,
-//         docVerified: false,
-//         remarks: "Auto-generated for missed cycle",
-//       },
-//       ...chainSteps,
-//     ];
-
-//     const gstSplit = computeGstSplit(media, 0);
-
-//     const newEntry = {
-//       dueMonth: getDueMonthLabel(candidateDate),
-//       dueDate: new Date(candidateDate),
-//       netPayable: Number(gstSplit.netPayable) || 0,
-//       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
-//       customPaymentFrequency:
-//         media.rentalPayment?.paymentFrequency === 6
-//           ? media.rentalPayment?.customPaymentFrequency || 1
-//           : undefined,
-//       ownerApprovalDate: null,
-//       mailSent: false,
-//       gstAddedToBalance: false,
-//       campaignName: "",
-//       proofOfCampaign: null,
-//       savedBy: {
-//         userId: null,
-//         userName: "System (auto-generated)",
-//         role: null,
-//         savedAt: nowIST(),
-//       },
-//       approvalFlow: 2,
-//       approvalSteps: steps,
-//       approvalStatus: 1,
-//       currentPendingRole: ROLE.STAFF,
-//       agreementDocVerified: false,
-//       status: 1,
-//       withGst: 0,
-//       gstAmount: Number(gstSplit.gstAmount) || 0,
-//       baseAmount: Number(gstSplit.baseAmount) || 0,
-//       gstApplicableFlag: media.gstApplicableFlag || 0,
-//       pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
-//       updatedBy: userName || "",
-//       updatedAt: nowIST(),
-//     };
-
-//     media.rentalDue.push(newEntry);
-//     const savedEntry = media.rentalDue[media.rentalDue.length - 1];
-
-//     const yearLabel = getYearLabel(candidateDate);
-//     const monthLabel = getMonthLabel(candidateDate);
-
-//     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-//     if (!yearBucket) {
-//       media.rentalDueHistory.push({ year: yearLabel, months: [] });
-//       yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
-//     }
-//     let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
-//     if (!monthBucket) {
-//       yearBucket.months.push({ month: monthLabel, entries: [] });
-//       monthBucket = yearBucket.months[yearBucket.months.length - 1];
-//     }
-//     monthBucket.entries.push({
-//       rentalDueId: savedEntry._id,
-//       siteName: media.mediaName,
-//       campaignName: "",
-//       dueDate: new Date(candidateDate),
-//       netPayable: Number(newEntry.netPayable) || 0,
-//       approvalStatus: newEntry.approvalStatus,
-//       savedBy: "System (auto-generated)",
-//       savedByRole: null,
-//       updatedAt: nowIST(),
-//       updatedBy: userName || "",
-//     });
-
-//     generatedEntries.push({
-//       rentalDueId: savedEntry._id,
-//       dueMonth: newEntry.dueMonth,
-//       dueDate: newEntry.dueDate,
-//       netPayable: newEntry.netPayable,
-//       approvalStatus: newEntry.approvalStatus,
-//       currentPendingRole: newEntry.currentPendingRole,
-//     });
-
-//     existingDueDateKeys.add(candidateKey);
-//   }
-
-//   // ✅ advance lastBillPaidDate/nextBillingDate to match the latest
-//   // cycle this walk covered, regardless of whether it created a new
-//   // entry (self-corrects drift either way).
-//   if (latestCycleDate) {
-//     media.rentalPayment.lastBillPaidDate = latestCycleDate;
-//     media.rentalPayment.nextBillingDate = addMonthsLocal(latestCycleDate, cycleMonths);
-//     media.markModified("rentalPayment");
-//   }
-
-//   if (generatedEntries.length > 0) {
-//     media.markModified("rentalDue");
-//     media.markModified("rentalDueHistory");
-//     media.updatedBy = userName || "";
-//     media.updatedAt = nowIST();
-//     await media.save({ timestamps: false });
-//   } else if (latestCycleDate) {
-//     // rentalPayment dates may have been corrected even with no new entries
-//     media.updatedBy = userName || "";
-//     media.updatedAt = nowIST();
-//     await media.save({ timestamps: false });
-//   }
-
-//   return { generatedEntries };
-// }
-const generatedEntries = [];
+  const generatedEntries = [];
   let latestCycleDate = null;
 
   for (const candidateDate of dueCycles) {
     latestCycleDate = candidateDate;
     const candidateMonthLabel = getDueMonthLabel(candidateDate);
 
-    const existingEntryForMonth = media.rentalDue.find(
-      (e) => e.dueMonth === candidateMonthLabel,
-    );
-    if (
-      existingEntryForMonth &&
-      new Date(existingEntryForMonth.dueDate).getTime() === candidateDate.getTime()
-    ) {
-      existingDueMonthKeys.add(candidateMonthLabel);
-      continue;
-    } // already saved — skip, never overwrite
+    const facesToGenerate = siteBillMode === 2 ? media.mediaDetails : [null];
 
-    const chainSteps = buildApprovalSteps(2);
-    const steps = [
-      {
-        role: ROLE.STAFF,
-        userId: null,
-        userName: "",
-        approvedAt: null,
+    for (const face of facesToGenerate) {
+      const faceId = face ? face._id : null;
+
+      const existingEntryForMonth = media.rentalDue.find(
+        (e) => e.dueMonth === candidateMonthLabel && String(e.mediaDetailId || "") === String(faceId || ""),
+      );
+      if (
+        existingEntryForMonth &&
+        new Date(existingEntryForMonth.dueDate).getTime() === candidateDate.getTime()
+      ) {
+        continue;
+      }
+
+      const chainSteps = buildApprovalSteps(2);
+      const steps = [
+        {
+          role: ROLE.STAFF,
+          userId: null,
+          userName: "",
+          approvedAt: null,
+          status: 1,
+          docVerified: false,
+          remarks: "Auto-generated for missed cycle",
+        },
+        ...chainSteps,
+      ];
+
+      const inferredWithGst = 0;
+      const gstSplit = computeGstSplit(media, inferredWithGst);
+
+      const newEntry = {
+        dueMonth: candidateMonthLabel,
+        dueDate: new Date(candidateDate),
+        mediaDetailId: faceId,
+        netPayable: Number(gstSplit.netPayable) || 0,
+        paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
+        customPaymentFrequency:
+          media.rentalPayment?.paymentFrequency === 6
+            ? media.rentalPayment?.customPaymentFrequency || 1
+            : undefined,
+        ownerApprovalDate: null,
+        mailSent: false,
+        gstAddedToBalance: false,
+        campaignName: "",
+        reason: "",
+        proofOfCampaign: null,
+        savedBy: {
+          userId: null,
+          userName: "System (auto-generated)",
+          role: null,
+          savedAt: nowIST(),
+        },
+        approvalFlow: 2,
+        approvalSteps: steps,
+        approvalStatus: 1,
+        currentPendingRole: ROLE.STAFF,
+        agreementDocVerified: false,
         status: 1,
-        docVerified: false,
-        remarks: "Auto-generated for missed cycle",
-      },
-      ...chainSteps,
-    ];
+        withGst: inferredWithGst,
+        gstAmount: Number(gstSplit.gstAmount) || 0,
+        baseAmount: Number(gstSplit.baseAmount) || 0,
+        gstApplicableFlag: 0,
+        pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
+        updatedBy: userName || "",
+        updatedAt: nowIST(),
+      };
 
-    // ✅ FIXED — default to 0 (Pending) even if GST is applicable.
-    // It will be changed to 1 (Hold) or 2 (Direct) only on Owner approval.
-    const inferredWithGst = 0; // Always 0 initially
-    const gstSplit = computeGstSplit(media, inferredWithGst);
+      const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
 
-    const newEntry = {
-      dueMonth: getDueMonthLabel(candidateDate),
-      dueDate: new Date(candidateDate),
-      netPayable: Number(gstSplit.netPayable) || 0,
-      paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
-      customPaymentFrequency:
-        media.rentalPayment?.paymentFrequency === 6
-          ? media.rentalPayment?.customPaymentFrequency || 1
-          : undefined,
-      ownerApprovalDate: null,
-      mailSent: false,
-      gstAddedToBalance: false,
-      campaignName: "",
-      reason: "",
-      proofOfCampaign: null,
-      savedBy: {
-        userId: null,
-        userName: "System (auto-generated)",
-        role: null,
-        savedAt: nowIST(),
-      },
-      approvalFlow: 2,
-      approvalSteps: steps,
-      approvalStatus: 1,
-      currentPendingRole: ROLE.STAFF,
-      agreementDocVerified: false,
-      status: 1,
-      withGst: inferredWithGst,
-      gstAmount: Number(gstSplit.gstAmount) || 0,
-      baseAmount: Number(gstSplit.baseAmount) || 0,
-      // ✅ FIXED — default flag to 0 for pending entries. Display logic in List API
-      // will auto-infer it for the UI while it's pending.
-      gstApplicableFlag: 0,
-      pastgstApplicableFlag: media.pastgstApplicableFlag || 0,
-      updatedBy: userName || "",
-      updatedAt: nowIST(),
-    };
+      if (!atomicResult) continue;
 
-    // ✅ CHANGED — atomic DB-level check-and-push instead of an
-    // in-memory push + later media.save(). Two requests (e.g.
-    // rental-list + ledger-list, or two concurrent rental-list calls)
-    // hitting the same mediaId close together could both load the
-    // document BEFORE either saved, both see no entry for this cycle
-    // in their in-memory copy, and both push — producing two separate
-    // rentalDue entries with the identical dueDate (confirmed by the
-    // near-identical savedAt timestamps on the duplicate pairs). The
-    // atomic $elemMatch guard below makes MongoDB itself the single
-    // source of truth: the push only applies if no entry with this
-    // exact dueDate exists in the database at that instant, so only
-    // one of two racing requests can ever win.
-    const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
+      media.rentalDue = atomicResult.rentalDue;
+      const savedEntry = media.rentalDue[media.rentalDue.length - 1];
 
-    if (!atomicResult) {
-      // another concurrent request already created this exact cycle
-      // first — don't duplicate, just record the cycle as covered.
-      existingDueMonthKeys.add(candidateMonthLabel);
-      continue;
+      const yearLabel = getYearLabel(candidateDate);
+      const monthLabel = getMonthLabel(candidateDate);
+
+      let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+      if (!yearBucket) {
+        media.rentalDueHistory.push({ year: yearLabel, months: [] });
+        yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
+      }
+      let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
+      if (!monthBucket) {
+        yearBucket.months.push({ month: monthLabel, entries: [] });
+        monthBucket = yearBucket.months[yearBucket.months.length - 1];
+      }
+      monthBucket.entries.push({
+        rentalDueId: savedEntry._id,
+        siteName: face ? face.mediaName : (media.mediaDetails?.map(d => d.mediaName).join(", ") || "Unknown"),
+        campaignName: "",
+        reason: "",
+        dueDate: new Date(candidateDate),
+        netPayable: Number(newEntry.netPayable) || 0,
+        approvalStatus: newEntry.approvalStatus,
+        savedBy: "System (auto-generated)",
+        savedByRole: null,
+        updatedAt: nowIST(),
+        updatedBy: userName || "",
+      });
+
+      generatedEntries.push({
+        rentalDueId: savedEntry._id,
+        dueMonth: newEntry.dueMonth,
+        dueDate: newEntry.dueDate,
+        netPayable: newEntry.netPayable,
+        approvalStatus: newEntry.approvalStatus,
+        currentPendingRole: newEntry.currentPendingRole,
+      });
     }
-
-    // re-sync this in-memory document with what's now actually in the
-    // DB (includes the just-pushed entry with its real _id).
-    media.rentalDue = atomicResult.rentalDue;
-    const savedEntry = media.rentalDue[media.rentalDue.length - 1];
-
-    const yearLabel = getYearLabel(candidateDate);
-    const monthLabel = getMonthLabel(candidateDate);
-
-    let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-    if (!yearBucket) {
-      media.rentalDueHistory.push({ year: yearLabel, months: [] });
-      yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
-    }
-    let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
-    if (!monthBucket) {
-      yearBucket.months.push({ month: monthLabel, entries: [] });
-      monthBucket = yearBucket.months[yearBucket.months.length - 1];
-    }
-    monthBucket.entries.push({
-      rentalDueId: savedEntry._id,
-      siteName: media.mediaName,
-      campaignName: "",
-      reason: "",
-      dueDate: new Date(candidateDate),
-      netPayable: Number(newEntry.netPayable) || 0,
-      approvalStatus: newEntry.approvalStatus,
-      savedBy: "System (auto-generated)",
-      savedByRole: null,
-      updatedAt: nowIST(),
-      updatedBy: userName || "",
-    });
-
-    generatedEntries.push({
-      rentalDueId: savedEntry._id,
-      dueMonth: newEntry.dueMonth,
-      dueDate: newEntry.dueDate,
-      netPayable: newEntry.netPayable,
-      approvalStatus: newEntry.approvalStatus,
-      currentPendingRole: newEntry.currentPendingRole,
-    });
-
-    existingDueMonthKeys.add(candidateMonthLabel);
   }
 
-  // ✅ advance lastBillPaidDate/nextBillingDate to match the latest
-  // cycle this walk covered, regardless of whether it created a new
-  // entry (self-corrects drift either way).
   if (latestCycleDate) {
     media.rentalPayment.lastBillPaidDate = latestCycleDate;
     media.rentalPayment.nextBillingDate = addMonthsUTC(latestCycleDate, cycleMonths);
@@ -793,12 +644,13 @@ const generatedEntries = [];
     media.markModified("rentalDueHistory");
     await media.save({ timestamps: false });
   } else if (latestCycleDate) {
-    // rentalPayment dates may have been corrected even with no new entries
     await media.save({ timestamps: false });
   }
 
   return { generatedEntries };
 }
+exports.generateMissedEntriesForMedia = generateMissedEntriesForMedia;
+
 function getAgreementVerificationStatus(item) {
   const history = item.agreementDocVerification || [];
   const currentFile = item.agreement?.agreementPDF?.fileName;
@@ -1232,7 +1084,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     //   return ownerObj;
     // });
 
-    const isSingleBill = media.siteBillMode === 1;
+    const isSingleBill = (media.mediaDetails?.some(d => d.siteBillMode === 1) || media.siteBillMode === 1);
     const data = {
       billingType: isSingleBill ? "single_bill" : "separate_bill",
     };
@@ -1617,10 +1469,14 @@ const isSameCycle = (a, b) => {
 // a loop (new array-body request).
 // ═════════════════════════════════════════════════════════════
 
+// ✅ INTERNAL HELPER for processing updates on a PRE-LOADED media document
+
 // ── saveRentalDue — one site ───────────────────────────────────
-async function processSingleRentalDue({
-  mediaId,
+// ✅ INTERNAL HELPER for processing updates on a PRE-LOADED media document
+async function processSingleRentalDueInternal({
+  media,
   rentalDueId,
+  mediaDetailId,
   campaignName,
   reason,
   withGst,
@@ -1631,7 +1487,160 @@ async function processSingleRentalDue({
   userType,
   userId,
   userName,
-  skipMail = false, // ✅ ADDED
+}) {
+  const mediaId = media._id;
+
+  const pendingEntry = (media.rentalDue || []).find(
+    (d) => String(d._id) === String(rentalDueId),
+  );
+
+  if (!pendingEntry) {
+    return { success: false, mediaId, message: "Rental due entry not found" };
+  }
+
+  const entry = pendingEntry;
+  const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
+  const isOwnerOverride =
+    userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
+  const isStaffOrTeamLead = userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
+
+  if (!isOwnerOverride && !isStaffOrTeamLead && userType !== entry.currentPendingRole) {
+    return {
+      success: false,
+      mediaId,
+      message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
+    };
+  }
+
+  if (campaignName) entry.campaignName = campaignName;
+  if (reason) entry.reason = reason;
+  if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
+  if (invoice) entry.invoice = invoice;
+
+  // ✅ AUTO-INFER gstApplicableFlag
+  let resolvedUpdateFlag = gstApplicableFlag !== undefined ? Number(gstApplicableFlag) : Number(entry.gstApplicableFlag || 0);
+  if (resolvedUpdateFlag === 0) {
+    const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+    const anyOwnerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+    if (anyOwnerGst || siteGst) resolvedUpdateFlag = 2;
+  }
+  if ([0, 1, 2].includes(resolvedUpdateFlag)) {
+    entry.gstApplicableFlag = resolvedUpdateFlag;
+    if (gstApplicableFlag !== undefined || (Number(media.gstApplicableFlag) || 0) === 0) {
+        media.gstApplicableFlag = resolvedUpdateFlag;
+    }
+  }
+
+  if ([1, 2].includes(Number(withGst))) {
+    const newWithGst = Number(withGst);
+    if (entry.withGst !== newWithGst) {
+      entry.withGst = newWithGst;
+      entry.gstApplicableFlag = newWithGst;
+      const recomputedSplit = computeGstSplit(media, newWithGst);
+      entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
+      entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
+      entry.netPayable = Number(recomputedSplit.netPayable) || 0;
+    }
+  }
+
+  if (isOwnerOverride || userType === entry.currentPendingRole) {
+    if (isOwnerOverride) {
+      entry.approvalSteps.forEach((step) => {
+        if (step.status === 1) {
+          if (step.role === ROLE.OWNER) {
+            step.status = 2;
+            step.userId = userId;
+            step.userName = userName;
+            step.approvedAt = nowIST();
+            step.docVerified = true;
+          } else {
+            step.status = 3;
+            step.remarks = "Skipped — owner approved directly";
+          }
+        }
+      });
+      entry.approvalStatus = 3;
+      entry.status = 3;
+      entry.currentPendingRole = null;
+      entry.agreementDocVerified = true;
+      entry.ownerApprovalDate = nowIST();
+    } else {
+      const step = entry.approvalSteps.find((s) => s.role === userType && s.status === 1);
+      if (step) {
+        step.status = 2;
+        step.userId = userId;
+        step.userName = userName;
+        step.approvedAt = nowIST();
+        step.docVerified = true;
+
+        const roleIndex = chain.indexOf(userType);
+        const nextRole = chain[roleIndex + 1];
+        if (nextRole) {
+          entry.currentPendingRole = nextRole;
+          entry.approvalStatus = 2;
+          entry.status = 2;
+        } else {
+          entry.currentPendingRole = null;
+          entry.approvalStatus = 3;
+          entry.status = 3;
+          entry.agreementDocVerified = true;
+          if (userType === ROLE.OWNER) entry.ownerApprovalDate = nowIST();
+        }
+      }
+    }
+
+    if (entry.approvalStatus === 3) {
+      await saveOverDueHistoryIfApplicable(media, entry, userName);
+      applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, requestedPastFlag);
+      addGstToBalanceIfApplicable(media, entry, userName);
+      addOwnerGstToBalanceIfApplicable(media, entry, userName);
+      resetLiveAgreementFlags(media);
+      if (Array.isArray(media.ledger)) media.ledger = [];
+      media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
+    }
+  }
+
+  entry.updatedBy = userName;
+  entry.updatedAt = nowIST();
+
+  const yearLabel = getYearLabel(entry.dueDate);
+  const monthLabel = getMonthLabel(entry.dueDate);
+  const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+  const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+  const historyRecord = monthBucket?.entries.find((e) => String(e.rentalDueId) === String(entry._id));
+  if (historyRecord) {
+    historyRecord.approvalStatus = entry.approvalStatus;
+    historyRecord.campaignName = entry.campaignName;
+    historyRecord.updatedAt = nowIST();
+    historyRecord.updatedBy = userName;
+  }
+
+  return {
+    success: true,
+    mediaId,
+    mediaName: media.mediaName,
+    rentalDueId: entry._id,
+    approvalStatus: entry.approvalStatus,
+    entryDoc: entry,
+  };
+}
+
+// ── saveRentalDue — one site ───────────────────────────────────
+async function processSingleRentalDue({
+  mediaId,
+  rentalDueId,
+  mediaDetailId,
+  campaignName,
+  reason,
+  withGst,
+  gstApplicableFlag,
+  pastgstApplicableFlag: requestedPastFlag,
+  proofOfCampaign,
+  invoice,
+  userType,
+  userId,
+  userName,
+  skipMail = false,
 }) {
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
     return { success: false, mediaId, message: "A valid mediaId is required" };
@@ -1642,430 +1651,47 @@ async function processSingleRentalDue({
     return { success: false, mediaId, message: "Media not found" };
   }
 
-  // ✅ ADDED — before any existing save/approval logic runs, catch this
-  // site up on any missed billing cycles. Purely additive: only ever
-  // CREATES new pending rentalDue entries for past cycles that don't
-  // have one yet — never touches nextBillingDate/lastBillPaidDate
-  // (Rule 1), never overwrites an existing entry (Rule 2). If nothing
-  // was missed, this is a no-op.
   await generateMissedEntriesForMedia(media, userName);
 
-  if (!media.agreementDocVerified) {
-    media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
-  }
-  if (!media.agreementDocVerificationHistory) {
-    media.agreementDocVerificationHistory = [];
-  }
-  if (!Array.isArray(media.rentalDueEntries)) {
-    media.rentalDueEntries = Array.isArray(media.rentalDue)
-      ? media.rentalDue
-      : [];
-  }
-  if (!Array.isArray(media.rentalDueHistory)) {
-    media.rentalDueHistory = [];
-  }
-  if (!Array.isArray(media.agreementDocVerification)) {
-    media.agreementDocVerification = [];
-  }
-  if (!Array.isArray(media.ledger)) {
-    media.ledger = [];
-  }
-  if (media.rentalPayment && media.rentalPayment.balanceGstAmount == null) {
-    media.rentalPayment.balanceGstAmount = 0;
-  }
+  if (rentalDueId) {
+    const result = await processSingleRentalDueInternal({
+      media,
+      rentalDueId,
+      mediaDetailId,
+      campaignName,
+      reason,
+      withGst,
+      gstApplicableFlag,
+      pastgstApplicableFlag: requestedPastFlag,
+      proofOfCampaign,
+      invoice,
+      userType,
+      userId,
+      userName,
+    });
 
-  // ✅ MOVED UP — find the target entry FIRST (via rentalDueId, or
-  // fallback to the last pending one), so the verification gate below
-  // can check against THIS entry's own cycle — not nextBillingDate,
-  // which now auto-advances regardless of approval and would point at
-  // a totally different (often future, entry-less) month.
-  const pendingEntry = rentalDueId
-    ? media.rentalDueEntries.find(
-        (e) => String(e._id) === String(rentalDueId) && e.approvalStatus !== 3,
-      )
-    : [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3);
-
-  if (rentalDueId && !pendingEntry) {
-    return {
-      success: false,
-      mediaId,
-      mediaName: media.mediaName,
-      message: `No pending rentalDue entry found with id ${rentalDueId} (it may already be approved, or doesn't belong to this site)`,
-    };
-  }
-if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
-  media.markModified("rentalDue");
-}
-  // Note: when pendingEntry is null (nothing pending — this request
-  // will go through the CREATE branch further down), the fallback
-  // below correctly verifies against nextBillingDate's cycle instead,
-  // since there's no existing entry yet to reference.
-  const currentCycleForVerification = pendingEntry
-    ? getCurrentCycle(pendingEntry.dueDate)
-    : getCurrentCycle(media.rentalPayment?.nextBillingDate);
-
-  if (!currentCycleForVerification) {
-    return {
-      success: false,
-      mediaId,
-      mediaName: media.mediaName,
-      message: "Unable to determine current billing cycle",
-    };
-  }
-
-  const currentCycleVerificationsForSave =
-    media.agreementDocVerification.filter(
-      (h) => h.isVerified && isSameCycle(h.cycle, currentCycleForVerification),
-    );
-
-  const verifiedRolesThisCycle = new Set(
-    currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
-  );
-  const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
-
-  // ✅ FIXED — restored: EVERY role (Staff, Team Lead, Owner) must
-  // personally verify THIS entry's own cycle before they can save/
-  // approve it — no exceptions, no "2 others already verified"
-  // bypass. Previously only Owner had any gate, and even that had a
-  // bypass; both are removed.
-   const twoOtherRolesAlreadyVerified = verifiedRolesThisCycle.size >= 2;
-  const ownerVerificationIsOptional =
-    userType === ROLE.OWNER && twoOtherRolesAlreadyVerified;
-
-  if (!hasVerifiedThisCycle && !ownerVerificationIsOptional) {
-    return {
-      success: false,
-      mediaId,
-      mediaName: media.mediaName,
-      message: `${ROLE_LABEL[userType]} must verify the agreement document for ${pendingEntry ? pendingEntry.dueMonth : `the billing cycle starting ${formatDate(currentCycleForVerification)}`} before saving`,
-    };
-  }
-
-  // ✅ FIXED — "already closed" check now compares against the TARGET
-  // entry's own dueDate, not nextBillingDate.
-  const ownerAlreadyClosedThisCycle = pendingEntry
-    ? (() => {
-        if (pendingEntry.status !== 3) return false;
-        const ownerStep = pendingEntry.approvalSteps?.find(
-          (s) => s.role === ROLE.OWNER,
-        );
-        return ownerStep?.status === 2;
-      })()
-    : false;
-
-  if (userType === ROLE.OWNER && ownerAlreadyClosedThisCycle) {
-    return {
-      success: false,
-      mediaId,
-      mediaName: media.mediaName,
-      message: "Owner has already approved this document for the current cycle",
-    };
-  }
-
-  // ── BRANCH 1: UPDATE / APPROVAL ──
-  if (pendingEntry) {
-    const entry = pendingEntry;
-    const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
-    const isOwnerOverride =
-      userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
-    const isStaffOrTeamLead =
-      userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
-
-    if (
-      !isOwnerOverride &&
-      !isStaffOrTeamLead &&
-      userType !== entry.currentPendingRole
-    ) {
-      return {
-        success: false,
-        mediaId,
-        mediaName: media.mediaName,
-        message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
-      };
-    }
-
-    if (campaignName) entry.campaignName = campaignName;
-    if (reason) entry.reason = reason;
-    if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
-    if (invoice) entry.invoice = invoice; // ✅ ADDED
-
-    // ✅ AUTO-INFER gstApplicableFlag if it's currently 0 or passed as 0
-    let resolvedUpdateFlag = gstApplicableFlag !== undefined ? Number(gstApplicableFlag) : Number(entry.gstApplicableFlag || 0);
-    if (resolvedUpdateFlag === 0) {
-      const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-      const ownerGst = (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
-      // Priority: Default to 2 (Enabled/General) if GST exists anywhere.
-      if (ownerGst || siteGst) resolvedUpdateFlag = 2;
-    }
-
-    if ([0, 1, 2].includes(resolvedUpdateFlag)) {
-      entry.gstApplicableFlag = resolvedUpdateFlag;
-      // Also update media level if it's currently 0 or if payload explicitly sends a value
-      if (gstApplicableFlag !== undefined || (Number(media.gstApplicableFlag) || 0) === 0) {
-          media.gstApplicableFlag = resolvedUpdateFlag;
-      }
-    }
-
-    if ([0, 1, 2].includes(Number(requestedPastFlag))) {
-      entry.pastgstApplicableFlag = Number(requestedPastFlag);
-    }
-     if ([1, 2].includes(Number(withGst))) {
-      const newWithGst = Number(withGst);
-      if (entry.withGst !== newWithGst) {
-        entry.withGst = newWithGst;
-        // ✅ FIXED — align gstApplicableFlag with withGst:
-        // 1 (Hold) -> Flag 1 (Site/Rental)
-        // 2 (Direct) -> Flag 2 (Landowner)
-        entry.gstApplicableFlag = newWithGst;
-
-        const recomputedSplit = computeGstSplit(media, newWithGst);
-        entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
-        entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
-        entry.netPayable = Number(recomputedSplit.netPayable) || 0;
-
-        if (userType === ROLE.OWNER) {
-          syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
-        }
-      }
-    }
-
-    if (isOwnerOverride) {
-      entry.approvalSteps.forEach((step) => {
-        if (step.status !== 1) return;
-        if (step.role === ROLE.OWNER) {
-          step.status = 2;
-          step.userId = userId;
-          step.userName = userName;
-          step.approvedAt = nowIST();
-          step.docVerified = true;
-          step.remarks = "Direct owner approval";
-        } else {
-          step.status = 3;
-          step.remarks = "Skipped — owner approved directly";
-        }
-      });
-      entry.approvalStatus = 3;
-      entry.status = 3;
-      entry.currentPendingRole = null;
-      entry.agreementDocVerified = true;
-      entry.ownerApprovalDate = nowIST();
-      media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
-
-      await saveOverDueHistoryIfApplicable(media, entry, userName);
-
-      markRoleVerified(media, entry, ROLE.OWNER, userName);
-      applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
-
- if (Number(entry.withGst) === 1 && Number(entry.gstAmount) <= 0) {
-        const freshSplit = computeGstSplit(media, 1);
-        entry.gstAmount = Number(freshSplit.gstAmount) || 0;
-        entry.baseAmount = Number(freshSplit.baseAmount) || 0;
-        entry.netPayable = Number(freshSplit.netPayable) || 0;
-      }
-      addGstToBalanceIfApplicable(media, entry, userName);
-      addOwnerGstToBalanceIfApplicable(media, entry, userName);
-      // ✅ CHANGED — date advancement removed. lastBillPaidDate/
-      // nextBillingDate now auto-advance on schedule via
-      // generateMissedEntriesForMedia (called earlier this same
-      // request), NOT on Owner approval anymore (Rule 1 scrapped).
-      // Still reset the live verification flags for the new cycle.
-      resetLiveAgreementFlags(media);
-
-      if (Array.isArray(media.ledger) && media.ledger.length > 0) {
-        media.ledger = [];
-        media.markModified("ledger");
-      }
-
-      media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
-      media.markModified("agreementDocVerified");
-    } else {
-      const step = entry.approvalSteps.find(
-        (s) => s.role === userType && s.status === 1,
-      );
-
-      if (step) {
-        step.status = 2;
-        step.userId = userId;
-        step.userName = userName;
-        step.approvedAt = nowIST();
-                step.docVerified = hasVerifiedThisCycle;
-        media.rentalStatus = RENTAL_STATUS_MAP[userType];
-
-        // ✅ CHANGED — only log a verification record if this role
-        // actually verified. Previously this ran unconditionally,
-        // which would falsely record Owner as having verified the
-        // doc even when they used the new optional-verification path
-        // and never called verifyAgreementDoc at all.
-        if (hasVerifiedThisCycle) {
-          markRoleVerified(media, entry, userType, userName);
-        }
-
-        const roleIndex = chain.indexOf(userType);
-        const nextRole = chain[roleIndex + 1];
-
-        if (nextRole) {
-          entry.currentPendingRole = nextRole;
-          entry.approvalStatus = 2;
-          entry.status = 2;
-        } else {
-          entry.currentPendingRole = null;
-          entry.approvalStatus = 3;
-          entry.status = 3;
-          entry.agreementDocVerified = true;
-
-          if (userType === ROLE.OWNER) {
-            entry.ownerApprovalDate = nowIST();
-
-            await saveOverDueHistoryIfApplicable(media, entry, userName);
-
-            applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
-             if (Number(entry.withGst) === 1 && Number(entry.gstAmount) <= 0) {
-              const freshSplit = computeGstSplit(media, 1);
-              entry.gstAmount = Number(freshSplit.gstAmount) || 0;
-              entry.baseAmount = Number(freshSplit.baseAmount) || 0;
-              entry.netPayable = Number(freshSplit.netPayable) || 0;
-            }
-            addGstToBalanceIfApplicable(media, entry, userName);
-            addOwnerGstToBalanceIfApplicable(media, entry, userName);
-            // ✅ CHANGED — date advancement removed, same reason as above.
-            resetLiveAgreementFlags(media);
-
-            if (Array.isArray(media.ledger) && media.ledger.length > 0) {
-              media.ledger = [];
-              media.markModified("ledger");
-            }
-
-            media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
-            media.markModified("agreementDocVerified");
-          }
-        }
-      }
-    }
-
-    entry.updatedBy = userName;
-    entry.updatedAt = nowIST();
-
-    const yearLabel = getYearLabel(entry.dueDate);
-    const monthLabel = getMonthLabel(entry.dueDate);
-    const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-    const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
-    const historyRecord = monthBucket?.entries.find(
-      (e) => String(e.rentalDueId) === String(entry._id),
-    );
-    if (historyRecord) {
-      historyRecord.approvalStatus = entry.approvalStatus;
-      historyRecord.campaignName = entry.campaignName;
-      historyRecord.updatedAt = nowIST();
-      historyRecord.updatedBy = userName;
-    }
-
-    await media.save({ timestamps: false });
-
-    let mailSentFlag = entry.mailSent;
-    if (!skipMail && userType === ROLE.OWNER && entry.approvalStatus === 3) {
-      const mailResult = await sendRentalDueApprovalMail(media, entry);
-      entry.mailSent = !!mailResult.sent;
-      mailSentFlag = entry.mailSent;
+    if (result.success) {
       await media.save({ timestamps: false });
+      if (!skipMail && userType === ROLE.OWNER && result.approvalStatus === 3) {
+        const mailRes = await sendRentalDueApprovalMail(media, result.entryDoc);
+        result.entryDoc.mailSent = !!mailRes.sent;
+        await media.save({ timestamps: false });
+      }
     }
-    const resolvedGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
-    return {
-      success: true,
-      mediaDoc: media, // ✅ Return the doc for batch processing
-      entryDoc: entry, // ✅ Return the entry for batch processing
-      mediaId: media._id,
-      mediaName: media.mediaName,
-      rentalDueId: entry._id,
-      dueMonth: entry.dueMonth, // ✅ ADDED — makes it explicit which month this response is for
-      campaignName: entry.campaignName,
-      reason: entry.reason,
-      proofOfCampaign: entry.proofOfCampaign,
-      invoice: entry.invoice, // ✅ ADDED
-      approvalSteps: entry.approvalSteps,
-      approvalStatus: entry.approvalStatus,
-      currentPendingRole: entry.currentPendingRole,
-      currentPendingRoleLabel: entry.currentPendingRole
-        ? ROLE_LABEL[entry.currentPendingRole]
-        : "Completed",
-      rentalStatus: media.rentalStatus,
-      withGst: entry.withGst,
-      gstAmount: entry.gstAmount,
-      baseAmount: entry.baseAmount,
-      netPayable: entry.netPayable,
-      balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
-      agreementDocVerified: media.agreementDocVerified,
-      agreementDocVerificationHistory: media.agreementDocVerificationHistory,
-      agreementDocVerificationStatus: getAgreementVerificationStatus(media),
-      rentalPayment: media.rentalPayment,
-      ledger: media.ledger,
-      mailSent: mailSentFlag,
-      gstApplicableFlag: resolvedGst.gstApplicableFlag,
-      gstApplicableDisplay: resolvedGst,
-
-    };
+    return result;
   }
 
   // ── BRANCH 2: CREATE ──
-  // ✅ ADDED — inactive sites can't have BRAND NEW rentalDue entries
-  // created. (Existing pending entries left over from when the site
-  // was Active still go through BRANCH 1 above and remain approvable
-  // — this only blocks creating something new.)
   if (Number(media.status) !== 1) {
-    return {
-      success: false,
-      mediaId,
-      mediaName: media.mediaName,
-      message: "This site is Inactive — rental due entries cannot be auto-generated or created",
-    };
+    return { success: false, mediaId, message: "This site is Inactive" };
   }
-
   if (!campaignName) {
-    return {
-      success: false,
-      mediaId,
-      mediaName: media.mediaName,
-      message: "campaignName is required",
-    };
+    return { success: false, mediaId, message: "campaignName is required" };
   }
 
-  if (userType === ROLE.OWNER) {
-    const dueDateObjPreCheck = media.rentalPayment?.nextBillingDate
-      ? new Date(media.rentalPayment.nextBillingDate)
-      : new Date();
-    const alreadyClosed = media.rentalDueEntries.some((e) => {
-      if (e.status !== 3 || !e.dueDate) return false;
-      if (new Date(e.dueDate).getTime() !== dueDateObjPreCheck.getTime())
-        return false;
-      const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
-      return ownerStep?.status === 2;
-    });
-    if (alreadyClosed) {
-      return {
-        success: false,
-        mediaId,
-        mediaName: media.mediaName,
-        message: "Owner has already approved this document for the current cycle",
-      };
-    }
-  }
-
-  const dueDateObj = media.rentalPayment?.nextBillingDate
-    ? new Date(media.rentalPayment.nextBillingDate)
-    : new Date();
-
+  const dueDateObj = media.rentalPayment?.nextBillingDate ? new Date(media.rentalPayment.nextBillingDate) : new Date();
   const chainSteps = buildApprovalSteps(2);
-  const steps = [
-    {
-      role: ROLE.STAFF,
-      userId: null,
-      userName: "",
-      approvedAt: null,
-      status: 1,
-      docVerified: false,
-      remarks: "",
-    },
-    ...chainSteps,
-  ];
+  const steps = [{ role: ROLE.STAFF, userId: null, userName: "", approvedAt: null, status: 1, docVerified: false, remarks: "" }, ...chainSteps];
 
   const isOwnerOverride = userType === ROLE.OWNER;
   const isTeamLeadCreating = userType === ROLE.TEAM_LEAD;
@@ -2079,7 +1705,6 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
         step.userName = userName;
         step.approvedAt = nowIST();
         step.docVerified = true;
-        step.remarks = "Direct owner approval";
       } else {
         step.status = 3;
         step.remarks = "Skipped — owner approved directly";
@@ -2087,63 +1712,43 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     });
   } else if (isTeamLeadCreating) {
     staffStep.status = 3;
-    staffStep.remarks = "Skipped — created directly by Team Lead";
-
     const teamLeadStep = steps.find((s) => s.role === ROLE.TEAM_LEAD);
     teamLeadStep.status = 2;
     teamLeadStep.userId = userId;
     teamLeadStep.userName = userName;
     teamLeadStep.approvedAt = nowIST();
     teamLeadStep.docVerified = true;
-    teamLeadStep.remarks = "Created and approved by Team Lead";
   } else {
     staffStep.status = 2;
     staffStep.userId = userId;
     staffStep.userName = userName;
     staffStep.approvedAt = nowIST();
-    staffStep.docVerified = false;
-    staffStep.remarks = "Entry created by Staff";
   }
 
   const nextPendingStep = steps.find((s) => s.status === 1);
   const allApproved = !nextPendingStep;
-
-  const resolvedWithGst = [0, 1, 2].includes(Number(withGst))
-    ? Number(withGst)
-    : 0;
+  const resolvedWithGst = [0, 1, 2].includes(Number(withGst)) ? Number(withGst) : 0;
   const gstSplit = computeGstSplit(media, resolvedWithGst);
-
-  // ✅ FIXED — align gstApplicableFlag with withGst:
-  // 1 (Hold) -> Flag 1 (Site/Rental)
-  // 2 (Direct) -> Flag 2 (Landowner)
-  // 0 (Pending) -> Flag 0
-  let resolvedGstFlag = resolvedWithGst;
 
   const newEntry = {
     dueMonth: getDueMonthLabel(dueDateObj),
     dueDate: dueDateObj,
     netPayable: Number(gstSplit.netPayable) || 0,
     paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
-    customPaymentFrequency:
-      media.rentalPayment?.paymentFrequency === 6
-        ? media.rentalPayment?.customPaymentFrequency || 1
-        : undefined,
+    customPaymentFrequency: media.rentalPayment?.paymentFrequency === 6 ? media.rentalPayment?.customPaymentFrequency || 1 : undefined,
     ownerApprovalDate: isOwnerOverride ? nowIST() : null,
-    mailSent: false,
-    gstAddedToBalance: false,
     campaignName,
     reason,
-    proofOfCampaign: proofOfCampaign,
-    invoice: invoice, // ✅ ADDED
+    proofOfCampaign,
+    invoice,
     savedBy: { userId, userName, role: userType, savedAt: nowIST() },
-    approvalFlow: 2,
     approvalSteps: steps,
     approvalStatus: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
     currentPendingRole: nextPendingStep ? nextPendingStep.role : null,
     agreementDocVerified: allApproved,
     status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
     withGst: resolvedWithGst,
-    gstApplicableFlag: resolvedGstFlag,
+    gstApplicableFlag: resolvedWithGst,
     pastgstApplicableFlag: Number(requestedPastFlag) || 0,
     gstAmount: Number(gstSplit.gstAmount) || 0,
     baseAmount: Number(gstSplit.baseAmount) || 0,
@@ -2151,120 +1756,43 @@ if (pendingEntry && ensureApprovalStepsPopulated(pendingEntry)) {
     updatedAt: nowIST(),
   };
 
-  // ✅ CHANGED — use atomic check-and-push to avoid duplicates if two
-  // requests try to create the same cycle entry at once.
-  const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(
-    media._id,
-    newEntry,
-  );
-
+  const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
   if (atomicResult) {
     media.rentalDue = atomicResult.rentalDue;
-    // Sync alias if used
-    media.rentalDueEntries = media.rentalDue;
-  }
+    const savedEntry = media.rentalDue[media.rentalDue.length - 1];
+    media.rentalStatus = RENTAL_STATUS_MAP[userType];
 
-  const savedEntry = media.rentalDue[media.rentalDue.length - 1];
-  media.rentalStatus = RENTAL_STATUS_MAP[userType];
-
-  if (isOwnerOverride) {
-    markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
-  } else if (isTeamLeadCreating) {
-    markRoleVerified(media, savedEntry, ROLE.TEAM_LEAD, userName);
-  }
-
-  if (isOwnerOverride) {
-    applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag,requestedPastFlag);
-
-    await saveOverDueHistoryIfApplicable(media, savedEntry, userName);
-
-    addGstToBalanceIfApplicable(media, savedEntry, userName);
-    addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
-    // ✅ CHANGED — date advancement removed, same reason as above.
-    resetLiveAgreementFlags(media);
-
-    if (Array.isArray(media.ledger) && media.ledger.length > 0) {
-      media.ledger = [];
-      media.markModified("ledger");
+    if (isOwnerOverride) {
+      applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, requestedPastFlag);
+      await saveOverDueHistoryIfApplicable(media, savedEntry, userName);
+      addGstToBalanceIfApplicable(media, savedEntry, userName);
+      addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
+      resetLiveAgreementFlags(media);
+      if (Array.isArray(media.ledger)) media.ledger = [];
+      media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
     }
 
-    media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
-    media.markModified("agreementDocVerified");
-  }
+    const yearLabel = getYearLabel(dueDateObj);
+    const monthLabel = getMonthLabel(dueDateObj);
+    let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+    if (!yearBucket) { media.rentalDueHistory.push({ year: yearLabel, months: [] }); yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1]; }
+    let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
+    if (!monthBucket) { yearBucket.months.push({ month: monthLabel, entries: [] }); monthBucket = yearBucket.months[yearBucket.months.length - 1]; }
+    monthBucket.entries.push({ rentalDueId: savedEntry._id, siteName: media.mediaName, campaignName, reason, dueDate: dueDateObj, netPayable: Number(newEntry.netPayable) || 0, approvalStatus: newEntry.approvalStatus, savedBy: userName, savedByRole: userType, updatedAt: nowIST(), updatedBy: userName });
 
-  const yearLabel = getYearLabel(dueDateObj);
-  const monthLabel = getMonthLabel(dueDateObj);
-
-  let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-  if (!yearBucket) {
-    media.rentalDueHistory.push({ year: yearLabel, months: [] });
-    yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
-  }
-  let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
-  if (!monthBucket) {
-    yearBucket.months.push({ month: monthLabel, entries: [] });
-    monthBucket = yearBucket.months[yearBucket.months.length - 1];
-  }
-  monthBucket.entries.push({
-    rentalDueId: savedEntry._id,
-    siteName: media.mediaName,
-    campaignName,
-    reason,
-    dueDate: dueDateObj,
-    netPayable: Number(newEntry.netPayable) || 0,
-    approvalStatus: newEntry.approvalStatus,
-    savedBy: userName,
-    savedByRole: userType,
-    updatedAt: nowIST(),
-    updatedBy: userName,
-  });
-
-  await media.save({ timestamps: false });
-
-  let mailSentFlag = savedEntry.mailSent;
-  if (!skipMail && isOwnerOverride && savedEntry.approvalStatus === 3) {
-    const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
-    savedEntry.mailSent = !!mailResult.sent;
-    mailSentFlag = savedEntry.mailSent;
     await media.save({ timestamps: false });
-  }
-  const resolvedGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
-  return {
-    success: true,
-    isNew: true,
-    mediaDoc: media, // ✅ Return doc
-    entryDoc: savedEntry, // ✅ Return entry
-    rentalDueId: savedEntry._id,
-    mediaId: media._id,
-    mediaName: media.mediaName,
-    campaignName,
-    reason,
-    proofOfCampaign,
-    invoice, // ✅ ADDED
-    dueDate: dueDateObj,
-    netPayable: newEntry.netPayable,
-    withGst: newEntry.withGst,
-    gstAmount: newEntry.gstAmount,
-    baseAmount: newEntry.baseAmount,
-    balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
-    savedBy: { userId, userName, role: userType, roleLabel: ROLE_LABEL[userType] || "" },
-    approvalSteps: steps,
-    approvalStatus: newEntry.approvalStatus,
-    currentPendingRole: newEntry.currentPendingRole,
-    currentPendingRoleLabel: newEntry.currentPendingRole
-      ? ROLE_LABEL[newEntry.currentPendingRole]
-      : "Completed",
-    rentalStatus: media.rentalStatus,
-    agreementDocVerified: media.agreementDocVerified,
-    agreementDocVerificationHistory: media.agreementDocVerificationHistory,
-    agreementDocVerificationStatus: getAgreementVerificationStatus(media),
-    rentalPayment: media.rentalPayment,
-    ledger: media.ledger,
-    mailSent: mailSentFlag,
-    gstApplicableFlag: resolvedGst.gstApplicableFlag,
-    gstApplicableDisplay: resolvedGst,
 
-  };
+    if (!skipMail && isOwnerOverride && savedEntry.approvalStatus === 3) {
+      const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
+      savedEntry.mailSent = !!mailResult.sent;
+      await media.save({ timestamps: false });
+    }
+
+    const resGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
+    return { success: true, mediaId: media._id, mediaName: media.mediaName, rentalDueId: savedEntry._id, approvalStatus: savedEntry.approvalStatus, entryDoc: savedEntry, gstApplicableFlag: resGst.gstApplicableFlag, gstApplicableDisplay: resGst };
+  }
+
+  return { success: false, mediaId, message: "No pending cycle found" };
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -2310,14 +1838,40 @@ exports.saveRentalDue = async (req, res) => {
       invoice = req.processFile(singleInvoiceFile);
     }
 
-    // ── NEW — batch mode: entries: [ { mediaId, campaignName, withGst, gstApplicableFlag }, ... ]
-    // Note: proofOfCampaign file upload only applies to the single-mediaId
-    // request below (multipart with one file). Batch requests don't carry
-    // a per-entry file in this version.
-    if (Array.isArray(entries) && entries.length > 0) {
-      // ✅ ADDED — match "entries[N][proofOfCampaign]" fieldnames to
-      // their array index, same pattern landOwners[N][panCardImage]
-      // already uses elsewhere in this codebase.
+    // ── NEW — batch mode ──
+    let entriesArray = [];
+    if (Array.isArray(entries)) {
+      entriesArray = entries;
+    } else if (entries && typeof entries === "object") {
+      // Handle Postman form-data style objects { "0": {...}, "1": {...} }
+      const keys = Object.keys(entries).filter(k => !isNaN(k));
+      if (keys.length > 0) {
+        entriesArray = keys
+          .sort((a, b) => Number(a) - Number(b))
+          .map((key) => entries[key]);
+      }
+    }
+
+    // Fallback: Manually gather entries from top-level req.body if the above failed
+    // (Happens if the parser doesn't group entries[0] into a single 'entries' object)
+    if (entriesArray.length === 0) {
+      const manualEntries = {};
+      Object.keys(req.body).forEach(key => {
+        const match = key.match(/^entries\[(\d+)\]\[(\w+)\]$/);
+        if (match) {
+          const index = match[1];
+          const field = match[2];
+          if (!manualEntries[index]) manualEntries[index] = {};
+          manualEntries[index][field] = req.body[key];
+        }
+      });
+      const indices = Object.keys(manualEntries).sort((a, b) => Number(a) - Number(b));
+      if (indices.length > 0) {
+        entriesArray = indices.map(i => manualEntries[i]);
+      }
+    }
+
+    if (entriesArray.length > 0) {
       const parseEntryFileIndex = (fieldname) => {
         const match = fieldname.match(/^entries\[(\d+)\]\[proofOfCampaign\]$/);
         return match ? Number(match[1]) : null;
@@ -2339,64 +1893,71 @@ exports.saveRentalDue = async (req, res) => {
         if (iIdx !== null) entryInvoiceFileMap[iIdx] = f;
       });
 
+      // ✅ GROUP ENTRIES BY mediaId TO PREVENT RACE CONDITIONS
+      const mediaGroups = {};
+      entriesArray.forEach((item, index) => {
+        const mId = String(item.mediaId).trim();
+        if (!mediaGroups[mId]) mediaGroups[mId] = [];
+        mediaGroups[mId].push({ ...item, originalIndex: index });
+      });
+
       const results = [];
       const batchApprovedSites = [];
 
-      for (let index = 0; index < entries.length; index++) {
-        const item = entries[index];
+      // Process each media document once
+      for (const mId of Object.keys(mediaGroups)) {
+        const group = mediaGroups[mId];
+        const media = await Media.findById(mId);
 
-        // ✅ ADDED — resolve THIS entry's own file, if one was sent.
-        let entryProofOfCampaign = null;
-        const entryFile = entryFileMap[index];
-        if (entryFile) {
-          if (!entryFile.mimetype?.startsWith("image/")) {
-            results.push({
-              success: false,
-              mediaId: item.mediaId,
-              message: `entries[${index}].proofOfCampaign must be an image file`,
-            });
-            continue;
+        if (!media) {
+          group.forEach(item => results.push({ success: false, mediaId: mId, message: "Media not found" }));
+          continue;
+        }
+
+        // Before processing, run catch-up sweep
+        await generateMissedEntriesForMedia(media, userName);
+
+        for (const item of group) {
+          const index = item.originalIndex;
+          let entryProofOfCampaign = null;
+          if (entryFileMap[index]) {
+            entryProofOfCampaign = req.processFile(entryFileMap[index]);
           }
-          entryProofOfCampaign = req.processFile(entryFile);
-        }
 
-        let entryInvoice = null;
-        const invoiceFile = entryInvoiceFileMap[index];
-        if (invoiceFile) {
-          const isPdf = invoiceFile.mimetype === "application/pdf";
-          const isImage = invoiceFile.mimetype?.startsWith("image/");
-          if (!isPdf && !isImage) {
-            results.push({
-              success: false,
-              mediaId: item.mediaId,
-              message: `entries[${index}].invoice must be a PDF or image file`,
-            });
-            continue;
+          let entryInvoice = null;
+          if (entryInvoiceFileMap[index]) {
+            entryInvoice = req.processFile(entryInvoiceFileMap[index]);
           }
-          entryInvoice = req.processFile(invoiceFile);
+
+          // Directly process on the loaded document instance
+          const processResult = await processSingleRentalDueInternal({
+            media,
+            rentalDueId: item.rentalDueId,
+            mediaDetailId: item.mediaDetailId,
+            campaignName: item.campaignName,
+            reason: item.reason,
+            withGst: item.withGst,
+            gstApplicableFlag: item.gstApplicableFlag,
+            pastgstApplicableFlag: item.pastgstApplicableFlag,
+            proofOfCampaign: entryProofOfCampaign,
+            invoice: entryInvoice,
+            userType,
+            userId,
+            userName,
+          });
+
+          results.push({ ...processResult, originalIndex: index });
+          if (processResult.success && processResult.approvalStatus === 3) {
+            batchApprovedSites.push({ media, entry: processResult.entryDoc });
+          }
         }
 
-        const result = await processSingleRentalDue({
-          mediaId: typeof item.mediaId === "string" ? item.mediaId.trim() : item.mediaId,
-          rentalDueId: typeof item.rentalDueId === "string" ? item.rentalDueId.trim() : item.rentalDueId,
-          campaignName: typeof item.campaignName === "string" ? item.campaignName.trim() : item.campaignName,
-          reason: typeof item.reason === "string" ? item.reason.trim() : item.reason,
-          withGst: item.withGst,
-          gstApplicableFlag: item.gstApplicableFlag,
-          pastgstApplicableFlag: item.pastgstApplicableFlag, // ✅ NEW
-          proofOfCampaign: entryProofOfCampaign, // ✅ CHANGED — was hardcoded null
-          invoice: entryInvoice, // ✅ ADDED
-          userType,
-          userId,
-          userName,
-          skipMail: true, // ✅ Skip single mail during batch loop
-        });
-        results.push(result);
-
-        if (result.success && result.mediaDoc && result.entryDoc && result.approvalStatus === 3) {
-          batchApprovedSites.push({ media: result.mediaDoc, entry: result.entryDoc });
-        }
+        // Save the document ONCE after all updates for its faces/cycles are done
+        await media.save({ timestamps: false });
       }
+
+      // Re-sort results to match incoming order
+      results.sort((a, b) => a.originalIndex - b.originalIndex);
 
       // ✅ Send one grouped mail if multiple sites were fully approved together
       if (batchApprovedSites.length > 0) {
@@ -2483,6 +2044,7 @@ exports.saveRentalDue = async (req, res) => {
     const result = await processSingleRentalDue({
       mediaId: trimmedMediaId,
       rentalDueId: typeof rentalDueId === "string" ? rentalDueId.trim() : rentalDueId,
+      mediaDetailId: req.body.mediaDetailId, // ✅ NEW
       campaignName: typeof campaignName === "string" ? campaignName.trim() : campaignName,
       reason: typeof reason === "string" ? reason.trim() : reason,
       withGst,
@@ -2726,7 +2288,7 @@ saveVerificationProgressSnapshot(
   return {
     success: true,
     mediaId: media._id,
-    mediaName: media.mediaName,
+    mediaName: media.mediaDetails?.map(d => d.mediaName).join(", ") || "Unknown",
     rentalDueId: targetEntry ? targetEntry._id : null, // ✅ ADDED
     dueMonth: targetEntry ? targetEntry.dueMonth : null, // ✅ ADDED
     message: targetEntry
@@ -3616,7 +3178,10 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
     {
       _id: mediaId,
       rentalDue: {
-        $elemMatch: { dueMonth: newEntry.dueMonth },
+        $elemMatch: {
+          dueMonth: newEntry.dueMonth,
+          mediaDetailId: newEntry.mediaDetailId || null
+        },
       },
     },
     {
@@ -3628,7 +3193,10 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
       returnDocument: 'after',
       timestamps: false,
       arrayFilters: [
-        { "elem.dueMonth": newEntry.dueMonth },
+        {
+          "elem.dueMonth": newEntry.dueMonth,
+          "elem.mediaDetailId": newEntry.mediaDetailId || null
+        },
       ],
     },
   );
@@ -3637,7 +3205,14 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   const created = await Media.findOneAndUpdate(
     {
       _id: mediaId,
-      rentalDue: { $not: { $elemMatch: { dueMonth: newEntry.dueMonth } } },
+      rentalDue: {
+        $not: {
+          $elemMatch: {
+            dueMonth: newEntry.dueMonth,
+            mediaDetailId: newEntry.mediaDetailId || null
+          }
+        }
+      },
     },
     {
       $push: { rentalDue: newEntry },
@@ -3826,9 +3401,9 @@ exports.getRentalDueListWithStats = async (req, res) => {
             },
           };
 
-    const mediaMatch = { status: 1 };
-    if (city) mediaMatch.city = { $regex: city, $options: "i" };
-    if (mediaType) mediaMatch.mediaType = { $regex: mediaType, $options: "i" };
+    const mediaMatch = { "mediaDetails.status": 1 };
+    if (city) mediaMatch["mediaDetails.city"] = { $regex: city, $options: "i" };
+    if (mediaType) mediaMatch["mediaDetails.mediaType"] = { $regex: mediaType, $options: "i" };
     if (frequency)
       mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
 
@@ -3843,10 +3418,10 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     if (search) {
       mediaMatch.$or = [
-        { mediaCode: { $regex: search, $options: "i" } },
-        { mediaName: { $regex: search, $options: "i" } },
-        { city: { $regex: search, $options: "i" } },
-        { location: { $regex: search, $options: "i" } },
+        { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
+        { "mediaDetails.mediaName": { $regex: search, $options: "i" } },
+        { "mediaDetails.city": { $regex: search, $options: "i" } },
+        { "mediaDetails.location": { $regex: search, $options: "i" } },
         { "landOwners.name": { $regex: search, $options: "i" } },
       ];
     }
@@ -3916,7 +3491,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // nextBillingDate/lastBillPaidDate (Rule 1). This guarantees the
     // list always reflects up-to-date pending/overdue bills even for
     // sites nobody has opened saveRentalDue for recently.
-  const activeSitesForSweep = await Media.find({ status: 1 });
+  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 });
 // const sweepDebugLog = [];
 for (const siteDoc of activeSitesForSweep) {
   const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
@@ -3934,7 +3509,7 @@ for (const siteDoc of activeSitesForSweep) {
 
   // sweepDebugLog.push({
   //   mediaId: siteDoc._id,
-  //   mediaName: siteDoc.mediaName,
+  //   mediaName: siteDoc.mediaDetails?.[0]?.mediaName || "Unknown",
   //   generatedCount,
   //   latestDueMonth: siteDoc.rentalDue?.length
   //     ? siteDoc.rentalDue[siteDoc.rentalDue.length - 1]?.dueMonth
@@ -3956,7 +3531,7 @@ for (const siteDoc of activeSitesForSweep) {
     };
 
     const dueThisMonthAgg = await Media.aggregate([
-      { $match: { status: 1 } },
+      { $match: { "mediaDetails.status": 1 } },
       { $match: monthOrCondition },
       {
         $addFields: {
@@ -4057,7 +3632,7 @@ for (const siteDoc of activeSitesForSweep) {
     };
 
     const dueAmountOpenAgg = await Media.aggregate([
-      { $match: { status: 1 } },
+      { $match: { "mediaDetails.status": 1 } },
       { $match: monthOrCondition },
       {
         $addFields: {
@@ -4163,7 +3738,7 @@ for (const siteDoc of activeSitesForSweep) {
     const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
 
     const statsAgg = await Media.aggregate([
-      { $match: { status: 1 } },
+      { $match: { "mediaDetails.status": 1 } },
       { $match: monthOrCondition },
       {
         $addFields: {
@@ -4351,7 +3926,7 @@ for (const siteDoc of activeSitesForSweep) {
     // counting each unapproved past entry independently — so 2 missed
     // months on the same site now correctly count as 2, not 0.
     const pastPendingAgg = await Media.aggregate([
-      { $match: { status: 1 } },
+      { $match: { "mediaDetails.status": 1 } },
       { $unwind: "$rentalDue" },
       { $match: { "rentalDue.dueDate": { $lt: monthStart } } },
       {
@@ -4444,7 +4019,7 @@ for (const siteDoc of activeSitesForSweep) {
       (statsAgg[0]?.pendingAmount || 0) + overDueAmountTotal;
 
     const approvalBreakdownAgg = await Media.aggregate([
-      { $match: { status: 1 } },
+      { $match: { "mediaDetails.status": 1 } },
       { $unwind: "$rentalDue" },
       {
         $match: {
@@ -4463,7 +4038,7 @@ for (const siteDoc of activeSitesForSweep) {
     });
 
     const approvalCompletedBreakdownAgg = await Media.aggregate([
-      { $match: { status: 1 } },
+      { $match: { "mediaDetails.status": 1 } },
       { $unwind: "$rentalDue" },
       {
         $match: {
@@ -4699,17 +4274,10 @@ if (Number(isPastPending) === 1) {
     // appraisal, frontView, etc.) so each owner's sites[] entry can
     // carry the FULL site detail, not a trimmed subset.
     listPipeline.push({
-      
+
       $project: {
-        mediaCode: 1,
-        mediaName: 1,
-        mediaType: 1,
-        city: 1,
-        state: 1,
-        location: 1,
-        siteBillMode: 1,
+        mediaDetails: 1,
         rentalStatus: 1,
-        totalSqFt: 1,
         landOwners: 1,
         appraisal: 1,
         frontView: 1,
@@ -4859,10 +4427,10 @@ if (Number(isPastPending) === 1) {
       });
 
       // ✅ ADDED — Dedupe for safety. If multiple entries exist for the same
-      // month, priority: Approved (3) > most recently updated.
+      // month + face, priority: Approved (3) > most recently updated.
       const dedupedMap = new Map();
       pendingEntriesUpToMonth.forEach((e) => {
-        const key = String(e.dueMonth).trim();
+        const key = `${String(e.dueMonth).trim()}_${String(e.mediaDetailId || "null")}`;
         const existing = dedupedMap.get(key);
         if (!existing) {
           dedupedMap.set(key, e);
@@ -4888,13 +4456,14 @@ if (Number(isPastPending) === 1) {
       // inside each rentalDueEntries[] item, scoped to that specific
       // pending month.
       const filteredRentalDueEntries = finalPendingEntries.map((entry) => {
-      const entryCycleKey = entry.dueDate ? getCurrentCycle(entry.dueDate) : null;
+      const entryObj = entry.toObject ? entry.toObject() : entry;
+      const entryCycleKey = entryObj.dueDate ? getCurrentCycle(entryObj.dueDate) : null;
 
 const entryVerificationProgressHistory = (
   item.verificationProgressHistory || []
 ).filter((v) => {
   if (v.rentalDueId) {
-    return String(v.rentalDueId) === String(entry._id);
+    return String(v.rentalDueId) === String(entryObj._id);
   }
   if (!v.cycle || !entryCycleKey) return false;
   const vCycleKey =
@@ -4904,9 +4473,9 @@ const entryVerificationProgressHistory = (
   return vCycleKey === entryCycleKey;
 });
 
-  const resolvedGstDisplay = resolveGstApplicable(item, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
+  const resolvedGstDisplay = resolveGstApplicable(item, entryObj.gstApplicableFlag, entryObj.pastgstApplicableFlag);
 
-  let resolvedEntryGstAmount = Number(entry.gstAmount || 0);
+  let resolvedEntryGstAmount = Number(entryObj.gstAmount || 0);
   if (resolvedEntryGstAmount === 0) {
     const gstFlag = resolvedGstDisplay.gstApplicableFlag;
     if (gstFlag === 1 && Number(item.rentalPayment?.gstApplicable) === 1) {
@@ -4919,10 +4488,10 @@ const entryVerificationProgressHistory = (
   }
 
   return {
-    ...entry,
+    ...entryObj,
     gstAmount: resolvedEntryGstAmount,
     gstApplicableFlag: resolvedGstDisplay.gstApplicableFlag,
-    verificationProgress: buildVerificationProgress(item, entry.dueDate, entry._id),
+    verificationProgress: buildVerificationProgress(item, entryObj.dueDate, entryObj._id),
     verificationProgressHistory: entryVerificationProgressHistory,
     gstApplicableDisplay: resolvedGstDisplay,
   };
@@ -4944,22 +4513,61 @@ const filteredAgreementDocVerificationHistory = (
   return pendingCycleKeys.has(hCycleKey);
 });
 
+      const details = item.mediaDetails || [];
+      const siteBillMode = details[0]?.siteBillMode || 1;
+
+      // ✅ SITE-BASED RENTAL ENTRIES:
+      // If Single Bill (1): Return one entry per month for the whole site.
+      // If Separate Bill (2): Return one entry per face per month.
+      const rentalDueEntries = [];
+      if (siteBillMode === 2) {
+        details.forEach((face) => {
+          filteredRentalDueEntries.forEach((entry) => {
+            // ✅ ONLY pick entries that belong to this specific face
+            if (String(entry.mediaDetailId || "") !== String(face._id)) return;
+
+            rentalDueEntries.push({
+              ...entry,
+              mediaId: item._id,
+              mediaDetailId: face._id,
+              mediaName: face.mediaName,
+              mediaCode: face.mediaCode,
+              rentalDueId: entry._id, // User requested alias
+              totalSqFt: face.totalSqFt,
+            });
+          });
+        });
+      } else {
+        // Single Bill Mode
+        filteredRentalDueEntries.forEach((entry) => {
+          rentalDueEntries.push({
+            ...entry,
+            mediaId: item._id,
+            mediaDetailId: null,
+            mediaName: details.map((d) => d.mediaName).join(", "),
+            mediaCode: details.map((d) => d.mediaCode).join(" / "),
+            rentalDueId: entry._id,
+            totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+          });
+        });
+      }
+
       return {
         _id: item._id,
-        mediaCode: item.mediaCode,
-        mediaName: item.mediaName,
-        mediaType: item.mediaType,
-        city: item.city,
-        state: item.state,
-        location: item.location,
-        siteBillMode: item.siteBillMode,
+        mediaCode: details.map(d => d.mediaCode).join(" / "),
+        mediaName: details.map(d => d.mediaName).join(", "),
+        mediaType: details[0]?.mediaType,
+        city: details[0]?.city,
+        state: details[0]?.state,
+        location: details[0]?.location,
+        siteBillMode: details[0]?.siteBillMode,
         rentalStatus: item.rentalStatus,
-        totalSqFt: item.totalSqFt,
+        totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+        mediaDetails: details,
         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
         netPayable: item.rentalPayment?.netPayable || 0,
         gstApplicable: item.rentalPayment?.gstApplicable || 0,
-        // gstAmount: item.rentalPayment?.gstAmount || 0,
-          gstAmount:
+        gstAmount:
           item.rentalPayment?.gstAmount ||
           (Number(item.rentalPayment?.gstApplicable) === 1
             ? Math.max(
@@ -4993,9 +4601,10 @@ const filteredAgreementDocVerificationHistory = (
           const anchor = item.rentalPayment?.billingStartDate || lp;
           return formatDate(d < new Date(anchor) ? anchor : d);
         })(),
+        // ✅ FIXED — return the entry's dueDate, fallback to lastBillPaidDate
         currentBillDate: currentMonthEntry
-          ? formatDate(item.rentalPayment?.lastBillPaidDate)
-          : "",
+          ? formatDate(currentMonthEntry.dueDate)
+          : formatDate(item.rentalPayment?.lastBillPaidDate),
         dueStatus: resolvedDueStatus,
         dueStatusLabel: STATUS_LABEL[resolvedDueStatus] || "",
        gstApplicableDisplay: (() => {
@@ -5028,7 +4637,7 @@ const filteredAgreementDocVerificationHistory = (
           filteredAgreementDocVerificationHistory,
         gstBalanceHistory: item.gstBalanceHistory || [],
         gstOutstandingHistory: item.rentalPayment?.gstOutstandingHistory || [], // ✅ NEW
-        rentalDueEntries: filteredRentalDueEntries,
+        rentalDueEntries: rentalDueEntries, // ✅ CHANGED: Now contains face-based entries
       };
     };
 
@@ -5160,7 +4769,7 @@ const filteredAgreementDocVerificationHistory = (
     // actually requested, matching what the ledger List API already
     // correctly shows for the same filter.
       const outstandingScopedSites = await Media.find(mediaMatch)
-      .select("status gstApplicableFlag rentalDue landOwners ledger ledgerHistory rentalPayment pendingMonths gstBalanceHistory")
+      .select("mediaDetails gstApplicableFlag rentalDue landOwners ledger ledgerHistory rentalPayment pendingMonths gstBalanceHistory")
       .lean();
 
     const overallOutstandingTotals = outstandingScopedSites.reduce(
