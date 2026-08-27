@@ -441,14 +441,13 @@ async function generateMissedEntriesForMedia(media, userName) {
   if (!Array.isArray(media.rentalDue)) media.rentalDue = [];
   if (!Array.isArray(media.rentalDueHistory)) media.rentalDueHistory = [];
 
-  const siteBillMode = media.siteBillMode || media.mediaDetails?.[0]?.siteBillMode || 1;
-
   if (media.rentalPayment?.lastBillPaidDate) {
     const lbpDate = new Date(media.rentalPayment.lastBillPaidDate);
     if (!Number.isNaN(lbpDate.getTime())) {
       const lbpMonthLabel = getDueMonthLabel(lbpDate);
 
-      const facesToSync = siteBillMode === 2 ? media.mediaDetails : [null];
+      // ✅ FIXED — Always sync per face to support face-based tracking
+      const facesToSync = media.mediaDetails || [];
       for (const face of facesToSync) {
         const faceId = face ? face._id : null;
         const matchingEntry = media.rentalDue.find(
@@ -520,13 +519,17 @@ async function generateMissedEntriesForMedia(media, userName) {
     latestCycleDate = candidateDate;
     const candidateMonthLabel = getDueMonthLabel(candidateDate);
 
-    const facesToGenerate = siteBillMode === 2 ? media.mediaDetails : [null];
+    // ✅ FIXED — Always generate per face to support face-based tracking
+    const facesToGenerate = media.mediaDetails || [];
 
     for (const face of facesToGenerate) {
       const faceId = face ? face._id : null;
 
+      // ✅ FIXED — check for ANY entry for this month (face-specific OR site-wide).
+      // If a site-wide entry (null) exists, we consider the month "covered" for this face
+      // to prevent creating a face-specific duplicate that leads to double-counting.
       const existingEntryForMonth = media.rentalDue.find(
-        (e) => e.dueMonth === candidateMonthLabel && String(e.mediaDetailId || "") === String(faceId || ""),
+        (e) => e.dueMonth === candidateMonthLabel && (String(e.mediaDetailId || "") === String(faceId || "") || !e.mediaDetailId),
       );
       if (
         existingEntryForMonth &&
@@ -550,7 +553,7 @@ async function generateMissedEntriesForMedia(media, userName) {
       ];
 
       const inferredWithGst = 0;
-      const gstSplit = computeGstSplit(media, inferredWithGst);
+      const gstSplit = computeGstSplit(media, inferredWithGst, faceId);
 
       const newEntry = {
         dueMonth: candidateMonthLabel,
@@ -816,12 +819,23 @@ function advanceRentalPaymentOnOwnerApproval(media) {
   resetLiveAgreementFlags(media);
 }
 
-function computeGstSplit(media, withGst) {
-  const baseRent = Number(media.rentalPayment?.totalRentalAmount || 0);
-  const gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
-  const totalWithGst =
-    media.rentalPayment?.totalRentalAmountWithGst ||
-    baseRent + gstAmountFull;
+function computeGstSplit(media, withGst, targetFaceId = null) {
+  let baseRent = Number(media.rentalPayment?.totalRentalAmount || 0);
+  let gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
+
+  const details = media.mediaDetails || [];
+  // ✅ NEW — proportional split logic for face-based records
+  if (targetFaceId && details.length > 1) {
+    const totalSqFt = details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
+    const targetFace = details.find((d) => String(d._id) === String(targetFaceId));
+    if (totalSqFt > 0 && targetFace) {
+      const ratio = (targetFace.totalSqFt || 0) / totalSqFt;
+      baseRent = Math.round(baseRent * ratio);
+      gstAmountFull = Math.round(gstAmountFull * ratio);
+    }
+  }
+
+  const totalWithGst = baseRent + gstAmountFull;
 
   if (withGst === 1 || withGst === 0) {
     return {
@@ -4514,43 +4528,42 @@ const filteredAgreementDocVerificationHistory = (
 });
 
       const details = item.mediaDetails || [];
-      const siteBillMode = details[0]?.siteBillMode || 1;
 
       // ✅ SITE-BASED RENTAL ENTRIES:
-      // If Single Bill (1): Return one entry per month for the whole site.
-      // If Separate Bill (2): Return one entry per face per month.
+      // Always Return one entry per face per month to support tracking different campaigns.
+      // Proportional amounts are handled by computeGstSplit during generation.
       const rentalDueEntries = [];
-      if (siteBillMode === 2) {
-        details.forEach((face) => {
-          filteredRentalDueEntries.forEach((entry) => {
-            // ✅ ONLY pick entries that belong to this specific face
-            if (String(entry.mediaDetailId || "") !== String(face._id)) return;
-
-            rentalDueEntries.push({
-              ...entry,
-              mediaId: item._id,
-              mediaDetailId: face._id,
-              mediaName: face.mediaName,
-              mediaCode: face.mediaCode,
-              rentalDueId: entry._id, // User requested alias
-              totalSqFt: face.totalSqFt,
-            });
-          });
-        });
-      } else {
-        // Single Bill Mode
+      details.forEach((face) => {
+        const faceIdStr = String(face._id);
         filteredRentalDueEntries.forEach((entry) => {
+          const entryFaceId = entry.mediaDetailId ? String(entry.mediaDetailId) : null;
+
+          // ✅ Match logic:
+          // 1. Exact match for this face ID
+          // 2. Site-wide entry (null) ONLY IF this specific face doesn't have its own entry for this month
+          let isMatch = false;
+          if (entryFaceId === faceIdStr) {
+            isMatch = true;
+          } else if (entryFaceId === null) {
+            const hasSpecificEntry = filteredRentalDueEntries.some(
+              (e) => e.dueMonth === entry.dueMonth && String(e.mediaDetailId || "") === faceIdStr
+            );
+            if (!hasSpecificEntry) isMatch = true;
+          }
+
+          if (!isMatch) return;
+
           rentalDueEntries.push({
             ...entry,
             mediaId: item._id,
-            mediaDetailId: null,
-            mediaName: details.map((d) => d.mediaName).join(", "),
-            mediaCode: details.map((d) => d.mediaCode).join(" / "),
-            rentalDueId: entry._id,
-            totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+            mediaDetailId: face._id,
+            mediaName: face.mediaName,
+            mediaCode: face.mediaCode,
+            rentalDueId: entry._id, // User requested alias
+            totalSqFt: face.totalSqFt,
           });
         });
-      }
+      });
 
       return {
         _id: item._id,
