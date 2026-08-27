@@ -366,11 +366,6 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
 // ─────────────────────────────────────────────────────────────
 const MediaSchema = new mongoose.Schema(
   {
-    // mediaId: {
-    //   type: String,
-    //   unique: true,
-    //   sparse: true,
-    // },
     mediaCode: {
       type: String,
       required: true,
@@ -399,11 +394,6 @@ const MediaSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    // fullAddress: {
-    //   type: String,
-    //   required: true,
-    //   trim: true,
-    // },
     width: {
       type: Number,
       required: true,
@@ -572,6 +562,11 @@ const MediaSchema = new mongoose.Schema(
         },
         landOwnerBillMode: {
           // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
+           agreementBillMode: {
           type: Number,
           enum: [1, 2], // 1 = single, 2 = seperate
           default: null,

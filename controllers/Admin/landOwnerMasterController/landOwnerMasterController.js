@@ -230,6 +230,7 @@ const syncOrLinkMediaOwnerToMaster = async (
       paymentCategory: owner.paymentCategory,
       eligibleMode: owner.eligibleMode,
       landOwnerBillMode: owner.landOwnerBillMode,
+      agreementBillMode: owner.agreementBillMode,
       bankPassbook: owner.bankPassbook,
       cancelCheckLeaf: owner.cancelCheckLeaf,
       onlineMode: owner.onlineMode,
@@ -480,6 +481,7 @@ const OWNER_UPDATABLE_FIELDS = [
   "paymentCategory",
   "eligibleMode",
   "landOwnerBillMode",
+  "agreementBillMode",
   "onlineMode",
   // financial inputs
   "typeShare",

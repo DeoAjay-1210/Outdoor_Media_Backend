@@ -47,6 +47,11 @@ const LandOwnerMasterSchema = new mongoose.Schema(
       enum: [1, 2], // 1 = single, 2 = seperate
       default: null,
     },
+      agreementBillMode: {
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
     typeShare: {
       type: Number,
       enum: [1, 2], // 1 percentage, 2 amount

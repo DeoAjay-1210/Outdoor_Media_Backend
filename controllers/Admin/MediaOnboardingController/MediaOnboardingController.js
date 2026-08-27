@@ -1882,6 +1882,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
           "aadharCardNumber",
           "eligibleMode",
           "landOwnerBillMode",
+          "agreementBillMode"
         ];
 
         FIELDS_TO_RESTORE.forEach((field) => {
