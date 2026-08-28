@@ -1528,7 +1528,24 @@ const mediaOnboarding = async (req, res) => {
     const { id } = req.body;
     const mediaData = req.body;
     const userName = req.user?.userName || "Admin";
-
+Object.keys(mediaData).forEach((key) => {
+  const match = key.match(/^mediaDetails\[(\d+)\]siteBillMode$/);
+  if (match) {
+    const index = parseInt(match[1]);
+    if (!mediaData.mediaDetails) mediaData.mediaDetails = [];
+    if (typeof mediaData.mediaDetails === "string") {
+      try {
+        mediaData.mediaDetails = JSON.parse(mediaData.mediaDetails);
+      } catch {
+        mediaData.mediaDetails = [];
+      }
+    }
+    if (Array.isArray(mediaData.mediaDetails)) {
+      if (!mediaData.mediaDetails[index]) mediaData.mediaDetails[index] = {};
+      mediaData.mediaDetails[index].siteBillMode = mediaData[key];
+    }
+  }
+});
     const jsonFields = [
       "mediaDetails",
       "landOwners",
@@ -1826,8 +1843,9 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
         ...detail,
         width: detail.width !== undefined ? Number(detail.width) : detail.width,
         height: detail.height !== undefined ? Number(detail.height) : detail.height,
-        status: detail.status !== undefined ? Number(detail.status) : detail.status,
-        siteBillMode: detail.siteBillMode !== undefined ? Number(detail.siteBillMode) : detail.siteBillMode,
+       status: detail.status !== undefined && detail.status !== null ? Number(detail.status) : detail.status,
+siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null && detail.siteBillMode !== "" ? Number(detail.siteBillMode) : null,
+
       }));
     }
 
@@ -3212,6 +3230,7 @@ if (landOwnerMasterId) {
         item.city = item.mediaDetails[0]?.city;
         item.state = item.mediaDetails[0]?.state;
         item.location = item.mediaDetails[0]?.location;
+        item.siteBillMode = item.mediaDetails[0]?.siteBillMode;
       }
       if (item.rentalPayment?.rentalAmountHistory) {
         item.rentalPayment.rentalAmountHistory.sort(
@@ -3350,6 +3369,7 @@ const getMediaById = async (req, res) => {
       mediaData.city = mediaData.mediaDetails[0]?.city;
       mediaData.state = mediaData.mediaDetails[0]?.state;
       mediaData.location = mediaData.mediaDetails[0]?.location;
+      mediaData.siteBillMode = mediaData.mediaDetails[0]?.siteBillMode;
     }
 
     // ✅ Sort rentalAmountHistory by updatedAt DESC
