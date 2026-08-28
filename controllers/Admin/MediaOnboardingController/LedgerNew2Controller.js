@@ -4573,7 +4573,11 @@ function buildSingleMediaHistoryBlock(
       previousGSTDue: 0,
       totalOutstandingAmount: 0,
     };
-    const details = media.mediaDetails || [];
+    // const details = media.mediaDetails || [];
+    const details = (media.mediaDetails || []).map((d) => ({
+  ...d,
+  mediaId: media._id,
+}));
     return {
       // mediaId: media._id,
       // mediaName: details.map(d => d.mediaName).join(", "),

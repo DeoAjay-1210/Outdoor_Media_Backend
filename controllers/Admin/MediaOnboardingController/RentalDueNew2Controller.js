@@ -823,9 +823,13 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
   let baseRent = Number(media.rentalPayment?.totalRentalAmount || 0);
   let gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
 
+  const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
   const details = media.mediaDetails || [];
-  // ✅ NEW — proportional split logic for face-based records
-  if (targetFaceId && details.length > 1) {
+
+  // ✅ UPDATED — respect agreementBillMode
+  // Mode 1: Single Amount Agreement — split site totals across faces
+  // Mode 2: Multiple Amount Agreement — each face gets the full site-level amount
+  if (billMode === 1 && targetFaceId && details.length > 1) {
     const totalSqFt = details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
     const targetFace = details.find((d) => String(d._id) === String(targetFaceId));
     if (totalSqFt > 0 && targetFace) {
@@ -1550,7 +1554,7 @@ async function processSingleRentalDueInternal({
     if (entry.withGst !== newWithGst) {
       entry.withGst = newWithGst;
       entry.gstApplicableFlag = newWithGst;
-      const recomputedSplit = computeGstSplit(media, newWithGst);
+      const recomputedSplit = computeGstSplit(media, newWithGst, entry.mediaDetailId);
       entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
       entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
       entry.netPayable = Number(recomputedSplit.netPayable) || 0;
@@ -3546,186 +3550,174 @@ for (const siteDoc of activeSitesForSweep) {
 
     const dueThisMonthAgg = await Media.aggregate([
       { $match: { "mediaDetails.status": 1 } },
-      { $match: monthOrCondition },
+      { $unwind: "$rentalDue" },
+      {
+        $match: {
+          "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd }
+        }
+      },
       {
         $addFields: {
-          matchingEntry: {
-            $let: {
-              vars: {
-                filtered: {
-                  $filter: {
-                    input: { $ifNull: ["$rentalDue", []] },
-                    as: "rd",
-                    cond: {
-                      $and: [
-                        { $gte: ["$$rd.dueDate", monthStart] },
-                        { $lte: ["$$rd.dueDate", monthEnd] },
-                      ],
-                    },
-                  },
-                },
-              },
-              in: {
-                $let: {
-                  vars: {
-                    approved: {
-                      $filter: {
-                        input: "$$filtered",
-                        as: "f",
-                        cond: { $eq: ["$$f.approvalStatus", 3] },
-                      },
-                    },
-                  },
-                  in: {
-                    $cond: [
-                      { $gt: [{ $size: "$$approved" }, 0] },
-                      { $first: "$$approved" },
-                      { $first: "$$filtered" },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
+          billMode: { $ifNull: [{ $first: "$landOwners.agreementBillMode" }, 1] },
+          faceCount: { $size: { $ifNull: ["$mediaDetails", [1]] } }
+        }
       },
       {
         $addFields: {
           effectiveNetPayable: {
             $let: {
               vars: {
-                base: { $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"] },
-                entryGst: { $ifNull: ["$matchingEntry.gstAmount", 0] },
-                siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
-                ownerGst: {
-                  $sum: {
-                    $map: {
-                      input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
-                      as: "o",
-                      in: { $ifNull: ["$$o.gstAmount", 0] }
-                    }
+                siteBase: { $ifNull: ["$rentalPayment.totalRentalAmount", 0] },
+                siteGst: {
+                  $let: {
+                    vars: {
+                      rpGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                      loGst: {
+                        $sum: {
+                          $map: {
+                            input: { $ifNull: ["$landOwners", []] },
+                            as: "o",
+                            in: {
+                              $cond: [
+                                { $eq: [{ $toInt: { $ifNull: ["$$o.gstApplicable", 0] } }, 1] },
+                                { $ifNull: ["$$o.gstAmount", 0] },
+                                0
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    in: { $cond: [{ $gt: ["$$rpGst", 0] }, "$$rpGst", "$$loGst"] }
                   }
-                }
+                },
+                faceCount: { $cond: [{ $gt: ["$faceCount", 0] }, "$faceCount", 1] },
+                billMode: "$billMode"
               },
               in: {
                 $let: {
                   vars: {
-                    gst: {
-                      $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
-                    }
+                    rawBase: { $ifNull: ["$rentalDue.netPayable", "$rentalDue.baseAmount"] },
+                    rawGst: { $ifNull: ["$rentalDue.gstAmount", 0] }
                   },
                   in: {
-                    $cond: [
-                      {
-                        $and: [
-                          { $gt: ["$$gst", 0] },
-                          { $gte: ["$$base", { $add: [{ $ifNull: ["$rentalPayment.totalRentalAmount", 0] }, "$$gst"] }] }
-                        ]
+                    $let: {
+                      vars: {
+                        // If the entry has the full site amount (rawBase >= siteBase - 1), we must divide it.
+                        // Otherwise (e.g. already split), we use it as-is.
+                        faceBase: {
+                          $cond: [
+                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawBase", { $subtract: ["$$siteBase", 1] }] }] },
+                            { $divide: ["$$siteBase", "$$faceCount"] },
+                            "$$rawBase"
+                          ]
+                        },
+                        faceGst: {
+                          $cond: [
+                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawGst", { $subtract: ["$$siteGst", 1] }] }] },
+                            { $divide: ["$$siteGst", "$$faceCount"] },
+                            { $cond: [{ $gt: ["$$rawGst", 0] }, "$$rawGst", { $cond: [{ $eq: ["$$billMode", 1] }, { $divide: ["$$siteGst", "$$faceCount"] }, "$$siteGst"] }] }
+                          ]
+                        }
                       },
-                      "$$base",
-                      { $add: ["$$base", "$$gst"] }
-                    ]
+                      in: { $add: ["$$faceBase", "$$faceGst"] }
+                    }
                   }
                 }
               }
             }
           },
+          effectiveCount: 1
         },
       },
       {
         $group: {
           _id: null,
           totalNetPayable: { $sum: "$effectiveNetPayable" },
-          count: { $sum: 1 },
+          count: { $sum: "$effectiveCount" },
         },
       },
     ]);
     const dueThisMonth = {
-      totalNetPayable: dueThisMonthAgg[0]?.totalNetPayable || 0,
-      count: dueThisMonthAgg[0]?.count || 0,
+      totalNetPayable: Math.round(dueThisMonthAgg[0]?.totalNetPayable || 0),
+      count: Math.round(dueThisMonthAgg[0]?.count || 0),
     };
 
     const dueAmountOpenAgg = await Media.aggregate([
       { $match: { "mediaDetails.status": 1 } },
-      { $match: monthOrCondition },
+      { $unwind: "$rentalDue" },
+      {
+        $match: {
+          "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
+          "rentalDue.approvalStatus": { $ne: 3 }
+        }
+      },
       {
         $addFields: {
-          matchingEntry: {
-            $let: {
-              vars: {
-                filtered: {
-                  $filter: {
-                    input: { $ifNull: ["$rentalDue", []] },
-                    as: "rd",
-                    cond: {
-                      $and: [
-                        { $gte: ["$$rd.dueDate", monthStart] },
-                        { $lte: ["$$rd.dueDate", monthEnd] },
-                      ],
-                    },
-                  },
-                },
-              },
-              in: {
-                $let: {
-                  vars: {
-                    approved: {
-                      $filter: {
-                        input: "$$filtered",
-                        as: "f",
-                        cond: { $eq: ["$$f.approvalStatus", 3] },
-                      },
-                    },
-                  },
-                  in: {
-                    $cond: [
-                      { $gt: [{ $size: "$$approved" }, 0] },
-                      { $first: "$$approved" },
-                      { $first: "$$filtered" },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
+          billMode: { $ifNull: [{ $first: "$landOwners.agreementBillMode" }, 1] },
+          faceCount: { $size: { $ifNull: ["$mediaDetails", [1]] } }
+        }
       },
       {
         $addFields: {
           effectiveNetPayable: {
             $let: {
               vars: {
-                base: { $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"] },
-                entryGst: { $ifNull: ["$matchingEntry.gstAmount", 0] },
-                siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
-                ownerGst: {
-                  $sum: {
-                    $map: {
-                      input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
-                      as: "o",
-                      in: { $ifNull: ["$$o.gstAmount", 0] }
-                    }
+                siteBase: { $ifNull: ["$rentalPayment.totalRentalAmount", 0] },
+                siteGst: {
+                  $let: {
+                    vars: {
+                      rpGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                      loGst: {
+                        $sum: {
+                          $map: {
+                            input: { $ifNull: ["$landOwners", []] },
+                            as: "o",
+                            in: {
+                              $cond: [
+                                { $eq: [{ $toInt: { $ifNull: ["$$o.gstApplicable", 0] } }, 1] },
+                                { $ifNull: ["$$o.gstAmount", 0] },
+                                0
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    in: { $cond: [{ $gt: ["$$rpGst", 0] }, "$$rpGst", "$$loGst"] }
                   }
-                }
+                },
+                faceCount: { $cond: [{ $gt: ["$faceCount", 0] }, "$faceCount", 1] },
+                billMode: "$billMode"
               },
               in: {
                 $let: {
                   vars: {
-                    gst: {
-                      $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
-                    }
+                    rawBase: { $ifNull: ["$rentalDue.netPayable", "$rentalDue.baseAmount"] },
+                    rawGst: { $ifNull: ["$rentalDue.gstAmount", 0] }
                   },
                   in: {
-                    $cond: [
-                      {
-                        $and: [
-                          { $gt: ["$$gst", 0] },
-                          { $gte: ["$$base", { $add: [{ $ifNull: ["$rentalPayment.totalRentalAmount", 0] }, "$$gst"] }] }
-                        ]
+                    $let: {
+                      vars: {
+                        // If the entry has the full site amount (rawBase >= siteBase - 1), we must divide it.
+                        // Otherwise (e.g. already split), we use it as-is.
+                        faceBase: {
+                          $cond: [
+                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawBase", { $subtract: ["$$siteBase", 1] }] }] },
+                            { $divide: ["$$siteBase", "$$faceCount"] },
+                            "$$rawBase"
+                          ]
+                        },
+                        faceGst: {
+                          $cond: [
+                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawGst", { $subtract: ["$$siteGst", 1] }] }] },
+                            { $divide: ["$$siteGst", "$$faceCount"] },
+                            { $cond: [{ $gt: ["$$rawGst", 0] }, "$$rawGst", { $cond: [{ $eq: ["$$billMode", 1] }, { $divide: ["$$siteGst", "$$faceCount"] }, "$$siteGst"] }] }
+                          ]
+                        }
                       },
-                      "$$base",
-                      { $add: ["$$base", "$$gst"] }
-                    ]
+                      in: { $add: ["$$faceBase", "$$faceGst"] }
+                    }
                   }
                 }
               }
@@ -3738,125 +3730,147 @@ for (const siteDoc of activeSitesForSweep) {
           $or: [
             { "rentalPayment.status": { $in: [2, 3] } },
             {
-              "matchingEntry.dueDate": { $lt: today },
-              "matchingEntry.approvalStatus": { $ne: 3 },
+              "rentalDue.dueDate": { $lt: today },
             },
           ],
         },
       },
-      { $match: { $expr: { $not: [isClosedOverallCond] } } },
       {
         $group: { _id: null, totalOpen: { $sum: "$effectiveNetPayable" } },
       },
     ]);
-    const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
+    const dueAmountOpen = Math.round(dueAmountOpenAgg[0]?.totalOpen || 0);
 
     const statsAgg = await Media.aggregate([
       { $match: { "mediaDetails.status": 1 } },
-      { $match: monthOrCondition },
+      { $unwind: "$rentalDue" },
+      {
+        $match: {
+          "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd }
+        }
+      },
       {
         $addFields: {
-          matchingEntry: {
-            $let: {
-              vars: {
-                filtered: {
-                  $filter: {
-                    input: { $ifNull: ["$rentalDue", []] },
-                    as: "rd",
-                    cond: {
-                      $and: [
-                        { $gte: ["$$rd.dueDate", monthStart] },
-                        { $lte: ["$$rd.dueDate", monthEnd] },
-                      ],
-                    },
-                  },
-                },
-              },
-              in: {
-                $let: {
-                  vars: {
-                    approved: {
-                      $filter: {
-                        input: "$$filtered",
-                        as: "f",
-                        cond: { $eq: ["$$f.approvalStatus", 3] },
-                      },
-                    },
-                  },
-                  in: {
-                    $cond: [
-                      { $gt: [{ $size: "$$approved" }, 0] },
-                      { $first: "$$approved" },
-                      { $first: "$$filtered" },
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
+          billMode: { $ifNull: [{ $first: "$landOwners.agreementBillMode" }, 1] },
+          faceCount: { $size: { $ifNull: ["$mediaDetails", [1]] } }
+        }
       },
       {
         $addFields: {
           effectiveNetPayable: {
             $let: {
               vars: {
-                base: { $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"] },
-                entryGst: { $ifNull: ["$matchingEntry.gstAmount", 0] },
-                siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
-                ownerGst: {
-                  $sum: {
-                    $map: {
-                      input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
-                      as: "o",
-                      in: { $ifNull: ["$$o.gstAmount", 0] }
-                    }
+                siteBase: { $ifNull: ["$rentalPayment.totalRentalAmount", 0] },
+                siteGst: {
+                  $let: {
+                    vars: {
+                      rpGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                      loGst: {
+                        $sum: {
+                          $map: {
+                            input: { $ifNull: ["$landOwners", []] },
+                            as: "o",
+                            in: {
+                              $cond: [
+                                { $eq: [{ $toInt: { $ifNull: ["$$o.gstApplicable", 0] } }, 1] },
+                                { $ifNull: ["$$o.gstAmount", 0] },
+                                0
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    in: { $cond: [{ $gt: ["$$rpGst", 0] }, "$$rpGst", "$$loGst"] }
                   }
-                }
+                },
+                faceCount: { $cond: [{ $gt: ["$faceCount", 0] }, "$faceCount", 1] },
+                billMode: "$billMode"
               },
               in: {
                 $let: {
                   vars: {
-                    gst: {
-                      $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
-                    }
+                    rawBase: { $ifNull: ["$rentalDue.netPayable", "$rentalDue.baseAmount"] },
+                    rawGst: { $ifNull: ["$rentalDue.gstAmount", 0] }
                   },
                   in: {
-                    $cond: [
-                      {
-                        $and: [
-                          { $gt: ["$$gst", 0] },
-                          { $gte: ["$$base", { $add: [{ $ifNull: ["$rentalPayment.totalRentalAmount", 0] }, "$$gst"] }] }
-                        ]
+                    $let: {
+                      vars: {
+                        // If the entry has the full site amount (rawBase >= siteBase - 1), we must divide it.
+                        // Otherwise (e.g. already split), we use it as-is.
+                        faceBase: {
+                          $cond: [
+                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawBase", { $subtract: ["$$siteBase", 1] }] }] },
+                            { $divide: ["$$siteBase", "$$faceCount"] },
+                            "$$rawBase"
+                          ]
+                        },
+                        faceGst: {
+                          $cond: [
+                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawGst", { $subtract: ["$$siteGst", 1] }] }] },
+                            { $divide: ["$$siteGst", "$$faceCount"] },
+                            { $cond: [{ $gt: ["$$rawGst", 0] }, "$$rawGst", { $cond: [{ $eq: ["$$billMode", 1] }, { $divide: ["$$siteGst", "$$faceCount"] }, "$$siteGst"] }] }
+                          ]
+                        }
                       },
-                      "$$base",
-                      { $add: ["$$base", "$$gst"] }
-                    ]
+                      in: { $add: ["$$faceBase", "$$faceGst"] }
+                    }
                   }
                 }
               }
             }
           },
-          isApprovedByRole: hasRoleApprovedCond,
-          isClosedOverall: isClosedOverallCond,
-          hasRoleActed: hasRoleActedCond,
+          isApprovedByRole: targetRole === null
+            ? { $eq: ["$rentalDue.approvalStatus", 3] }
+            : {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: { $ifNull: ["$rentalDue.approvalSteps", []] },
+                        as: "s",
+                        cond: { $and: [{ $eq: ["$$s.role", targetRole] }, { $eq: ["$$s.status", 2] }] }
+                      }
+                    }
+                  },
+                  0
+                ]
+              },
+          isClosedOverall: { $eq: ["$rentalDue.approvalStatus", 3] },
+          hasRoleActed: targetRole === null
+            ? { $eq: ["$rentalDue.approvalStatus", 3] }
+            : {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: { $ifNull: ["$rentalDue.approvalSteps", []] },
+                        as: "s",
+                        cond: { $and: [{ $eq: ["$$s.role", targetRole] }, { $in: ["$$s.status", [2, 3]] }] }
+                      }
+                    }
+                  },
+                  0
+                ]
+              },
           isOverdueGlobally: {
             $or: [
               { $eq: ["$rentalPayment.status", 3] },
               {
                 $and: [
-                  { $lt: ["$matchingEntry.dueDate", today] },
-                  { $ne: ["$matchingEntry.approvalStatus", 3] },
+                  { $lt: ["$rentalDue.dueDate", today] },
+                  { $ne: ["$rentalDue.approvalStatus", 3] },
                 ],
               },
             ],
           },
+          effectiveCount: 1
         },
       },
       {
         $group: {
           _id: null,
-          approved: { $sum: { $cond: ["$isApprovedByRole", 1, 0] } },
+          approved: { $sum: { $cond: ["$isApprovedByRole", "$effectiveCount", 0] } },
           approvedAmount: {
             $sum: { $cond: ["$isApprovedByRole", "$effectiveNetPayable", 0] },
           },
@@ -3871,7 +3885,7 @@ for (const siteDoc of activeSitesForSweep) {
                     { $eq: ["$isOverdueGlobally", true] },
                   ],
                 },
-                1,
+                "$effectiveCount",
                 0,
               ],
             },
@@ -3903,7 +3917,7 @@ for (const siteDoc of activeSitesForSweep) {
                     { $not: ["$isOverdueGlobally"] },
                   ],
                 },
-                1,
+                "$effectiveCount",
                 0,
               ],
             },
@@ -3927,6 +3941,7 @@ for (const siteDoc of activeSitesForSweep) {
         },
       },
     ]);
+
 
 
     // ✅ FIXED — same root cause as isPastPendingByRoleCond above.
@@ -3960,6 +3975,8 @@ for (const siteDoc of activeSitesForSweep) {
               },
             ],
           },
+          billMode: { $ifNull: [{ $first: "$landOwners.agreementBillMode" }, 1] },
+          faceCount: { $size: { $ifNull: ["$mediaDetails", [1]] } }
         },
       },
       {
@@ -3984,33 +4001,40 @@ for (const siteDoc of activeSitesForSweep) {
             $sum: {
               $let: {
                 vars: {
-                  base: "$rentalDue.netPayable",
-                  entryGst: { $ifNull: ["$rentalDue.gstAmount", 0] },
-                  siteGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
-                  ownerGst: {
-                    $sum: {
-                      $map: {
-                        input: { $filter: { input: { $ifNull: ["$landOwners", []] }, as: "o", cond: { $eq: ["$$o.gstApplicable", 1] } } },
-                        as: "o",
-                        in: { $ifNull: ["$$o.gstAmount", 0] }
-                      }
+                  siteBase: { $ifNull: ["$rentalPayment.totalRentalAmount", 0] },
+                  siteGst: {
+                    $let: {
+                      vars: {
+                        rpGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
+                        loGst: {
+                          $sum: {
+                            $map: {
+                              input: {
+                                $filter: {
+                                  input: { $ifNull: ["$landOwners", []] },
+                                  as: "o",
+                                  cond: { $eq: [{ $toInt: { $ifNull: ["$$o.gstApplicable", 0] } }, 1] }
+                                }
+                              },
+                              as: "o",
+                              in: { $ifNull: ["$$o.gstAmount", 0] }
+                            }
+                          }
+                        }
+                      },
+                      in: { $cond: [{ $gt: ["$$rpGst", 0] }, "$$rpGst", "$$loGst"] }
                     }
-                  }
+                  },
+                  faceCount: { $cond: [{ $gt: ["$faceCount", 0] }, "$faceCount", 1] },
+                  billMode: "$billMode"
                 },
                 in: {
                   $let: {
                     vars: {
-                      gst: {
-                        $cond: [ { $gt: ["$$entryGst", 0] }, "$$entryGst", { $cond: [ { $gt: ["$$siteGst", 0] }, "$$siteGst", "$$ownerGst" ] } ]
-                      }
+                      faceBase: { $cond: [{ $eq: ["$$billMode", 1] }, { $divide: ["$$siteBase", "$$faceCount"] }, "$$siteBase"] },
+                      faceGst: { $cond: [{ $eq: ["$$billMode", 1] }, { $divide: ["$$siteGst", "$$faceCount"] }, "$$siteGst"] }
                     },
-                    in: {
-                      $cond: [
-                        { $and: [ { $gt: ["$$gst", 0] }, { $gte: ["$$base", { $add: ["$rentalPayment.totalRentalAmount", "$$gst"] }] } ] },
-                        "$$base",
-                        { $add: ["$$base", "$$gst"] }
-                      ]
-                    }
+                    in: { $add: ["$$faceBase", "$$faceGst"] }
                   }
                 }
               }
@@ -4019,6 +4043,7 @@ for (const siteDoc of activeSitesForSweep) {
         },
       },
     ]);
+
     const pastPendingApproval = {
       count: pastPendingAgg[0]?.count || 0,
       amount: pastPendingAgg[0]?.amount || 0,
@@ -4821,11 +4846,11 @@ const filteredAgreementDocVerificationHistory = (
         currentBillDate: formatDate(monthStart),
         dueThisMonth,
         dueAmountOpen,
-        overDue: { siteCount: overDueSiteCount, amount: overDueAmountTotal },
-        approvedCount,
-        approvedAmountTotal,
-        pendingCount,
-        pendingAmountTotal,
+        overDue: { siteCount: Math.round(overDueSiteCount), amount: Math.round(overDueAmountTotal) },
+        approvedCount: Math.round(approvedCount),
+        approvedAmountTotal: Math.round(approvedAmountTotal),
+        pendingCount: Math.round(pendingCount),
+        pendingAmountTotal: Math.round(pendingAmountTotal),
         // pastPendingApproval removed per user request (merged into overDue)
         pendingApproval: {
           staff: pendingByRole.staff,

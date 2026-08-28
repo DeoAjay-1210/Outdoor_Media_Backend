@@ -2979,37 +2979,51 @@ const landOwnerSiteFilter = async (req, res) => {
     let overdueAmountTotal = 0;
 
     for (const media of globalMediaDocs) {
+      const faceCount = (media.mediaDetails || []).length || 1;
+      const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
+
       // ── 1) Current Month Logic ──
-      const currentMonthEntry = (media.rentalDue || []).find((e) => {
+      const currentMonthEntries = (media.rentalDue || []).filter((e) => {
         if (!e.dueDate) return false;
         const d = new Date(e.dueDate);
         return d >= statsMonthStart && d <= statsMonthEnd;
       });
 
-      if (currentMonthEntry) {
+      for (const currentMonthEntry of currentMonthEntries) {
         const isApprovedOverall = currentMonthEntry.approvalStatus === 3;
         const roleStep = (currentMonthEntry.approvalSteps || []).find((s) => s.role === targetRole);
         const hasRoleApproved = roleStep && roleStep.status === 2;
         const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
 
-        const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
         const entryGst = Number(currentMonthEntry.gstAmount || 0);
         const siteGst = Number(media.rentalPayment?.gstAmount || 0);
         const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-        const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-        let base = Number(currentMonthEntry.netPayable || 0);
-        let effectiveAmount = base;
-        if (resolvedGst > 0) {
-          if (base < (Number(media.rentalPayment?.totalRentalAmount || 0) + resolvedGst)) {
-            effectiveAmount = base + resolvedGst;
-          }
-        }
+        const rpTotal = Number(media.rentalPayment?.totalRentalAmount || 0);
+        const rawBase = Number(currentMonthEntry.netPayable || currentMonthEntry.baseAmount || 0);
+        const rawGst = Number(currentMonthEntry.gstAmount || 0);
+
+        // Logic to detect if amounts are already split or need splitting (Mode 1)
+        const resolvedBase = (billMode === 1 && rawBase >= (rpTotal - 1))
+          ? (rpTotal / faceCount)
+          : rawBase;
+
+        const resolvedGst = rawGst > 0
+          ? (billMode === 1 && rawGst >= ( (siteGst > 0 ? siteGst : ownerGst) - 1))
+              ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount)
+              : rawGst
+          : (billMode === 1
+              ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount)
+              : (siteGst > 0 ? siteGst : ownerGst)
+            );
+
+        let effectiveAmount = resolvedBase + resolvedGst;
 
         const isApprovedByRole = targetRole === null ? isApprovedOverall : hasRoleApproved;
+        const effectiveCount = 1; // Count individual faces/entries
 
         if (isApprovedByRole) {
-          approvedCount++;
+          approvedCount += effectiveCount;
           approvedAmountTotal += effectiveAmount;
         } else {
           const shouldCountAsOpen = targetRole === null
@@ -3021,10 +3035,10 @@ const landOwnerSiteFilter = async (req, res) => {
                                       (currentMonthEntry.dueDate && new Date(currentMonthEntry.dueDate) < today && !isApprovedOverall);
 
             if (isOverdueGlobally) {
-              overdueSiteCount++;
+              overdueSiteCount += effectiveCount;
               overdueAmountTotal += effectiveAmount;
             } else {
-              pendingCount++;
+              pendingCount += effectiveCount;
               pendingAmountTotal += effectiveAmount;
             }
           }
@@ -3051,24 +3065,38 @@ const landOwnerSiteFilter = async (req, res) => {
           const entryGst = Number(pastEntry.gstAmount || 0);
           const siteGst = Number(media.rentalPayment?.gstAmount || 0);
           const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-          const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-          let base = Number(pastEntry.netPayable || 0);
-          let effectiveAmount = base;
-          if (resolvedGst > 0) {
-            if (base < (Number(media.rentalPayment?.totalRentalAmount || 0) + resolvedGst)) {
-              effectiveAmount = base + resolvedGst;
-            }
-          }
+          const rpTotal = Number(media.rentalPayment?.totalRentalAmount || 0);
+          const rawBase = Number(pastEntry.netPayable || pastEntry.baseAmount || 0);
+          const rawGst = Number(pastEntry.gstAmount || 0);
 
-          overdueSiteCount++;
+          const resolvedBase = (billMode === 1 && rawBase >= (rpTotal - 1))
+            ? (rpTotal / faceCount)
+            : rawBase;
+
+          const resolvedGst = rawGst > 0
+            ? (billMode === 1 && rawGst >= ( (siteGst > 0 ? siteGst : ownerGst) - 1))
+                ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount)
+                : rawGst
+            : (billMode === 1
+                ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount)
+                : (siteGst > 0 ? siteGst : ownerGst)
+              );
+
+          let effectiveAmount = resolvedBase + resolvedGst;
+
+          const effectiveCount = 1;
+          overdueSiteCount += effectiveCount;
           overdueAmountTotal += effectiveAmount;
         }
       }
     }
 
-    const totalPendingCount = pendingCount + overdueSiteCount;
-    const totalPendingAmount = pendingAmountTotal + overdueAmountTotal;
+
+
+
+    const totalPendingCount = Math.round(pendingCount + overdueSiteCount);
+    const totalPendingAmount = Math.round(pendingAmountTotal + overdueAmountTotal);
 
     const totalCount = entriesForResponse.length;
     const startIdx = (pageNumbers - 1) * pageSize;
@@ -3100,14 +3128,15 @@ const landOwnerSiteFilter = async (req, res) => {
         ...overallOutstandingTotals,
         overallLedgerSummary,
         // ✅ NEW: Rental Due Stats
-        overDue: { siteCount: overdueSiteCount, amount: overdueAmountTotal },
-        approvedCount,
-        approvedAmountTotal,
-        pendingCount: totalPendingCount,
-        pendingAmountTotal: totalPendingAmount,
+        overDue: { siteCount: Math.round(overdueSiteCount), amount: Math.round(overdueAmountTotal) },
+        approvedCount: Math.round(approvedCount),
+        approvedAmountTotal: Math.round(approvedAmountTotal),
+        pendingCount: Math.round(totalPendingCount),
+        pendingAmountTotal: Math.round(totalPendingAmount),
       },
       200,
     );
+
   } catch (error) {
     return errorResponse(res, error.message, null, 400);
   }
