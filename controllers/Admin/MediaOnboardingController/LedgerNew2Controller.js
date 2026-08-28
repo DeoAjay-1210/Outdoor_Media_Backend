@@ -3791,7 +3791,7 @@ latestLedger = latestLedger.sort((a, b) => {
               (o) =>
                 String(o.landOwnerMasterId) === String(owner.landOwnerMasterId),
             );
-            const details = m.mediaDetails || [];
+            const details = (m.mediaDetails || []).filter(d => Number(d.status) === 1);
             return {
               mediaId: m._id,
               mediaCode: details.map(d => d.mediaCode).join(" / "),
@@ -3811,16 +3811,15 @@ latestLedger = latestLedger.sort((a, b) => {
           linkedSites: trueLinkedSites,
         };
       });
-      const details = mediaObj.mediaDetails || [];
+      const parentMediaId = mediaObj.mediaId || String(mediaObj._id);
+const details = (mediaObj.mediaDetails || []).map((d) => ({
+  ...d,
+  mediaId: parentMediaId,
+}));
       return {
         ...restOfMediaObj,
-        // mediaCode: details.map(d => d.mediaCode).join(" / "),
-        // mediaName: details.map(d => d.mediaName).join(", "),
-        // mediaType: details[0]?.mediaType,
-        // city: details[0]?.city,
-        // state: details[0]?.state,
-        // location: details[0]?.location,
-        // totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+        mediaId: parentMediaId,
+        mediaDetails: details,
         landOwners: correctedLandOwners,
         ledger: latestLedger,
         withGst1Ledger: withGst1Ledger,
@@ -4585,18 +4584,13 @@ function buildSingleMediaHistoryBlock(
       previousGSTDue: 0,
       totalOutstandingAmount: 0,
     };
-    // const details = media.mediaDetails || [];
-    const details = (media.mediaDetails || []).map((d) => ({
+const parentMediaId = media.mediaId || String(media._id);
+const details = (media.mediaDetails || []).map((d) => ({
   ...d,
-  mediaId: media._id,
+  mediaId: parentMediaId,
 }));
     return {
-      // mediaId: media._id,
-      // mediaName: details.map(d => d.mediaName).join(", "),
-      // mediaType: details[0]?.mediaType,
-      // mediaCode: details.map(d => d.mediaCode).join(" / "),
-      // city: details[0]?.city,
-      // totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+     mediaId: parentMediaId,
       mediaDetails: details,
       landOwners: [],
       ledgerHistory: [],
@@ -6019,14 +6013,13 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
   const currentBillDate = getCurrentBillDate(media, autoCurrentMonthYM);
 
-  const details = media.mediaDetails || [];
+  const details = (media.mediaDetails || []).map((d) => ({
+  ...d,
+  mediaId: media._id,
+}));
+
   return {
-    // mediaId: media._id,
-    // mediaName: details.map(d => d.mediaName).join(", "),
-    // mediaType: details[0]?.mediaType,
-    // mediaCode: details.map(d => d.mediaCode).join(" / "),
-    // city: details[0]?.city,
-    // totalSqFt: details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0),
+   
     mediaDetails: details,
     rentalPayment: media.rentalPayment,
     landOwners: matchingLandOwners,

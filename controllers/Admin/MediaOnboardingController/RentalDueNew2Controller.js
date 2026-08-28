@@ -3496,13 +3496,24 @@ exports.getRentalDueListWithStats = async (req, res) => {
       };
     }
 
-    // ✅ FIXED — totalSites now counts EVERY site regardless of
-    // status (Active + Inactive), so inactive sites still show up in
-    // this count. Bill auto-generation itself still correctly skips
-    // inactive sites (see generateMissedEntriesForMedia's status
-    // guard) — this only affects the COUNT shown here, not whether
-    // bills get created.
-    const totalSites = await Media.countDocuments({});
+    // ✅ FIXED — totalSites now counts EVERY face in the system (from mediaDetails),
+    // matching the global onboarding count rather than just the rental-active count.
+    const totalFacesAgg = await Media.aggregate([
+      { $unwind: "$mediaDetails" },
+      { $count: "count" },
+    ]);
+    const totalSites = totalFacesAgg[0]?.count || 0;
+
+    // ✅ FIXED — siteCount now counts EVERY unique document (Site) in onboarding.
+    const siteCount = await Media.countDocuments({});
+
+    // ✅ ADDED — activeCount specifically for status: 1 faces (rental-active).
+    const activeCountAgg = await Media.aggregate([
+      { $unwind: "$mediaDetails" },
+      { $match: { "mediaDetails.status": 1 } },
+      { $count: "count" },
+    ]);
+    const activeCount = activeCountAgg[0]?.count || 0;
 
     // ✅ ADDED — before computing any stats/list data, sweep every
     // active site and catch it up on any missed billing cycles. Same
@@ -4237,7 +4248,11 @@ const filteredAgreementDocVerificationHistory = (
   return pendingCycleKeys.has(hCycleKey);
 });
 
-      const details = item.mediaDetails || [];
+      const parentMediaId = item.mediaId || String(item._id);
+const details = (item.mediaDetails || []).map((d) => ({
+  ...d,
+  mediaId: parentMediaId,
+}));
 
       // ✅ SITE-BASED RENTAL ENTRIES:
       // Always Return one entry per face per month to support tracking different campaigns.
@@ -4277,6 +4292,7 @@ const filteredAgreementDocVerificationHistory = (
 
       return {
         _id: item._id,
+        mediaId: parentMediaId,
         mediaCode: details.map(d => d.mediaCode).join(" / "),
         mediaName: details.map(d => d.mediaName).join(", "),
         mediaType: details[0]?.mediaType,
@@ -4527,6 +4543,8 @@ const filteredAgreementDocVerificationHistory = (
       // sweepDebugLog,
       value: {
         totalSites,
+        siteCount,
+        activeCount,
         previousBillGenerateDate: formatDate(new Date(yr, mo - 2, 1)),
         currentBillDate: formatDate(monthStart),
         dueThisMonth,

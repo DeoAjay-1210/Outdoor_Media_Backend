@@ -783,7 +783,7 @@ const landOwnerList = async (req, res) => {
         );
 
         if (ownerEntry) {
-          (media.mediaDetails || []).forEach((face) => {
+          (media.mediaDetails || []).filter(d => Number(d.status) === 1).forEach((face) => {
             liveFaces.push({
               mediaId: media._id,
               mediaDetailId: face._id,
@@ -2300,7 +2300,7 @@ const landOwnerSiteFilter = async (req, res) => {
           }
         });
       }
-      const details = mediaDoc.mediaDetails || [];
+      const details = (mediaDoc.mediaDetails || []).filter(d => Number(d.status) === 1);
       details.forEach((face) => {
         const faceId = String(face._id);
         const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
@@ -2979,7 +2979,8 @@ const landOwnerSiteFilter = async (req, res) => {
     let overdueAmountTotal = 0;
 
     for (const media of globalMediaDocs) {
-      const faceCount = (media.mediaDetails || []).length || 1;
+      const activeFacesList = (media.mediaDetails || []).filter(d => Number(d.status) === 1);
+      const faceCount = activeFacesList.length || 1;
       const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
 
       const approvedFaces = new Set();

@@ -3212,17 +3212,37 @@ if (landOwnerMasterId) {
     // QUERY
     // ===============================
 
-    const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
+    const counts = await MediaOnboarding.aggregate([
+      { $match: combinedFilter },
+      {
+        $group: {
+          _id: null,
+          siteCount: { $sum: 1 },
+          faceCount: { $sum: { $size: { $ifNull: ["$mediaDetails", []] } } },
+        },
+      },
+    ]);
+
+    const totalSites = counts[0]?.siteCount || 0;
+    const totalCount = counts[0]?.faceCount || 0;
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
-      .sort({ updatedAt: -1})
+      .sort({ updatedAt: -1 })
       .skip((pageNumbers - 1) * pageSize)
       .limit(pageSize)
       .lean();
 
     // ✅ Process each media item to provide aggregated summary fields
     mediaListData.forEach((item) => {
+      const parentMediaId = item.mediaId || String(item._id);
+item.mediaId = parentMediaId;
       if (Array.isArray(item.mediaDetails)) {
+        // ✅ FIXED — Filter mediaDetails to only include Active (status 1) faces
+item.mediaDetails = item.mediaDetails.map((d) => ({
+  ...d,
+  mediaId: parentMediaId, 
+}));
+
         item.mediaName = item.mediaDetails.map(d => d.mediaName).join(", ");
         item.mediaCode = item.mediaDetails.map(d => d.mediaCode).join(" / ");
         item.totalSqFt = item.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
@@ -3264,16 +3284,21 @@ if (landOwnerMasterId) {
     // AGGREGATION FOR STATISTICS
     // ===============================
 
-    // Get active count - using numeric status value (adjust based on your schema)
-    // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
-    const activeCount = await MediaOnboarding.countDocuments({
-      "mediaDetails.status": 1, // Change this to match your active status number
-    });
+    // Get active face count
+    const activeCountAgg = await MediaOnboarding.aggregate([
+      { $unwind: "$mediaDetails" },
+      { $match: { "mediaDetails.status": 1 } },
+      { $count: "count" },
+    ]);
+    const activeCount = activeCountAgg[0]?.count || 0;
 
-    // Get agreement expired count (agreement.status = 3)
-    const agreementExpiredCount = await MediaOnboarding.countDocuments({
-      "agreement.status": 3,
-    });
+    // Get agreement expired face count
+    const agreementExpiredCountAgg = await MediaOnboarding.aggregate([
+      { $match: { "agreement.status": 3 } },
+      { $unwind: "$mediaDetails" },
+      { $count: "count" },
+    ]);
+    const agreementExpiredCount = agreementExpiredCountAgg[0]?.count || 0;
 
     // Get total rental amounts from all documents
     const rentalAggregation = await MediaOnboarding.aggregate([
@@ -3359,9 +3384,15 @@ const getMediaById = async (req, res) => {
     if (!mediaData) {
       return errorResponse(res, "Media not found", null, 404);
     }
+const parentMediaId = mediaData.mediaId || String(mediaData._id);
+mediaData.mediaId = parentMediaId;
 
     // ✅ Aggregated summary fields
     if (Array.isArray(mediaData.mediaDetails)) {
+      mediaData.mediaDetails = mediaData.mediaDetails.map((d) => ({
+  ...d,
+  mediaId: parentMediaId, 
+}));
       mediaData.mediaName = mediaData.mediaDetails.map(d => d.mediaName).join(", ");
       mediaData.mediaCode = mediaData.mediaDetails.map(d => d.mediaCode).join(" / ");
       mediaData.totalSqFt = mediaData.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
