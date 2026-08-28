@@ -821,14 +821,19 @@ function advanceRentalPaymentOnOwnerApproval(media) {
 
 function computeGstSplit(media, withGst, targetFaceId = null) {
   let baseRent = Number(media.rentalPayment?.totalRentalAmount || 0);
+
+  // ✅ FIXED — resolve the FULL GST from the best available source (Site or Sum of Owners)
   let gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
+  if (gstAmountFull <= 0) {
+    gstAmountFull = (media.landOwners || [])
+      .filter((o) => Number(o.gstApplicable) === 1)
+      .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+  }
 
   const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
   const details = media.mediaDetails || [];
 
-  // ✅ UPDATED — respect agreementBillMode
   // Mode 1: Single Amount Agreement — split site totals across faces
-  // Mode 2: Multiple Amount Agreement — each face gets the full site-level amount
   if (billMode === 1 && targetFaceId && details.length > 1) {
     const totalSqFt = details.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
     const targetFace = details.find((d) => String(d._id) === String(targetFaceId));
@@ -1198,44 +1203,49 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 function addGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.gstAddedToBalance) return;
 
-  // ✅ NEW GUARD — if per-owner GST rows already exist for this
-  // rentalDueId, the owner-level breakdown already covers it. Do NOT
-  // also create the generic ownerId:null placeholder row — that's what
-  // was causing the duplicate (gstAmount:0 + gstAmount:9000 for the
-  // same rentalDueId/dueMonth).
-  const ownerRowsExist = (media.gstBalanceHistory || []).some(
-    (g) => String(g.rentalDueId) === String(entry._id) && g.source === "owner",
+  const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
+
+  // ✅ FIXED — for Mode 1 (Single Amount Agreement), only add the site-level GST once per month.
+  // Check if ANY entry for this dueMonth already exists in history.
+  const existsForMonth = (media.gstBalanceHistory || []).some(
+    (g) => g.dueMonth === entry.dueMonth
   );
-  if (ownerRowsExist) {
+
+  if (billMode === 1 && existsForMonth) {
     entry.gstAddedToBalance = true;
     return;
   }
 
-  if (entry?.withGst === 1 && entry.gstAmount > 0) {
-    if (!Array.isArray(media.gstBalanceHistory)) {
-      media.gstBalanceHistory = [];
+  if (entry?.withGst === 1) {
+    // Resolve the full site GST if entry amount is split
+    const split = computeGstSplit(media, entry.withGst, null); // passing null faceId gets full site total
+    const fullGst = split.gstAmount;
+
+    if (fullGst > 0) {
+      if (!Array.isArray(media.gstBalanceHistory)) {
+        media.gstBalanceHistory = [];
+      }
+
+      media.gstBalanceHistory.push({
+        rentalDueId: entry._id,
+        dueMonth: entry.dueMonth,
+        cycle: entry.dueDate,
+        gstAmount: fullGst,
+        isPaid: false,
+        paidAmount: 0,
+        paidAt: null,
+        paidBy: "",
+        createdAt: nowIST(),
+        createdBy: userName,
+        source: "rental",
+        ownerId: null,
+        ownerName: "",
+      });
+      media.markModified("gstBalanceHistory");
+
+      entry.gstAddedToBalance = true;
+      recomputeBalanceGstAmount(media);
     }
-
-    media.gstBalanceHistory.push({
-      rentalDueId: entry._id,
-      dueMonth: entry.dueMonth,
-      cycle: entry.dueDate,
-      gstAmount: entry.gstAmount,
-      isPaid: false,
-      paidAmount: 0,
-      paidAt: null,
-      paidBy: "",
-      createdAt: nowIST(),
-      createdBy: userName,
-      source: "rental",
-      ownerId: null,
-      ownerName: "",
-    });
-    media.markModified("gstBalanceHistory");
-
-    entry.gstAddedToBalance = true;
-
-    recomputeBalanceGstAmount(media);
   }
 }
 
@@ -1248,15 +1258,7 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
     media.gstBalanceHistory = [];
   }
 
-  // ✅ FIXED — build the owner-level rows FIRST, and only remove the
-  // site-level placeholder (and mark it as replaced) if at least one
-  // owner-level row was actually added. Previously the placeholder was
-  // deleted UNCONDITIONALLY before checking whether any owner
-  // qualified — so if the site-level GST was genuinely held
-  // (addGstToBalanceIfApplicable had already pushed it) but no
-  // individual owner had BOTH gstApplicable===1 AND gstAmount>0, the
-  // valid placeholder got deleted here and nothing replaced it,
-  // leaving gstBalanceHistory empty despite a real GST hold existing.
+  const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
   const ownerRowsToAdd = [];
 
   media.landOwners.forEach((owner) => {
@@ -1264,11 +1266,18 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
     const ownerGstAmount = Number(owner.gstAmount || 0);
 
     if (ownerGstApplicable === 1 && ownerGstAmount > 0) {
+      // ✅ FIXED — for Mode 1 (Single Amount Agreement), only add each owner's GST once per month.
+      const alreadyExists = (media.gstBalanceHistory || []).some(
+        (g) => g.dueMonth === entry.dueMonth && String(g.ownerId || g.landOwnerId) === String(owner._id)
+      );
+
+      if (billMode === 1 && alreadyExists) return;
+
       ownerRowsToAdd.push({
         rentalDueId: entry._id,
         dueMonth: entry.dueMonth,
         cycle: entry.dueDate,
-        gstAmount: ownerGstAmount,
+        gstAmount: ownerGstAmount, // Full owner GST (not split)
         isPaid: false,
         paidAmount: 0,
         paidAt: null,
@@ -1283,15 +1292,11 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
   });
 
   if (ownerRowsToAdd.length > 0) {
-    // ✅ only remove the placeholder NOW, since we know it's genuinely
-    // being replaced by real owner-level rows.
-    const placeholderExists = media.gstBalanceHistory.some(
-      (g) => String(g.rentalDueId) === String(entry._id) && g.source === "rental" && !g.ownerId,
-    );
-    if (placeholderExists) {
-      media.gstBalanceHistory = media.gstBalanceHistory.filter(
-        (g) => !(String(g.rentalDueId) === String(entry._id) && g.source === "rental" && !g.ownerId),
-      );
+    // If Mode 1, we might be replacing a site-level placeholder that was added by the same OR different face.
+    const placeholderFilter = (g) => g.dueMonth === entry.dueMonth && g.source === "rental" && !g.ownerId;
+
+    if (media.gstBalanceHistory.some(placeholderFilter)) {
+      media.gstBalanceHistory = media.gstBalanceHistory.filter((g) => !placeholderFilter(g));
     }
 
     media.gstBalanceHistory.push(...ownerRowsToAdd);
@@ -1300,9 +1305,6 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
     entry.gstAddedToBalance = true;
     recomputeBalanceGstAmount(media);
   }
-  // ✅ if ownerRowsToAdd is empty, we do NOTHING — the site-level
-  // placeholder (if it exists) is left completely intact, so
-  // gstBalanceHistory still correctly reflects the site-level GST hold.
 }
 function recomputeBalanceGstAmount(media) {
   const unpaidTotal = (media.gstBalanceHistory || []).reduce((sum, g) => {
@@ -3681,10 +3683,10 @@ for (const siteDoc of activeSitesForSweep) {
           _id: { mediaId: "$_id", faceId: "$rentalDue.mediaDetailId" },
           faceIsApprovedCurrent: { $max: { $cond: ["$isCurrentMonth", "$isApprovedByRole", false] } },
           faceIsOverdue: { $max: "$isOverdueGlobally" },
-          faceIsPending: { $max: "$isPendingByRole" },
+          faceIsPendingCurrent: { $max: { $cond: ["$isCurrentMonth", "$isPendingByRole", false] } },
           amtApprovedCurrent: { $sum: { $cond: [{ $and: ["$isCurrentMonth", "$isApprovedByRole"] }, "$effectiveNetPayable", 0] } },
           amtOverdueTotal: { $sum: { $cond: ["$isOverdueGlobally", "$effectiveNetPayable", 0] } },
-          amtPendingTotal: { $sum: { $cond: ["$isPendingByRole", "$effectiveNetPayable", 0] } },
+          amtPendingCurrent: { $sum: { $cond: [{ $and: ["$isCurrentMonth", "$isPendingByRole"] }, "$effectiveNetPayable", 0] } },
           isDueThisMonth: { $max: "$isCurrentMonth" },
           amtDueThisMonth: { $sum: { $cond: ["$isCurrentMonth", "$effectiveNetPayable", 0] } },
           amtDueOpenCurrent: { $sum: { $cond: [{ $and: ["$isCurrentMonth", "$isPendingByRole", { $or: [{ $eq: ["$rentalPayment.status", 3] }, { $lt: ["$rentalDue.dueDate", today] }] }] }, "$effectiveNetPayable", 0] } }
@@ -3700,8 +3702,8 @@ for (const siteDoc of activeSitesForSweep) {
           approvedAmountTotal: { $sum: "$amtApprovedCurrent" },
           overdueCount: { $sum: { $cond: ["$faceIsOverdue", 1, 0] } },
           overdueAmountTotal: { $sum: "$amtOverdueTotal" },
-          pendingCount: { $sum: { $cond: ["$faceIsPending", 1, 0] } },
-          pendingAmountTotal: { $sum: "$amtPendingTotal" }
+          pendingCount: { $sum: { $cond: ["$faceIsPendingCurrent", 1, 0] } },
+          pendingAmountTotal: { $sum: "$amtPendingCurrent" }
         }
       }
     ]);
@@ -3735,11 +3737,11 @@ for (const siteDoc of activeSitesForSweep) {
       { $unwind: "$rentalDue" },
       {
         $match: {
-          "rentalDue.dueDate": { $lte: monthEnd },
+          "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
           "rentalDue.approvalStatus": { $in: [1, 2] },
         },
       },
-      // Deduplicate faces per role
+      // Deduplicate faces per role (Current Month Only)
       {
         $group: {
           _id: {

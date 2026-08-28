@@ -3057,8 +3057,7 @@ const landOwnerSiteFilter = async (req, res) => {
             : (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : (siteGst > 0 ? siteGst : ownerGst));
 
           const effectiveAmount = resolvedBase + resolvedGst;
-          pendingFaces.add(faceId);
-          pendingAmountTotal += effectiveAmount;
+          // ✅ FIXED — Only add to overdue stats, not pending totals (as requested)
           overdueFaces.add(faceId);
           overdueAmountTotal += effectiveAmount;
         }
