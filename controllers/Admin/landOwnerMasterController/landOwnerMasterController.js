@@ -3007,13 +3007,17 @@ const landOwnerSiteFilter = async (req, res) => {
 
         const rawBase = Number(currentMonthEntry.netPayable || currentMonthEntry.baseAmount || 0);
         const rawGst = Number(currentMonthEntry.gstAmount || 0);
+        const withGstFlag = Number(currentMonthEntry.withGst || 0);
 
         const resolvedBase = (billMode === 1 && rawBase >= (rpTotal - 1)) ? (rpTotal / faceCount) : rawBase;
         const resolvedGst = rawGst > 0
           ? (billMode === 1 && rawGst >= ((siteGst > 0 ? siteGst : ownerGst) - 1)) ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst
           : (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : (siteGst > 0 ? siteGst : ownerGst));
 
-        const effectiveAmount = resolvedBase + resolvedGst;
+        const siteTotal = rpTotal + (siteGst > 0 ? siteGst : ownerGst);
+        const effectiveAmount = withGstFlag === 2
+          ? (billMode === 1 && rawBase >= (siteTotal - 1)) ? (siteTotal / faceCount) : rawBase
+          : resolvedBase + resolvedGst;
         const isApprovedByRole = targetRole === null ? isApprovedOverall : hasRoleApproved;
 
         if (isApprovedByRole) {
@@ -3051,13 +3055,17 @@ const landOwnerSiteFilter = async (req, res) => {
         if (isPendingByRole) {
           const rawBase = Number(pastEntry.netPayable || pastEntry.baseAmount || 0);
           const rawGst = Number(pastEntry.gstAmount || 0);
+          const withGstFlag = Number(pastEntry.withGst || 0);
 
           const resolvedBase = (billMode === 1 && rawBase >= (rpTotal - 1)) ? (rpTotal / faceCount) : rawBase;
           const resolvedGst = rawGst > 0
             ? (billMode === 1 && rawGst >= ((siteGst > 0 ? siteGst : ownerGst) - 1)) ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst
             : (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : (siteGst > 0 ? siteGst : ownerGst));
 
-          const effectiveAmount = resolvedBase + resolvedGst;
+          const siteTotal = rpTotal + (siteGst > 0 ? siteGst : ownerGst);
+          const effectiveAmount = withGstFlag === 2
+            ? (billMode === 1 && rawBase >= (siteTotal - 1)) ? (siteTotal / faceCount) : rawBase
+            : resolvedBase + resolvedGst;
           // ✅ FIXED — Only add to overdue stats, not pending totals (as requested)
           overdueFaces.add(faceId);
           overdueAmountTotal += effectiveAmount;

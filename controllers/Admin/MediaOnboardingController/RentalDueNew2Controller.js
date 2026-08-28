@@ -3607,7 +3607,8 @@ for (const siteDoc of activeSitesForSweep) {
                 $let: {
                   vars: {
                     rawBase: { $ifNull: ["$rentalDue.netPayable", "$rentalDue.baseAmount"] },
-                    rawGst: { $ifNull: ["$rentalDue.gstAmount", 0] }
+                    rawGst: { $ifNull: ["$rentalDue.gstAmount", 0] },
+                    withGst: { $ifNull: ["$rentalDue.withGst", 0] }
                   },
                   in: {
                     $let: {
@@ -3627,7 +3628,19 @@ for (const siteDoc of activeSitesForSweep) {
                           ]
                         }
                       },
-                      in: { $add: ["$$faceBase", "$$faceGst"] }
+                      in: {
+                        $cond: [
+                          { $eq: ["$$withGst", 2] },
+                          {
+                            $cond: [
+                              { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawBase", { $subtract: [{ $add: ["$$siteBase", "$$siteGst"] }, 1] }] }] },
+                              { $divide: [{ $add: ["$$siteBase", "$$siteGst"] }, "$$faceCount"] },
+                              "$$rawBase"
+                            ]
+                          },
+                          { $add: ["$$faceBase", "$$faceGst"] }
+                        ]
+                      }
                     }
                   }
                 }
