@@ -238,6 +238,37 @@ async function generateMissedEntriesForMedia(media, userName) {
         existingEntryForMonth &&
         new Date(existingEntryForMonth.dueDate).getTime() === candidateDate.getTime()
       ) {
+        // ✅ SYNC PENDING ENTRY AMOUNTS — if configuration (GST/rent) changed while pending
+        if (existingEntryForMonth.approvalStatus === 1) {
+          const inferredWithGst = Number(existingEntryForMonth.withGst || 0);
+          const currentGstSplit = computeGstSplit(media, inferredWithGst, faceId);
+
+          if (
+            Number(existingEntryForMonth.netPayable) !== Number(currentGstSplit.netPayable) ||
+            Number(existingEntryForMonth.gstAmount) !== Number(currentGstSplit.gstAmount) ||
+            Number(existingEntryForMonth.baseAmount) !== Number(currentGstSplit.baseAmount)
+          ) {
+            existingEntryForMonth.netPayable = Number(currentGstSplit.netPayable);
+            existingEntryForMonth.gstAmount = Number(currentGstSplit.gstAmount);
+            existingEntryForMonth.baseAmount = Number(currentGstSplit.baseAmount);
+
+            // Also update history entry if it exists
+            const yearLabel = getYearLabel(candidateDate);
+            const monthLabel = getMonthLabel(candidateDate);
+            const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+            const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+            const historyRecord = monthBucket?.entries.find(
+              (h) => String(h.rentalDueId) === String(existingEntryForMonth._id)
+            );
+            if (historyRecord) {
+              historyRecord.netPayable = existingEntryForMonth.netPayable;
+              historyRecord.updatedAt = nowIST();
+              historyRecord.updatedBy = userName || "System (auto-update)";
+            }
+            media.markModified("rentalDue");
+            media.markModified("rentalDueHistory");
+          }
+        }
         continue;
       }
 
@@ -566,6 +597,215 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
   };
 }
 
+// async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
+//   try {
+//     const toMail = process.env.T0_EMail;
+//     const ccMail = process.env.CC_EMail;
+//     const mailMode = process.env.MAIL_MODE || "development";
+
+//     const formatYMD = (date) =>
+//       date ? new Date(date).toISOString().split("T")[0] : null;
+
+//     const targetDueMonth = entry.dueMonth;
+
+//     // ── GROUPING LOGIC ──
+//     // ✅ FIXED — Removed automatic DB lookup for other sites.
+//     // If batchSites is provided (from batch approval), use them.
+//     // Otherwise, it's a single site mail as requested.
+//     let sitesInGroupData = [];
+//     if (Array.isArray(batchSites) && batchSites.length > 0) {
+//       sitesInGroupData = batchSites;
+//     } else {
+//       sitesInGroupData = [{ media, entry }];
+//     }
+
+//     // Identify unique landowners across the provided sites
+//     const uniqueOwnersMap = new Map();
+//     sitesInGroupData.forEach(({ media: siteMedia }) => {
+//       (siteMedia.landOwners || []).forEach((owner) => {
+//         if (owner.landOwnerMasterId) {
+//           const key = String(owner.landOwnerMasterId);
+//           if (!uniqueOwnersMap.has(key)) {
+//             uniqueOwnersMap.set(key, owner.toObject ? owner.toObject() : owner);
+//           }
+//         }
+//       });
+//     });
+
+//     const uniqueOwners = Array.from(uniqueOwnersMap.values());
+//     const ownerRefs = {};
+//     uniqueOwners.forEach((owner, idx) => {
+//       const ref = `LO-${String(idx + 1).padStart(2, "0")}`;
+//       ownerRefs[String(owner.landOwnerMasterId)] = ref;
+//       owner.ownerRef = ref;
+//     });
+
+//     // ── DATA AGGREGATION ──
+//     const allFaces = [];
+//     const allOwnersMap = new Map();
+//     const allProofs = [];
+//     const allInvoices = [];
+//     let totalRental = 0;
+//     let totalGst = 0;
+//     let totalNet = 0;
+
+//     sitesInGroupData.forEach(({ media: site, entry: siteInputEntry }) => {
+//       const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
+//       const rp = site.rentalPayment || {};
+
+//       // 1. Collect Faces (Media Details)
+//       (site.mediaDetails || []).forEach((d) => {
+//         if (Number(d.status) === 1) {
+//           allFaces.push({
+//             mediaCode: d.mediaCode || "",
+//             mediaName: d.mediaName || "",
+//             mediaType: d.mediaType || "",
+//             state: d.state || "",
+//             city: d.city || "",
+//             location: d.location || "",
+//             width: d.width || 0,
+//             height: d.height || 0,
+//             totalSqFt: d.totalSqFt || 0,
+//             status: d.status || 0,
+//           });
+//         }
+//       });
+
+//       // 2. Sum Payments
+//       const siteBaseRent = Number(rp.totalRentalAmount || 0);
+//       const siteGstAmount = Number(siteEntry?.gstAmount || 0);
+//       totalRental += siteBaseRent;
+//       totalGst += siteGstAmount;
+//       totalNet += (siteBaseRent + siteGstAmount);
+
+//       // 3. Merge LandOwners
+//       (site.landOwners || []).forEach((o) => {
+//         const id = String(o.landOwnerMasterId);
+//         if (allOwnersMap.has(id)) {
+//           const existing = allOwnersMap.get(id);
+//           existing.shareAmount = (Number(existing.shareAmount) || 0) + (Number(o.shareAmount) || 0);
+//           existing.gstAmount = (Number(existing.gstAmount) || 0) + (Number(o.gstAmount) || 0);
+//           existing.totalAmountWithGst = (Number(existing.totalAmountWithGst) || 0) + (Number(o.totalAmountWithGst) || 0);
+//         } else {
+//           allOwnersMap.set(id, { ...(o.toObject ? o.toObject() : o) });
+//         }
+//       });
+
+//       // 4. Collect Proofs
+//       if (siteEntry?.proofOfCampaign?.filePath) allProofs.push(siteEntry.proofOfCampaign.filePath);
+//       if (siteEntry?.invoice?.filePath) allInvoices.push(siteEntry.invoice.filePath);
+//     });
+
+//     const isSingleBill = (media.mediaDetails?.some(d => d.siteBillMode === 1) || media.siteBillMode === 1);
+
+//     const data = {
+//       billingType: isSingleBill ? "single_bill" : "separate_bill",
+//       mediaDetails: allFaces,
+//       rentalPayment: {
+//         totalRentalAmount: totalRental,
+//         gstAmount: totalGst,
+//         netPayable: totalNet,
+//         paymentFrequency: entry.paymentFrequency || media.rentalPayment?.paymentFrequency || 0,
+//         lastBillPaidDate: formatYMD(media.rentalPayment?.lastBillPaidDate),
+//         nextBillingDate: formatYMD(media.rentalPayment?.nextBillingDate),
+//       },
+//       landOwners: Array.from(allOwnersMap.values()).map((o, idx) => ({
+//         ownerRef: `LO-${String(idx + 1).padStart(2, "0")}`,
+//         name: o.name || "",
+//         phone: o.phone || "",
+//         bankName: o.bankName || "",
+//         ifsc: o.ifsc || "",
+//         accountNumber: o.accountNumber || "",
+//         panNumber: o.panNumber || "",
+//         shareAmount: o.shareAmount || 0,
+//         gstAmount: o.gstAmount || 0,
+//         totalAmountWithGst: o.totalAmountWithGst || 0,
+//         tdsPercentage: o.tdsPercentage || 0,
+//         tdsAmount: o.tdsAmount || 0,
+//         paymentCategory: o.paymentCategory || 0,
+//         onlineMode: o.onlineMode || 0,
+//       })),
+//       proof_of_campaign: allProofs,
+//       invoice: allInvoices,
+//       numberOfLandOwners: allOwnersMap.size,
+//     };
+
+//     if (isSingleBill) {
+//       data.numberOfSites = sitesInGroupData.length;
+//     }
+
+
+//     const mailPayload = {
+//       mailtype: "cmdapproval",
+//       to: [toMail],
+//        cc: [ccMail],
+//       data: data,
+//     };
+
+//     console.log(
+//       "📧 RENTAL DUE MAIL PAYLOAD:",
+//       JSON.stringify(mailPayload, null, 2)
+//     );
+
+//     if (mailMode !== "production") {
+//       console.log(
+//         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
+//       );
+//       return {
+//         mailtype: "cmdapproval",
+//         to: [toMail],
+//         cc: [ccMail],
+//         success: true,
+//         sent: false,
+//         statusCode: 200,
+//         message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
+//         data: mailPayload.data,
+//       };
+//     }
+
+//     const response = await axios.post(
+//       "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
+//       mailPayload,
+//       { headers: { "Content-Type": "application/json" } }
+//     );
+
+//     console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
+
+//     const isMailSuccess =
+//       response.data &&
+//       (response.data.success === true ||
+//         response.data.status === "success" ||
+//         response.status === 200);
+
+//     return {
+//       mailtype: "cmdapproval",
+//       to: [toMail],
+//       cc: [ccMail],
+//       success: !!isMailSuccess,
+//       sent: !!isMailSuccess,
+//       statusCode: response.status || (isMailSuccess ? 200 : 500),
+//       message: isMailSuccess
+//         ? "Rental due approval mail sent successfully"
+//         : "Rental due approval mail failed",
+//       data: mailPayload.data,
+//     };
+//   } catch (mailErr) {
+//     console.error(
+//       "❌ Rental due approval mail error:",
+//       mailErr?.message || mailErr
+//     );
+//     return {
+//       mailtype: "cmdapproval",
+//       to: [process.env.T0_EMail],
+//       cc: [process.env.CC_EMail],
+//       success: false,
+//       sent: false,
+//       statusCode: 500,
+//       message: mailErr?.message || "Unknown mail error",
+//       data: null,
+//     };
+//   }
+// }
 async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
   try {
     const toMail = process.env.T0_EMail;
@@ -578,107 +818,44 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     const targetDueMonth = entry.dueMonth;
 
     // ── GROUPING LOGIC ──
-    // ✅ FIXED — Removed automatic DB lookup for other sites.
-    // If batchSites is provided (from batch approval), use them.
-    // Otherwise, it's a single site mail as requested.
-    let sitesInGroupData = [];
-    if (Array.isArray(batchSites) && batchSites.length > 0) {
-      sitesInGroupData = batchSites;
-    } else {
-      sitesInGroupData = [{ media, entry }];
-    }
-
-    // Identify unique landowners across the provided sites
-    const uniqueOwnersMap = new Map();
-    sitesInGroupData.forEach(({ media: siteMedia }) => {
-      (siteMedia.landOwners || []).forEach((owner) => {
-        if (owner.landOwnerMasterId) {
-          const key = String(owner.landOwnerMasterId);
-          if (!uniqueOwnersMap.has(key)) {
-            uniqueOwnersMap.set(key, owner.toObject ? owner.toObject() : owner);
-          }
-        }
-      });
-    });
-
-    const uniqueOwners = Array.from(uniqueOwnersMap.values());
-    const ownerRefs = {};
-    uniqueOwners.forEach((owner, idx) => {
-      const ref = `LO-${String(idx + 1).padStart(2, "0")}`;
-      ownerRefs[String(owner.landOwnerMasterId)] = ref;
-      owner.ownerRef = ref;
-    });
-
-    // ── DATA AGGREGATION ──
-    const allFaces = [];
-    const allOwnersMap = new Map();
-    const allProofs = [];
-    const allInvoices = [];
-    let totalRental = 0;
-    let totalGst = 0;
-    let totalNet = 0;
-
-    sitesInGroupData.forEach(({ media: site, entry: siteInputEntry }) => {
-      const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
-      const rp = site.rentalPayment || {};
-
-      // 1. Collect Faces (Media Details)
-      (site.mediaDetails || []).forEach((d) => {
-        if (Number(d.status) === 1) {
-          allFaces.push({
-            mediaCode: d.mediaCode || "",
-            mediaName: d.mediaName || "",
-            mediaType: d.mediaType || "",
-            state: d.state || "",
-            city: d.city || "",
-            location: d.location || "",
-            width: d.width || 0,
-            height: d.height || 0,
-            totalSqFt: d.totalSqFt || 0,
-            status: d.status || 0,
-          });
-        }
-      });
-
-      // 2. Sum Payments
-      const siteBaseRent = Number(rp.totalRentalAmount || 0);
-      const siteGstAmount = Number(siteEntry?.gstAmount || 0);
-      totalRental += siteBaseRent;
-      totalGst += siteGstAmount;
-      totalNet += (siteBaseRent + siteGstAmount);
-
-      // 3. Merge LandOwners
-      (site.landOwners || []).forEach((o) => {
-        const id = String(o.landOwnerMasterId);
-        if (allOwnersMap.has(id)) {
-          const existing = allOwnersMap.get(id);
-          existing.shareAmount = (Number(existing.shareAmount) || 0) + (Number(o.shareAmount) || 0);
-          existing.gstAmount = (Number(existing.gstAmount) || 0) + (Number(o.gstAmount) || 0);
-          existing.totalAmountWithGst = (Number(existing.totalAmountWithGst) || 0) + (Number(o.totalAmountWithGst) || 0);
-        } else {
-          allOwnersMap.set(id, { ...(o.toObject ? o.toObject() : o) });
-        }
-      });
-
-      // 4. Collect Proofs
-      if (siteEntry?.proofOfCampaign?.filePath) allProofs.push(siteEntry.proofOfCampaign.filePath);
-      if (siteEntry?.invoice?.filePath) allInvoices.push(siteEntry.invoice.filePath);
-    });
+    let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
+      ? batchSites
+      : [{ media, entry }];
 
     const isSingleBill = (media.mediaDetails?.some(d => d.siteBillMode === 1) || media.siteBillMode === 1);
 
-    const data = {
-      billingType: isSingleBill ? "single_bill" : "separate_bill",
-      mediaDetails: allFaces,
-      rentalPayment: {
-        totalRentalAmount: totalRental,
-        gstAmount: totalGst,
-        netPayable: totalNet,
-        paymentFrequency: entry.paymentFrequency || media.rentalPayment?.paymentFrequency || 0,
-        lastBillPaidDate: formatYMD(media.rentalPayment?.lastBillPaidDate),
-        nextBillingDate: formatYMD(media.rentalPayment?.nextBillingDate),
-      },
-      landOwners: Array.from(allOwnersMap.values()).map((o, idx) => ({
+    let totalFaceCount = 0;
+    const uniqueOwnersSetAtRoot = new Set();
+
+    const sitesPayload = sitesInGroupData.map(({ media: site, entry: siteInputEntry }) => {
+      const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
+      const rp = site.rentalPayment || {};
+      const agreement = site.agreement || {};
+
+      // 1. Collect Active Faces
+      const activeFaces = (site.mediaDetails || []).filter(d => Number(d.status) === 1).map(d => ({
+        mediaCode: d.mediaCode || "",
+        mediaName: d.mediaName || "",
+        mediaType: d.mediaType || "",
+        state: d.state || "",
+        city: d.city || "",
+        location: d.location || "",
+        width: d.width || 0,
+        height: d.height || 0,
+        totalSqFt: d.totalSqFt || 0,
+        status: d.status || 0
+      }));
+
+      totalFaceCount += activeFaces.length;
+
+      // 2. Identify Owners for this Site
+      const siteOwnersMap = new Map();
+      (site.landOwners || []).forEach(o => {
+        uniqueOwnersSetAtRoot.add(String(o.landOwnerMasterId));
+        siteOwnersMap.set(String(o.landOwnerMasterId), { ...(o.toObject ? o.toObject() : o) });
+      });
+
+      const siteLandOwners = Array.from(siteOwnersMap.values()).map((o, idx) => ({
         ownerRef: `LO-${String(idx + 1).padStart(2, "0")}`,
         name: o.name || "",
         phone: o.phone || "",
@@ -686,22 +863,54 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         ifsc: o.ifsc || "",
         accountNumber: o.accountNumber || "",
         panNumber: o.panNumber || "",
-        shareAmount: o.shareAmount || 0,
-        gstAmount: o.gstAmount || 0,
-        totalAmountWithGst: o.totalAmountWithGst || 0,
-        tdsPercentage: o.tdsPercentage || 0,
-        tdsAmount: o.tdsAmount || 0,
         paymentCategory: o.paymentCategory || 0,
         onlineMode: o.onlineMode || 0,
-      })),
-      proof_of_campaign: allProofs,
-      invoice: allInvoices,
-      numberOfLandOwners: allOwnersMap.size,
-    };
+        shareAmount: Number(o.shareAmount || 0),
+        onlineAmount: Number(o.onlineAmount || 0),
+        cashAmount: Number(o.cashAmount || 0),
+        tdsApplicable: o.tdsApplicable || 0,
+        tdsPercentage: o.tdsPercentage || 0,
+        tdsAmount: Number(o.tdsAmount || 0),
+        tdsHold: 0,
+        gstHold: Number(siteEntry?.withGst) === 1 ? 1 : 0,
+        gstApplicable: o.gstApplicable || 0,
+        gstNumber: o.gstNumber || "",
+        gstPercentage: o.gstPercentage || 0,
+        gstAmount: Number(o.gstAmount || 0),
+        totalAmountWithGst: Number(o.totalAmountWithGst || (Number(o.shareAmount || 0) + Number(o.gstAmount || 0))),
+      }));
 
-    if (isSingleBill) {
-      data.numberOfSites = sitesInGroupData.length;
-    }
+      return {
+        mediaDetails: activeFaces,
+        rentalPayment: {
+          totalRentalAmount: Number(rp.totalRentalAmount || 0),
+          gstAmount: Number(siteEntry?.gstAmount || 0),
+          netPayable: Number(rp.totalRentalAmount || 0) + Number(siteEntry?.gstAmount || 0),
+          paymentFrequency: siteEntry?.paymentFrequency || rp.paymentFrequency || 0,
+          lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+          nextBillingDate: formatYMD(rp.nextBillingDate),
+        },
+        agreement: {
+          startDate: formatYMD(agreement.startDate),
+          endDate: formatYMD(agreement.endDate),
+          reminderBeforeExpiry: agreement.reminderBeforeExpiry || 0,
+          advanceRent: agreement.advanceRent || 0,
+          status: agreement.status || 0,
+        },
+        appraisal: {},
+        landOwners: siteLandOwners,
+        proof_of_campaign: siteEntry?.proofOfCampaign?.filePath ? [siteEntry.proofOfCampaign.filePath] : [],
+        invoice: siteEntry?.invoice?.filePath ? [siteEntry.invoice.filePath] : [],
+        numberOfLandOwners: siteOwnersMap.size
+      };
+    });
+
+    const data = {
+      billingType: isSingleBill ? "single_bill" : "separate_bill",
+      numberOfSites: totalFaceCount,
+      numberOfLandOwners: uniqueOwnersSetAtRoot.size,
+      sites: sitesPayload
+    };
 
 
     const mailPayload = {
@@ -775,7 +984,6 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     };
   }
 }
-
 
 function addGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.gstAddedToBalance) return;

@@ -2214,6 +2214,22 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
           }
         });
       }
+
+      // ✅ NEW — preserve the EXISTING mediaDetails' real _id, matched by
+      // array position, to prevent duplication in rentalDue entries.
+      if (mediaData.mediaDetails && Array.isArray(mediaData.mediaDetails)) {
+        mediaData.mediaDetails.forEach((detail, idx) => {
+          const existingDetail = media.mediaDetails?.[idx];
+          if (existingDetail) {
+            const sentIdMatchesExisting =
+              detail._id && String(detail._id) === String(existingDetail._id);
+
+            if (!sentIdMatchesExisting) {
+              detail._id = existingDetail._id;
+            }
+          }
+        });
+      }
       // ✅ ADDED — Media → LandOwnerMaster sync. For any owner that's
       // already linked (has landOwnerMasterId), push this property's
       // edits (name, amounts, GST/TDS, etc.) into the linked Master
@@ -2375,8 +2391,28 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
           media.rentalPayment.previousBillGenerateDate;
       }
 
+      const protectedFields = [
+        "_id",
+        "__v",
+        "createdAt",
+        "updatedAt",
+        "mediaId",
+        "rentalDue",
+        "rentalDueEntries",
+        "rentalDueHistory",
+        "ledger",
+        "withGst1Ledger",
+        "ledgerHistory",
+        "tdsBalanceHistory",
+        "pendingMonths",
+        "agreementDocVerification",
+        "verificationProgressHistory",
+        "gstBalanceHistory",
+        "agreementDocVerificationHistory"
+      ];
+
       Object.keys(mediaData).forEach((key) => {
-        if (!["_id", "__v", "createdAt", "updatedAt", "mediaId"].includes(key)) {
+        if (!protectedFields.includes(key)) {
           media[key] = mediaData[key];
         }
       });
