@@ -3246,11 +3246,11 @@ if (landOwnerMasterId) {
         : filter;
 
     // ===============================
-    // QUERY
+    // QUERY & PAGINATION
     // ===============================
 
-    const counts = await MediaOnboarding.aggregate([
-      { $match: combinedFilter },
+    // ✅ Global totals for the system (Cannot reduce based on filter)
+    const globalCounts = await MediaOnboarding.aggregate([
       {
         $group: {
           _id: null,
@@ -3260,9 +3260,11 @@ if (landOwnerMasterId) {
       },
     ]);
 
-    const totalSites = counts[0]?.siteCount || 0;
-    const faceCount = counts[0]?.faceCount || 0;
-    const totalCount = faceCount;
+    const totalCount = globalCounts[0]?.siteCount || 0;
+    const totalFaces = globalCounts[0]?.faceCount || 0;
+
+    // ✅ Filtered count for pagination logic
+    const filteredCount = await MediaOnboarding.countDocuments(combinedFilter);
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
       .sort({ updatedAt: -1 })
@@ -3390,8 +3392,10 @@ const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
       {
         pageNumber: pageNumbers,
         count: pageSize,
-        totalCount,
-        totalPages: Math.ceil(totalCount / pageSize),
+        totalCount, // Global system total (e.g., 419)
+        totalFaces, // Global system total (e.g., 422)
+        filteredCount, // Current filtered total
+        totalPages: Math.ceil(filteredCount / pageSize),
         cityFilter,
         mediaTypeFilter,
         landOwnerNameFilter,
