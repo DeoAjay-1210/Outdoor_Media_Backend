@@ -366,6 +366,13 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
 // ─────────────────────────────────────────────────────────────
 const MediaSchema = new mongoose.Schema(
   {
+    siteCode: {
+      type: String,
+      trim: true,
+    },
+    excelRowNumber: {
+      type: Number,
+    },
     mediaDetails: [
       {
         mediaCode: {
@@ -1135,6 +1142,13 @@ MediaSchema.pre("save", function () {
     }
 
     owner.shareAmount = resolvedShareAmount;
+
+    // ✅ AUTO-TDS — If total rental amount is 50,000 or above,
+    // automatically force tdsApplicable to 1 for every land owner.
+    if (totalRentalAmount >= 50000) {
+      owner.tdsApplicable = 1;
+    }
+
     const paymentCategory = Number(owner.paymentCategory || 1);
 
     // ✅ FIXED — ensure onlineAmount and cashAmount are synced for
@@ -1164,7 +1178,7 @@ MediaSchema.pre("save", function () {
       tdsApplicable === 1
         ? envTdsPercent > 0
           ? envTdsPercent
-          : Number(owner.tdsPercentage || 0)
+          : Number(owner.tdsPercentage || 10)
         : 0;
     owner.tdsPercentage = tdsPercentage;
 

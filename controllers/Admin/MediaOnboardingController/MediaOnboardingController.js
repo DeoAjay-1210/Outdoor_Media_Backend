@@ -3153,6 +3153,7 @@ const mediaList = async (req, res) => {
       searchFilter = {
         $or: [
           { mediaId: searchRegex },
+          { siteCode: searchRegex },
           { "mediaDetails.mediaCode": searchRegex },
           { "mediaDetails.mediaName": searchRegex },
           { "mediaDetails.mediaType": searchRegex },
@@ -3260,7 +3261,8 @@ if (landOwnerMasterId) {
     ]);
 
     const totalSites = counts[0]?.siteCount || 0;
-    const totalCount = counts[0]?.faceCount || 0;
+    const faceCount = counts[0]?.faceCount || 0;
+    const totalCount = faceCount;
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
       .sort({ updatedAt: -1 })
@@ -3273,14 +3275,16 @@ if (landOwnerMasterId) {
       const parentMediaId = item.mediaId || String(item._id);
 item.mediaId = parentMediaId;
       if (Array.isArray(item.mediaDetails)) {
+        item.siteCode = item.siteCode || item.mediaDetails[0]?.siteCode;
         // ✅ FIXED — Filter mediaDetails to only include Active (status 1) faces
-item.mediaDetails = item.mediaDetails.map((d) => ({
-  ...d,
-  mediaId: parentMediaId, 
-}));
+        item.mediaDetails = item.mediaDetails.map((d) => ({
+          ...d,
+          mediaId: parentMediaId,
+          siteCode: item.siteCode,
+        }));
 
-        item.mediaName = item.mediaDetails.map(d => d.mediaName).join(", ");
-        item.mediaCode = item.mediaDetails.map(d => d.mediaCode).join(" / ");
+        item.mediaName = item.mediaDetails.map((d) => d.mediaName).join(", ");
+        item.mediaCode = item.mediaDetails.map((d) => d.mediaCode).join(" / ");
         item.totalSqFt = item.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
         item.mediaType = item.mediaDetails[0]?.mediaType;
         item.city = item.mediaDetails[0]?.city;
@@ -3425,12 +3429,14 @@ mediaData.mediaId = parentMediaId;
 
     // ✅ Aggregated summary fields
     if (Array.isArray(mediaData.mediaDetails)) {
+      mediaData.siteCode = mediaData.siteCode || mediaData.mediaDetails[0]?.siteCode;
       mediaData.mediaDetails = mediaData.mediaDetails.map((d) => ({
-  ...d,
-  mediaId: parentMediaId, 
-}));
-      mediaData.mediaName = mediaData.mediaDetails.map(d => d.mediaName).join(", ");
-      mediaData.mediaCode = mediaData.mediaDetails.map(d => d.mediaCode).join(" / ");
+        ...d,
+        mediaId: parentMediaId,
+        siteCode: mediaData.siteCode,
+      }));
+      mediaData.mediaName = mediaData.mediaDetails.map((d) => d.mediaName).join(", ");
+      mediaData.mediaCode = mediaData.mediaDetails.map((d) => d.mediaCode).join(" / ");
       mediaData.totalSqFt = mediaData.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
       mediaData.mediaType = mediaData.mediaDetails[0]?.mediaType;
       mediaData.city = mediaData.mediaDetails[0]?.city;
@@ -3496,8 +3502,8 @@ const COLUMN_MAP = {
   width: "width",
   hight: "height",
   height: "height",
+  "site code": "siteCode",
 };
-
 const uploadExcel = async (req, res) => {
   try {
     if (!req.file) {
@@ -3537,6 +3543,9 @@ const uploadExcel = async (req, res) => {
     }
     // ────────────────────────────────────────────────────────────
 
+    // ── STEP 1: Map + validate every row, then GROUP by Site Code ──
+    const groups = new Map(); // siteCode -> { details: [], excelRows: [] }
+
     for (const [index, row] of rows.entries()) {
       const excelRow = index + 2;
       const mapped = {};
@@ -3545,7 +3554,7 @@ const uploadExcel = async (req, res) => {
       Object.keys(row).forEach((excelKey) => {
         const normalizedKey = excelKey.trim().toLowerCase();
         const schemaField = COLUMN_MAP[normalizedKey];
-        if (schemaField && (row[excelKey] !== undefined && row[excelKey] !== null)) {
+        if (schemaField && row[excelKey] !== undefined && row[excelKey] !== null) {
           mapped[schemaField] = row[excelKey];
         }
       });
@@ -3579,51 +3588,307 @@ const uploadExcel = async (req, res) => {
         location: mapped.location || "",
         width: Math.floor(Number(mapped.width) || 0),
         height: Math.floor(Number(mapped.height) || 0),
+        status: 2,          // ✅ explicit — pipeline updates skip schema defaults entirely
+  siteBillMode: null, 
       };
       mediaDetail.totalSqFt = mediaDetail.width * mediaDetail.height;
 
-      const mediaDocData = {
-        mediaId: `${prefix}MED#${nextNumber}`,
-        mediaDetails: [mediaDetail],
-        excelRowNumber: excelRow,
-        createdAt: new Date(today.getTime() + (rows.length - index)),
-        updatedAt: new Date(today.getTime() + (rows.length - index)),
-      };
+      // Rows without a Site Code fall back to their own mediaCode,
+      // so they still become a standalone document (1 object in the array).
+      const siteCode = mapped.siteCode || mapped.mediaCode;
 
-      nextNumber++;
+      if (!groups.has(siteCode)) {
+        groups.set(siteCode, { details: [], excelRows: [] });
+      }
+      groups.get(siteCode).details.push(mediaDetail);
+      groups.get(siteCode).excelRows.push(excelRow);
+    }
+
+    // ── STEP 2: Guard against duplicate mediaCode WITHIN the same group ──
+    for (const [siteCode, group] of groups) {
+      const seen = new Set();
+      const deduped = [];
+      for (let i = 0; i < group.details.length; i++) {
+        const code = group.details[i].mediaCode;
+        if (seen.has(code)) {
+          results.errors.push({
+            row: group.excelRows[i],
+            reason: `Duplicate Media Code "${code}" within Site Code "${siteCode}"`,
+          });
+          results.skipped++;
+          continue;
+        }
+        seen.add(code);
+        deduped.push(group.details[i]);
+      }
+      group.details = deduped;
+    }
+
+    // ── STEP 3: One bulk op per GROUP — append into mediaDetails, never overwrite ──
+    let groupIdx = 0;
+    const groupCount = groups.size;
+    for (const [siteCode, group] of groups) {
+      if (!group.details.length) continue;
+
+      const newDetailCodes = group.details.map((d) => d.mediaCode);
+      const firstRow = group.excelRows[0];
+
+      // To preserve Excel order in a DESCENDING list (updatedAt: -1),
+      // the first site in Excel (groupIdx 0) gets the largest offset
+      // so it has the latest timestamp.
+      const timestamp = new Date(today.getTime() + (groupCount - groupIdx));
 
       bulkOps.push({
         updateOne: {
-          filter: { "mediaDetails.mediaCode": mapped.mediaCode },
-          update: {
-            $set: {
-              ...mediaDocData,
-            },
+          filter: {
+            $or: [
+              { siteCode: siteCode },
+              { "mediaDetails.mediaCode": { $in: newDetailCodes } },
+            ],
           },
+          update: [
+            // STAGE 1: compute the merged array, but stash it in a TEMP field
+            {
+              $set: {
+                siteCode: siteCode,
+                excelRowNumber: firstRow,
+                mediaId: { $ifNull: ["$mediaId", `${prefix}MED#${nextNumber}`] },
+                createdAt: { $ifNull: ["$createdAt", timestamp] },
+                _mergedDetails: {
+                  $let: {
+                    vars: {
+                      existing: { $cond: [{ $isArray: "$mediaDetails" }, "$mediaDetails", []] },
+                    },
+                    in: {
+                      $concatArrays: [
+                        {
+                          $map: {
+                            input: "$$existing",
+                            as: "e",
+                            in: {
+                              $let: {
+                                vars: {
+                                  match: {
+                                    $first: {
+                                      $filter: {
+                                        input: group.details,
+                                        as: "d",
+                                        cond: { $eq: ["$$d.mediaCode", "$$e.mediaCode"] },
+                                      },
+                                    },
+                                  },
+                                },
+                                in: { $ifNull: ["$$match", "$$e"] },
+                              },
+                            },
+                          },
+                        },
+                        {
+                          $filter: {
+                            input: group.details,
+                            as: "d",
+                            cond: {
+                              $not: [
+                                {
+                                  $in: [
+                                    "$$d.mediaCode",
+                                    { $map: { input: "$$existing", as: "e", in: "$$e.mediaCode" } },
+                                  ],
+                                },
+                              ],
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+            // STAGE 2: Apply the merge and update timestamp
+            {
+              $set: {
+                updatedAt: timestamp,
+                mediaDetails: "$_mergedDetails",
+              },
+            },
+            // STAGE 3: drop the temp field
+            { $unset: "_mergedDetails" },
+          ],
           upsert: true,
         },
       });
+      groupIdx++;
+      nextNumber++;
     }
 
     if (bulkOps.length) {
-      const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
-        ordered: false,
-        timestamps: false,
-      });
-      results.inserted = bulkResult.upsertedCount;
-      results.skipped += bulkResult.matchedCount;
+  try {
+    const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
+      ordered: false,
+      timestamps: false,
+    });
+    results.inserted = bulkResult.upsertedCount;
+    results.skipped += bulkResult.matchedCount;
+  } catch (bulkErr) {
+    // With ordered:false, Mongo still attempts every op — failures land here
+    // instead of aborting the whole batch.
+    if (bulkErr.writeErrors) {
+      for (const we of bulkErr.writeErrors) {
+        results.errors.push({
+          reason: `DB error: ${we.errmsg}`,
+          op: we.op,
+        });
+        results.skipped++;
+      }
+      results.inserted = bulkErr.result?.nUpserted ?? 0;
+    } else {
+      throw bulkErr; // unrecognized error shape — let outer catch handle it
     }
+  }
+}
+
+    let totalFaces = 0;
+    groups.forEach((g) => {
+      totalFaces += g.details.length;
+    });
 
     return res.status(200).json({
       success: true,
-      message: `Upload complete. Inserted: ${results.inserted}, Skipped (duplicate/error): ${results.skipped}`,
-      details: results,
+      message: `Upload complete. Total Faces: ${totalFaces}, Sites: ${results.inserted + results.skipped}. (Inserted: ${results.inserted}, Updated/Matched: ${results.skipped})`,
+      details: { ...results, totalFaces },
     });
   } catch (err) {
     console.error("Excel upload error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+// const uploadExcel = async (req, res) => {
+//   try {
+//     if (!req.file) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "No file uploaded." });
+//     }
+
+//     const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+//     const sheetName = workbook.SheetNames[0];
+//     const sheet = workbook.Sheets[sheetName];
+//     const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+
+//     if (!rows.length) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "Excel sheet is empty." });
+//     }
+
+//     const results = { inserted: 0, skipped: 0, errors: [] };
+//     const bulkOps = [];
+
+//     // ── Generate starting mediaId counter ONCE before the loop ──
+//     const today = nowIST();
+//     const prefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+
+//     const lastMedia = await MediaOnboarding.findOne({
+//       mediaId: { $regex: `^${prefix}MED#` },
+//     })
+//       .sort({ mediaId: -1 })
+//       .limit(1);
+
+//     let nextNumber = 1;
+//     if (lastMedia) {
+//       const match = lastMedia.mediaId.match(/#(\d+)$/);
+//       if (match) nextNumber = parseInt(match[1]) + 1;
+//     }
+//     // ────────────────────────────────────────────────────────────
+
+//     for (const [index, row] of rows.entries()) {
+//       const excelRow = index + 2;
+//       const mapped = {};
+
+//       // ✅ Robust case-insensitive header matching
+//       Object.keys(row).forEach((excelKey) => {
+//         const normalizedKey = excelKey.trim().toLowerCase();
+//         const schemaField = COLUMN_MAP[normalizedKey];
+//         if (schemaField && (row[excelKey] !== undefined && row[excelKey] !== null)) {
+//           mapped[schemaField] = row[excelKey];
+//         }
+//       });
+
+//       mapped.mediaName = mapped.mediaName || `Media-${excelRow}`;
+
+//       const missing = [];
+//       if (!mapped.mediaCode) missing.push("Media Code");
+//       if (!mapped.mediaName) missing.push("Media Name");
+//       if (!mapped.state) missing.push("State");
+//       if (!mapped.city) missing.push("City");
+//       if (!mapped.width) missing.push("Width");
+//       if (!mapped.height) missing.push("Height");
+//       if (!mapped.mediaType) missing.push("Media Type");
+
+//       if (missing.length) {
+//         results.errors.push({
+//           row: excelRow,
+//           reason: `Missing: ${missing.join(", ")}`,
+//         });
+//         results.skipped++;
+//         continue;
+//       }
+
+//       const mediaDetail = {
+//         mediaCode: mapped.mediaCode,
+//         mediaName: mapped.mediaName,
+//         mediaType: mapped.mediaType,
+//         state: mapped.state,
+//         city: mapped.city,
+//         location: mapped.location || "",
+//         width: Math.floor(Number(mapped.width) || 0),
+//         height: Math.floor(Number(mapped.height) || 0),
+//       };
+//       mediaDetail.totalSqFt = mediaDetail.width * mediaDetail.height;
+
+//       const mediaDocData = {
+//         mediaId: `${prefix}MED#${nextNumber}`,
+//         mediaDetails: [mediaDetail],
+//         excelRowNumber: excelRow,
+//         createdAt: new Date(today.getTime() + (rows.length - index)),
+//         updatedAt: new Date(today.getTime() + (rows.length - index)),
+//       };
+
+//       nextNumber++;
+
+//       bulkOps.push({
+//         updateOne: {
+//           filter: { "mediaDetails.mediaCode": mapped.mediaCode },
+//           update: {
+//             $set: {
+//               ...mediaDocData,
+//             },
+//           },
+//           upsert: true,
+//         },
+//       });
+//     }
+
+//     if (bulkOps.length) {
+//       const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
+//         ordered: false,
+//         timestamps: false,
+//       });
+//       results.inserted = bulkResult.upsertedCount;
+//       results.skipped += bulkResult.matchedCount;
+//     }
+
+//     return res.status(200).json({
+//       success: true,
+//       message: `Upload complete. Inserted: ${results.inserted}, Skipped (duplicate/error): ${results.skipped}`,
+//       details: results,
+//     });
+//   } catch (err) {
+//     console.error("Excel upload error:", err);
+//     return res.status(500).json({ success: false, message: err.message });
+//   }
+// };
 const syncBillingCyclesNow = async (req, res) => {
   try {
     const result = await MediaOnboarding.syncBillingCycles();
