@@ -3260,10 +3260,11 @@ if (landOwnerMasterId) {
       },
     ]);
 
-    const totalCount = globalCounts[0]?.siteCount || 0;
-    const totalFaces = globalCounts[0]?.faceCount || 0;
+    const siteCount = globalCounts[0]?.siteCount || 0;
+    const totalCount = globalCounts[0]?.faceCount || 0;
+    const totalFaces = totalCount;
 
-    // ✅ Filtered count for pagination logic
+    // ✅ Filtered count for pagination logic (Based on Sites)
     const filteredCount = await MediaOnboarding.countDocuments(combinedFilter);
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
@@ -3392,9 +3393,10 @@ const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
       {
         pageNumber: pageNumbers,
         count: pageSize,
-        totalCount, // Global system total (e.g., 419)
-        totalFaces, // Global system total (e.g., 422)
-        filteredCount, // Current filtered total
+        totalCount, // Global total Faces (e.g., 422)
+        totalSites: siteCount, // Global total Sites (e.g., 420)
+        totalFaces, // Alias for totalCount
+        filteredCount, // Current filtered Sites count
         totalPages: Math.ceil(filteredCount / pageSize),
         cityFilter,
         mediaTypeFilter,
