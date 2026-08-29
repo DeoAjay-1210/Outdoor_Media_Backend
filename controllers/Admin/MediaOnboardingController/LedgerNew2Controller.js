@@ -998,24 +998,25 @@ function dedupeGstBalanceHistory(gstBalanceHistoryArr) {
   const list = gstBalanceHistoryArr || [];
   const byKey = new Map();
 
+  // Step 1: Identify which months already have real owner entries
   list.forEach((row) => {
-    const key = `${row.rentalDueId || ""}_${row.dueMonth || ""}`;
-    // ✅ CHANGED: Check for ownerId (new schema) OR landOwnerId (legacy)
-    const hasOwner = row.ownerId || row.landOwnerId;
-    if (hasOwner) {
-      if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push(row);
+    const ownerId = row.ownerId || row.landOwnerId;
+    if (ownerId) {
+      const key = `${row.dueMonth || ""}_${ownerId}`;
+      byKey.set(key, true);
     }
   });
 
   const result = [];
   list.forEach((row) => {
-    const key = `${row.rentalDueId || ""}_${row.dueMonth || ""}`;
-    const hasRealOwnerVersion = byKey.has(key) && byKey.get(key).length > 0;
-    // ✅ CHANGED: A placeholder is defined as having neither ID
     const isPlaceholder = !row.ownerId && !row.landOwnerId;
-    if (isPlaceholder && hasRealOwnerVersion) {
-      return; // drop the null-owner placeholder — a real-owner row covers this key
+    if (isPlaceholder) {
+      // If ANY owner has a real entry for this month, drop the generic site-level placeholder
+      const monthKeyPrefix = `${row.dueMonth || ""}_`;
+      const anyOwnerHasEntry = [...byKey.keys()].some((k) =>
+        k.startsWith(monthKeyPrefix),
+      );
+      if (anyOwnerHasEntry) return;
     }
     result.push(row);
   });
@@ -1370,16 +1371,47 @@ exports.createLedgerEntry = async (req, res) => {
           savedLedgerEntries.push(savedLedgerEntry);
 
           if (item.rentalDueId) {
-            const matchingGstRecords = media.gstBalanceHistory.filter(
+            let matchingGstRecords = media.gstBalanceHistory.filter(
               (g) => String(g.rentalDueId) === String(item.rentalDueId),
             );
+
+            // ✅ IMPROVED — if no record found for this face ID, but it's single bill mode, look for month placeholder
+            if (matchingGstRecords.length === 0) {
+              const billMode = Number(
+                (media.landOwners || [])[0]?.agreementBillMode || 1,
+              );
+              if (billMode === 1) {
+                const rentalDue = (media.rentalDue || []).find(
+                  (d) => String(d._id) === String(item.rentalDueId),
+                );
+                if (rentalDue) {
+                  const placeholder = media.gstBalanceHistory.find(
+                    (g) =>
+                      g.dueMonth === rentalDue.dueMonth &&
+                      !g.ownerId &&
+                      !g.landOwnerId,
+                  );
+                  if (placeholder) {
+                    placeholder.rentalDueId = item.rentalDueId; // link it to the face being paid
+                    matchingGstRecords = [placeholder];
+                  }
+                }
+              }
+            }
+
             matchingGstRecords.forEach((g) => {
               g.utrNumber = item.utrNumber;
               g.date = entryDate;
               g.isUtrEntry = true;
-              g.isPaid = true; // ✅ ADDED — mark as paid so it immediately reduces outstanding totals.
+              g.isPaid = true; // ✅ ADDED — mark as paid
               g.updatedBy = req.user?.userName || "";
               g.updatedAt = nowIST();
+              // Adopt the placeholder if it has no owner
+              if (!g.ownerId && !g.landOwnerId && matchedOwner) {
+                g.ownerId = matchedOwner._id;
+                g.ownerName = matchedOwner.name;
+                g.source = "owner";
+              }
               updatedGstBalanceRecords.push(g);
             });
             if (matchingGstRecords.length > 0)
@@ -1620,7 +1652,7 @@ exports.createLedgerEntry = async (req, res) => {
             row = media.gstBalanceHistory.find(
               (g) =>
                 String(g.rentalDueId) === String(rentalDueId) &&
-                String(g.ownerId) === String(owner._id),
+                String(g.ownerId || g.landOwnerId || "") === String(owner._id),
             );
 
             if (!row) {
@@ -1628,20 +1660,42 @@ exports.createLedgerEntry = async (req, res) => {
                 (d) => String(d._id) === String(rentalDueId),
               );
               if (rentalDue) {
-                media.gstBalanceHistory.push({
-                  rentalDueId: rentalDueId,
-                  dueMonth: rentalDue.dueMonth,
-                  cycle: rentalDue.dueDate,
-                  gstAmount: Number(rentalDue.gstAmount || 0),
-                  isPaid: false,
-                  source: "owner",
-                  ownerId: owner._id,
-                  ownerName: owner.name,
-                  createdAt: nowIST(),
-                  createdBy: updatedBy,
-                });
-                row =
-                  media.gstBalanceHistory[media.gstBalanceHistory.length - 1];
+                const billMode = Number(
+                  (media.landOwners || [])[0]?.agreementBillMode || 1,
+                );
+                // In single bill mode, look for ANY placeholder for this month
+                if (billMode === 1) {
+                  row = media.gstBalanceHistory.find(
+                    (g) =>
+                      g.dueMonth === rentalDue.dueMonth &&
+                      !g.ownerId &&
+                      !g.landOwnerId,
+                  );
+                }
+
+                if (row) {
+                  // Adopt existing placeholder
+                  row.ownerId = owner._id;
+                  row.ownerName = owner.name;
+                  row.source = "owner";
+                  row.rentalDueId = rentalDueId;
+                } else {
+                  // Push new owner-specific record
+                  media.gstBalanceHistory.push({
+                    rentalDueId: rentalDueId,
+                    dueMonth: rentalDue.dueMonth,
+                    cycle: rentalDue.dueDate,
+                    gstAmount: Number(rentalDue.gstAmount || 0),
+                    isPaid: false,
+                    source: "owner",
+                    ownerId: owner._id,
+                    ownerName: owner.name,
+                    createdAt: nowIST(),
+                    createdBy: updatedBy,
+                  });
+                  row =
+                    media.gstBalanceHistory[media.gstBalanceHistory.length - 1];
+                }
               }
             }
           }
@@ -2163,7 +2217,20 @@ async function executeBulkPaymentBatch(req, batchData) {
           dueMonthLabel = rentalDue.dueMonth;
           cycleDateVal = rentalDue.dueDate;
 
-          let row = media.gstBalanceHistory.find(g => String(g.rentalDueId) === String(item.rentalDueId) && String(g.ownerId) === String(owner._id));
+          // ✅ IMPROVED — find existing row, looking for site-level placeholder if owner-specific row doesn't exist yet
+          let row = media.gstBalanceHistory.find(g =>
+            String(g.rentalDueId) === String(item.rentalDueId) &&
+            String(g.ownerId || g.landOwnerId || "") === String(owner._id)
+          );
+
+          if (!row && Number(siteBillMode) === 1) {
+            // In single bill mode, look for ANY placeholder for this month
+            row = media.gstBalanceHistory.find(g =>
+              g.dueMonth === dueMonthLabel &&
+              !g.ownerId && !g.landOwnerId
+            );
+          }
+
           if (!row) {
             media.gstBalanceHistory.push({
               rentalDueId: item.rentalDueId, dueMonth: dueMonthLabel, cycle: cycleDateVal,
@@ -2171,6 +2238,14 @@ async function executeBulkPaymentBatch(req, batchData) {
               ownerId: owner._id, ownerName: owner.name, createdAt: nowIST(), createdBy: updatedBy
             });
             row = media.gstBalanceHistory[media.gstBalanceHistory.length - 1];
+          } else {
+            // Adopt the placeholder and ensure it matches the current face's ID
+            if (!row.ownerId && !row.landOwnerId) {
+              row.ownerId = owner._id;
+              row.ownerName = owner.name;
+              row.source = "owner";
+              row.rentalDueId = item.rentalDueId;
+            }
           }
           amount = Number(row.gstAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.isUtrEntry = true;
