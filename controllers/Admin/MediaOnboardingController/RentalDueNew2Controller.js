@@ -88,29 +88,6 @@ const buildApprovalSteps = (approvalFlow) => {
   }));
 };
 
-// ═════════════════════════════════════════════════════════════
-// ✅ AUTO-GENERATE MISSED RENTAL DUE ENTRIES (shared helper, NO
-// standalone endpoint — called from inside saveRentalDue and
-// getRentalDueListWithStats below).
-//
-// ✅ UPDATED — "Rule 1" (dates only change on Owner approval) has
-// been SCRAPPED per explicit instruction. This function now
-// auto-advances rentalPayment.lastBillPaidDate and
-// rentalPayment.nextBillingDate on schedule, based on
-// paymentFrequency, REGARDLESS of whether any bill was approved.
-// advanceRentalPaymentOnOwnerApproval (further below) is no longer
-// called anywhere — kept in the file but dead code, since dates now
-// move here instead.
-//
-// Still true: walks forward from the CURRENT nextBillingDate one
-// cycle at a time (cycle length = paymentFrequency), and for every
-// past cycle date that doesn't already have a rentalDue[] entry,
-// creates a new independent PENDING entry — never overwrites an
-// existing one (this part is unchanged).
-//
-// Idempotent — safe to call on every saveRentalDue/list request; it
-// skips any cycle date that already has an entry.
-// ═════════════════════════════════════════════════════════════
 const FREQUENCY_MONTHS_MAP = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
 
 function getCycleMonthsForFrequency(media) {
@@ -132,62 +109,6 @@ function addMonthsUTC(date, months) {
   return d;
 }
 
-// async function generateMissedEntriesForMedia(media, userName) {
-//   // ✅ ADDED — only Active (status: 1) sites auto-generate missed
-//   // bills. Inactive (status: 2) sites are skipped entirely — no new
-//   // pending months get created for them, regardless of how many
-//   // cycles have passed.
-//   if (Number(media.status) !== 1) {
-//     return { generatedEntries: [] };
-//   }
-
-//   const today = new Date();
-
-//   // ✅ FIXED — operate DIRECTLY on media.rentalDue, the REAL schema
-//   // field on MediaSchema. "rentalDueEntries" is NOT an actual schema
-//   // path — it was only ever a plain in-memory alias
-//   // (media.rentalDueEntries = media.rentalDue), and this function was
-//   // calling media.markModified("rentalDueEntries") afterward, which
-//   // targets a path that doesn't exist in the schema at all. Combined
-//   // with the alias indirection, this made persistence unreliable —
-//   // entries could appear generated in-memory/in the response but
-//   // never actually get saved to the DB, so August looked like it
-//   // "couldn't generate" (it kept vanishing on the next fetch).
-//   if (!Array.isArray(media.rentalDue)) {
-//     media.rentalDue = [];
-//   }
-//   if (!Array.isArray(media.rentalDueHistory)) {
-//     media.rentalDueHistory = [];
-//   }
-
-//   const cycleMonths = getCycleMonthsForFrequency(media);
-//   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
-
-//   const existingDueDateKeys = new Set(
-//     media.rentalDue
-//       .filter((e) => e.dueDate)
-//       .map((e) => new Date(e.dueDate).getTime()),
-//   );
-
-//   // ✅ FIXED (previous pass) — the walk's starting point comes from
-//   // the LATEST EXISTING rentalDue entry (ground truth), NOT from
-//   // rentalPayment.nextBillingDate, which can drift ahead and
-//   // permanently hide gaps.
-//   const sortedExistingEntries = [...media.rentalDue]
-//     .filter((e) => e.dueDate)
-//     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-
-//   let candidateDate;
-//   if (sortedExistingEntries.length > 0) {
-//     const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
-//     candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
-//   } else {
-//     // no entries exist at all yet — fall back to nextBillingDate as
-//     // the seed for the very FIRST entry ever generated on this site.
-//     const anchorDate = media.rentalPayment?.nextBillingDate;
-//     if (!anchorDate) return { generatedEntries: [] };
-//     candidateDate = new Date(anchorDate);
-//   }
 function ensureNextBillingDateSeed(media) {
   if (media.rentalPayment?.nextBillingDate) return false; // already seeded
 
@@ -215,224 +136,6 @@ function ensureNextBillingDateSeed(media) {
   return true;
 }
 
-// async function generateMissedEntriesForMedia(media, userName) {
-//   if (Number(media.status) !== 1) {
-//     return { generatedEntries: [] };
-//   }
-
-//   const today = new Date();
-
-//   if (!Array.isArray(media.rentalDue)) {
-//     media.rentalDue = [];
-//   }
-//   if (!Array.isArray(media.rentalDueHistory)) {
-//     media.rentalDueHistory = [];
-//   }
-
-//   const cycleMonths = getCycleMonthsForFrequency(media);
-//   if (!cycleMonths || cycleMonths <= 0) return { generatedEntries: [] };
-
-//   const existingDueDateKeys = new Set(
-//     media.rentalDue
-//       .filter((e) => e.dueDate)
-//       .map((e) => new Date(e.dueDate).getTime()),
-//   );
-
-//   const sortedExistingEntries = [...media.rentalDue]
-//   .filter((e) => e.dueDate)
-//   .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-
-// // ✅ ADDED — figure out the TRUE genesis cycle independent of
-// // whatever's already in rentalDue[], so we can detect (and backfill)
-// // a gap sitting BEFORE the earliest existing entry. This is what
-// // self-heals a site that was corrupted by an earlier buggy run
-// // (e.g. an "August-only" entry created while July was skipped).
-// const nextBillingDate = media.rentalPayment?.nextBillingDate;
-// const lastBillPaidDate = media.rentalPayment?.lastBillPaidDate;
-
-// let genesisCandidate = null;
-// if (
-//   lastBillPaidDate &&
-//   (!nextBillingDate || new Date(lastBillPaidDate) < new Date(nextBillingDate))
-// ) {
-//   genesisCandidate = addMonthsLocal(new Date(lastBillPaidDate), cycleMonths);
-// } else if (nextBillingDate) {
-//   genesisCandidate = new Date(nextBillingDate);
-// }
-
-// let candidateDate;
-// if (sortedExistingEntries.length > 0) {
-//   const earliestExisting = sortedExistingEntries[0];
-//   const latestExisting = sortedExistingEntries[sortedExistingEntries.length - 1];
-
-//   // ✅ ADDED — if the true genesis cycle is EARLIER than the
-//   // earliest entry we already have, start there instead — this
-//   // backfills the gap (e.g. July) instead of only ever walking
-//   // forward from whatever entry happens to exist already.
-//   if (genesisCandidate && genesisCandidate < new Date(earliestExisting.dueDate)) {
-//     candidateDate = genesisCandidate;
-//   } else {
-//     candidateDate = addMonthsLocal(new Date(latestExisting.dueDate), cycleMonths);
-//   }
-// } else {
-//   if (!genesisCandidate) return { generatedEntries: [] };
-//   candidateDate = genesisCandidate;
-// }
-//   const generatedEntries = [];
-//   let safety = 0;
-
-//   // previousCycleDate tracks the cycle just before candidateDate, so
-//   // lastBillPaidDate/nextBillingDate get updated to match wherever
-//   // the walk actually lands — self-correcting any prior drift.
-//   let previousCycleDate = new Date(candidateDate);
-
-//   // ✅ compare against the END of the CURRENT CALENDAR MONTH — any
-//   // cycle date within or before the current month generates
-//   // immediately, matching "monthly" auto-generation rather than
-//   // waiting for the exact billing day to pass.
-//   const currentMonthEnd = new Date(
-//     today.getFullYear(),
-//     today.getMonth() + 1,
-//     0,
-//     23,
-//     59,
-//     59,
-//   );
-
-//   while (candidateDate <= currentMonthEnd && safety < 60) {
-//     safety++;
-//     const candidateKey = candidateDate.getTime();
-
-//     if (!existingDueDateKeys.has(candidateKey)) {
-//       const chainSteps = buildApprovalSteps(2);
-//       const steps = [
-//         {
-//           role: ROLE.STAFF,
-//           userId: null,
-//           userName: "",
-//           approvedAt: null,
-//           status: 1,
-//           docVerified: false,
-//           remarks: "Auto-generated for missed cycle",
-//         },
-//         ...chainSteps,
-//       ];
-
-//       const gstSplit = computeGstSplit(media, 0);
-
-//       const newEntry = {
-//         dueMonth: getDueMonthLabel(candidateDate),
-//         dueDate: new Date(candidateDate),
-//         netPayable: Number(gstSplit.netPayable) || 0,
-//         paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
-//         customPaymentFrequency:
-//           media.rentalPayment?.paymentFrequency === 6
-//             ? media.rentalPayment?.customPaymentFrequency || 1
-//             : undefined,
-//         ownerApprovalDate: null,
-//         mailSent: false,
-//         gstAddedToBalance: false,
-//         campaignName: "",
-//         proofOfCampaign: null,
-//         savedBy: {
-//           userId: null,
-//           userName: "System (auto-generated)",
-//           role: null,
-//           savedAt: nowIST(),
-//         },
-//         approvalFlow: 2,
-//         approvalSteps: steps,
-//         approvalStatus: 1,
-//         currentPendingRole: ROLE.STAFF,
-//         agreementDocVerified: false,
-//         status: 1,
-//         withGst: 0,
-//         gstAmount: Number(gstSplit.gstAmount) || 0,
-//         baseAmount: Number(gstSplit.baseAmount) || 0,
-//         updatedBy: userName || "",
-//         updatedAt: nowIST(),
-//       };
-
-//       // ✅ FIXED — push directly onto the real schema field.
-//       media.rentalDue.push(newEntry);
-//       const savedEntry = media.rentalDue[media.rentalDue.length - 1];
-
-//       const yearLabel = getYearLabel(candidateDate);
-//       const monthLabel = getMonthLabel(candidateDate);
-
-//       let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-//       if (!yearBucket) {
-//         media.rentalDueHistory.push({ year: yearLabel, months: [] });
-//         yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
-//       }
-//       let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
-//       if (!monthBucket) {
-//         yearBucket.months.push({ month: monthLabel, entries: [] });
-//         monthBucket = yearBucket.months[yearBucket.months.length - 1];
-//       }
-//       monthBucket.entries.push({
-//         rentalDueId: savedEntry._id,
-//         siteName: media.mediaName,
-//         campaignName: "",
-//         dueDate: new Date(candidateDate),
-//         netPayable: Number(newEntry.netPayable) || 0,
-//         approvalStatus: newEntry.approvalStatus,
-//         savedBy: "System (auto-generated)",
-//         savedByRole: null,
-//         updatedAt: nowIST(),
-//         updatedBy: userName || "",
-//       });
-
-//       generatedEntries.push({
-//         rentalDueId: savedEntry._id,
-//         dueMonth: newEntry.dueMonth,
-//         dueDate: newEntry.dueDate,
-//         netPayable: newEntry.netPayable,
-//         approvalStatus: newEntry.approvalStatus,
-//         currentPendingRole: newEntry.currentPendingRole,
-//       });
-
-//       existingDueDateKeys.add(candidateKey);
-//     }
-
-//     previousCycleDate = candidateDate;
-//     candidateDate = addMonthsLocal(candidateDate, cycleMonths);
-//   }
-
-//   // ✅ ADDED — auto-advance the real billing dates on the document,
-//   // to match wherever the schedule walk landed. This is the scrapped-
-//   // Rule-1 behavior: lastBillPaidDate/nextBillingDate move forward on
-//   // schedule regardless of whether any bill was ever approved.
-//   if (generatedEntries.length > 0) {
-//     media.rentalPayment.lastBillPaidDate = previousCycleDate;
-//     media.rentalPayment.nextBillingDate = candidateDate;
-//     media.markModified("rentalPayment");
-//   }
-
-//   if (generatedEntries.length > 0) {
-//     // ✅ FIXED — markModified the REAL schema path ("rentalDue"), not
-//     // the fake "rentalDueEntries" path that doesn't exist in the
-//     // schema and was never actually doing anything.
-//     media.markModified("rentalDue");
-//     media.markModified("rentalDueHistory");
-//     media.updatedBy = userName || "";
-//     media.updatedAt = nowIST();
-//     await media.save({ timestamps: false });
-//   }
-
-//   return { generatedEntries };
-// }
-// ✅ REPLACED — generateMissedEntriesForMedia now uses the SAME
-// cycle-walking algorithm as LedgerNew2Controller.getAllDueCycles,
-// instead of a different "extend from last saved entry" approach.
-// That mismatch was the actual root cause: ledger-list computes its
-// due cycles fresh from the anchor date every single call (stateless
-// full walk), while this function only ever advanced forward from
-// whatever was already saved — so a site with no rentalDue[] entries
-// yet showed nothing here until ledger-list's own walk ran once and
-// persisted entries via ensureRentalDueForCycles. Now both
-// controllers derive the identical cycle list from the identical
-// anchor, so rental-list is self-sufficient on the very first call.
 async function generateMissedEntriesForMedia(media, userName) {
   if (!media.mediaDetails?.some(d => d.status === 1)) {
     return { generatedEntries: [] };
@@ -906,224 +609,98 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       owner.ownerRef = ref;
     });
 
-    // ── BUILD SITES PAYLOAD ──
+    // ── DATA AGGREGATION ──
+    const allFaces = [];
+    const allOwnersMap = new Map();
     const allProofs = [];
     const allInvoices = [];
-    const sitesPayload = sitesInGroupData.map(({ media: site, entry: siteInputEntry }) => {
+    let totalRental = 0;
+    let totalGst = 0;
+    let totalNet = 0;
+
+    sitesInGroupData.forEach(({ media: site, entry: siteInputEntry }) => {
       const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
       const rp = site.rentalPayment || {};
-      const agreement = site.agreement || {};
-      const appraisal = site.appraisal || {};
 
-      const proof = siteEntry?.proofOfCampaign?.filePath;
-      if (proof) allProofs.push(proof);
-
-      const inv = siteEntry?.invoice?.filePath;
-      if (inv) allInvoices.push(inv);
-
-      const siteGstAmount = Number(siteEntry?.gstAmount || 0);
-      const siteGstApplicable = Number(rp.gstApplicable) === 1 ? 1 : 0;
-      const siteBaseRent = Number(rp.totalRentalAmount || 0);
-
-      // ✅ Site specific appraisal logic
-      let siteAppraisalPayload = {};
-      // ... (rest of siteAppraisalPayload logic same as before)
-      if (appraisal.lastAppraisalDate) {
-        const lastAppDate = new Date(appraisal.lastAppraisalDate);
-        const today = new Date();
-        if (
-          lastAppDate.getUTCFullYear() === today.getUTCFullYear() &&
-          lastAppDate.getUTCMonth() === today.getUTCMonth()
-        ) {
-          let prevRentValue = 0;
-          if (Array.isArray(appraisal.history)) {
-            const lastKey = lastAppDate.getTime();
-            const matchH = appraisal.history.find(
-              (h) => h.appraisalDate && new Date(h.appraisalDate).getTime() === lastKey
-            );
-            prevRentValue = Number(matchH?.previousRent || 0);
-          }
-          siteAppraisalPayload = {
-            applicable: appraisal.applicable || 0,
-            type: appraisal.type || 0,
-            percentage: appraisal.percentage || 0,
-            fixedAmount: appraisal.fixedAmount || 0,
-            frequency: appraisal.frequency || 0,
-            currentRent: prevRentValue,
-            appraisalAmount: appraisal.appraisalAmount || 0,
-            totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
-            lastAppraisalDate: formatYMD(appraisal.lastAppraisalDate),
-            nextAppraisalDate: formatYMD(appraisal.nextAppraisalDate),
-          };
+      // 1. Collect Faces (Media Details)
+      (site.mediaDetails || []).forEach((d) => {
+        if (Number(d.status) === 1) {
+          allFaces.push({
+            mediaCode: d.mediaCode || "",
+            mediaName: d.mediaName || "",
+            mediaType: d.mediaType || "",
+            state: d.state || "",
+            city: d.city || "",
+            location: d.location || "",
+            width: d.width || 0,
+            height: d.height || 0,
+            totalSqFt: d.totalSqFt || 0,
+            status: d.status || 0,
+          });
         }
-      }
-
-      const siteOwnerGst = (site.landOwners || []).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-      const siteLandOwners = (site.landOwners || []).map((o) => {
-        return {
-          ownerRef: ownerRefs[String(o.landOwnerMasterId)],
-          name: o.name || "",
-          phone: o.phone || "",
-          bankName: o.bankName || "",
-          ifsc: o.ifsc || "",
-          accountNumber: o.accountNumber || "",
-          panNumber: o.panNumber || "",
-          paymentCategory: o.paymentCategory || 0,
-          onlineMode: o.onlineMode || 0,
-          shareAmount: o.shareAmount || 0,
-          onlineAmount: o.onlineAmount || 0,
-          cashAmount: o.cashAmount || 0,
-          tdsApplicable: o.tdsApplicable || 0,
-          tdsPercentage: o.tdsPercentage || 0,
-          tdsAmount: o.tdsAmount || 0,
-          tdsHold: 0,
-          gstHold: Number(siteEntry?.withGst) === 1 ? 1 : 0,
-          gstApplicable: o.gstApplicable || 0,
-          gstNumber: o.gstNumber || "",
-          gstPercentage: o.gstPercentage || 0,
-          gstAmount: o.gstAmount || 0,
-          totalAmountWithGst: Number(o.totalAmountWithGst || (Number(o.shareAmount || 0) + Number(o.gstAmount || 0))),
-        };
       });
 
-      const siteNetPayable = siteBaseRent + siteGstAmount + siteOwnerGst;
-      const siteLandOwnerRefs = (site.landOwners || [])
-        .map((o) => ownerRefs[String(o.landOwnerMasterId)])
-        .filter(Boolean);
+      // 2. Sum Payments
+      const siteBaseRent = Number(rp.totalRentalAmount || 0);
+      const siteGstAmount = Number(siteEntry?.gstAmount || 0);
+      totalRental += siteBaseRent;
+      totalGst += siteGstAmount;
+      totalNet += (siteBaseRent + siteGstAmount);
 
-      return {
-        mediaCode: site.mediaCode || "",
-        mediaName: site.mediaName || "",
-        mediaType: site.mediaType || "",
-        state: site.state || "",
-        city: site.city || "",
-        location: site.location || "",
-        width: site.width || 0,
-        height: site.height || 0,
-        totalSqFt: site.totalSqFt || 0,
-        status: site.status || 0, // ✅ MOVED — now inside site object
-        rentalPayment: {
-          totalRentalAmount: siteBaseRent,
-          gstApplicable: siteGstApplicable,
-          gstNumber: rp.gstNumber || "",
-          gstPercentage: rp.gstPercentage || 0,
-          gstAmount: siteGstAmount,
-          netPayable: siteNetPayable,
-          paymentFrequency: siteEntry?.paymentFrequency || rp.paymentFrequency || 0,
-          lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
-          nextBillingDate: formatYMD(rp.nextBillingDate),
-        },
-        agreement: {
-          startDate: formatYMD(agreement.startDate),
-          endDate: formatYMD(agreement.endDate),
-          reminderBeforeExpiry: agreement.reminderBeforeExpiry || 0,
-          advanceRent: agreement.advanceRent || 0,
-          status: agreement.status || 0,
-        },
-        appraisal: siteAppraisalPayload,
-        landOwners: siteLandOwners,
-        proof_of_campaign: proof ? [proof] : [],
-        invoice: inv ? [inv] : [],
-        landOwnerRefs: uniqueOwners.length > 1 ? siteLandOwnerRefs : undefined,
-      };
+      // 3. Merge LandOwners
+      (site.landOwners || []).forEach((o) => {
+        const id = String(o.landOwnerMasterId);
+        if (allOwnersMap.has(id)) {
+          const existing = allOwnersMap.get(id);
+          existing.shareAmount = (Number(existing.shareAmount) || 0) + (Number(o.shareAmount) || 0);
+          existing.gstAmount = (Number(existing.gstAmount) || 0) + (Number(o.gstAmount) || 0);
+          existing.totalAmountWithGst = (Number(existing.totalAmountWithGst) || 0) + (Number(o.totalAmountWithGst) || 0);
+        } else {
+          allOwnersMap.set(id, { ...(o.toObject ? o.toObject() : o) });
+        }
+      });
+
+      // 4. Collect Proofs
+      if (siteEntry?.proofOfCampaign?.filePath) allProofs.push(siteEntry.proofOfCampaign.filePath);
+      if (siteEntry?.invoice?.filePath) allInvoices.push(siteEntry.invoice.filePath);
     });
 
-    // ── BUILD LANDOWNERS PAYLOAD ──
-    // const landOwnersPayload = uniqueOwners.map((owner) => {
-    //   let totalShareAmount = 0;
-    //   let totalOnlineAmount = 0;
-    //   let totalCashAmount = 0;
-    //   let totalGstAmount = 0;
-    //   let totalTdsAmount = 0;
-    //   let totalAmountWithGst = 0;
-
-    //   // ✅ ADDED — capture GST specific details for the owner
-    //   let ownerGstApplicable = 0;
-    //   let ownerGstNumber = "";
-    //   let ownerGstPercentage = 0;
-
-    //   const siteRentBreakdown = [];
-
-    //   sitesInGroupData.forEach(({ media: site }) => {
-    //     const matchedOwner = (site.landOwners || []).find(
-    //       (o) =>
-    //         o.landOwnerMasterId &&
-    //         String(o.landOwnerMasterId) === String(owner.landOwnerMasterId)
-    //     );
-    //     if (matchedOwner) {
-    //       const share = Number(matchedOwner.shareAmount || 0);
-    //       totalShareAmount += share;
-    //       totalOnlineAmount += Number(matchedOwner.onlineAmount || 0);
-    //       totalCashAmount += Number(matchedOwner.cashAmount || 0);
-
-    //       const ownerGst = Number(matchedOwner.gstAmount || 0);
-    //       totalGstAmount += ownerGst;
-
-    //       totalTdsAmount += Number(matchedOwner.tdsAmount || 0);
-
-    //       totalAmountWithGst += Number(matchedOwner.totalAmountWithGst || (share + ownerGst));
-
-    //       // ✅ Capture details from the owner record
-    //       if (!ownerGstNumber) ownerGstNumber = matchedOwner.gstNumber || "";
-    //       if (!ownerGstPercentage) ownerGstPercentage = Number(matchedOwner.gstPercentage || 0);
-    //       if (Number(matchedOwner.gstApplicable) === 1) ownerGstApplicable = 1;
-
-    //       siteRentBreakdown.push({
-    //         mediaCode: site.mediaCode,
-    //         shareAmount: share,
-    //       });
-    //     }
-    //   });
-
-    //   const ownerObj = {
-    //     ownerRef: owner.ownerRef,
-    //     name: owner.name || "",
-    //     phone: owner.phone || "",
-    //     bankName: owner.bankName || "",
-    //     ifsc: owner.ifsc || "",
-    //     accountNumber: owner.accountNumber || "",
-    //     panNumber: owner.panNumber || "",
-    //     paymentCategory: owner.paymentCategory || 0,
-    //     onlineMode: owner.onlineMode || 0,
-    //     shareAmount: totalShareAmount,
-    //     onlineAmount: totalOnlineAmount,
-    //     cashAmount: totalCashAmount,
-    //     tdsApplicable: owner.tdsApplicable || 0,
-    //     tdsPercentage: owner.tdsPercentage || 0,
-    //     tdsAmount: totalTdsAmount,
-    //     tdsHold: 0,
-    //     gstHold: Number(entry?.withGst) === 1 ? 1 : 0,
-    //     // ✅ NEW — explicitly include GST fields as requested
-    //     gstApplicable: ownerGstApplicable,
-    //     gstNumber: ownerGstNumber,
-    //     gstPercentage: ownerGstPercentage,
-    //     gstAmount: totalGstAmount,
-    //     totalAmountWithGst: totalAmountWithGst,
-    //   };
-
-    //   if (sitesInGroupData.length > 1) {
-    //     ownerObj.siteRentBreakdown = siteRentBreakdown;
-    //   }
-    //   return ownerObj;
-    // });
-
     const isSingleBill = (media.mediaDetails?.some(d => d.siteBillMode === 1) || media.siteBillMode === 1);
+
     const data = {
       billingType: isSingleBill ? "single_bill" : "separate_bill",
+      mediaDetails: allFaces,
+      rentalPayment: {
+        totalRentalAmount: totalRental,
+        gstAmount: totalGst,
+        netPayable: totalNet,
+        paymentFrequency: entry.paymentFrequency || media.rentalPayment?.paymentFrequency || 0,
+        lastBillPaidDate: formatYMD(media.rentalPayment?.lastBillPaidDate),
+        nextBillingDate: formatYMD(media.rentalPayment?.nextBillingDate),
+      },
+      landOwners: Array.from(allOwnersMap.values()).map((o, idx) => ({
+        ownerRef: `LO-${String(idx + 1).padStart(2, "0")}`,
+        name: o.name || "",
+        phone: o.phone || "",
+        bankName: o.bankName || "",
+        ifsc: o.ifsc || "",
+        accountNumber: o.accountNumber || "",
+        panNumber: o.panNumber || "",
+        shareAmount: o.shareAmount || 0,
+        gstAmount: o.gstAmount || 0,
+        totalAmountWithGst: o.totalAmountWithGst || 0,
+        tdsPercentage: o.tdsPercentage || 0,
+        tdsAmount: o.tdsAmount || 0,
+        paymentCategory: o.paymentCategory || 0,
+        onlineMode: o.onlineMode || 0,
+      })),
+      proof_of_campaign: allProofs,
+      invoice: allInvoices,
+      numberOfLandOwners: allOwnersMap.size,
     };
 
     if (isSingleBill) {
-      data.numberOfSites = sitesPayload.length;
-    }
-
-    data.numberOfLandOwners = uniqueOwners.length;
-    // status removed from here
-
-    if (isSingleBill) {
-      data.sites = sitesPayload;
-    } else {
-      const s = sitesPayload[0];
-      Object.assign(data, s);
+      data.numberOfSites = sitesInGroupData.length;
     }
 
 

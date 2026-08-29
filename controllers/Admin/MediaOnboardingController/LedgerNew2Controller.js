@@ -3819,6 +3819,13 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
       return {
         ...restOfMediaObj,
         mediaId: parentMediaId,
+         mediaCode: details.map(d => d.mediaCode).join(" / "),
+        mediaName: details.map(d => d.mediaName).join(", "),
+        mediaType: details[0]?.mediaType,
+        city: details[0]?.city,
+        state: details[0]?.state,
+        location: details[0]?.location,
+        siteBillMode: details[0]?.siteBillMode,
         mediaDetails: details,
         landOwners: correctedLandOwners,
         ledger: latestLedger,
