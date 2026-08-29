@@ -839,8 +839,8 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
     const targetFace = details.find((d) => String(d._id) === String(targetFaceId));
     if (totalSqFt > 0 && targetFace) {
       const ratio = (targetFace.totalSqFt || 0) / totalSqFt;
-      baseRent = Math.round(baseRent * ratio);
-      gstAmountFull = Math.round(gstAmountFull * ratio);
+      baseRent = Math.floor(baseRent * ratio);
+      gstAmountFull = Math.floor(gstAmountFull * ratio);
     }
   }
 
@@ -2636,7 +2636,7 @@ exports.getOverDueHistoryList = async (req, res) => {
     return successResponse(res, "OverDue history fetched successfully", {
       summary: {
           ...summary,
-          avgOverdueDays: Math.round(summary.avgOverdueDays || 0)
+          avgOverdueDays: Math.floor(summary.avgOverdueDays || 0)
       },
       pagination: {
         pageNumber: pageNumbers,
@@ -3745,16 +3745,16 @@ for (const siteDoc of activeSitesForSweep) {
     };
 
     const dueThisMonth = {
-      totalNetPayable: Math.round(stats.dueThisMonthAmount),
-      count: Math.round(stats.dueThisMonthCount),
+      totalNetPayable: Math.floor(stats.dueThisMonthAmount),
+      count: Math.floor(stats.dueThisMonthCount),
     };
-    const dueAmountOpen = Math.round(stats.dueAmountOpen);
-    const approvedCount = Math.round(stats.approvedCount);
-    const approvedAmountTotal = Math.round(stats.approvedAmountTotal);
-    const overDueSiteCount = Math.round(stats.overdueCount);
-    const overDueAmountTotal = Math.round(stats.overdueAmountTotal);
-    const pendingCount = Math.round(stats.pendingCount);
-    const pendingAmountTotal = Math.round(stats.pendingAmountTotal);
+    const dueAmountOpen = Math.floor(stats.dueAmountOpen);
+    const approvedCount = Math.floor(stats.approvedCount);
+    const approvedAmountTotal = Math.floor(stats.approvedAmountTotal);
+    const overDueSiteCount = Math.floor(stats.overdueCount);
+    const overDueAmountTotal = Math.floor(stats.overdueAmountTotal);
+    const pendingCount = Math.floor(stats.pendingCount);
+    const pendingAmountTotal = Math.floor(stats.pendingAmountTotal);
 
     const approvalBreakdownAgg = await Media.aggregate([
       { $match: { "mediaDetails.status": 1 } },
@@ -4562,11 +4562,11 @@ const details = (item.mediaDetails || []).map((d) => ({
         currentBillDate: formatDate(monthStart),
         dueThisMonth,
         dueAmountOpen,
-        overDue: { siteCount: Math.round(overDueSiteCount), amount: Math.round(overDueAmountTotal) },
-        approvedCount: Math.round(approvedCount),
-        approvedAmountTotal: Math.round(approvedAmountTotal),
-        pendingCount: Math.round(pendingCount),
-        pendingAmountTotal: Math.round(pendingAmountTotal),
+        overDue: { siteCount: Math.floor(overDueSiteCount), amount: Math.floor(overDueAmountTotal) },
+        approvedCount: Math.floor(approvedCount),
+        approvedAmountTotal: Math.floor(approvedAmountTotal),
+        pendingCount: Math.floor(pendingCount),
+        pendingAmountTotal: Math.floor(pendingAmountTotal),
         // pastPendingApproval removed per user request (merged into overDue)
         pendingApproval: {
           staff: pendingByRole.staff,

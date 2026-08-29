@@ -951,7 +951,7 @@ MediaSchema.pre("save", function () {
 //   rp.gstPercentage = rentalGstApplicable === 1 ? envGstPct : 0;
 //   rp.gstAmount =
 //     rentalGstApplicable === 1
-//       ? Math.round((totalRentalAmount * envGstPct) / 100)
+//       ? Math.floor((totalRentalAmount * envGstPct) / 100)
 //       : 0;
 //   rp.totalRentalAmountWithGst = totalRentalAmount + rp.gstAmount;
 
@@ -978,7 +978,7 @@ MediaSchema.pre("save", function () {
 
 //     if (Number(owner.typeShare) === 1) {
 //       const sharePercentage = Number(owner.sharePercentage || 0);
-//       resolvedShareAmount = Math.round(
+//       resolvedShareAmount = Math.floor(
 //         (totalRentalAmount * sharePercentage) / 100,
 //       );
 //     } else {
@@ -1008,7 +1008,7 @@ MediaSchema.pre("save", function () {
 
 //     const tdsAmount =
 //       tdsApplicable === 1 && tdsPercentage > 0
-//         ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
+//         ? Math.floor((tdsBaseAmount * tdsPercentage) / 100)
 //         : 0;
 //     owner.tdsAmount = tdsAmount;
 
@@ -1037,7 +1037,7 @@ MediaSchema.pre("save", function () {
 
 //     const ownerGstAmount =
 //       ownerGstApplicable === 1 && gstBaseAmount > 0
-//         ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+//         ? Math.floor((gstBaseAmount * ownerGstPct) / 100)
 //         : 0;
 
 //     owner.gstPercentage =
@@ -1113,7 +1113,7 @@ MediaSchema.pre("save", function () {
   rp.gstPercentage = rentalGstApplicable === 1 ? envGstPct : 0;
   rp.gstAmount =
     rentalGstApplicable === 1
-      ? Math.round((totalRentalAmount * envGstPct) / 100)
+      ? Math.floor((totalRentalAmount * envGstPct) / 100)
       : 0;
   rp.totalRentalAmountWithGst = totalRentalAmount + rp.gstAmount;
 
@@ -1127,7 +1127,7 @@ MediaSchema.pre("save", function () {
 
     if (Number(owner.typeShare) === 1) {
       const sharePercentage = Number(owner.sharePercentage || 0);
-      resolvedShareAmount = Math.round(
+      resolvedShareAmount = Math.floor(
         (totalRentalAmount * sharePercentage) / 100,
       );
     } else {
@@ -1170,7 +1170,7 @@ MediaSchema.pre("save", function () {
 
     const tdsAmount =
       tdsApplicable === 1 && tdsPercentage > 0
-        ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
+        ? Math.floor((tdsBaseAmount * tdsPercentage) / 100)
         : 0;
     owner.tdsAmount = tdsAmount;
 
@@ -1196,7 +1196,7 @@ MediaSchema.pre("save", function () {
 
     const ownerGstAmount =
       ownerGstApplicable === 1 && gstBaseAmount > 0
-        ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+        ? Math.floor((gstBaseAmount * ownerGstPct) / 100)
         : 0;
 
     owner.gstPercentage =

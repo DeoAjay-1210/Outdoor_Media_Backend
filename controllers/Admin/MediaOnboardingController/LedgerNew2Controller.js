@@ -596,7 +596,7 @@ function splitAmountForOwner(owner, totalAmount) {
   if (cashAmount > 0 || onlineAmount > 0) {
     return { cash: cashAmount, online: onlineAmount };
   }
-  const half = Math.round((totalAmount / 2) * 100) / 100;
+  const half = Math.floor((totalAmount / 2) * 100) / 100;
   return { cash: half, online: totalAmount - half };
 }
 function getCycleMonthsForFrequency(paymentFrequency, customPaymentFrequency) {
@@ -6401,15 +6401,15 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
   }
 
   return {
-    totalLedgerAmount: Math.round(summary.totalLedgerAmount),
+    totalLedgerAmount: Math.floor(summary.totalLedgerAmount),
     totalLedgerAmountSites: summary.totalLedgerAmountSites.size,
-    totalLedgerGstAmount: Math.round(summary.totalLedgerGstAmount),
+    totalLedgerGstAmount: Math.floor(summary.totalLedgerGstAmount),
     totalLedgerGstAmountSites: summary.totalLedgerGstAmountSites.size,
-    totalLedgerPendingAmount: Math.round(summary.totalLedgerPendingAmount),
+    totalLedgerPendingAmount: Math.floor(summary.totalLedgerPendingAmount),
     totalLedgerPendingAmountSites: summary.totalLedgerPendingAmountSites.size,
-    totalGstPendingAmount: Math.round(summary.totalGstPendingAmount),
+    totalGstPendingAmount: Math.floor(summary.totalGstPendingAmount),
     totalGstPendingAmountSites: summary.totalGstPendingAmountSites.size,
-    overallDueMonthAmount: Math.round(summary.overallDueMonthAmount), // ✅ NEW
+    overallDueMonthAmount: Math.floor(summary.overallDueMonthAmount), // ✅ NEW
     overallDueMonthAmountSites: summary.overallDueMonthAmountSites.size, // ✅ NEW
   };
 }

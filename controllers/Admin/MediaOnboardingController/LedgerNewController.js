@@ -420,7 +420,7 @@ function splitAmountForOwner(owner, totalAmount) {
   if (cashAmount > 0 || onlineAmount > 0) {
     return { cash: cashAmount, online: onlineAmount };
   }
-  const half = Math.round((totalAmount / 2) * 100) / 100;
+  const half = Math.floor((totalAmount / 2) * 100) / 100;
   return { cash: half, online: totalAmount - half };
 }
 

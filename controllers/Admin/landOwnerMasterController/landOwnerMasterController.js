@@ -370,7 +370,7 @@ const computeFinancialFields = (landOwner) => {
 
   landOwner.tdsAmount =
     tdsApplicable === 1 && tdsPercentage > 0
-      ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
+      ? Math.floor((tdsBaseAmount * tdsPercentage) / 100)
       : 0;
 
   // ── GST base amount — same paymentCategory rule as MediaSchema ──
@@ -388,7 +388,7 @@ const computeFinancialFields = (landOwner) => {
 
   const gstAmount =
     gstApplicable === 1 && gstBaseAmount > 0
-      ? Math.round((gstBaseAmount * gstPct) / 100)
+      ? Math.floor((gstBaseAmount * gstPct) / 100)
       : 0;
 
   landOwner.gstPercentage =
@@ -1760,13 +1760,13 @@ const landOwnerSiteFilter = async (req, res) => {
             let base = 0;
             if (pc === 2) base = Number(o.shareAmount || 0);
             else if (pc === 3) base = Number(o.onlineAmount || 0);
-            return Math.round((base * envGstPct) / 100);
+            return Math.floor((base * envGstPct) / 100);
           };
 
           const rentalGst =
             Number(mediaDoc.rentalPayment?.gstApplicable) === 1
               ? Number(mediaDoc.rentalPayment?.gstAmount || 0) ||
-                Math.round(
+                Math.floor(
                   (Number(mediaDoc.rentalPayment?.totalRentalAmount || 0) *
                     envGstPct) /
                     100,
@@ -2113,7 +2113,7 @@ const landOwnerSiteFilter = async (req, res) => {
       const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
       // ✅ IMPROVED — calculate if 0 but applicable
       const calcRentalGst = () =>
-        Math.round(
+        Math.floor(
           (Number(mediaDoc.rentalPayment?.totalRentalAmount || 0) * envGstPct) /
             100,
         );
@@ -2122,7 +2122,7 @@ const landOwnerSiteFilter = async (req, res) => {
         let base = 0;
         if (pc === 2) base = Number(o.shareAmount || 0);
         else if (pc === 3) base = Number(o.onlineAmount || 0);
-        return Math.round((base * envGstPct) / 100);
+        return Math.floor((base * envGstPct) / 100);
       };
 
       // ✅ NEW: compute rental status for this site relative to reference month
@@ -2165,7 +2165,7 @@ const landOwnerSiteFilter = async (req, res) => {
           if (net > base && base > 0) {
             cycleGstAmount = net - base;
           } else if (net > 0) {
-            cycleGstAmount = Math.round(net - net / (1 + envGstPct / 100));
+            cycleGstAmount = Math.floor(net - net / (1 + envGstPct / 100));
           }
         }
       }
@@ -2329,7 +2329,7 @@ const landOwnerSiteFilter = async (req, res) => {
               let base = 0;
               if (pc === 2) base = Number(owner.shareAmount || 0);
               else if (pc === 3) base = Number(owner.onlineAmount || 0);
-              return Math.round((base * envGstPct) / 100);
+              return Math.floor((base * envGstPct) / 100);
             };
 
             let oGst = Number(o.gstAmount || 0);
@@ -2340,7 +2340,7 @@ const landOwnerSiteFilter = async (req, res) => {
 
             if (oGst === 0 && resolvedSiteGstAmount > 0) {
               if (siteGstFlag === 1 || siteGstFlag === 0) {
-                oGst = Math.round(
+                oGst = Math.floor(
                   resolvedSiteGstAmount / (ownersOnThisSite.length || 1),
                 );
               } else if (siteGstFlag === 2 && Number(o.gstApplicable) === 1) {
@@ -3109,11 +3109,11 @@ const landOwnerSiteFilter = async (req, res) => {
         ...overallOutstandingTotals,
         overallLedgerSummary,
         // ✅ NEW: Rental Due Stats
-        overDue: { siteCount: Math.round(overdueSiteCount), amount: Math.round(overdueAmountTotal) },
-        approvedCount: Math.round(approvedCount),
-        approvedAmountTotal: Math.round(approvedAmountTotal),
-        pendingCount: Math.round(pendingCount),
-        pendingAmountTotal: Math.round(pendingAmountTotal),
+        overDue: { siteCount: Math.floor(overdueSiteCount), amount: Math.floor(overdueAmountTotal) },
+        approvedCount: Math.floor(approvedCount),
+        approvedAmountTotal: Math.floor(approvedAmountTotal),
+        pendingCount: Math.floor(pendingCount),
+        pendingAmountTotal: Math.floor(pendingAmountTotal),
       },
       200,
     );

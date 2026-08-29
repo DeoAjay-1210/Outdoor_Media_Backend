@@ -6,7 +6,7 @@ const spacesClient = require('../config/spaces');
 const uploadToSpaces = async (file, folder = 'Roadshows') => {
   // Generate unique filename
   const ext = path.extname(file.originalname);
-  const fileName = `${folder}/${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+  const fileName = `${folder}/${Date.now()}-${Math.floor(Math.random() * 1e9)}${ext}`;
 
   // Determine if file is video based on mimetype
   const isVideo = file.mimetype.startsWith('video/');
