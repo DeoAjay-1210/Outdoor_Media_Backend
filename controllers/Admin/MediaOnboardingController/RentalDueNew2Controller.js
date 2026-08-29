@@ -822,35 +822,108 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       ? batchSites
       : [{ media, entry }];
 
+    // ── GROUPING BY AGREEMENT MODE ──
+    const groupedAgreements = [];
+    const mediaDocGroups = new Map();
+
+    sitesInGroupData.forEach((item) => {
+      const site = item.media;
+      const mId = String(site._id);
+      const billMode = Number((site.landOwners || [])[0]?.agreementBillMode || 1);
+
+      if (billMode === 1) {
+        if (!mediaDocGroups.has(mId)) {
+          mediaDocGroups.set(mId, []);
+        }
+        mediaDocGroups.get(mId).push(item);
+      } else {
+        // billMode === 2: each entry/face is a separate agreement
+        groupedAgreements.push([item]);
+      }
+    });
+
+    // Add grouped agreements (billMode 1) to the final list
+    mediaDocGroups.forEach((group) => {
+      groupedAgreements.push(group);
+    });
+
     const isSingleBill = (media.mediaDetails?.some(d => d.siteBillMode === 1) || media.siteBillMode === 1);
 
     let totalFaceCount = 0;
     const uniqueOwnersSetAtRoot = new Set();
 
-    const sitesPayload = sitesInGroupData.map(({ media: site, entry: siteInputEntry }) => {
-      const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
-      const rp = site.rentalPayment || {};
-      const agreement = site.agreement || {};
+    const sitesPayload = groupedAgreements.map((group) => {
+      const firstItem = group[0];
+      const site = firstItem.media;
+      const targetBillMode = Number((site.landOwners || [])[0]?.agreementBillMode || 1);
 
-      // 1. Collect Active Faces
-      const activeFaces = (site.mediaDetails || []).filter(d => Number(d.status) === 1).map(d => ({
-        mediaCode: d.mediaCode || "",
-        mediaName: d.mediaName || "",
-        mediaType: d.mediaType || "",
-        state: d.state || "",
-        city: d.city || "",
-        location: d.location || "",
-        width: d.width || 0,
-        height: d.height || 0,
-        totalSqFt: d.totalSqFt || 0,
-        status: d.status || 0
-      }));
+      let activeFaces = [];
+      let totalAgreementRental = 0;
+      let totalAgreementGst = 0;
+      let proofs = [];
+      let invoices = [];
+
+      if (targetBillMode === 1) {
+        // ── Case 1: Single Agreement Multiple Sites ──
+        activeFaces = (site.mediaDetails || [])
+          .filter((d) => Number(d.status) === 1)
+          .map((d) => ({
+            mediaCode: d.mediaCode || "",
+            mediaName: d.mediaName || "",
+            mediaType: d.mediaType || "",
+            state: d.state || "",
+            city: d.city || "",
+            location: d.location || "",
+            width: d.width || 0,
+            height: d.height || 0,
+            totalSqFt: d.totalSqFt || 0,
+            status: d.status || 0,
+          }));
+
+        group.forEach((item) => {
+          const e = item.entry;
+          totalAgreementRental += Number(e.baseAmount || 0);
+          totalAgreementGst += Number(e.gstAmount || 0);
+          if (e.proofOfCampaign?.filePath) proofs.push(e.proofOfCampaign.filePath);
+          if (e.invoice?.filePath) invoices.push(e.invoice.filePath);
+        });
+
+        // For Single Agreement, only 0th index invoice
+        if (invoices.length > 1) {
+          invoices = [invoices[0]];
+        }
+      } else {
+        // ── Case 2: Multiple Agreement (Individual Sites) ──
+        const item = group[0];
+        const e = item.entry;
+        const d = (site.mediaDetails || []).find((f) => String(f._id) === String(e.mediaDetailId));
+
+        if (d) {
+          activeFaces.push({
+            mediaCode: d.mediaCode || "",
+            mediaName: d.mediaName || "",
+            mediaType: d.mediaType || "",
+            state: d.state || "",
+            city: d.city || "",
+            location: d.location || "",
+            width: d.width || 0,
+            height: d.height || 0,
+            totalSqFt: d.totalSqFt || 0,
+            status: d.status || 0,
+          });
+        }
+
+        totalAgreementRental = Number(e.baseAmount || 0);
+        totalAgreementGst = Number(e.gstAmount || 0);
+        if (e.proofOfCampaign?.filePath) proofs.push(e.proofOfCampaign.filePath);
+        if (e.invoice?.filePath) invoices.push(e.invoice.filePath);
+      }
 
       totalFaceCount += activeFaces.length;
 
-      // 2. Identify Owners for this Site
+      // ── Owners Identification ──
       const siteOwnersMap = new Map();
-      (site.landOwners || []).forEach(o => {
+      (site.landOwners || []).forEach((o) => {
         uniqueOwnersSetAtRoot.add(String(o.landOwnerMasterId));
         siteOwnersMap.set(String(o.landOwnerMasterId), { ...(o.toObject ? o.toObject() : o) });
       });
@@ -872,21 +945,24 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         tdsPercentage: o.tdsPercentage || 0,
         tdsAmount: Number(o.tdsAmount || 0),
         tdsHold: 0,
-        gstHold: Number(siteEntry?.withGst) === 1 ? 1 : 0,
+        gstHold: Number(firstItem.entry?.withGst) === 1 ? 1 : 0,
         gstApplicable: o.gstApplicable || 0,
         gstNumber: o.gstNumber || "",
         gstPercentage: o.gstPercentage || 0,
         gstAmount: Number(o.gstAmount || 0),
-        totalAmountWithGst: Number(o.totalAmountWithGst || (Number(o.shareAmount || 0) + Number(o.gstAmount || 0))),
+        totalAmountWithGst: Number(o.totalAmountWithGst || Number(o.shareAmount || 0) + Number(o.gstAmount || 0)),
       }));
+
+      const rp = site.rentalPayment || {};
+      const agreement = site.agreement || {};
 
       return {
         mediaDetails: activeFaces,
         rentalPayment: {
-          totalRentalAmount: Number(rp.totalRentalAmount || 0),
-          gstAmount: Number(siteEntry?.gstAmount || 0),
-          netPayable: Number(rp.totalRentalAmount || 0) + Number(siteEntry?.gstAmount || 0),
-          paymentFrequency: siteEntry?.paymentFrequency || rp.paymentFrequency || 0,
+          totalRentalAmount: totalAgreementRental,
+          gstAmount: totalAgreementGst,
+          netPayable: totalAgreementRental + totalAgreementGst,
+          paymentFrequency: firstItem.entry?.paymentFrequency || rp.paymentFrequency || 0,
           lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
           nextBillingDate: formatYMD(rp.nextBillingDate),
         },
@@ -899,9 +975,9 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         },
         appraisal: {},
         landOwners: siteLandOwners,
-        proof_of_campaign: siteEntry?.proofOfCampaign?.filePath ? [siteEntry.proofOfCampaign.filePath] : [],
-        invoice: siteEntry?.invoice?.filePath ? [siteEntry.invoice.filePath] : [],
-        numberOfLandOwners: siteOwnersMap.size
+        proof_of_campaign: proofs,
+        invoice: invoices,
+        numberOfLandOwners: siteOwnersMap.size,
       };
     });
 
@@ -909,7 +985,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       billingType: isSingleBill ? "single_bill" : "separate_bill",
       numberOfSites: totalFaceCount,
       numberOfLandOwners: uniqueOwnersSetAtRoot.size,
-      sites: sitesPayload
+      sites: sitesPayload,
     };
 
 
@@ -2021,7 +2097,10 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
       $push: { agreementDocVerification: verificationRecord },
       $set: { updatedBy: userName },
     },
-    { new: true,timestamps: false },
+    {
+      returnDocument: "after",
+      timestamps: false,
+    },
   );
 
   if (!updatedMedia) {

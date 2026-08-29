@@ -759,7 +759,7 @@ const landOwnerList = async (req, res) => {
           },
         },
       },
-      { $sort: { latestActivityAt: -1 } },
+      { $sort: { updatedAt: -1, _id: -1 } },
       { $skip: (pageNumbers - 1) * pageSize },
       { $limit: pageSize },
     ]);

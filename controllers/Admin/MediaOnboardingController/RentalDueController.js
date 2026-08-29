@@ -1348,7 +1348,7 @@ exports.verifyAgreementDoc = async (req, res) => {
         $push: { agreementDocVerification: verificationRecord },
         $set: { updatedBy: userName, updatedAt: nowIST() },
       },
-      { new: true },
+      { returnDocument: 'after' },
     );
 
     // ── If the atomic update matched nothing, someone else (or a

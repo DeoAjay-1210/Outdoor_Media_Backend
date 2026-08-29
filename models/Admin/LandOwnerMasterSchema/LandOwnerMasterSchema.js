@@ -7,7 +7,11 @@ const fileObjectSchema = {
   filePath: { type: String },
   mimeType: { type: String },
   size: { type: Number },
-  fileType: { type: String, enum: ["image"], default: "image" },
+  fileType: {
+    type: String,
+    enum: ["image","other"],
+    default: "image"
+  },
   uploadedAt: { type: Date, default: null },
 };
 

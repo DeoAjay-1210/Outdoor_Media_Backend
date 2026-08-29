@@ -1,6 +1,7 @@
 // routes/mediaRoutes.js
 const express = require("express");
 const multer = require("multer");
+const path = require("path");
 const router = express.Router();
 const {
   mediaOnboarding,
@@ -64,11 +65,14 @@ const uploads = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
   fileFilter: (_req, file, cb) => {
-    const allowed = [
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExts = [".xlsx", ".xls"];
+    const allowedMimeTypes = [
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
       "application/vnd.ms-excel", // .xls
     ];
-    if (allowed.includes(file.mimetype)) {
+
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExts.includes(ext)) {
       cb(null, true);
     } else {
       cb(new Error("Only .xlsx / .xls files are accepted"), false);
