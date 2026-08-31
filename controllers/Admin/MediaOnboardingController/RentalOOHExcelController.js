@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
-const XLSX = require("xlsx");
+const XLSX = require("xlsx-js-style");
 const { successResponse, errorResponse } = require("../../../utils/response");
 
 /**
@@ -166,27 +166,51 @@ const downloadRentalOOHExcel = async (req, res) => {
            monthLedgerTotal += totalLedger;
            monthGstTotal += totalGst;
 
-           mediaDetails.forEach(mDetail => {
-             const mId = String(mDetail._id);
+           // Robust check for Single Bill Mode (Common Billing)
+           // Check top-level, inside mediaDetails, or if name already suggests combined sites
+           const isCombined = Number(media.siteBillMode) === 1 ||
+                             (mediaDetails.length > 0 && Number(mediaDetails[0].siteBillMode) === 1) ||
+                             (media.mediaName && (media.mediaName.includes(",") || media.mediaName.includes("+") || media.mediaName.includes("/")));
 
-             // Attribution Logic:
-             // If this face has specific billing (Separate), use it.
-             // Otherwise, use the site-wide billing (Single) as requested.
-             let dLedger = ledgerByFace.get(mId) || siteWideLedger;
-             let dGst = gstByFace.get(mId) || siteWideGst;
+           if (isCombined) {
+             // Show ONE combined row for all faces (e.g., site 1 + site 2)
+             const combinedCode = media.mediaCode || mediaDetails.map(m => m.mediaCode).filter(c => c).join(" / ");
+             let combinedName = media.mediaName || mediaDetails.map(m => m.mediaName).join(" + ");
+
+             // Normalize separators to " + " to match your UI request
+             combinedName = combinedName.split(", ").join(" + ").split(" / ").join(" + ").split(",").join(" + ");
 
              reportRows.push({
                 "Month": monthLabel,
-                "Media Code": mDetail.mediaCode,
-                "Media Name": mDetail.mediaName,
-                "Media Type": mDetail.mediaType,
+                "Media Code": combinedCode,
+                "Media Name": combinedName,
+                "Media Type": media.mediaType || (mediaDetails[0] && mediaDetails[0].mediaType),
                 "Total Landowners": owners.length,
-                "Ledger Amount": Math.round(dLedger * 100) / 100,
-                "GST Amount": Math.round(dGst * 100) / 100,
-                "Total Amount": Math.round((dLedger + dGst) * 100) / 100
+                "Ledger Amount": Math.round(totalLedger * 100) / 100,
+                "GST Amount": Math.round(totalGst * 100) / 100,
+                "Total Amount": Math.round((totalLedger + totalGst) * 100) / 100
              });
              monthDataFound = true;
-           });
+           } else {
+             // For Separate Bill, show each face individually
+             mediaDetails.forEach(mDetail => {
+               const mId = String(mDetail._id);
+               let dLedger = ledgerByFace.get(mId) || (siteWideLedger / mediaDetails.length);
+               let dGst = gstByFace.get(mId) || (siteWideGst / mediaDetails.length);
+
+               reportRows.push({
+                  "Month": monthLabel,
+                  "Media Code": mDetail.mediaCode,
+                  "Media Name": mDetail.mediaName,
+                  "Media Type": mDetail.mediaType,
+                  "Total Landowners": owners.length,
+                  "Ledger Amount": Math.round(dLedger * 100) / 100,
+                  "GST Amount": Math.round(dGst * 100) / 100,
+                  "Total Amount": Math.round((dLedger + dGst) * 100) / 100
+               });
+               monthDataFound = true;
+             });
+           }
         }
       }
 
@@ -216,6 +240,27 @@ const downloadRentalOOHExcel = async (req, res) => {
     // Create Workbook
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(reportRows);
+
+    // Apply header styling (Teal background, White bold text)
+    const headerRange = { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } }; // A1 to H1
+    for (let col = headerRange.s.c; col <= headerRange.e.c; col++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
+      if (ws[cellAddress]) {
+        ws[cellAddress].s = {
+          fill: {
+            fgColor: { rgb: "31869B" }, // Teal color from screenshot
+          },
+          font: {
+            bold: true,
+            color: { rgb: "FFFFFF" }, // White text
+          },
+          alignment: {
+            vertical: "center",
+            horizontal: "center",
+          },
+        };
+      }
+    }
 
     ws["!merges"] = merges;
 
