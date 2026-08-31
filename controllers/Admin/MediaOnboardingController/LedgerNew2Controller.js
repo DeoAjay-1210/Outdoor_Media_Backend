@@ -4345,7 +4345,7 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
 
     const globalMediaDocs = await Media.find(
       { "mediaDetails.status": 1 },
-      "gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
+      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
     ).lean();
 
     // ✅ ensure rentalDue exists for global docs to ensure system-wide accuracy

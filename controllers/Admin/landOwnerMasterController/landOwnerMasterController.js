@@ -2662,14 +2662,14 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     for (const media of summaryDocs) {
       await ensureRentalDueForCycles(
         media,
-        outstandingMonthYear,
+        parsedMonthFilter ? outstandingMonthYear : null,
         req.user?.userName || "Admin",
       );
     }
 
     const overallOutstandingTotals = summaryDocs.reduce(
       (acc, mediaDoc) => {
-        const s = computeOutstandingSummary(mediaDoc, outstandingMonthYear);
+        const s = computeOutstandingSummary(mediaDoc, parsedMonthFilter ? outstandingMonthYear : null);
         acc.overallCurrentBaseRentDue += s.currentBaseRent;
         acc.overallCurrentGSTDue += s.currentGSTDue;
         acc.overallPreviousBaseRentDue += s.previousBaseRentDue;
@@ -2804,7 +2804,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
     const overallLedgerSummary = calculateOverallLedgerSummary(
       summaryDocs,
-      outstandingMonthYear,
+      parsedMonthFilter ? outstandingMonthYear : null,
     );
 
     return successResponse(
