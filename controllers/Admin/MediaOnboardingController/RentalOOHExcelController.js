@@ -2,16 +2,6 @@ const mongoose = require("mongoose");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const XLSX = require("xlsx");
 const { successResponse, errorResponse } = require("../../../utils/response");
-const { getDueMonthLabel } = require("../../../utils/Datehelpers");
-
-const FREQ_LABEL = {
-  1: "Monthly",
-  2: "Quarterly",
-  3: "Half-Yearly",
-  4: "Yearly",
-  5: "2 Years",
-  6: "Custom"
-};
 
 /**
  * Generate a list of months between fromMonth (MM-YYYY) and toMonth (MM-YYYY)
@@ -54,37 +44,51 @@ const downloadRentalOOHExcel = async (req, res) => {
       "mediaDetails.status": 1 // Only active media
     }).lean();
 
-    const siteDetailsRows = [];
-    const monthlySummary = monthLabels.map(label => ({
-      Month: label,
-      TotalSites: new Set(),
-      TotalMedia: new Set(),
-      TotalLandowners: new Set(),
-      OverallLedger: 0,
-      OverallGstLedger: 0,
-      OverallNetAmount: 0
-    }));
-
-    const ledgerAuditRows = [];
+    const reportRows = [];
+    const merges = [];
 
     // Process each month
     for (let i = 0; i < monthList.length; i++) {
       const monthLabel = monthLabels[i];
-      const summary = monthlySummary[i];
+
+      let monthLedgerTotal = 0;
+      let monthGstTotal = 0;
+      let monthDataFound = false;
+
+      // 1. Add a visual Month Header
+      const headerRowIndex = reportRows.length;
+      reportRows.push({
+        "Month": `--- ${monthLabel.toUpperCase()} ---`,
+        "Media Code": "",
+        "Media Name": "",
+        "Media Type": "",
+        "Total Landowners": "",
+        "Ledger Amount": "",
+        "GST Amount": "",
+        "Total Amount": ""
+      });
+
+      // Merge the month header across all 8 columns
+      merges.push({ s: { r: headerRowIndex + 1, c: 0 }, e: { r: headerRowIndex + 1, c: 7 } });
 
       for (const media of mediaDocs) {
-        const siteCode = media.siteCode || "N/A";
         const mediaDetails = media.mediaDetails || [];
         const owners = media.landOwners || [];
 
-        // Deduplicate ledger entries for this month
-        // We look into media.ledger, media.withGst1Ledger, and media.ledgerHistory
+        // Build mapping of rentalDueId -> mediaDetailId
+        const dueToMediaMap = new Map();
+        (media.rentalDue || []).forEach(d => {
+          if (d.mediaDetailId) {
+            dueToMediaMap.set(String(d._id), String(d.mediaDetailId));
+          }
+        });
+
+        // Collect all ledger entries
         const allLedgerEntries = [
           ...(media.ledger || []),
           ...(media.withGst1Ledger || [])
         ];
 
-        // Also check ledgerHistory
         if (media.ledgerHistory) {
           media.ledgerHistory.forEach(yearBucket => {
             if (yearBucket.months) {
@@ -97,14 +101,12 @@ const downloadRentalOOHExcel = async (req, res) => {
           });
         }
 
-        // Filter approved entries for this month
+        // Filter and deduplicate
         const monthLedgerEntries = allLedgerEntries.filter(e =>
           (e.month === monthLabel || e.dueMonth === monthLabel) &&
           (e.status === 1 || e.isUtrEntry === true)
         );
 
-        // Deduplicate by rentalDueId + landOwnerId + month + amount (if needed)
-        // Use a Map to keep unique entries
         const uniqueLedgers = new Map();
         monthLedgerEntries.forEach(e => {
           const key = `${e.rentalDueId || "no-due"}-${e.landOwnerId || "no-owner"}-${monthLabel}-${e.amount}-${e.paymentMode || "unknown"}`;
@@ -113,143 +115,129 @@ const downloadRentalOOHExcel = async (req, res) => {
           }
         });
 
-        // GST Balance History
         const monthGstEntries = (media.gstBalanceHistory || []).filter(g =>
           g.dueMonth === monthLabel && (g.isPaid || (g.utrNumber && g.utrNumber.trim() !== ""))
         );
+
+        // Deduplicate GST entries
         const uniqueGst = new Map();
+        const ledgerEntriesBase = Array.from(uniqueLedgers.values()).filter(e => e.isUtrEntry !== true);
+        const gstEntriesFromLedger = Array.from(uniqueLedgers.values()).filter(e => e.isUtrEntry === true);
+
+        gstEntriesFromLedger.forEach(g => {
+          const key = `${g.rentalDueId || "no-due"}-${g.landOwnerId || "no-owner"}-${monthLabel}-${g.amount}`;
+          uniqueGst.set(key, { amount: Number(g.amount), rentalDueId: g.rentalDueId });
+        });
         monthGstEntries.forEach(g => {
-          const key = `${g.rentalDueId}-${g.ownerId || "rental"}-${monthLabel}-${g.gstAmount}`;
+          const key = `${g.rentalDueId || "no-due"}-${g.ownerId || "rental"}-${monthLabel}-${g.gstAmount}`;
           if (!uniqueGst.has(key)) {
-            uniqueGst.set(key, g);
+            uniqueGst.set(key, { amount: Number(g.gstAmount), rentalDueId: g.rentalDueId, source: g.source });
           }
         });
 
-        // Track totals for summary
-        let siteLedgerTotal = 0;
-        let siteGstTotal = 0;
+        // Tracking per Site/Media in this month
+        const ledgerByFace = new Map();
+        const gstByFace = new Map();
+        let siteWideLedger = 0;
+        let siteWideGst = 0;
 
-        // Map data per landowner
-        for (const owner of owners) {
-          const ownerId = String(owner.ownerId || owner._id);
-          const ownerName = owner.name || "Unknown";
+        ledgerEntriesBase.forEach(e => {
+          const mId = dueToMediaMap.get(String(e.rentalDueId));
+          if (mId && mId !== "SITE") {
+            ledgerByFace.set(mId, (ledgerByFace.get(mId) || 0) + (Number(e.amount) || 0));
+          } else {
+            siteWideLedger += (Number(e.amount) || 0);
+          }
+        });
 
-          // Calculate Ledger for this owner in this month
-          const ownerLedger = Array.from(uniqueLedgers.values())
-            .filter(e => String(e.landOwnerId) === ownerId)
-            .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+        uniqueGst.forEach(g => {
+          const mId = dueToMediaMap.get(String(g.rentalDueId));
+          if (mId && mId !== "SITE") {
+            gstByFace.set(mId, (gstByFace.get(mId) || 0) + (g.amount || 0));
+          } else {
+            siteWideGst += (g.amount || 0);
+          }
+        });
 
-          // Calculate GST for this owner in this month
-          const ownerGst = monthGstEntries
-            .filter(g => g.source === "owner" && String(g.ownerId) === ownerId)
-            .reduce((sum, g) => sum + (Number(g.gstAmount) || 0), 0);
+        const totalLedger = Array.from(ledgerByFace.values()).reduce((a,b) => a+b, 0) + siteWideLedger;
+        const totalGst = Array.from(gstByFace.values()).reduce((a,b) => a+b, 0) + siteWideGst;
 
-          if (ownerLedger > 0 || ownerGst > 0) {
-            summary.TotalSites.add(siteCode);
-            summary.TotalLandowners.add(ownerId);
+        if (totalLedger > 0 || totalGst > 0) {
+           monthLedgerTotal += totalLedger;
+           monthGstTotal += totalGst;
 
-            siteLedgerTotal += ownerLedger;
-            siteGstTotal += ownerGst;
+           mediaDetails.forEach(mDetail => {
+             const mId = String(mDetail._id);
 
-            for (const mDetail of mediaDetails) {
-              summary.TotalMedia.add(mDetail.mediaCode);
+             // Attribution Logic:
+             // If this face has specific billing (Separate), use it.
+             // Otherwise, use the site-wide billing (Single) as requested.
+             let dLedger = ledgerByFace.get(mId) || siteWideLedger;
+             let dGst = gstByFace.get(mId) || siteWideGst;
 
-              siteDetailsRows.push({
-                Month: monthLabel,
-                "Site Code": siteCode,
+             reportRows.push({
+                "Month": monthLabel,
                 "Media Code": mDetail.mediaCode,
                 "Media Name": mDetail.mediaName,
                 "Media Type": mDetail.mediaType,
-                State: mDetail.state,
-                City: mDetail.city,
-                Location: mDetail.location,
-                "Total Sq Ft": mDetail.totalSqFt,
-                "Landowner Name": ownerName,
-                "Landowner Master ID": owner.landOwnerMasterId || "N/A",
-                "Share Percentage": owner.sharePercentage ? `${owner.sharePercentage}%` : "0%",
-                "Share Amount": owner.shareAmount || 0,
-                "Rental Amount": media.rentalPayment?.totalRentalAmount || 0,
-                "Payment Frequency": FREQ_LABEL[media.rentalPayment?.paymentFrequency] || "N/A",
-                "Payment Mode": owner.paymentCategory === 1 ? "Cash" : owner.paymentCategory === 2 ? "Online" : "Cash+Online",
-                "Online Amount": owner.onlineAmount || 0,
-                "Cash Amount": owner.cashAmount || 0,
-                "TDS Amount": owner.tdsAmount || 0,
-                "GST Amount": ownerGst,
-                "Ledger Amount": ownerLedger,
-                "Net Payable": ownerLedger + ownerGst,
-                "UTR Number": Array.from(uniqueLedgers.values())
-                  .filter(e => String(e.landOwnerId) === ownerId)
-                  .map(e => e.utrNumber)
-                  .filter(u => u)
-                  .join(", "),
-                "Ledger Status": "Approved",
-                "Rental Due Status": "Paid"
-              });
-            }
-          }
+                "Total Landowners": owners.length,
+                "Ledger Amount": Math.round(dLedger * 100) / 100,
+                "GST Amount": Math.round(dGst * 100) / 100,
+                "Total Amount": Math.round((dLedger + dGst) * 100) / 100
+             });
+             monthDataFound = true;
+           });
         }
+      }
 
-        // Handle Rental source GST (site-level)
-        const rentalGst = monthGstEntries
-          .filter(g => g.source === "rental")
-          .reduce((sum, g) => sum + (Number(g.gstAmount) || 0), 0);
-
-        siteGstTotal += rentalGst;
-
-        // If there was only rental GST and no owner-specific ledger/gst,
-        // we should still probably show it in the summary.
-
-        summary.OverallLedger += siteLedgerTotal;
-        summary.OverallGstLedger += siteGstTotal;
-        summary.OverallNetAmount += (siteLedgerTotal + siteGstTotal);
-
-        // Add to audit rows
-        uniqueLedgers.forEach(e => {
-          ledgerAuditRows.push({
-            Month: monthLabel,
-            SiteCode: siteCode,
-            LandOwner: e.landOwnerName,
-            Amount: e.amount,
-            UTR: e.utrNumber,
-            Date: e.date,
-            Mode: e.paymentMode,
-            Type: e.withGst === 1 ? "withGST" : "withoutGST"
-          });
+      // Add Monthly Total row
+      if (monthDataFound) {
+        const totalRowIdx = reportRows.length;
+        reportRows.push({
+          "Month": `${monthLabel.toUpperCase()} TOTAL`,
+          "Media Code": "",
+          "Media Name": "",
+          "Media Type": "",
+          "Total Landowners": "",
+          "Ledger Amount": Math.round(monthLedgerTotal * 100) / 100,
+          "GST Amount": Math.round(monthGstTotal * 100) / 100,
+          "Total Amount": Math.round((monthLedgerTotal + monthGstTotal) * 100) / 100
         });
+
+        // Merge total label across columns A to E
+        merges.push({ s: { r: totalRowIdx + 1, c: 0 }, e: { r: totalRowIdx + 1, c: 4 } });
+        reportRows.push({}); // Spacing
+      } else {
+        reportRows.pop();
+        merges.pop();
       }
     }
 
-    // Format summary for sheet
-    const summarySheetData = monthlySummary.map(s => ({
-      Month: s.Month,
-      "Total Sites": s.TotalSites.size,
-      "Total Media": s.TotalMedia.size,
-      "Total Landowners": s.TotalLandowners.size,
-      "Overall Ledger Amount": s.OverallLedger,
-      "Overall GST Ledger Amount": s.OverallGstLedger,
-      "Overall Net Amount": s.OverallNetAmount
-    }));
-
     // Create Workbook
     const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(reportRows);
 
-    // Sheet 1: Monthly Summary
-    const wsSummary = XLSX.utils.json_to_sheet(summarySheetData);
-    XLSX.utils.book_append_sheet(wb, wsSummary, "Monthly Summary");
+    ws["!merges"] = merges;
 
-    // Sheet 2: Site Monthly Details
-    const wsDetails = XLSX.utils.json_to_sheet(siteDetailsRows);
-    XLSX.utils.book_append_sheet(wb, wsDetails, "Site Monthly Details");
+    // Column widths
+    ws["!cols"] = [
+      { wch: 25 }, // Month
+      { wch: 20 }, // Media Code
+      { wch: 40 }, // Media Name
+      { wch: 15 }, // Media Type
+      { wch: 15 }, // Total Landowners
+      { wch: 15 }, // Ledger
+      { wch: 15 }, // GST
+      { wch: 15 }, // Total
+    ];
 
-    // Sheet 3: Ledger Details (Audit)
-    const wsAudit = XLSX.utils.json_to_sheet(ledgerAuditRows);
-    XLSX.utils.book_append_sheet(wb, wsAudit, "Ledger Details");
+    XLSX.utils.book_append_sheet(wb, ws, "Rental OOH Report");
 
-    // Generate buffer
     const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename=Rental_OOH_Report_${fromMonth}_to_${toMonth}.xlsx`);
+    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
 
     return res.send(buffer);
 
