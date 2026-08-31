@@ -132,7 +132,7 @@ const downloadRentalOOHExcel = async (req, res) => {
         // Map data per landowner
         for (const owner of owners) {
           const ownerId = String(owner.ownerId || owner._id);
-          const ownerName = owner.ownerName || "Unknown";
+          const ownerName = owner.name || "Unknown";
 
           // Calculate Ledger for this owner in this month
           const ownerLedger = Array.from(uniqueLedgers.values())
@@ -140,17 +140,9 @@ const downloadRentalOOHExcel = async (req, res) => {
             .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
 
           // Calculate GST for this owner in this month
-          // Note: Some GST might be at rental level (ownerId=null), we split it if needed or follow existing logic.
-          // Usually if source='owner', it's owner-specific. If source='rental', it's site-level.
           const ownerGst = monthGstEntries
             .filter(g => g.source === "owner" && String(g.ownerId) === ownerId)
             .reduce((sum, g) => sum + (Number(g.gstAmount) || 0), 0);
-
-          // If there's rental level GST, it might need to be shown or split.
-          // Requirement 4 says "GST must also be available at site level".
-          // If we have site-level GST, we might need to show it on the first owner row or split it.
-          // For now, let's also pick up rental source GST if it hasn't been handled.
-          // But usually, the report is landowner-wise.
 
           if (ownerLedger > 0 || ownerGst > 0) {
             summary.TotalSites.add(siteCode);
@@ -158,10 +150,6 @@ const downloadRentalOOHExcel = async (req, res) => {
 
             siteLedgerTotal += ownerLedger;
             siteGstTotal += ownerGst;
-
-            // Media level details - if multiple media, we might need to duplicate or show once.
-            // A site has multiple media. The ledger usually belongs to a media if siteBillMode=2.
-            // If siteBillMode=1, it's site-level.
 
             for (const mDetail of mediaDetails) {
               summary.TotalMedia.add(mDetail.mediaCode);
@@ -178,14 +166,14 @@ const downloadRentalOOHExcel = async (req, res) => {
                 "Total Sq Ft": mDetail.totalSqFt,
                 "Landowner Name": ownerName,
                 "Landowner Master ID": owner.landOwnerMasterId || "N/A",
-                "Share Percentage": owner.percentage ? `${owner.percentage}%` : "0%",
-                "Share Amount": owner.amount || 0,
+                "Share Percentage": owner.sharePercentage ? `${owner.sharePercentage}%` : "0%",
+                "Share Amount": owner.shareAmount || 0,
                 "Rental Amount": media.rentalPayment?.totalRentalAmount || 0,
                 "Payment Frequency": FREQ_LABEL[media.rentalPayment?.paymentFrequency] || "N/A",
                 "Payment Mode": owner.paymentCategory === 1 ? "Cash" : owner.paymentCategory === 2 ? "Online" : "Cash+Online",
                 "Online Amount": owner.onlineAmount || 0,
                 "Cash Amount": owner.cashAmount || 0,
-                "TDS Amount": 0, // Need to find where TDS is stored if required
+                "TDS Amount": owner.tdsAmount || 0,
                 "GST Amount": ownerGst,
                 "Ledger Amount": ownerLedger,
                 "Net Payable": ownerLedger + ownerGst,

@@ -11,6 +11,7 @@ const authRoutes = require("./routes/Admin/UserRoutes/UserRoutes");
 const mediaRoutes = require("./routes/Admin/MediaOnboardingRoutes/MediaOnboardingRoutes");
 const ledgerRoutes = require("./routes/Admin/MediaOnboardingRoutes/LedgerRoutes");
 const RentalDue = require("./routes/Admin/MediaOnboardingRoutes/rentalDueRoutes");
+const RentalOOHExcelRoutes = require("./routes/Admin/MediaOnboardingRoutes/RentalOOHExcelRoutes");
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
 const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
@@ -42,6 +43,7 @@ app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
 app.use("/admin", ledgerRoutes);
 app.use("/admin", RentalDue);
+app.use("/admin", RentalOOHExcelRoutes);
 app.use("/admin", LandownerMasterRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
