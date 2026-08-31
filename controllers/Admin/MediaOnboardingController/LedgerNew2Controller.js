@@ -6522,7 +6522,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
           if (isDirectGst) {
             result.totalGstPendingAmount += currentOwnerGst;
-            if (currentOwnerGst > 0) result.hasPendingGst = true;
+            // withGst 2 "cannot hold", so don't set the pending flag used for filtering
           }
 
           if (isCurrentCycle) {
@@ -6531,7 +6531,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
             if (isDirectGst) {
               result.currentMonthGstPending += currentOwnerGst;
-              if (currentOwnerGst > 0) result.hasCurrentMonthGstPending = true;
+              // withGst 2 "cannot hold", so don't set the pending flag used for filtering
             }
           } else {
             result.pastRentPending += rentAmount;
@@ -6539,7 +6539,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
             if (isDirectGst) {
               result.pastGstPending += currentOwnerGst;
-              if (currentOwnerGst > 0) result.hasPastGstPending = true;
+              // withGst 2 "cannot hold", so don't set the pending flag used for filtering
             }
           }
         }
