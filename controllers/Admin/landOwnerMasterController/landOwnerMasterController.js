@@ -914,13 +914,14 @@ const landOwnerSiteFilter = async (req, res) => {
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
 
-    // ✅ ADDED — resolve the target month (defaults to "now")
+    // ✅ FIXED — use getUTC* methods on the shifted IST date to ensure
+    // consistent month detection regardless of the server's local timezone.
     const parsedMonthFilter = parseSiteFilterMonthParam(monthFilter);
     const referenceDate = parsedMonthFilter
-      ? new Date(parsedMonthFilter.year, parsedMonthFilter.month - 1, 1)
+      ? new Date(Date.UTC(parsedMonthFilter.year, parsedMonthFilter.month - 1, 1))
       : nowIST();
-    const referenceYear = referenceDate.getFullYear();
-    const referenceMonthIdx = referenceDate.getMonth();
+    const referenceYear = referenceDate.getUTCFullYear();
+    const referenceMonthIdx = referenceDate.getUTCMonth();
     const monthFilterApplied = parsedMonthFilter
       ? monthFilter
       : `${String(referenceMonthIdx + 1).padStart(2, "0")}-${referenceYear}`;
@@ -1771,6 +1772,7 @@ const landOwnerSiteFilter = async (req, res) => {
 
       // ✅ DISCOVERY: Check if any cycle in rentalDue indicates GST is present
       let cycleGstAmount = 0;
+      let cycleWithGst = 0;
       const currentCycle = (rentalDue || []).find((due) => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
         return (
@@ -1781,6 +1783,7 @@ const landOwnerSiteFilter = async (req, res) => {
       });
 
       if (currentCycle) {
+        cycleWithGst = Number(currentCycle.withGst || 0);
         if (Number(currentCycle.gstAmount) > 0) {
           cycleGstAmount = Number(currentCycle.gstAmount);
         } else if (
@@ -1932,6 +1935,15 @@ const landOwnerSiteFilter = async (req, res) => {
         const faceId = String(face._id);
         const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
 
+        // ✅ Resolve final GST applicability (1=Hold, 2=Direct)
+        let finalGstApplicable = 0;
+        if (cycleWithGst === 1 || cycleWithGst === 2) {
+          finalGstApplicable = cycleWithGst;
+        } else if (resolvedSiteGstAmount > 0) {
+          // Fallback if not in cycle record
+          finalGstApplicable = 1; // Default to hold if amount exists but flag is missing
+        }
+
         siteMap.set(uniqueFaceKey, {
           mediaId: mediaDoc._id,
           mediaDetailId: face._id,
@@ -1940,7 +1952,7 @@ const landOwnerSiteFilter = async (req, res) => {
           mediaDetailsCount: 1,
           totalRentalAmount: mediaDoc.rentalPayment?.totalRentalAmount || 0,
           gstAmount: resolvedSiteGstAmount,
-          gstApplicable: resolvedSiteGstAmount > 0 ? 1 : 0,
+          gstApplicable: finalGstApplicable,
           updatedAt: siteLatestActivityAt,
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
@@ -1996,83 +2008,115 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       });
     });
 
-    const toSiteResponseShape = (site,targetOwnerId = null) => {
-      // ✅ Filter rentalDue entries matching the requested monthFilter
-      // (Matches RentalDueNew2 behavior: current month OR past pending)
-      const filteredDues = (site.rentalDue || [])
-        .filter((due) => {
-          const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
-          if (!parsed) return false;
-          const isCurrent =
-            parsed.year === referenceYear &&
-            parsed.monthIdx === referenceMonthIdx;
-          const isPast =
-            parsed.year < referenceYear ||
-            (parsed.year === referenceYear &&
-              parsed.monthIdx < referenceMonthIdx);
+    const toSiteResponseShape = (site, targetOwnerId = null) => {
+      // ✅ Filter rentalDue entries based on the requested filters.
+      // If a "Past Pending" filter is active, we exclude the current month
+      // cycle from the display array to focus only on the trouble spots.
+      const duesMap = new Map();
 
-          return isCurrent || (isPast && due.approvalStatus !== 3);
-        })
-        .map((due) => {
-  const cycleDate = due.dueDate ? new Date(due.dueDate) : null;
-  let isPaidForRent = false;
-  let isPaidForGst = false;
+      (site.rentalDue || []).forEach((due) => {
+        const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+        if (!parsed) return;
 
-  if (cycleDate) {
-    const ownersToCheck = targetOwnerId
-      ? (site.ownersDetail || []).filter(
-          (o) => String(o.landOwnerMasterId) === String(targetOwnerId),
-        )
-      : site.ownersDetail || [];
+        const isCurrent =
+          parsed.year === referenceYear && parsed.monthIdx === referenceMonthIdx;
+        const isPast =
+          parsed.year < referenceYear ||
+          (parsed.year === referenceYear && parsed.monthIdx < referenceMonthIdx);
 
-    if (ownersToCheck.length > 0) {
-      // 1) RENT check
-      isPaidForRent = ownersToCheck.every((owner) => {
-        const modes = getRequiredModesShared(owner.paymentCategory);
-        return modes.every((mode) =>
-          isOwnerModePaidForCycle(site, owner, mode, cycleDate),
-        );
+        // Calculate payment status for this cycle
+        const cycleDate = due.dueDate ? new Date(due.dueDate) : null;
+        let isPaidForRent = false;
+        let isPaidForGst = false;
+
+        if (cycleDate) {
+          const ownersToCheck = targetOwnerId
+            ? (site.ownersDetail || []).filter(
+                (o) => String(o.landOwnerMasterId) === String(targetOwnerId),
+              )
+            : site.ownersDetail || [];
+
+          if (ownersToCheck.length > 0) {
+            isPaidForRent = ownersToCheck.every((owner) => {
+              const modes = getRequiredModesShared(owner.paymentCategory);
+              return modes.every((mode) =>
+                isOwnerModePaidForCycle(site, owner, mode, cycleDate),
+              );
+            });
+
+            const withGst = Number(due.withGst || 0);
+            if (withGst === 2) {
+              isPaidForGst = isPaidForRent;
+            } else if (withGst === 1) {
+              isPaidForGst = ownersToCheck.every((owner) =>
+                isGstPaidForCycle(site, owner, due.dueMonth),
+              );
+            }
+          }
+        }
+
+        const isPending = !isPaidForRent;
+
+        let shouldInclude = false;
+        if (!isAnyFilterActive) {
+          // Default: Current Month + Past Pending
+          shouldInclude = isCurrent || (isPast && isPending);
+        } else {
+          // If filtering specifically for past pending, exclude current month
+          if (includePastRentPendingSites && isPast && isPending) shouldInclude = true;
+          if (includePastRentalPending && isPast && isPending) shouldInclude = true;
+          if (includePastGstPendingSites && isPast && !isPaidForGst) shouldInclude = true;
+
+          // If filtering for current month, only include current month
+          if (includeCurrentMonthRentPendingSites && isCurrent && isPending) shouldInclude = true;
+          if (includeCurrentMonthGstPendingSites && isCurrent && !isPaidForGst) shouldInclude = true;
+          if (includeCurrentMonthRentPaidSites && isCurrent && isPaidForRent) shouldInclude = true;
+          if (includeCurrentMonthGstPaidSites && isCurrent && isPaidForGst) shouldInclude = true;
+
+          // Fallback for general filters (Overall Due / Total Outstanding)
+          if ((includeCurrentMonthOverallDueAmountSites || includeTotalOutstandingSites) && (isCurrent || (isPast && isPending))) {
+            shouldInclude = true;
+          }
+        }
+
+        if (shouldInclude) {
+          const isDirect = Number(due.withGst) === 2;
+
+          // Deduplicate by month (prefer approved entries if duplicates exist)
+          const existing = duesMap.get(due.dueMonth);
+          if (
+            !existing ||
+            (due.approvalStatus === 3 && existing.approvalStatus !== 3)
+          ) {
+            duesMap.set(due.dueMonth, {
+              dueMonth: due.dueMonth,
+              dueDate: due.dueDate,
+              approvalStatus: due.approvalStatus,
+              ownerApprovalDate: due.ownerApprovalDate,
+              netPayable: due.netPayable,
+              withGst: due.withGst,
+              gstAmount: due.gstAmount,
+              baseAmount: due.baseAmount,
+              isPaidForRent,
+              isPaidForGst,
+            });
+          }
+        }
       });
 
-      // 2) GST check
-      const withGst = Number(due.withGst || 0);
-      if (withGst === 2) {
-        // Direct: GST is paid if Rent is paid
-        isPaidForGst = isPaidForRent;
-      } else if (withGst === 1) {
-        // Tracked: check gstBalanceHistory
-        isPaidForGst = ownersToCheck.every((owner) =>
-           isGstPaidForCycle(site, owner, due.dueMonth)
-        );
-      } else {
-        // Not applicable or pending
-        isPaidForGst = false;
-      }
-    }
-  }
-
-  return {
-    dueMonth: due.dueMonth,
-    dueDate: due.dueDate,
-    approvalStatus: due.approvalStatus,
-    ownerApprovalDate: due.ownerApprovalDate,
-    netPayable: due.netPayable,
-    withGst: due.withGst,
-    gstAmount: due.gstAmount,
-    baseAmount: due.baseAmount,
-    isPaidForRent, // ✅ RENAMED
-    isPaidForGst,  // ✅ ADDED
-  };
-});
-
+      const filteredDues = Array.from(duesMap.values()).sort((a, b) => {
+        const dA = a.dueDate ? new Date(a.dueDate) : new Date(0);
+        const dB = b.dueDate ? new Date(b.dueDate) : new Date(0);
+        return dA - dB;
+      });
 
       return {
         mediaId: site.mediaId,
-        mediaDetailId: site.mediaDetailId, // ✅ ADDED
+        mediaDetailId: site.mediaDetailId,
         mediaCode: site.mediaCode,
         mediaName: site.mediaName,
-        baseRent: site.totalRentalAmount,
-        gstAmount: site.gstAmount,
+        baseRent: site.totalRentalAmount || 0,
+        gstAmount: site.gstAmount || 0,
         tdsAmount: (site.ownersDetail || []).reduce(
           (sum, od) => sum + (od.tdsAmount || 0),
           0,
@@ -2086,18 +2130,21 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       // ✅ Use unique Media IDs for financial totals to avoid doubling amounts for multi-face docs
       const uniqueDocs = [];
       const seenIds = new Set();
-      sites.forEach(s => {
-          if (!seenIds.has(String(s.mediaId))) {
-              uniqueDocs.push(s);
-              seenIds.add(String(s.mediaId));
-          }
+      sites.forEach((s) => {
+        if (!seenIds.has(String(s.mediaId))) {
+          uniqueDocs.push(s);
+          seenIds.add(String(s.mediaId));
+        }
       });
 
-      const totalBaseRent = uniqueDocs.reduce(
-        (s, site) => s + site.totalRentalAmount,
-        0,
-      );
-      const gstHoldTotal = uniqueDocs.reduce((s, site) => s + site.gstAmount, 0);
+      const totalBaseRent = uniqueDocs.reduce((s, site) => {
+        return s + (site.totalRentalAmount || 0);
+      }, 0);
+
+      const gstHoldTotal = uniqueDocs.reduce((s, site) => {
+        return s + (site.gstAmount || 0);
+      }, 0);
+
       const tdsHoldTotal = uniqueDocs.reduce((s, site) => {
         return (
           s +
@@ -2107,6 +2154,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           )
         );
       }, 0);
+
       return {
         totalBaseRent,
         gstHoldTotal,

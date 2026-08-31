@@ -713,8 +713,10 @@ function getRequiredModesShared(paymentCategory) {
 }
 
 function isOwnerModePaidForCycle(media, owner, mode, cycleDate) {
-  const cycleMonthName = MONTH_NAMES[cycleDate.getUTCMonth()];
-  const cycleYear = String(cycleDate.getUTCFullYear());
+  // ✅ FIXED — Shift to IST before extracting month/year to match cycle-label strings
+  const istCycle = new Date(cycleDate.getTime() + IST_OFFSET_MS);
+  const cycleMonthName = MONTH_NAMES[istCycle.getUTCMonth()];
+  const cycleYear = String(istCycle.getUTCFullYear());
   const cycleMonthLabel = `${cycleMonthName} ${cycleYear}`;
 
   const ownerIdStr = String(owner._id || "");
@@ -821,8 +823,30 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
               ? Number(owner.cashAmount || owner.shareAmount || 0)
               : Number(owner.onlineAmount || owner.shareAmount || 0);
 
-          // removed direct GST addition here to keep Rent Only
-          // Removed TDS deduction here per user request to include TDS in the total amount.
+          if (isDirectGst) {
+            let gstFlag = Number(media.gstApplicableFlag || 0);
+            if (gstFlag === 0) {
+              const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+              const ownerGstAny = owners.some(
+                (o) => Number(o.gstApplicable) === 1,
+              );
+              if (ownerGstAny) gstFlag = 2;
+              else if (siteGst) gstFlag = 1;
+            }
+            let ownerGst = 0;
+            const expectedGstPerCycle = resolveExpectedGstForCycle(media);
+            if (gstFlag === 1) {
+              ownerGst = expectedGstPerCycle / (owners.length || 1);
+            } else {
+              ownerGst = Number(owner.gstAmount || 0);
+              if (ownerGst <= 0 && owners.length > 0) {
+                ownerGst = expectedGstPerCycle / owners.length;
+              }
+            }
+            if (paymentCategory !== 3 || mode === "Online") {
+              modeAmount += ownerGst;
+            }
+          }
 
           cycleUnpaid += modeAmount;
 
@@ -926,10 +950,12 @@ function getGstDueForCycles(media, requestedMonthYear) {
           if (!isPaid) {
             let gstFlag = Number(media.gstApplicableFlag || 0);
             if (gstFlag === 0) {
-                const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-                const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1);
-                if (ownerGstAny) gstFlag = 2;
-                else if (siteGst) gstFlag = 1;
+              const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
+              const ownerGstAny = owners.some(
+                (o) => Number(o.gstApplicable) === 1,
+              );
+              if (ownerGstAny) gstFlag = 2;
+              else if (siteGst) gstFlag = 1;
             }
             let ownerGst = 0;
             if (gstFlag === 1) {
@@ -937,11 +963,11 @@ function getGstDueForCycles(media, requestedMonthYear) {
             } else {
               ownerGst = Number(owner.gstAmount || 0);
               if (ownerGst <= 0 && owners.length > 0) {
-                 ownerGst = expectedGstPerCycle / owners.length;
+                ownerGst = expectedGstPerCycle / owners.length;
               }
             }
             if (paymentCategory !== 3 || mode === "Online") {
-               cycleOutstanding += ownerGst;
+              cycleOutstanding += ownerGst;
             }
           }
         });
@@ -949,7 +975,10 @@ function getGstDueForCycles(media, requestedMonthYear) {
     } else {
       // Standard Tracked GST logic
       // Check for "Without GST" approval that blocks future demand for this month
-      const matchedApprovedWithoutGst = matchedDue && Number(matchedDue.withGst) === 2 && Number(matchedDue.approvalStatus) === 3;
+      const matchedApprovedWithoutGst =
+        matchedDue &&
+        Number(matchedDue.withGst) === 2 &&
+        Number(matchedDue.approvalStatus) === 3;
 
       if (!matchedApprovedWithoutGst) {
         // Outstanding = Total Expected - Amount already paid.
@@ -6282,7 +6311,9 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
             const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-            const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1);
+            const ownerGstAny = owners.some(
+              (o) => Number(o.gstApplicable) === 1,
+            );
             if (ownerGstAny) gstFlag = 2;
             else if (siteGst) gstFlag = 1;
           }
@@ -6293,7 +6324,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
           } else {
             ownerGst = Number(owner.gstAmount || 0);
             if (ownerGst <= 0 && owners.length > 0) {
-                ownerGst = expectedGstPerCycle / owners.length;
+              ownerGst = expectedGstPerCycle / owners.length;
             }
           }
           if (paymentCategory !== 3 || mode === "Online") {
