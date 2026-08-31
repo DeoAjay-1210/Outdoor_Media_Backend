@@ -57,12 +57,11 @@ app.listen(PORT, () => {
 app.use(cors({
   origin: [
     "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "https://yourfrontend.com",
     "https://peaceful-entremet-3dd657.netlify.app",
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
     "https://adinn-outdoor-media.netlify.app",
-    "http://192.168.1.42:5000"
+    "http://192.168.1.42:5000",
+    "http://192.168.1.39:5000"
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]

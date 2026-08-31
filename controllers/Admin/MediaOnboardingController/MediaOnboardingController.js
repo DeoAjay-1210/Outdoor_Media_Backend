@@ -3275,8 +3275,8 @@ if (landOwnerMasterId) {
 
     // ✅ Process each media item to provide aggregated summary fields
     mediaListData.forEach((item) => {
-      const parentMediaId = item.mediaId || String(item._id);
-item.mediaId = parentMediaId;
+      const parentMediaId = String(item._id);
+      item.mediaId = parentMediaId;
       if (Array.isArray(item.mediaDetails)) {
         item.siteCode = item.siteCode || item.mediaDetails[0]?.siteCode;
         // ✅ FIXED — Filter mediaDetails to only include Active (status 1) faces
@@ -3430,7 +3430,7 @@ const getMediaById = async (req, res) => {
     if (!mediaData) {
       return errorResponse(res, "Media not found", null, 404);
     }
-const parentMediaId = mediaData.mediaId || String(mediaData._id);
+const parentMediaId = String(mediaData._id);
 mediaData.mediaId = parentMediaId;
 
     // ✅ Aggregated summary fields
@@ -3531,22 +3531,8 @@ const uploadExcel = async (req, res) => {
 
     const results = { inserted: 0, skipped: 0, errors: [] };
     const bulkOps = [];
-
-    // ── Generate starting mediaId counter ONCE before the loop ──
     const today = nowIST();
-    const prefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
 
-    const lastMedia = await MediaOnboarding.findOne({
-      mediaId: { $regex: `^${prefix}MED#` },
-    })
-      .sort({ mediaId: -1 })
-      .limit(1);
-
-    let nextNumber = 1;
-    if (lastMedia) {
-      const match = lastMedia.mediaId.match(/#(\d+)$/);
-      if (match) nextNumber = parseInt(match[1]) + 1;
-    }
     // ────────────────────────────────────────────────────────────
 
     // ── STEP 1: Map + validate every row, then GROUP by Site Code ──
@@ -3658,7 +3644,6 @@ const uploadExcel = async (req, res) => {
               $set: {
                 siteCode: siteCode,
                 excelRowNumber: firstRow,
-                mediaId: { $ifNull: ["$mediaId", `${prefix}MED#${nextNumber}`] },
                 createdAt: { $ifNull: ["$createdAt", timestamp] },
                 _mergedDetails: {
                   $let: {
@@ -3725,7 +3710,6 @@ const uploadExcel = async (req, res) => {
         },
       });
       groupIdx++;
-      nextNumber++;
     }
 
     if (bulkOps.length) {
