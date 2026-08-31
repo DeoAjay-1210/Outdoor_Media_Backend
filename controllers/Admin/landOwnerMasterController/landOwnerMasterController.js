@@ -899,6 +899,8 @@ const landOwnerSiteFilter = async (req, res) => {
       // ✅ NEW: Individual category pending flags
       currentMonthRentPendingSites: wantCurrentMonthRentPendingSites,
       currentMonthGstPendingSites: wantCurrentMonthGstPendingSites,
+      currentMonthRentPaidSites: wantCurrentMonthRentPaidSites,
+      currentMonthGstPaidSites: wantCurrentMonthGstPaidSites,
       pastRentPendingSites: wantPastRentPendingSites,
       pastGstPendingSites: wantPastGstPendingSites,
       currentMonthOverallDueAmountSites: wantCurrentMonthOverallDueAmount,
@@ -945,6 +947,8 @@ const landOwnerSiteFilter = async (req, res) => {
 
     const includeCurrentMonthRentPendingSites = Number(wantCurrentMonthRentPendingSites) === 1;
     const includeCurrentMonthGstPendingSites = Number(wantCurrentMonthGstPendingSites) === 1;
+    const includeCurrentMonthRentPaidSites = Number(wantCurrentMonthRentPaidSites) === 1;
+    const includeCurrentMonthGstPaidSites = Number(wantCurrentMonthGstPaidSites) === 1;
     const includePastRentPendingSites = Number(wantPastRentPendingSites) === 1;
     const includePastGstPendingSites = Number(wantPastGstPendingSites) === 1;
     const includeCurrentMonthOverallDueAmountSites = Number(wantCurrentMonthOverallDueAmount) === 1;
@@ -965,6 +969,8 @@ const landOwnerSiteFilter = async (req, res) => {
       includeTotalGstPendingAmount ||
       includeCurrentMonthRentPendingSites ||
       includeCurrentMonthGstPendingSites ||
+      includeCurrentMonthRentPaidSites ||
+      includeCurrentMonthGstPaidSites ||
       includePastRentPendingSites ||
       includePastGstPendingSites ||
       includeCurrentMonthOverallDueAmountSites ||
@@ -1531,6 +1537,8 @@ const landOwnerSiteFilter = async (req, res) => {
                   pastGst: 0,
                   currentGstPending: 0,
                   pastGstPending: 0,
+                  hasCurrentMonthRentPaid: false,
+                  hasCurrentMonthGstPaid: false,
                 };
                 ledgerDataByMediaOwner.set(keyMaster, bucket);
               }
@@ -1619,6 +1627,8 @@ const landOwnerSiteFilter = async (req, res) => {
                   pastGst: 0,
                   currentGstPending: 0,
                   pastGstPending: 0,
+                  hasCurrentMonthRentPaid: false,
+                  hasCurrentMonthGstPaid: false,
                 };
                 ledgerDataByMediaOwner.set(keyMaster, bucket);
               }
@@ -2166,6 +2176,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         hasPendingGst: false,    // ✅ NEW
         hasCurrentMonthRentPending: false,
         hasCurrentMonthGstPending: false,
+        hasCurrentMonthRentPaid: false,
+        hasCurrentMonthGstPaid: false,
         hasPastRentPending: false,
         hasPastGstPending: false,
         hasCurrentMonthOverallDueAmount: false,
@@ -2215,6 +2227,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
           if (site._overallSummary.hasCurrentMonthRentPending) combinedLedger.hasCurrentMonthRentPending = true;
           if (site._overallSummary.hasCurrentMonthGstPending) combinedLedger.hasCurrentMonthGstPending = true;
+          if (site._overallSummary.hasCurrentMonthRentPaid) combinedLedger.hasCurrentMonthRentPaid = true;
+          if (site._overallSummary.hasCurrentMonthGstPaid) combinedLedger.hasCurrentMonthGstPaid = true;
           if (site._overallSummary.hasPastRentPending) combinedLedger.hasPastRentPending = true;
           if (site._overallSummary.hasPastGstPending) combinedLedger.hasPastGstPending = true;
           if (site._overallSummary.hasCurrentMonthOverallDueAmount) combinedLedger.hasCurrentMonthOverallDueAmount = true;
@@ -2332,6 +2346,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             (includeTotalGstPendingAmount && combinedLedger.hasPendingGst) ||
             (includeCurrentMonthRentPendingSites && combinedLedger.hasCurrentMonthRentPending) ||
             (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentMonthGstPending) ||
+            (includeCurrentMonthRentPaidSites && combinedLedger.hasCurrentMonthRentPaid) ||
+            (includeCurrentMonthGstPaidSites && combinedLedger.hasCurrentMonthGstPaid) ||
             (includePastRentPendingSites && combinedLedger.hasPastRentPending) ||
             (includePastGstPendingSites && combinedLedger.hasPastGstPending) ||
             (includeCurrentMonthOverallDueAmountSites && combinedLedger.hasCurrentMonthOverallDueAmount) ||
@@ -2434,6 +2450,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         hasPendingGst: false,    // ✅ NEW
         hasCurrentMonthRentPending: false,
         hasCurrentMonthGstPending: false,
+        hasCurrentMonthRentPaid: false,
+        hasCurrentMonthGstPaid: false,
         hasPastRentPending: false,
         hasPastGstPending: false,
         hasCurrentMonthOverallDueAmount: false,
@@ -2462,6 +2480,14 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
             if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
             if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
+            if (site._overallSummary.hasCurrentMonthRentPending) combinedLedger.hasCurrentMonthRentPending = true;
+            if (site._overallSummary.hasCurrentMonthGstPending) combinedLedger.hasCurrentMonthGstPending = true;
+            if (site._overallSummary.hasCurrentMonthRentPaid) combinedLedger.hasCurrentMonthRentPaid = true;
+            if (site._overallSummary.hasCurrentMonthGstPaid) combinedLedger.hasCurrentMonthGstPaid = true;
+            if (site._overallSummary.hasPastRentPending) combinedLedger.hasPastRentPending = true;
+            if (site._overallSummary.hasPastGstPending) combinedLedger.hasPastGstPending = true;
+            if (site._overallSummary.hasCurrentMonthOverallDueAmount) combinedLedger.hasCurrentMonthOverallDueAmount = true;
+            if (site._overallSummary.hasTotalOutstanding) combinedLedger.hasTotalOutstanding = true;
           }
 
           if (needsLedgerFields && !processedDocIds.has(docIdStr)) {
@@ -2570,6 +2596,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             (includeTotalGstPendingAmount && combinedLedger.hasPendingGst) ||
             (includeCurrentMonthRentPendingSites && combinedLedger.hasCurrentMonthRentPending) ||
             (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentMonthGstPending) ||
+            (includeCurrentMonthRentPaidSites && combinedLedger.hasCurrentMonthRentPaid) ||
+            (includeCurrentMonthGstPaidSites && combinedLedger.hasCurrentMonthGstPaid) ||
             (includePastRentPendingSites && combinedLedger.hasPastRentPending) ||
             (includePastGstPendingSites && combinedLedger.hasPastGstPending) ||
             (includeCurrentMonthOverallDueAmountSites && combinedLedger.hasCurrentMonthOverallDueAmount) ||
