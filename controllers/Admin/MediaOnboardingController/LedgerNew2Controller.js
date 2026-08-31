@@ -4347,6 +4347,7 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
       { "mediaDetails.status": 1 },
       "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
     ).lean();
+    
 
     // ✅ ensure rentalDue exists for global docs to ensure system-wide accuracy
     for (const media of globalMediaDocs) {
