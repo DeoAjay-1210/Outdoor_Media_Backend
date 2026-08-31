@@ -755,7 +755,26 @@ function isOwnerModePaidForCycle(media, owner, mode, cycleDate) {
 
   return false;
 }
+function isGstPaidForCycle(media, owner, cycleMonthLabel) {
+  const history = media.gstBalanceHistory || [];
+  const ownerIdStr = String(owner._id || "");
+  const ownerMasterIdStr = owner.landOwnerMasterId ? String(owner.landOwnerMasterId) : null;
 
+  const matchesOwner = (id) => {
+    const s = String(id || "");
+    return s === ownerIdStr || (ownerMasterIdStr && s === ownerMasterIdStr);
+  };
+
+  const rows = history.filter(
+    (row) =>
+      row.dueMonth === cycleMonthLabel &&
+      (matchesOwner(row.ownerId) || matchesOwner(row.landOwnerId))
+  );
+
+  if (rows.length === 0) return false;
+
+  return rows.every((row) => row.isPaid || (row.utrNumber && row.utrNumber.trim() !== ""));
+}
 function getUnpaidRentForCycle(media, requestedMonthYear) {
   const owners = media.landOwners || [];
   const cycles = getAllDueCycles(media, requestedMonthYear);
@@ -6719,3 +6738,6 @@ exports.getOwnerWiseOutstanding = getOwnerWiseOutstanding; // ✅ ADDED
 exports.calculateOverallLedgerSummary = calculateOverallLedgerSummary; // ✅ NEW
 exports.getOverallSummaryForCycle = getOverallSummaryForCycle; // ✅ NEW: export for filter consistency
 exports.ensureRentalDueForCycles = ensureRentalDueForCycles; // ✅ NEW
+exports.isOwnerModePaidForCycle = isOwnerModePaidForCycle; // ✅ NEW
+exports.isGstPaidForCycle = isGstPaidForCycle; // ✅ NEW
+exports.getRequiredModesShared = getRequiredModesShared;

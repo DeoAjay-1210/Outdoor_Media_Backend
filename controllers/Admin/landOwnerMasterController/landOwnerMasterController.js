@@ -9,6 +9,9 @@ const {
   calculateOverallLedgerSummary,
   getOverallSummaryForCycle,
   ensureRentalDueForCycles,
+isOwnerModePaidForCycle,
+isGstPaidForCycle,
+getRequiredModesShared,
 } = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
 // ─────────────────────────────────────────────────────────────
 // IST HELPER — same pattern as mediaOnboardingController.js.
@@ -1963,6 +1966,7 @@ const landOwnerSiteFilter = async (req, res) => {
             }
 
             return {
+              _id: o._id,
               landOwnerMasterId: String(o.landOwnerMasterId),
               paymentCategory: o.paymentCategory,
               shareAmount: o.shareAmount || 0,
@@ -1974,12 +1978,15 @@ const landOwnerSiteFilter = async (req, res) => {
             };
           }),
           rentalDue: rentalDue,
+          ledger: mediaDoc.ledger,
+ledgerHistory: mediaDoc.ledgerHistory,
+gstBalanceHistory: mediaDoc.gstBalanceHistory,
           isFaceEntry: true,
         });
       });
     });
 
-    const toSiteResponseShape = (site) => {
+    const toSiteResponseShape = (site,targetOwnerId = null) => {
       // ✅ Filter rentalDue entries matching the requested monthFilter
       // (Matches RentalDueNew2 behavior: current month OR past pending)
       const filteredDues = (site.rentalDue || [])
@@ -1996,16 +2003,58 @@ const landOwnerSiteFilter = async (req, res) => {
 
           return isCurrent || (isPast && due.approvalStatus !== 3);
         })
-        .map((due) => ({
-          dueMonth: due.dueMonth,
-          dueDate: due.dueDate,
-          approvalStatus: due.approvalStatus,
-          ownerApprovalDate: due.ownerApprovalDate,
-          netPayable: due.netPayable,
-          withGst: due.withGst,
-          gstAmount: due.gstAmount,
-          baseAmount: due.baseAmount,
-        }));
+        .map((due) => {
+  const cycleDate = due.dueDate ? new Date(due.dueDate) : null;
+  let isPaidForRent = false;
+  let isPaidForGst = false;
+
+  if (cycleDate) {
+    const ownersToCheck = targetOwnerId
+      ? (site.ownersDetail || []).filter(
+          (o) => String(o.landOwnerMasterId) === String(targetOwnerId),
+        )
+      : site.ownersDetail || [];
+
+    if (ownersToCheck.length > 0) {
+      // 1) RENT check
+      isPaidForRent = ownersToCheck.every((owner) => {
+        const modes = getRequiredModesShared(owner.paymentCategory);
+        return modes.every((mode) =>
+          isOwnerModePaidForCycle(site, owner, mode, cycleDate),
+        );
+      });
+
+      // 2) GST check
+      const withGst = Number(due.withGst || 0);
+      if (withGst === 2) {
+        // Direct: GST is paid if Rent is paid
+        isPaidForGst = isPaidForRent;
+      } else if (withGst === 1) {
+        // Tracked: check gstBalanceHistory
+        isPaidForGst = ownersToCheck.every((owner) =>
+           isGstPaidForCycle(site, owner, due.dueMonth)
+        );
+      } else {
+        // Not applicable or pending
+        isPaidForGst = false;
+      }
+    }
+  }
+
+  return {
+    dueMonth: due.dueMonth,
+    dueDate: due.dueDate,
+    approvalStatus: due.approvalStatus,
+    ownerApprovalDate: due.ownerApprovalDate,
+    netPayable: due.netPayable,
+    withGst: due.withGst,
+    gstAmount: due.gstAmount,
+    baseAmount: due.baseAmount,
+    isPaidForRent, // ✅ RENAMED
+    isPaidForGst,  // ✅ ADDED
+  };
+});
+
 
       return {
         mediaId: site.mediaId,
