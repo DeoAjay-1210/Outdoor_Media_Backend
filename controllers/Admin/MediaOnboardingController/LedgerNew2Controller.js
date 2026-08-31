@@ -6642,7 +6642,9 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     currentMonthGstPaid: 0,
     currentMonthGstPaidSites: new Set(),
     overAllCurrentRentalAmount: 0, // ✅ NEW
+    overAllCurrentRentalAmountSites: new Set(),
     overAllCurrentMonthGstAmount: 0, // ✅ NEW
+    overAllCurrentMonthGstAmountSites: new Set(),
     pastRentPending: 0,
     pastRentPendingSites: new Set(),
     pastGstPending: 0,
@@ -6654,50 +6656,59 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
   };
 
   for (const media of mediaDocs) {
-    const mediaId = String(media._id);
     const s = getOverallSummaryForCycle(media, requestedMonthYear);
+    const activeDetails = (media.mediaDetails || []).filter(d => d.status === 1);
+
+    const addSites = (set, hasCondition) => {
+      if (hasCondition) {
+        activeDetails.forEach(d => set.add(String(d._id)));
+      }
+    };
 
     summary.totalLedgerAmount += s.totalLedgerAmount;
-    if (s.hasTotalLedger) summary.totalLedgerAmountSites.add(mediaId);
+    addSites(summary.totalLedgerAmountSites, s.hasTotalLedger);
 
     summary.totalLedgerGstAmount += s.totalLedgerGstAmount;
-    if (s.hasTotalGst) summary.totalLedgerGstAmountSites.add(mediaId);
+    addSites(summary.totalLedgerGstAmountSites, s.hasTotalGst);
 
     summary.totalLedgerPendingAmount += s.totalLedgerPendingAmount;
-    if (s.hasPendingLedger) summary.totalLedgerPendingAmountSites.add(mediaId);
+    addSites(summary.totalLedgerPendingAmountSites, s.hasPendingLedger);
 
     summary.totalGstPendingAmount += s.totalGstPendingAmount;
-    if (s.hasPendingGst) summary.totalGstPendingAmountSites.add(mediaId);
+    addSites(summary.totalGstPendingAmountSites, s.hasPendingGst);
 
     summary.overallDueMonthAmount += s.totalDueMonthAmount; // ✅ NEW
-    if (s.hasDueMonth) summary.overallDueMonthAmountSites.add(mediaId); // ✅ NEW
+    addSites(summary.overallDueMonthAmountSites, s.hasDueMonth); // ✅ NEW
 
     summary.currentMonthRentPending += s.currentMonthRentPending;
-    if (s.hasCurrentMonthRentPending) summary.currentMonthRentPendingSites.add(mediaId);
+    addSites(summary.currentMonthRentPendingSites, s.hasCurrentMonthRentPending);
 
     summary.currentMonthGstPending += s.currentMonthGstPending;
-    if (s.hasCurrentMonthGstPending) summary.currentMonthGstPendingSites.add(mediaId);
+    addSites(summary.currentMonthGstPendingSites, s.hasCurrentMonthGstPending);
 
     summary.currentMonthRentPaid += s.currentMonthRentPaid;
-    if (s.hasCurrentMonthRentPaid) summary.currentMonthRentPaidSites.add(mediaId);
+    addSites(summary.currentMonthRentPaidSites, s.hasCurrentMonthRentPaid);
 
     summary.currentMonthGstPaid += s.currentMonthGstPaid;
-    if (s.hasCurrentMonthGstPaid) summary.currentMonthGstPaidSites.add(mediaId);
+    addSites(summary.currentMonthGstPaidSites, s.hasCurrentMonthGstPaid);
 
     summary.overAllCurrentRentalAmount += s.currentMonthRentalAmount; // ✅ NEW
+    addSites(summary.overAllCurrentRentalAmountSites, s.currentMonthRentalAmount > 0);
+
     summary.overAllCurrentMonthGstAmount += s.currentMonthGstAmount; // ✅ NEW
+    addSites(summary.overAllCurrentMonthGstAmountSites, s.currentMonthGstAmount > 0);
 
     summary.pastRentPending += s.pastRentPending;
-    if (s.hasPastRentPending) summary.pastRentPendingSites.add(mediaId);
+    addSites(summary.pastRentPendingSites, s.hasPastRentPending);
 
     summary.pastGstPending += s.pastGstPending;
-    if (s.hasPastGstPending) summary.pastGstPendingSites.add(mediaId);
+    addSites(summary.pastGstPendingSites, s.hasPastGstPending);
 
     summary.currentMonthOverallDueAmount += s.currentMonthOverallDueAmount;
-    if (s.hasCurrentMonthOverallDueAmount) summary.currentMonthOverallDueAmountSites.add(mediaId);
+    addSites(summary.currentMonthOverallDueAmountSites, s.hasCurrentMonthOverallDueAmount);
 
     summary.totalOutstanding += s.totalOutstanding;
-    if (s.hasTotalOutstanding) summary.totalOutstandingSites.add(mediaId);
+    addSites(summary.totalOutstandingSites, s.hasTotalOutstanding);
   }
 
 
@@ -6721,7 +6732,9 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     currentMonthGstPaid: Math.floor(summary.currentMonthGstPaid),
     currentMonthGstPaidSites: summary.currentMonthGstPaidSites.size,
     overAllCurrentRentalAmount: Math.floor(summary.overAllCurrentRentalAmount), // ✅ NEW
+    overAllCurrentRentalAmountSites: summary.overAllCurrentRentalAmountSites.size,
     overAllCurrentMonthGstAmount: Math.floor(summary.overAllCurrentMonthGstAmount), // ✅ NEW
+    overAllCurrentMonthGstAmountSites: summary.overAllCurrentMonthGstAmountSites.size,
     pastRentPending: Math.floor(summary.pastRentPending),
     pastRentPendingSites: summary.pastRentPendingSites.size,
     pastGstPending: Math.floor(summary.pastGstPending),
