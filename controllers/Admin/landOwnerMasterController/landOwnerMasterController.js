@@ -893,8 +893,16 @@ const landOwnerSiteFilter = async (req, res) => {
       totalLedgerGstAmount: wantTotalLedgerGstAmount,
       totalLedgerPendingAmount: wantTotalLedgerPendingAmount,
       totalGstPendingAmount: wantTotalGstPendingAmount,
+      // ✅ NEW: Individual category pending flags
+      currentMonthRentPendingSites: wantCurrentMonthRentPendingSites,
+      currentMonthGstPendingSites: wantCurrentMonthGstPendingSites,
+      pastRentPendingSites: wantPastRentPendingSites,
+      pastGstPendingSites: wantPastGstPendingSites,
+      currentMonthOverallDueAmountSites: wantCurrentMonthOverallDueAmount,
+      totalOutstandingSites: wantTotalOutstanding,
       roleType, // ✅ NEW
     } = req.body || {};
+
 
     const today = nowIST();
     today.setUTCHours(0, 0, 0, 0);
@@ -932,6 +940,13 @@ const landOwnerSiteFilter = async (req, res) => {
     const includeTotalLedgerPendingAmount = Number(wantTotalLedgerPendingAmount) === 1;
     const includeTotalGstPendingAmount = Number(wantTotalGstPendingAmount) === 1;
 
+    const includeCurrentMonthRentPendingSites = Number(wantCurrentMonthRentPendingSites) === 1;
+    const includeCurrentMonthGstPendingSites = Number(wantCurrentMonthGstPendingSites) === 1;
+    const includePastRentPendingSites = Number(wantPastRentPendingSites) === 1;
+    const includePastGstPendingSites = Number(wantPastGstPendingSites) === 1;
+    const includeCurrentMonthOverallDueAmountSites = Number(wantCurrentMonthOverallDueAmount) === 1;
+    const includeTotalOutstandingSites = Number(wantTotalOutstanding) === 1;
+
     const needsLedgerFields =
       includeCurrentLedger ||
       includePastLedger ||
@@ -944,7 +959,14 @@ const landOwnerSiteFilter = async (req, res) => {
       includeTotalLedgerAmount ||
       includeTotalLedgerGstAmount ||
       includeTotalLedgerPendingAmount ||
-      includeTotalGstPendingAmount;
+      includeTotalGstPendingAmount ||
+      includeCurrentMonthRentPendingSites ||
+      includeCurrentMonthGstPendingSites ||
+      includePastRentPendingSites ||
+      includePastGstPendingSites ||
+      includeCurrentMonthOverallDueAmountSites ||
+      includeTotalOutstandingSites;
+
     const needsRentalStatusFields =
       includeApprovalSite ||
       includePendingSites ||
@@ -2092,7 +2114,13 @@ const landOwnerSiteFilter = async (req, res) => {
         hasTotalLedger: false, // ✅ NEW
         hasTotalGst: false,    // ✅ NEW
         hasPendingLedger: false, // ✅ NEW
-        hasPendingGst: false    // ✅ NEW
+        hasPendingGst: false,    // ✅ NEW
+        hasCurrentMonthRentPending: false,
+        hasCurrentMonthGstPending: false,
+        hasPastRentPending: false,
+        hasPastGstPending: false,
+        hasCurrentMonthOverallDueAmount: false,
+        hasTotalOutstanding: false
       };
       // ✅ NEW: Rental Status accumulation
       const rentalStatusMatch = {
@@ -2136,6 +2164,12 @@ const landOwnerSiteFilter = async (req, res) => {
           if (site._overallSummary.hasTotalGst) combinedLedger.hasTotalGst = true;
           if (site._overallSummary.hasPendingLedger) combinedLedger.hasPendingLedger = true;
           if (site._overallSummary.hasPendingGst) combinedLedger.hasPendingGst = true;
+          if (site._overallSummary.hasCurrentMonthRentPending) combinedLedger.hasCurrentMonthRentPending = true;
+          if (site._overallSummary.hasCurrentMonthGstPending) combinedLedger.hasCurrentMonthGstPending = true;
+          if (site._overallSummary.hasPastRentPending) combinedLedger.hasPastRentPending = true;
+          if (site._overallSummary.hasPastGstPending) combinedLedger.hasPastGstPending = true;
+          if (site._overallSummary.hasCurrentMonthOverallDueAmount) combinedLedger.hasCurrentMonthOverallDueAmount = true;
+          if (site._overallSummary.hasTotalOutstanding) combinedLedger.hasTotalOutstanding = true;
         }
 
         if (needsLedgerFields && !processedDocIds.has(docIdStr)) {
@@ -2246,7 +2280,13 @@ const landOwnerSiteFilter = async (req, res) => {
             (includeTotalLedgerAmount && combinedLedger.hasTotalLedger) ||
             (includeTotalLedgerGstAmount && combinedLedger.hasTotalGst) ||
             (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
-            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst)
+            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst) ||
+            (includeCurrentMonthRentPendingSites && combinedLedger.hasCurrentMonthRentPending) ||
+            (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentMonthGstPending) ||
+            (includePastRentPendingSites && combinedLedger.hasPastRentPending) ||
+            (includePastGstPendingSites && combinedLedger.hasPastGstPending) ||
+            (includeCurrentMonthOverallDueAmountSites && combinedLedger.hasCurrentMonthOverallDueAmount) ||
+            (includeTotalOutstandingSites && combinedLedger.hasTotalOutstanding)
           : false;
 
         const rentalMatch = needsRentalStatusFields
@@ -2342,7 +2382,13 @@ const landOwnerSiteFilter = async (req, res) => {
         hasTotalLedger: false, // ✅ NEW
         hasTotalGst: false,    // ✅ NEW
         hasPendingLedger: false, // ✅ NEW
-        hasPendingGst: false    // ✅ NEW
+        hasPendingGst: false,    // ✅ NEW
+        hasCurrentMonthRentPending: false,
+        hasCurrentMonthGstPending: false,
+        hasPastRentPending: false,
+        hasPastGstPending: false,
+        hasCurrentMonthOverallDueAmount: false,
+        hasTotalOutstanding: false
       };
       // ✅ NEW: Rental Status accumulation
       const rentalStatusMatch = {
@@ -2472,7 +2518,13 @@ const landOwnerSiteFilter = async (req, res) => {
             (includeTotalLedgerAmount && combinedLedger.hasTotalLedger) ||
             (includeTotalLedgerGstAmount && combinedLedger.hasTotalGst) ||
             (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
-            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst)
+            (includeTotalGstPendingAmount && combinedLedger.hasPendingGst) ||
+            (includeCurrentMonthRentPendingSites && combinedLedger.hasCurrentMonthRentPending) ||
+            (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentMonthGstPending) ||
+            (includePastRentPendingSites && combinedLedger.hasPastRentPending) ||
+            (includePastGstPendingSites && combinedLedger.hasPastGstPending) ||
+            (includeCurrentMonthOverallDueAmountSites && combinedLedger.hasCurrentMonthOverallDueAmount) ||
+            (includeTotalOutstandingSites && combinedLedger.hasTotalOutstanding)
           : false;
 
         const rentalMatch = needsRentalStatusFields
