@@ -2074,6 +2074,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           if (includeCurrentMonthRentPaidSites && isCurrent && isPaidForRent) shouldInclude = true;
           if (includeCurrentMonthGstPaidSites && isCurrent && isPaidForGst) shouldInclude = true;
 
+          // ✅ ADDED — respect Rental Status filters
+          if (includeApprovalSite && isCurrent && due.approvalStatus === 3) shouldInclude = true;
+          if (includePendingSites && isCurrent && (due.approvalStatus === 1 || due.approvalStatus === 2)) shouldInclude = true;
+          if (includeOverDue && (due.approvalStatus === 4 || (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) || (isPast && isPending))) shouldInclude = true;
+
           // Fallback for general filters (Overall Due / Total Outstanding)
           if ((includeCurrentMonthOverallDueAmountSites || includeTotalOutstandingSites) && (isCurrent || (isPast && isPending))) {
             shouldInclude = true;
