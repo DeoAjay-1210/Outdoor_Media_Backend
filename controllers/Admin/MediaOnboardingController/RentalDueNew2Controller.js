@@ -3479,16 +3479,16 @@ for (const siteDoc of activeSitesForSweep) {
                       vars: {
                         faceBase: {
                           $cond: [
-                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawBase", { $subtract: ["$$siteBase", 1] }] }] },
+                            { $eq: ["$$billMode", 1] },
                             { $divide: ["$$siteBase", "$$faceCount"] },
                             "$$rawBase"
                           ]
                         },
                         faceGst: {
                           $cond: [
-                            { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawGst", { $subtract: ["$$siteGst", 1] }] }] },
+                            { $eq: ["$$billMode", 1] },
                             { $divide: ["$$siteGst", "$$faceCount"] },
-                            { $cond: [{ $gt: ["$$rawGst", 0] }, "$$rawGst", { $cond: [{ $eq: ["$$billMode", 1] }, { $divide: ["$$siteGst", "$$faceCount"] }, "$$siteGst"] }] }
+                            { $cond: [{ $gt: ["$$rawGst", 0] }, "$$rawGst", "$$siteGst"] }
                           ]
                         }
                       },
@@ -3497,7 +3497,7 @@ for (const siteDoc of activeSitesForSweep) {
                           { $eq: ["$$withGst", 2] },
                           {
                             $cond: [
-                              { $and: [{ $eq: ["$$billMode", 1] }, { $gte: ["$$rawBase", { $subtract: [{ $add: ["$$siteBase", "$$siteGst"] }, 1] }] }] },
+                              { $eq: ["$$billMode", 1] },
                               { $divide: [{ $add: ["$$siteBase", "$$siteGst"] }, "$$faceCount"] },
                               "$$rawBase"
                             ]
@@ -3609,16 +3609,16 @@ for (const siteDoc of activeSitesForSweep) {
     };
 
     const dueThisMonth = {
-      totalNetPayable: Math.floor(stats.dueThisMonthAmount),
-      count: Math.floor(stats.dueThisMonthCount),
+      totalNetPayable: Math.round(stats.dueThisMonthAmount),
+      count: stats.dueThisMonthCount,
     };
-    const dueAmountOpen = Math.floor(stats.dueAmountOpen);
-    const approvedCount = Math.floor(stats.approvedCount);
-    const approvedAmountTotal = Math.floor(stats.approvedAmountTotal);
-    const overDueSiteCount = Math.floor(stats.overdueCount);
-    const overDueAmountTotal = Math.floor(stats.overdueAmountTotal);
-    const pendingCount = Math.floor(stats.pendingCount);
-    const pendingAmountTotal = Math.floor(stats.pendingAmountTotal);
+    const dueAmountOpen = Math.round(stats.dueAmountOpen);
+    const approvedCount = stats.approvedCount;
+    const approvedAmountTotal = Math.round(stats.approvedAmountTotal);
+    const overDueSiteCount = stats.overdueCount;
+    const overDueAmountTotal = Math.round(stats.overdueAmountTotal);
+    const pendingCount = stats.pendingCount;
+    const pendingAmountTotal = Math.round(stats.pendingAmountTotal);
 
     const approvalBreakdownAgg = await Media.aggregate([
       { $match: { "mediaDetails.status": 1 } },

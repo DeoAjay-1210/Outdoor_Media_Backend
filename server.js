@@ -59,6 +59,7 @@ app.listen(PORT, () => {
 app.use(cors({
   origin: [
     "http://localhost:8080",
+    "http://localhost:5000",
     "https://peaceful-entremet-3dd657.netlify.app",
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
     "https://adinn-outdoor-media.netlify.app",

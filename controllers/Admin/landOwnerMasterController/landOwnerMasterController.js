@@ -2774,14 +2774,14 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         const rawGst = Number(currentMonthEntry.gstAmount || 0);
         const withGstFlag = Number(currentMonthEntry.withGst || 0);
 
-        const resolvedBase = (billMode === 1 && rawBase >= (rpTotal - 1)) ? (rpTotal / faceCount) : rawBase;
+        const resolvedBase = billMode === 1 ? (rpTotal / faceCount) : rawBase;
         const resolvedGst = rawGst > 0
-          ? (billMode === 1 && rawGst >= ((siteGst > 0 ? siteGst : ownerGst) - 1)) ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst
+          ? (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst)
           : (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : (siteGst > 0 ? siteGst : ownerGst));
 
         const siteTotal = rpTotal + (siteGst > 0 ? siteGst : ownerGst);
         const effectiveAmount = withGstFlag === 2
-          ? (billMode === 1 && rawBase >= (siteTotal - 1)) ? (siteTotal / faceCount) : rawBase
+          ? (billMode === 1 ? (siteTotal / faceCount) : rawBase)
           : resolvedBase + resolvedGst;
         const isApprovedByRole = targetRole === null ? isApprovedOverall : hasRoleApproved;
 
@@ -2822,14 +2822,14 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           const rawGst = Number(pastEntry.gstAmount || 0);
           const withGstFlag = Number(pastEntry.withGst || 0);
 
-          const resolvedBase = (billMode === 1 && rawBase >= (rpTotal - 1)) ? (rpTotal / faceCount) : rawBase;
+          const resolvedBase = billMode === 1 ? (rpTotal / faceCount) : rawBase;
           const resolvedGst = rawGst > 0
-            ? (billMode === 1 && rawGst >= ((siteGst > 0 ? siteGst : ownerGst) - 1)) ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst
+            ? (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst)
             : (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : (siteGst > 0 ? siteGst : ownerGst));
 
           const siteTotal = rpTotal + (siteGst > 0 ? siteGst : ownerGst);
           const effectiveAmount = withGstFlag === 2
-            ? (billMode === 1 && rawBase >= (siteTotal - 1)) ? (siteTotal / faceCount) : rawBase
+            ? (billMode === 1 ? (siteTotal / faceCount) : rawBase)
             : resolvedBase + resolvedGst;
           // ✅ FIXED — Only add to overdue stats, not pending totals (as requested)
           overdueFaces.add(faceId);
@@ -2874,11 +2874,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         ...overallOutstandingTotals,
         overallLedgerSummary,
         // ✅ NEW: Rental Due Stats
-        overDue: { siteCount: Math.floor(overdueSiteCount), amount: Math.floor(overdueAmountTotal) },
-        approvedCount: Math.floor(approvedCount),
-        approvedAmountTotal: Math.floor(approvedAmountTotal),
-        pendingCount: Math.floor(pendingCount),
-        pendingAmountTotal: Math.floor(pendingAmountTotal),
+        overDue: { siteCount: overdueSiteCount, amount: Math.round(overdueAmountTotal) },
+        approvedCount: approvedCount,
+        approvedAmountTotal: Math.round(approvedAmountTotal),
+        pendingCount: pendingCount,
+        pendingAmountTotal: Math.round(pendingAmountTotal),
       },
       200,
     );
