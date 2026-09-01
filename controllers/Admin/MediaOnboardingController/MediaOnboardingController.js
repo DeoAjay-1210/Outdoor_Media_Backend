@@ -3300,10 +3300,9 @@ if (landOwnerMasterId) {
           (a, b) => b.updatedAt - a.updatedAt
         );
       }
-      // ✅ ADDED — ensure previousBillGenerateDate is present for display
+      // ✅ ADDED — ensure previousBillGenerateDate is present and CONSISTENT for display
       if (
         item.rentalPayment &&
-        !item.rentalPayment.previousBillGenerateDate &&
         item.rentalPayment.lastBillPaidDate
       ) {
         const lp = new Date(item.rentalPayment.lastBillPaidDate);
@@ -3311,14 +3310,16 @@ if (landOwnerMasterId) {
         const custom = Number(item.rentalPayment.customPaymentFrequency || 1);
         const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
         const months = freq === 6 ? custom : (map[freq] || 1);
-        lp.setMonth(lp.getMonth() - months);
+
+        const expectedPrev = new Date(lp);
+        expectedPrev.setMonth(expectedPrev.getMonth() - months);
 
         // ✅ CLAMP — don't go before billingStartDate
         const anchor = item.rentalPayment.billingStartDate || item.rentalPayment.lastBillPaidDate;
-        if (lp < new Date(anchor)) {
+        if (expectedPrev < new Date(anchor)) {
           item.rentalPayment.previousBillGenerateDate = anchor;
         } else {
-          item.rentalPayment.previousBillGenerateDate = lp;
+          item.rentalPayment.previousBillGenerateDate = expectedPrev;
         }
       }
     });
@@ -3458,10 +3459,9 @@ mediaData.mediaId = parentMediaId;
       );
     }
 
-    // ✅ ADDED — ensure previousBillGenerateDate is present for display
+    // ✅ ADDED — ensure previousBillGenerateDate is present and CONSISTENT for display
     if (
       mediaData.rentalPayment &&
-      !mediaData.rentalPayment.previousBillGenerateDate &&
       mediaData.rentalPayment.lastBillPaidDate
     ) {
       const lp = new Date(mediaData.rentalPayment.lastBillPaidDate);
@@ -3469,14 +3469,16 @@ mediaData.mediaId = parentMediaId;
       const custom = Number(mediaData.rentalPayment.customPaymentFrequency || 1);
       const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
       const months = freq === 6 ? custom : (map[freq] || 1);
-      lp.setMonth(lp.getMonth() - months);
+
+      const expectedPrev = new Date(lp);
+      expectedPrev.setMonth(expectedPrev.getMonth() - months);
 
       // ✅ CLAMP — don't go before billingStartDate
       const anchor = mediaData.rentalPayment.billingStartDate || mediaData.rentalPayment.lastBillPaidDate;
-      if (lp < new Date(anchor)) {
+      if (expectedPrev < new Date(anchor)) {
         mediaData.rentalPayment.previousBillGenerateDate = anchor;
       } else {
-        mediaData.rentalPayment.previousBillGenerateDate = lp;
+        mediaData.rentalPayment.previousBillGenerateDate = expectedPrev;
       }
     }
 
