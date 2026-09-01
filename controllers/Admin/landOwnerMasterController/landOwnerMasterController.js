@@ -2716,7 +2716,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       );
     }
 
-    const overallOutstandingTotalsRaw = summaryDocs.reduce(
+    const overallOutstandingTotals = summaryDocs.reduce(
       (acc, mediaDoc) => {
         const s = computeOutstandingSummary(mediaDoc, parsedMonthFilter ? outstandingMonthYear : null);
         acc.overallCurrentBaseRentDue += s.currentBaseRent;
@@ -2734,14 +2734,6 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         overallTotalOutstandingAmount: 0,
       },
     );
-
-    const overallOutstandingTotals = {
-      overallCurrentBaseRentDue: Math.round(overallOutstandingTotalsRaw.overallCurrentBaseRentDue),
-      overallCurrentGSTDue: Math.round(overallOutstandingTotalsRaw.overallCurrentGSTDue),
-      overallPreviousBaseRentDue: Math.round(overallOutstandingTotalsRaw.overallPreviousBaseRentDue),
-      overallPreviousGSTDue: Math.round(overallOutstandingTotalsRaw.overallPreviousGSTDue),
-      overallTotalOutstandingAmount: Math.round(overallOutstandingTotalsRaw.overallTotalOutstandingAmount),
-    };
 
     // ✅ NEW: Calculate Rental Due Stats (Role-based)
     let approvedCount = 0;
