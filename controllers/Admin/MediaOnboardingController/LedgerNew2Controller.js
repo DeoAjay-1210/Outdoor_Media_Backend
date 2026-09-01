@@ -585,7 +585,7 @@ function computeOutstandingSummary(media, requestedMonthYear) {
     fectureBaseReant,
     fectureGstDue,
     totalOutstandingAmount:
-      currentBaseRent + currentGSTDue + previousBaseRentDue + previousGSTDue,
+      Math.round(currentBaseRent + currentGSTDue + previousBaseRentDue + previousGSTDue),
   };
 }
 
@@ -847,9 +847,6 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
               modeAmount += ownerGst;
             }
           }
-
-          cycleUnpaid += modeAmount;
-
 
           cycleUnpaid += modeAmount;
         });
