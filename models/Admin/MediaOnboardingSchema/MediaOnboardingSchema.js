@@ -6,6 +6,33 @@ const {
   gstBalanceSchema,
   agreementDocVerificationSchema,
 } = require("./RentalDueModel");
+const IST_OFFSET_MS = 330 * 60000; // 5h30m
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
+const toDateOnly = (input) => {
+  const d = new Date(input);
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+  );
+};
+
+const dayKey = (input) => toDateOnly(input).getTime();
+const monthKey = (input) => {
+  const d = toDateOnly(input);
+  return d.getUTCFullYear() * 12 + d.getUTCMonth();
+};
+const thisMonthKey = () => monthKey(nowIST());
+
+const computeAppraisalAmount = (entry, previousRent) => {
+  if (Number(entry.type) === 1) {
+    return Math.floor((previousRent * Number(entry.percentage || 0)) / 100);
+  }
+  if (Number(entry.type) === 2) {
+    return Math.floor(Number(entry.fixedAmount || 0));
+  }
+  return 0;
+};
+
 const rentalAmountHistorySchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0 },
@@ -1112,6 +1139,78 @@ MediaSchema.pre("save", function () {
 // });
 MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
+  const appraisal = this.appraisal;
+
+  // ✅ AUTO-APPLY APPRAISAL — If an appraisal is due based on the current month,
+  // apply it to totalRentalAmount before proceeding with financial calculations.
+  if (
+    rp &&
+    appraisal &&
+    Number(appraisal.applicable) === 1 &&
+    Number(appraisal.appraisalHold) !== 1 &&
+    Array.isArray(appraisal.history) &&
+    appraisal.history.length > 0
+  ) {
+    const currentMonth = thisMonthKey();
+    const dueEntries = appraisal.history
+      .filter(
+        (h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth,
+      )
+      .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
+
+    if (dueEntries.length > 0) {
+      const latestDue = dueEntries[0];
+      const appraisedRent = Number(latestDue.newRent || 0);
+
+      if (appraisedRent > 0 && appraisedRent !== rp.totalRentalAmount) {
+        const oldRent = rp.totalRentalAmount;
+        rp.totalRentalAmount = appraisedRent;
+
+        // ✅ Proportional scaling for fixed-amount owners and cash/online splits
+        if (oldRent > 0 && Array.isArray(this.landOwners)) {
+          const ratio = appraisedRent / oldRent;
+          this.landOwners.forEach((owner) => {
+            // Scale fixed-amount shares proportionally
+            if (Number(owner.typeShare) === 2) {
+              owner.shareAmount = Math.floor(
+                Number(owner.shareAmount || 0) * ratio,
+              );
+            }
+
+            const cat = Number(owner.paymentCategory);
+            if (cat === 1) {
+              owner.cashAmount = Math.floor(
+                Number(owner.cashAmount || 0) * ratio,
+              );
+              owner.onlineAmount = 0;
+            } else if (cat === 2) {
+              owner.onlineAmount = Math.floor(
+                Number(owner.onlineAmount || 0) * ratio,
+              );
+              owner.cashAmount = 0;
+            } else if (cat === 3) {
+              owner.cashAmount = Math.floor(
+                Number(owner.cashAmount || 0) * ratio,
+              );
+              owner.onlineAmount = Math.floor(
+                Number(owner.onlineAmount || 0) * ratio,
+              );
+            }
+          });
+        }
+
+        // Record in rentalAmountHistory
+        if (!rp.rentalAmountHistory) rp.rentalAmountHistory = [];
+        rp.rentalAmountHistory.push({
+          amount: appraisedRent,
+          updatedBy: `System (Appraisal applied - ${toDateOnly(latestDue.appraisalDate).toISOString().split("T")[0]})`,
+          updatedAt: nowIST(),
+        });
+        rp.rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
+      }
+    }
+  }
+
   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
   const rentalGstApplicable = Number(rp.gstApplicable || 0);
   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
@@ -1503,11 +1602,36 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
         ? new Date(media.rentalPayment.previousBillGenerateDate)
         : null;
 
+      let needsSave = false;
+
       if (currentPrevDate && Math.abs(currentPrevDate - expectedPrevDate) > 86400000) { // more than 1 day diff
           media.rentalPayment.previousBillGenerateDate = expectedPrevDate;
+          needsSave = true;
+      }
+
+      // ✅ NEW — Also check if an appraisal is due. If so, force a save to trigger the pre-save appraisal hook.
+      const appraisal = media.appraisal;
+      if (
+        appraisal &&
+        Number(appraisal.applicable) === 1 &&
+        Number(appraisal.appraisalHold) !== 1 &&
+        Array.isArray(appraisal.history) &&
+        appraisal.history.length > 0
+      ) {
+        const currentMonth = thisMonthKey();
+        const latestDue = appraisal.history
+          .filter((h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth)
+          .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
+
+        if (latestDue && Number(latestDue.newRent || 0) !== Number(media.rentalPayment?.totalRentalAmount || 0)) {
+          needsSave = true;
+        }
+      }
+
+      if (needsSave) {
           await media.save({ timestamps: false });
           updatedCount++;
-          debugLog.push({ mediaName: media.mediaName, correctedPrevDate: expectedPrevDate });
+          debugLog.push({ mediaName: media.mediaName, corrected: true });
       } else {
         debugLog.push({
           mediaName: media.mediaName,

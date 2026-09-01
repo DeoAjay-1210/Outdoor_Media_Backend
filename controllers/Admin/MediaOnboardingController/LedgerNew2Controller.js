@@ -6328,8 +6328,9 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
             }
           }
           if (paymentCategory !== 3 || mode === "Online") {
-            if (isLiveCycle) bucket.currentGstPending += ownerGst;
-            else bucket.pastGstPending += ownerGst;
+            // ✅ withGst 2 "Direct" is folded into Rent buckets, not GST buckets
+            if (isLiveCycle) bucket.currentRentPending += ownerGst;
+            else bucket.pastRentPending += ownerGst;
           }
         }
       });
@@ -6517,30 +6518,22 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           }
         } else {
           // Pending - include current and past months
-          result.totalLedgerPendingAmount += rentAmount;
-          if (rentAmount > 0) result.hasPendingLedger = true;
+          let totalPending = rentAmount;
+          if (isDirectGst) totalPending += currentOwnerGst;
 
-          if (isDirectGst) {
-            result.totalGstPendingAmount += currentOwnerGst;
-            // withGst 2 "cannot hold", so don't set the pending flag used for filtering
-          }
+          result.totalLedgerPendingAmount += totalPending;
+          if (totalPending > 0) result.hasPendingLedger = true;
 
           if (isCurrentCycle) {
-            result.currentMonthRentPending += rentAmount;
-            if (rentAmount > 0) result.hasCurrentMonthRentPending = true;
+            result.currentMonthRentPending += totalPending;
+            if (totalPending > 0) result.hasCurrentMonthRentPending = true;
 
-            if (isDirectGst) {
-              result.currentMonthGstPending += currentOwnerGst;
-              // withGst 2 "cannot hold", so don't set the pending flag used for filtering
-            }
+            // ✅ withGst 2 "Direct" is folded into Rent, not added to GST Pending
           } else {
-            result.pastRentPending += rentAmount;
-            if (rentAmount > 0) result.hasPastRentPending = true;
+            result.pastRentPending += totalPending;
+            if (totalPending > 0) result.hasPastRentPending = true;
 
-            if (isDirectGst) {
-              result.pastGstPending += currentOwnerGst;
-              // withGst 2 "cannot hold", so don't set the pending flag used for filtering
-            }
+            // ✅ withGst 2 "Direct" is folded into Rent, not added to GST Pending
           }
         }
       });

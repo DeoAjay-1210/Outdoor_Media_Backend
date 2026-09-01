@@ -1421,8 +1421,9 @@ const landOwnerSiteFilter = async (req, res) => {
             parsed.monthIdx === referenceMonthIdx;
           if (!isCurrentMonth) return;
 
-          // ✅ FIXED: Support both separated (1) and included (2) GST cycles
-          if (Number(due.withGst) !== 1 && Number(due.withGst) !== 2) return;
+          // ✅ FIXED: Only separated (1) or pending (0) GST cycles show in GST bucket.
+          // Included (2) GST is already folded into Rent buckets.
+          if (Number(due.withGst) !== 1 && Number(due.withGst) !== 0) return;
           const hasGstRowAlready = gstBalanceHistory.some(
             (g) =>
               String(g.dueMonth || "")

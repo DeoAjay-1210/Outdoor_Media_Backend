@@ -2310,7 +2310,7 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       }
 
       // Step 4: handle agreement history with updatedBy/updatedAt on rentalPayment.
-      applyAppraisalRentIfDuent(mediaData, media, userName, rentActuallyChanged);
+      // applyAppraisalRentIfDuent(mediaData, media, userName, rentActuallyChanged); // ✅ MOVED to Model Pre-Save
 
       applyOwnerApprovalBillingShift(mediaData, media, userName);
       if (mediaData.rentalPayment && mediaData.agreement) {
@@ -2538,12 +2538,13 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      applyAppraisalRentIfDuent(
-        mediaData,
-        null,
-        userName,
-        rentActuallyChanged,
-      );
+      // applyAppraisalRentIfDuent(
+      //   mediaData,
+      //   null,
+      //   userName,
+      //   rentActuallyChanged,
+      // ); // ✅ MOVED to Model Pre-Save
+
       mediaData.gstApplicableFlag = detectInitialGstApplicableFlag(mediaData);
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
