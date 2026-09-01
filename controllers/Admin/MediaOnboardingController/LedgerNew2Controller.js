@@ -934,37 +934,10 @@ function getGstDueForCycles(media, requestedMonthYear) {
 
     let cycleOutstanding = 0;
     if (isDirectGst) {
-      // ✅ For Direct GST, calculate unpaid portion from the main ledger
-      const owners = media.landOwners || [];
-      owners.forEach((owner) => {
-        const paymentCategory = Number(owner.paymentCategory || 1);
-        getRequiredModesShared(paymentCategory).forEach((mode) => {
-          const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
-          if (!isPaid) {
-            let gstFlag = Number(media.gstApplicableFlag || 0);
-            if (gstFlag === 0) {
-              const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-              const ownerGstAny = owners.some(
-                (o) => Number(o.gstApplicable) === 1,
-              );
-              if (ownerGstAny) gstFlag = 2;
-              else if (siteGst) gstFlag = 1;
-            }
-            let ownerGst = 0;
-            if (gstFlag === 1) {
-              ownerGst = expectedGstPerCycle / (owners.length || 1);
-            } else {
-              ownerGst = Number(owner.gstAmount || 0);
-              if (ownerGst <= 0 && owners.length > 0) {
-                ownerGst = expectedGstPerCycle / owners.length;
-              }
-            }
-            if (paymentCategory !== 3 || mode === "Online") {
-              cycleOutstanding += ownerGst;
-            }
-          }
-        });
-      });
+      // ✅ FIXED — for Direct GST (withGst: 2), GST is already folded into Rent buckets
+      // in getUnpaidRentForCycle(). We must not add it here too, otherwise it double-counts
+      // in totalOutstandingAmount.
+      cycleOutstanding = 0;
     } else {
       // Standard Tracked GST logic
       // Check for "Without GST" approval that blocks future demand for this month

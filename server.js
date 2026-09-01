@@ -64,7 +64,12 @@ app.use(cors({
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
     "https://adinn-outdoor-media.netlify.app",
     "http://192.168.1.42:5000",
-    "http://192.168.1.39:5000"
+    "http://192.168.1.39:5000",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH/",
+    "http://localhost:54571/",
+    "http://localhost:54571",
+
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
