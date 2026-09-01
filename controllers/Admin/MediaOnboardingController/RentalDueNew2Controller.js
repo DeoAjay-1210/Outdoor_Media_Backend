@@ -4202,25 +4202,50 @@ const details = (item.mediaDetails || []).map((d) => ({
         nextBillingDate: item.rentalPayment?.nextBillingDate,
         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
         previousBillGenerateDate: (() => {
-          const pbgd = item.rentalPayment?.previousBillGenerateDate;
-          if (pbgd) return formatDate(pbgd);
           const lp = item.rentalPayment?.lastBillPaidDate;
-          if (!lp) return "";
+          const pbgd = item.rentalPayment?.previousBillGenerateDate;
+
           const freq = Number(item.rentalPayment?.paymentFrequency || 1);
           const custom = Number(item.rentalPayment?.customPaymentFrequency || 1);
           const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
           const months = freq === 6 ? custom : (map[freq] || 1);
-          const d = new Date(lp);
-          d.setMonth(d.getMonth() - months);
 
-          // ✅ CLAMP — don't go before billingStartDate
-          const anchor = item.rentalPayment?.billingStartDate || lp;
-          return formatDate(d < new Date(anchor) ? anchor : d);
+          const d = new Date(lp);
+          d.setUTCMonth(d.getUTCMonth() - months);
+          const calculatedPrev = d;
+
+          // ✅ FIXED — If previousBillGenerateDate is inconsistent (e.g. same as lastBillPaidDate
+          // or more than 1 cycle away), we return the calculated date.
+          if (lp && pbgd) {
+            const dLP = new Date(lp);
+            const dPBGD = new Date(pbgd);
+            const diffMonths =
+              (dLP.getUTCFullYear() - dPBGD.getUTCFullYear()) * 12 +
+              (dLP.getUTCMonth() - dPBGD.getUTCMonth());
+
+            if (diffMonths === months) {
+              return formatDate(pbgd);
+            }
+          }
+
+          return formatDate(calculatedPrev);
         })(),
-        // ✅ FIXED — return the entry's dueDate, fallback to lastBillPaidDate
-        currentBillDate: currentMonthEntry
-          ? formatDate(currentMonthEntry.dueDate)
-          : formatDate(item.rentalPayment?.lastBillPaidDate),
+        // ✅ FIXED — currentBillDate should only show if a cycle falls in the target month.
+        currentBillDate: (() => {
+          if (currentMonthEntry) return formatDate(currentMonthEntry.dueDate);
+
+          const nb = item.rentalPayment?.nextBillingDate;
+          if (nb) {
+            const dnb = new Date(nb);
+            if (
+              dnb.getUTCMonth() === monthStart.getUTCMonth() &&
+              dnb.getUTCFullYear() === monthStart.getUTCFullYear()
+            ) {
+              return formatDate(nb);
+            }
+          }
+          return "";
+        })(),
         dueStatus: resolvedDueStatus,
         dueStatusLabel: STATUS_LABEL[resolvedDueStatus] || "",
        gstApplicableDisplay: (() => {
@@ -4422,8 +4447,25 @@ const details = (item.mediaDetails || []).map((d) => ({
         totalSites,
         siteCount,
         activeCount,
-        previousBillGenerateDate: formatDate(new Date(yr, mo - 2, 1)),
-        currentBillDate: formatDate(monthStart),
+        previousBillGenerateDate: formatDate(addMonthsUTC(monthStart, -1)),
+        currentBillDate: (() => {
+          // If the requested month has no DUE entries and nextBillingDate has already moved past it,
+          // then currentBillDate for this month view should be empty.
+          const anyDueThisMonth = summaryStatsAgg[0]?.dueThisMonthCount > 0;
+          if (anyDueThisMonth) return formatDate(monthStart);
+
+          const now = nowIST();
+          if (
+            now.getUTCMonth() === monthStart.getUTCMonth() &&
+            now.getUTCFullYear() === monthStart.getUTCFullYear()
+          ) {
+            // Even if no due entries, if we are IN the month, we might show the month start as the anchor
+            // but the user wants it EMPTY if the bill is already generated/paid and moved to next month.
+            return "";
+          }
+
+          return "";
+        })(),
         dueThisMonth,
         dueAmountOpen,
         overDue: { siteCount: Math.floor(overDueSiteCount), amount: Math.floor(overDueAmountTotal) },

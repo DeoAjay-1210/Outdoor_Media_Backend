@@ -296,39 +296,35 @@ function parseDueMonthLabel(label) {
 
 
 function getCurrentBillDate(media, requestedMonthYear) {
-  let liveMonthLabel;
-
+  let targetMonth, targetYear;
   if (requestedMonthYear) {
-    // caller explicitly wants a specific month evaluated
-    liveMonthLabel = `${MONTH_NAMES[requestedMonthYear.month - 1]} ${requestedMonthYear.year}`;
+    targetMonth = requestedMonthYear.month - 1;
+    targetYear = requestedMonthYear.year;
   } else {
-    // ✅ FIXED — use lastBillPaidDate as the anchor for "Current Bill" when no month requested.
-    // nextBillingDate is usually the FUTURE cycle which might not have an entry yet.
-    const anchorDate = media.rentalPayment?.lastBillPaidDate || media.rentalPayment?.nextBillingDate;
-    if (!anchorDate) return "";
-    const d = new Date(anchorDate);
-    if (Number.isNaN(d.getTime())) return "";
-    liveMonthLabel = `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+    const now = nowIST();
+    targetMonth = now.getUTCMonth();
+    targetYear = now.getUTCFullYear();
   }
 
-  // ✅ dueMonth-based match
-  const matchedDue = (media.rentalDue || [])
-    .filter(
-      (due) =>
-        String(due.dueMonth).trim().toLowerCase() ===
-        liveMonthLabel.toLowerCase(),
-    )
-    .sort((a, b) => {
-      const sA = Number(a.approvalStatus || 0);
-      const sB = Number(b.approvalStatus || 0);
-      if (sA === 3 && sB !== 3) return -1;
-      if (sB === 3 && sA !== 3) return 1;
-      return new Date(b.updatedAt) - new Date(a.updatedAt);
-    })[0];
+  // ✅ FIXED — currentBillDate should only show if a cycle falls in the target month.
+  // 1. Check for a matching entry in rentalDue (representing that month's bill)
+  const label = `${MONTH_NAMES[targetMonth]} ${targetYear}`;
+  const matchedDue = (media.rentalDue || []).find(
+    (due) =>
+      String(due.dueMonth).trim().toLowerCase() === label.toLowerCase(),
+  );
+  if (matchedDue) return matchedDue.dueDate;
 
-  // ✅ FIXED — return the actual dueDate of the matched entry,
-  // falling back to lastBillPaidDate ONLY if no entry matched.
-  return matchedDue ? matchedDue.dueDate : (media.rentalPayment?.lastBillPaidDate || "");
+  // 2. Fallback: check if the next scheduled billing date falls in this month
+  const nb = media.rentalPayment?.nextBillingDate;
+  if (nb) {
+    const dnb = new Date(nb);
+    if (dnb.getUTCMonth() === targetMonth && dnb.getUTCFullYear() === targetYear) {
+      return nb;
+    }
+  }
+
+  return "";
 }
 /** Sum of unpaid rows in rentalPayment.gstOutstandingHistory (pre-onboarding legacy GST debt) */
 function sumUnpaidGstOutstanding(media) {
