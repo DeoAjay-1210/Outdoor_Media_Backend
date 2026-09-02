@@ -485,10 +485,17 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     const baseAmount = Number(entry.netPayable || 0);
     const isGstApplicable = resolvedGst > 0;
 
+    const mDetails = (media.mediaDetails || []).map(d => ({
+      mediaCode: d.mediaCode,
+      mediaName: d.mediaName,
+      mediaType: d.mediaType,
+      city: d.city,
+      location: d.location
+    }));
+
     await OverDueHistory.create({
       mediaId: media._id,
-      mediaName: media.mediaName,
-      mediaCode: media.mediaCode,
+      mediaDetails: mDetails,
       previousBillDate: media.rentalPayment?.previousBillGenerateDate,
       currentBillDate: entry.dueDate,
       nextBillDate: media.rentalPayment?.nextBillingDate,
@@ -2300,75 +2307,102 @@ exports.getOverDueHistoryList = async (req, res) => {
     const pageSize = parseInt(count) || 10;
     const skip = (pageNumbers - 1) * pageSize;
 
-    const filter = {};
+    const monthYearConditions = [];
+    const searchStatusConditions = [];
 
-    if (search) {
-      filter.$or = [
-        { mediaName: { $regex: search, $options: "i" } },
-        { mediaCode: { $regex: search, $options: "i" } },
-      ];
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+
+    // ── 1) Month / Year Filter (Base Context) ──
+    if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
+      const [mo, yr] = dueMonth.split("-").map(Number);
+      const monthName = monthNames[mo - 1];
+      if (monthName) {
+        monthYearConditions.push({ dueMonth: `${monthName} ${yr}` });
+      }
+    } else if (dueMonth || dueYear) {
+      const mo = parseInt(dueMonth);
+      const yr = parseInt(dueYear);
+
+      let monthName = null;
+      if (!isNaN(mo) && mo >= 1 && mo <= 12) {
+        monthName = monthNames[mo - 1];
+      } else if (typeof dueMonth === "string" && isNaN(mo)) {
+        monthName = dueMonth;
+      }
+
+      if (monthName && !isNaN(yr)) {
+        monthYearConditions.push({
+          dueMonth: new RegExp(`${monthName}.*${yr}`, "i"),
+        });
+      } else if (monthName) {
+        monthYearConditions.push({ dueMonth: { $regex: monthName, $options: "i" } });
+      } else if (!isNaN(yr)) {
+        monthYearConditions.push({ dueMonth: { $regex: String(yr), $options: "i" } });
+      }
     }
 
-    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-    if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
-        const [mo, yr] = dueMonth.split("-").map(Number);
-        const monthName = monthNames[mo - 1]; // Reverted to standard 1-based mapping (08 = August)
-        if (monthName) {
-            filter.dueMonth = `${monthName} ${yr}`;
-        }
-    } else if (dueMonth || dueYear) {
-        // Support separate dueMonth and dueYear
-        const mo = parseInt(dueMonth);
-        const yr = parseInt(dueYear);
-
-        let monthName = null;
-        if (!isNaN(mo) && mo >= 1 && mo <= 12) {
-            monthName = monthNames[mo - 1]; // Standard 1-based mapping
-        } else if (typeof dueMonth === 'string' && isNaN(mo)) {
-            monthName = dueMonth; // User sent "August"
-        }
-
-        if (monthName && !isNaN(yr)) {
-            filter.dueMonth = new RegExp(`${monthName}.*${yr}`, "i");
-        } else if (monthName) {
-            filter.dueMonth = { $regex: monthName, $options: "i" };
-        } else if (!isNaN(yr)) {
-            filter.dueMonth = { $regex: String(yr), $options: "i" };
-        }
+    // ── 2) Search / Status Filter (Table Specific) ──
+    if (search) {
+      searchStatusConditions.push({
+        $or: [
+          { "mediaDetails.mediaName": { $regex: search, $options: "i" } },
+          { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
+        ],
+      });
     }
 
     if (status !== undefined && status !== null && status !== "") {
-        const s = Number(status);
-        if (s === 0) {
-            // Pending: Both are null
-            filter.ledgerEntryDate = null;
-            filter.gstEntryDate = null;
-        } else if (s === 1) {
-            // Rent Entry only
-            filter.ledgerEntryDate = { $ne: null };
-            filter.gstEntryDate = null;
-        } else if (s === 2) {
-            // GST Entry only
-            filter.ledgerEntryDate = null;
-            filter.gstEntryDate = { $ne: null };
-        } else if (s === 3) {
-            // Complete
-            // We can't easily filter "Complete" with a single condition because it depends on withGst
-            // However, we can approximate or use $or
-            filter.$or = [
-                { ledgerEntryDate: { $ne: null }, gstEntryDate: { $ne: null } },
-                { ledgerEntryDate: { $ne: null }, withGst: 2 }
-            ];
-        }
+      const s = Number(status);
+      if (s === 0) {
+        searchStatusConditions.push({ ledgerEntryDate: null, gstEntryDate: null });
+      } else if (s === 1) {
+        searchStatusConditions.push({
+          ledgerEntryDate: { $ne: null },
+          gstEntryDate: null,
+        });
+      } else if (s === 2) {
+        searchStatusConditions.push({
+          ledgerEntryDate: null,
+          gstEntryDate: { $ne: null },
+        });
+      } else if (s === 3) {
+        searchStatusConditions.push({
+          $or: [
+            { ledgerEntryDate: { $ne: null }, gstEntryDate: { $ne: null } },
+            { ledgerEntryDate: { $ne: null }, withGst: 2 },
+          ],
+        });
+      }
     }
+
+    // ── 3) Build Final Filters ──
+    // Summary Filter: Based ONLY on Month/Year (Stays stable during search/status filtering)
+    const summaryFilter =
+      monthYearConditions.length > 0 ? { $and: monthYearConditions } : {};
+
+    // List Filter: Combined Base + Search/Status
+    const listConditions = [...monthYearConditions, ...searchStatusConditions];
+    const listFilter = listConditions.length > 0 ? { $and: listConditions } : {};
 
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
 
-    // 1) Summary Statistics
+    // 1) Summary Statistics (Uses Summary Filter)
     const statsAgg = await OverDueHistory.aggregate([
-      { $match: filter },
+      { $match: summaryFilter },
       {
         $facet: {
           totals: [
@@ -2432,14 +2466,14 @@ exports.getOverDueHistoryList = async (req, res) => {
       totalOverdueAmount: 0
     };
 
-    // 2) Data Fetch
+    // 2) Data Fetch (Uses Full Filter)
     const [history, totalCount] = await Promise.all([
-      OverDueHistory.find(filter)
+      OverDueHistory.find(listFilter)
         .sort({ approvedDate: -1 })
         .skip(skip)
         .limit(pageSize)
         .lean(),
-      OverDueHistory.countDocuments(filter)
+      OverDueHistory.countDocuments(listFilter)
     ]);
 
     // 3) Enrichment for UI

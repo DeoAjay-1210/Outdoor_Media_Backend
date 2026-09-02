@@ -7,8 +7,15 @@ const overDueHistorySchema = new mongoose.Schema(
       ref: "MediaOnboarding",
       required: true,
     },
-    mediaName: { type: String, trim: true },
-    mediaCode: { type: String, trim: true },
+    mediaDetails: [
+      {
+        mediaCode: { type: String, trim: true },
+        mediaName: { type: String, trim: true },
+        mediaType: { type: String, trim: true },
+        city: { type: String, trim: true },
+        location: { type: String, trim: true },
+      },
+    ],
     previousBillDate: { type: Date },
     currentBillDate: { type: Date },
     nextBillDate: { type: Date },
