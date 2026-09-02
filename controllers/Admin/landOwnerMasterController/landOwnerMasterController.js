@@ -275,6 +275,55 @@ const syncOrLinkMediaOwnerToMaster = async (
   return landOwnerMaster;
 };
 
+const removeLinkedSiteFromMaster = async (masterId, mediaId, session) => {
+  if (!masterId || !mediaId) return;
+
+  const landOwnerMaster = await LandOwnerMaster.findOne({
+    _id: masterId,
+  }).session(session || null);
+
+  if (!landOwnerMaster) return;
+
+  if (Array.isArray(landOwnerMaster.linkedSites)) {
+    const mediaIdStr = String(mediaId);
+    landOwnerMaster.linkedSites = landOwnerMaster.linkedSites.filter(
+      (site) => String(site.mediaId) !== mediaIdStr,
+    );
+
+    // Recalculate Master-level aggregates
+    const uniqueMediaIds = new Set(
+      landOwnerMaster.linkedSites.map((s) => String(s.mediaId)),
+    );
+    landOwnerMaster.linkedMediaCount = uniqueMediaIds.size;
+
+    const uniqueDocEntries = [];
+    const seen = new Set();
+    landOwnerMaster.linkedSites.forEach((s) => {
+      const mid = String(s.mediaId);
+      if (!seen.has(mid)) {
+        uniqueDocEntries.push(s);
+        seen.add(mid);
+      }
+    });
+
+    landOwnerMaster.totalShareAmount = uniqueDocEntries.reduce(
+      (sum, s) => sum + Number(s.shareAmount || 0),
+      0,
+    );
+    landOwnerMaster.totalGstAmount = uniqueDocEntries.reduce(
+      (sum, s) => sum + Number(s.gstAmount || 0),
+      0,
+    );
+    landOwnerMaster.totalNetPayableToOwner = uniqueDocEntries.reduce(
+      (sum, s) => sum + Number(s.netPayableToOwner || 0),
+      0,
+    );
+
+    landOwnerMaster.updatedAt = nowIST();
+    await landOwnerMaster.save({ session });
+  }
+};
+
 const correctLinkedSiteAmounts = async (
   masterId,
   mediaId,
@@ -2898,4 +2947,5 @@ module.exports = {
   landOwnerSiteFilter,
   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
+  removeLinkedSiteFromMaster, // used by mediaOnboardingController.js
 };
