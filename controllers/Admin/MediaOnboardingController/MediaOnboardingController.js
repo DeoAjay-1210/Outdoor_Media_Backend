@@ -1743,7 +1743,7 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
             : undefined,
           tdsApplicable: hasValue(owner.tdsApplicable)
             ? Number(owner.tdsApplicable)
-            : undefined,
+            : 0,
           tdsPercentage: hasValue(owner.tdsPercentage)
             ? Number(owner.tdsPercentage)
             : undefined,
@@ -1891,7 +1891,6 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
           "onlineMode",
           "cashAmount",
           "onlineAmount",
-          "tdsApplicable",
           "tdsPercentage",
           "tdsAmount",
           "gstApplicable",
