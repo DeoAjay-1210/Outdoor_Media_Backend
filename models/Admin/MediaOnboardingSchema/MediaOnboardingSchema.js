@@ -1242,12 +1242,6 @@ MediaSchema.pre("save", function () {
 
     owner.shareAmount = resolvedShareAmount;
 
-    // ✅ AUTO-TDS — If total rental amount is 50,000 or above,
-    // automatically force tdsApplicable to 1 for every land owner.
-    if (totalRentalAmount >= 50000) {
-      owner.tdsApplicable = 1;
-    }
-
     const paymentCategory = Number(owner.paymentCategory || 1);
 
     // ✅ FIXED — ensure onlineAmount and cashAmount are synced for
@@ -1260,6 +1254,18 @@ MediaSchema.pre("save", function () {
     } else if (paymentCategory === 2) {
       owner.cashAmount = 0;
       owner.onlineAmount = resolvedShareAmount;
+    }
+
+    // ✅ AUTO-TDS — Automatically force tdsApplicable to 1 if:
+    // 1. The landowner's total shareAmount is 50,000 or ABOVE AND they are Online-only (Category 2).
+    // 2. The landowner's onlineAmount is 50,000 or ABOVE (for Category 3 split payments).
+    // This ensures that for split payments (Category 3), even if the total share is 51,000,
+    // if the online portion is only 11,000, TDS will NOT be applied automatically.
+    if (
+      (paymentCategory === 2 && Number(owner.shareAmount || 0) >= 50000) ||
+      (Number(owner.onlineAmount || 0) >= 50000)
+    ) {
+      owner.tdsApplicable = 1;
     }
 
     let tdsBaseAmount = 0;
