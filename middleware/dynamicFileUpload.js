@@ -12,7 +12,7 @@ const BUCKET_NAME   = process.env.DO_SPACES_BUCKET    || "adinn-space";
 const CDN_BASE_URL =  process.env.DO_SPACES_CDN_BASE || "https://adinn-space.sgp1.cdn..digitaloceanspaces.com";
 const STORAGE_TYPE  = process.env.STORAGE_TYPE        || "local";
 const LOCAL_BASE_URL = process.env.LOCAL_BASE_URL     || "http://localhost:5000";
-const LOCAL_UPLOAD_PATH = process.env.LOCAL_UPLOAD_PATH || "uploads";
+const LOCAL_UPLOAD_PATH = process.env.LOCAL_UPLOAD_PATH || "public";
 const OUTDOORMEDIA_FOLDER = "Rental-OOH";  // base folder for spaces
 
 // ─────────────────────────────────────────────────────────────
@@ -88,8 +88,16 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
   // ── Local storage engine ─────────────────────────────────
   const localStorageEngine = multer.diskStorage({
     destination: (req, file, cb) => {
+      // ✅ Extract base fieldname for indexed fields like entries[0][invoice]
+      const baseFieldname = file.fieldname.includes("[")
+        ? file.fieldname.split("[").pop().split("]")[0]
+        : file.fieldname;
+
       // ✅ Use custom folder if field is in fieldFolderMap, else use default
-      const resolvedFolder = fieldFolderMap[file.fieldname] || (file.fieldname.includes("agreementPDF") ? "agreementPDF" : folderName);;
+      const resolvedFolder = fieldFolderMap[baseFieldname] ||
+                            fieldFolderMap[file.fieldname] ||
+                            (file.fieldname.includes("agreementPDF") ? "agreementPDF" : folderName);
+
       const resolvedPath = path.join(process.cwd(), LOCAL_UPLOAD_PATH, resolvedFolder);
 
       if (!fs.existsSync(resolvedPath)) {
@@ -116,8 +124,16 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
       cb(null, { fieldname: file.fieldname });
     },
     key: (req, file, cb) => {
+      // ✅ Extract base fieldname for indexed fields like entries[0][invoice]
+      const baseFieldname = file.fieldname.includes("[")
+        ? file.fieldname.split("[").pop().split("]")[0]
+        : file.fieldname;
+
       // ✅ Use custom spaces prefix if field is in fieldFolderMap, else use default
-      const resolvedFolder = fieldFolderMap[file.fieldname] || (file.fieldname.includes("agreementPDF") ? "agreementPDF" : folderName);;
+      const resolvedFolder = fieldFolderMap[baseFieldname] ||
+                            fieldFolderMap[file.fieldname] ||
+                            (file.fieldname.includes("agreementPDF") ? "agreementPDF" : folderName);
+
       const resolvedPrefix = `${OUTDOORMEDIA_FOLDER}/${resolvedFolder}`;
 
       const sanitized = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");

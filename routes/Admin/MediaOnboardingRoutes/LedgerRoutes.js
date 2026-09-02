@@ -5,13 +5,13 @@ const {
   createLedgerEntry,
   listMediaByLedger,
   getLedgerHistory,
-} = require("../../../controllers/Admin/MediaOnboardingController/LedgerController");
+} = require("../../../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
 
 
 
 router.post("/ledger-save",protect, createLedgerEntry);
 router.post("/ledger-list",protect, listMediaByLedger);
-router.get("/ledger-history",protect, getLedgerHistory);
+router.post("/ledger-history",protect, getLedgerHistory);
 
 module.exports = router;
 

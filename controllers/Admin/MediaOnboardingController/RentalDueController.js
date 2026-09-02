@@ -63,16 +63,6 @@ const RENTAL_STATUS_MAP = {
   [ROLE.OWNER]: 3,
 };
 
-// paymentFrequency -> number of months to add
-const FREQUENCY_MONTHS_MAP = {
-  1: 1, // 1 month
-  2: 2, // 2 months
-  3: 3, // 3 months
-  4: 6, // 6 months
-  5: 12, // 1 year
-  6: 24, // 2 years
-};
-
 function addMonths(date, months) {
   const d = new Date(date);
   d.setMonth(d.getMonth() + months);
@@ -108,14 +98,34 @@ function markRoleVerified(media, entry, role, userName) {
   media.agreementDocVerified[ROLE_FLAG_KEY[role]] = true;
   pushVerificationHistory(media, entry, role, userName);
 }
+const getCurrentCycle = (date) => {
+  if (!date) return null;
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
+const formatDate = (date) => {
+  if (!date) return "";
+  let d;
+  if (typeof date === "string" && date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [year, month, day] = date.split("-");
+    d = new Date(year, month - 1, day);
+  } else {
+    d = new Date(date);
+  }
+  const options = { year: "numeric", month: "long", day: "numeric" };
+  return d.toLocaleDateString("en-US", options);
+};
 function advanceRentalPaymentOnOwnerApproval(media) {
   const currentNextBillingDate = media.rentalPayment?.nextBillingDate;
   const frequency = media.rentalPayment?.paymentFrequency;
 
-  const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+  const frequencyMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
   const monthsToAdd =
-    frequency === 7
+    frequency === 6
       ? Number(media.rentalPayment?.customPaymentFrequency) || 1 // ✅ added
       : frequencyMap[frequency] || 1;
 
@@ -165,180 +175,6 @@ function computeGstSplit(media, withGst) {
   };
 }
 
-// async function sendRentalDueApprovalMail(media, entry) {
-//   try {
-//     const toMail = process.env.T0_EMail;
-//     const ccMail = process.env.CC_EMail;
-//     const mailMode = process.env.MAIL_MODE || "development";
-//     const formatDMY = (date) =>
-//       date
-//         ? new Date(date).toLocaleDateString("en-GB").replace(/\//g, "-")
-//         : null;
-
-//     const rp = media.rentalPayment || {};
-//     const appraisal = media.appraisal || {};
-//     const agreement = media.agreement || {};
-
-//     const landOwnersPayload = (media.landOwners || []).map((owner) => ({
-//       name: owner.name || "",
-//       phone: owner.phone || "",
-//       bankName: owner.bankName || "",
-//       ifsc: owner.ifsc || "",
-//       accountNumber: owner.accountNumber || "",
-//       panNumber: owner.panNumber || "",
-//       paymentCategory: owner.paymentCategory || 0,
-//       typeShare: owner.typeShare || 0,
-//       shareAmount: owner.shareAmount || 0,
-//       onlineMode: owner.onlineMode || 0,
-//       onlineAmount: owner.onlineAmount || 0,
-//       cashAmount: owner.cashAmount || 0,
-//       gstApplicable: owner.gstApplicable || 0,
-//       gstPercentage: owner.gstPercentage || 0,
-//       gstAmount: owner.gstAmount || 0,
-//       tdsApplicable: owner.tdsApplicable || 0,
-//       tdsPercentage: owner.tdsPercentage || 0,
-//       tdsAmount: owner.tdsAmount || 0,
-//       totalAmountWithGst: owner.totalAmountWithGst || 0,
-//     }));
-
-//     const mailPayload = {
-//       mailtype: "cmdapproval",
-//       to: [toMail],
-//       cc: [ccMail],
-//       data: {
-//         _id: media._id,
-//         mediaCode: media.mediaCode || "",
-//         mediaName: media.mediaName || "",
-//         mediaType: media.mediaType || "",
-//         state: media.state || "",
-//         city: media.city || "",
-//         location: media.location || "",
-//         // fullAddress: media.fullAddress || "",
-//         width: media.width || 0,
-//         height: media.height || 0,
-//         status: media.status || 0,
-//         totalSqFt: media.totalSqFt || 0,
-//         numberOfLandOwners: media.numberOfLandOwners || 0,
-
-//         rentalPayment: {
-//           totalRentalAmount: rp.totalRentalAmount || 0,
-//           gstApplicable: rp.gstApplicable || 0,
-//           gstNumber: rp.gstNumber || "",
-//           gstPercentage: rp.gstPercentage || 0,
-//           gstAmount: rp.gstAmount || 0,
-//           totalRentalAmountWithGst: rp.totalRentalAmountWithGst || 0,
-//           // tdsApplicable: rp.tdsApplicable || 0,
-//           // tdsPercentage: rp.tdsPercentage || 0,
-//           // tdsAmount: rp.tdsAmount || 0,
-//           netPayable: rp.netPayable || 0,
-//           paymentFrequency: rp.paymentFrequency || 0,
-//           customPaymentFrequency: rp.rentalPayment || 0,
-//           lastBillPaidDate: formatDMY(rp.lastBillPaidDate),
-//           nextBillingDate: formatDMY(rp.nextBillingDate),
-//           balanceGstAmount: rp.balanceGstAmount || 0,
-//           status: rp.status || 0,
-//         },
-
-//         // rentalDueEntry: {
-//         //   withGst: entry?.withGst ?? null,
-//         //   baseAmount: entry?.baseAmount || 0,
-//         //   gstAmount: entry?.gstAmount || 0,
-//         //   netPayable: entry?.netPayable || 0,
-//         //   dueMonth: entry?.dueMonth || "",
-//         //   dueDate: formatDMY(entry?.dueDate),
-//         //   ownerApprovalDate: formatDMY(entry?.ownerApprovalDate),
-//         //   campaignName: entry?.campaignName || "",
-//         //   approvalFlow: entry?.approvalFlow || null,
-//         //   approvalSteps: entry?.approvalSteps || [],
-//         // },
-
-//         appraisal: {
-//           applicable: appraisal.applicable || 0,
-//           type: appraisal.type || 0,
-//           percentage: appraisal.percentage || 0,
-//           fixedAmount: appraisal.fixedAmount || 0,
-//           frequency: appraisal.frequency || 0,
-//           currentRent: appraisal.currentRent || 0,
-//           appraisalAmount: appraisal.appraisalAmount || 0,
-//           totalAppraisalAmount: appraisal.totalAppraisalAmount || 0,
-//           lastAppraisalDate: formatDMY(appraisal.lastAppraisalDate),
-//           nextAppraisalDate: formatDMY(appraisal.nextAppraisalDate),
-//         },
-
-//         agreement: {
-//           startDate: formatDMY(agreement.startDate),
-//           endDate: formatDMY(agreement.endDate),
-//           reminderBeforeExpiry: agreement.reminderBeforeExpiry || 0,
-//           advanceRent: agreement.advanceRent || 0,
-//           status: agreement.status || 0,
-//         },
-
-//         landOwners: landOwnersPayload,
-//       },
-//     };
-
-//     console.log(
-//       "📧 RENTAL DUE MAIL PAYLOAD:",
-//       JSON.stringify(mailPayload, null, 2),
-//     );
-//     if (mailMode !== "production") {
-//       console.log(
-//         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`,
-//       );
-//       return {
-//         mailtype: "cmdapproval",
-//         to: [toMail],
-//         cc: [ccMail],
-//         success: true,
-//         sent: false, // ✅ mail wasn't actually sent, so mailSent stays false on the entry
-//         statusCode: 200,
-//         message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
-//         data: mailPayload.data,
-//       };
-//     }
-//     const response = await axios.post(
-//       "https://adinndigital.com/api/outdoormedia/index_cmdapproval.php",
-//       mailPayload,
-//       { headers: { "Content-Type": "application/json" } },
-//     );
-
-//     // console.log("✅ Rental due approval mail sent:", response.data);
-
-//     const isMailSuccess =
-//       response.data &&
-//       (response.data.success === true ||
-//         response.data.status === "success" ||
-//         response.status === 200);
-
-//     return {
-//       mailtype: "cmdapproval",
-//       to: [toMail],
-//       cc: [ccMail],
-//       success: !!isMailSuccess,
-//       sent: !!isMailSuccess, // ✅ NEW — controller reads `sent` to set entry.mailSent
-//       statusCode: response.status || (isMailSuccess ? 200 : 500),
-//       message: isMailSuccess
-//         ? "Rental due approval mail sent successfully"
-//         : "Rental due approval mail failed",
-//       data: mailPayload.data,
-//     };
-//   } catch (mailErr) {
-//     console.error(
-//       "❌ Rental due approval mail error:",
-//       mailErr?.message || mailErr,
-//     );
-//     return {
-//       mailtype: "cmdapproval",
-//       to: [process.env.T0_EMail],
-//       cc: [process.env.CC_EMail],
-//       success: false,
-//       sent: false, // ✅ NEW — ensures mailResult.sent is always defined, even on error
-//       statusCode: 500,
-//       message: mailErr?.message || "Unknown mail error",
-//       data: null,
-//     };
-//   }
-// }
 async function sendRentalDueApprovalMail(media, entry) {
   try {
     const toMail = process.env.T0_EMail;
@@ -418,9 +254,9 @@ async function sendRentalDueApprovalMail(media, entry) {
         };
       }
     }
-const proofOfCampaignPayload = entry?.proofOfCampaign.filePath
-  ? [entry.proofOfCampaign.filePath]
-  : [];
+    const proofOfCampaignPayload = entry?.proofOfCampaign.filePath
+      ? [entry.proofOfCampaign.filePath]
+      : [];
     const mailPayload = {
       mailtype: "cmdapproval",
       to: [toMail],
@@ -731,618 +567,6 @@ const resolveGstApplicable = (item) => {
   };
 };
 
-// exports.saveRentalDue = async (req, res) => {
-//   try {
-//     const { userType, userId, userName } = req.user;
-//     const { mediaId, campaignName, withGst,gstApplicableFlag  } = req.body;
-
-//     if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
-//       return res
-//         .status(400)
-//         .json({ success: false, message: "A valid mediaId is required" });
-//     }
-//     if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(userType)) {
-//       return res
-//         .status(403)
-//         .json({ success: false, message: "Invalid or missing user role" });
-//     }
-
-//     const media = await Media.findById(mediaId);
-//     if (!media) {
-//       return res
-//         .status(404)
-//         .json({ success: false, message: "Media not found" });
-//     }
-
-//     // Defensive init — older docs saved before this migration may not
-//     // have these fields yet.
-//     if (!media.agreementDocVerified) {
-//       media.agreementDocVerified = {
-//         staff: false,
-//         teamLead: false,
-//         owner: false,
-//       };
-//     }
-//     if (!media.agreementDocVerificationHistory) {
-//       media.agreementDocVerificationHistory = [];
-//     }
-//     if (!Array.isArray(media.rentalDueEntries)) {
-//       media.rentalDueEntries = Array.isArray(media.rentalDue)
-//         ? media.rentalDue
-//         : [];
-//     }
-//     if (!Array.isArray(media.rentalDueHistory)) {
-//       media.rentalDueHistory = [];
-//     }
-//     if (!Array.isArray(media.agreementDocVerification)) {
-//       media.agreementDocVerification = [];
-//     }
-//     if (!Array.isArray(media.ledger)) {
-//       media.ledger = [];
-//     }
-//     if (media.rentalPayment && media.rentalPayment.balanceGstAmount == null) {
-//       media.rentalPayment.balanceGstAmount = 0;
-//     }
-//     //  let uploadedProofOfCampaign = null;
-//     //     if (req.files?.proofOfCampaign?.[0]) {
-//     //       const file = req.files.proofOfCampaign[0];
-//     //       if (!file.mimetype?.startsWith("image/")) {
-//     //         return res.status(400).json({
-//     //           success: false,
-//     //           message: "Proof of campaign must be an image file",
-//     //         });
-//     //       }
-//     //       uploadedProofOfCampaign = req.processFile(file);
-//     //     }
-//     let proofOfCampaign = null;
-//     if (req.files?.proofOfCampaign?.[0]) {
-//       const file = req.files.proofOfCampaign[0];
-//       if (!file.mimetype?.startsWith("image/")) {
-//         return res.status(400).json({
-//           success: false,
-//           message: "Proof of campaign must be an image file",
-//         });
-//       }
-//       proofOfCampaign = req.processFile(file);
-//     }
-//     // ══════════════════════════════════════════════════════════════
-//     // 🔒 GUARD — "verify first, then save"
-//     // ══════════════════════════════════════════════════════════════
-//     const currentCycleForVerification = getCurrentCycle(
-//       media.rentalPayment?.nextBillingDate,
-//     );
-
-//     if (!currentCycleForVerification) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Unable to determine current billing cycle",
-//       });
-//     }
-
-//     const isSameCycle = (a, b) => {
-//       if (!a || !b) return false;
-//       const t1 = new Date(a).getTime();
-//       const t2 = new Date(b).getTime();
-//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
-//     };
-
-//     const currentCycleVerificationsForSave =
-//       media.agreementDocVerification.filter(
-//         (h) =>
-//           h.isVerified && isSameCycle(h.cycle, currentCycleForVerification),
-//       );
-
-//     // "2 verified is enough" rule — same as verifyAgreementDoc.
-//     const verifiedRolesThisCycle = new Set(
-//       currentCycleVerificationsForSave.map((h) => h.verifiedByRole),
-//     );
-//     const verifiedCountThisCycle = verifiedRolesThisCycle.size;
-
-//     const hasVerifiedThisCycle = verifiedRolesThisCycle.has(userType);
-
-//     const canProceedToSave =
-//       verifiedCountThisCycle >= 2 || hasVerifiedThisCycle;
-
-//     if (!canProceedToSave) {
-//       return res.status(400).json({
-//         success: false,
-//         message: `${ROLE_LABEL[userType]} must verify the agreement document for the billing cycle starting ${formatDate(currentCycleForVerification)} before saving`,
-//       });
-//     }
-
-//     // Most recently created entry that hasn't been fully approved yet.
-//     const pendingEntry = [...media.rentalDueEntries]
-//       .reverse()
-//       .find((e) => e.approvalStatus !== 3);
-
-//     // ── Current cycle = the billing date this request is acting against ──
-//     const currentCycleDate = media.rentalPayment?.nextBillingDate
-//       ? new Date(media.rentalPayment.nextBillingDate).getTime()
-//       : null;
-
-//     const ownerAlreadyClosedThisCycle = media.rentalDueEntries.some((e) => {
-//       if (e.status !== 3) return false;
-//       if (!currentCycleDate || !e.dueDate) return false;
-//       if (new Date(e.dueDate).getTime() !== currentCycleDate) return false;
-//       const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
-//       return ownerStep?.status === 2;
-//     });
-
-//     if (userType === ROLE.OWNER && ownerAlreadyClosedThisCycle) {
-//       return res.status(400).json({
-//         success: false,
-//         message:
-//           "Owner has already approved this document for the current cycle",
-//       });
-//     }
-//     let mailResult = null;
-//     // ═══════════════════════════════════════
-//     // BRANCH 1: pending entry exists → this call is an APPROVAL
-//     // ═══════════════════════════════════════
-//     if (pendingEntry) {
-//       const entry = pendingEntry;
-//       const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
-//       const isOwnerOverride =
-//         userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
-
-//       if (!isOwnerOverride && userType !== entry.currentPendingRole) {
-//         return res.status(403).json({
-//           success: false,
-//           message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
-//         });
-//       }
-//       if (campaignName) {
-//         entry.campaignName = campaignName;
-//       }
-//       if (proofOfCampaign) {
-//         entry.proofOfCampaign = proofOfCampaign;
-//       }
-//       // ✅ Applies to EVERY approving role (Staff/Team Lead/Owner), not just
-//       // Owner's final closure. Tracks/updates balanceGstAmount immediately
-//       // whenever withGst is 1, at any approval step.
-//       // if ([1, 2].includes(Number(withGst))) {
-//       //   const newWithGst = Number(withGst);
-//       //   const oldGstAmount = entry.gstAmount || 0;
-
-//       //   if (entry.withGst !== newWithGst) {
-//       //     entry.withGst = newWithGst;
-//       //     const recomputedSplit = computeGstSplit(media, newWithGst);
-//       //     entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
-//       //     entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
-//       //     entry.netPayable = Number(recomputedSplit.netPayable) || 0;
-//       //   }
-
-//       //   // Adjust balanceGstAmount to reflect the CURRENT gstAmount for this
-//       //   // entry — remove the old contribution (if any), add the new one.
-//       //   media.rentalPayment.balanceGstAmount =
-//       //     (media.rentalPayment.balanceGstAmount || 0) -
-//       //     (entry.withGst === newWithGst ? oldGstAmount : 0) +
-//       //     (newWithGst === 1 ? entry.gstAmount : 0);
-//       //   media.markModified("rentalPayment");
-//       // }
-//       if ([1, 2].includes(Number(withGst))) {
-//         const newWithGst = Number(withGst);
-//         if (entry.withGst !== newWithGst) {
-//           entry.withGst = newWithGst;
-//           const recomputedSplit = computeGstSplit(media, newWithGst);
-//           entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
-//           entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
-//           entry.netPayable = Number(recomputedSplit.netPayable) || 0;
-
-//           // ✅ NEW — keep gstBalanceHistory + balanceGstAmount in sync with
-//           // this change, whether it's Team Lead or Owner making it.
-//           if (userType === ROLE.OWNER) {
-//             syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
-//           }
-//           // syncGstBalanceOnWithGstChange(media, entry, newWithGst, userName);
-//         }
-//       }
-//       if (isOwnerOverride) {
-//         entry.approvalSteps.forEach((step) => {
-//           if (step.status !== 1) return;
-//           if (step.role === ROLE.OWNER) {
-//             step.status = 2;
-//             step.userId = userId;
-//             step.userName = userName;
-//             step.approvedAt = nowIST();
-//             step.docVerified = true;
-//             step.remarks = "Direct owner approval";
-//           } else {
-//             step.status = 3;
-//             step.remarks = "Skipped — owner approved directly";
-//           }
-//         });
-//         entry.approvalStatus = 3;
-//         entry.status = 3;
-//         entry.currentPendingRole = null;
-//         entry.agreementDocVerified = true;
-//         entry.ownerApprovalDate = nowIST();
-//         media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
-
-//         markRoleVerified(media, entry, ROLE.OWNER, userName);
-// applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
-//         // ✅ close out GST for this cycle BEFORE billing date rolls forward
-//         addGstToBalanceIfApplicable(media, entry, userName);
-//         addOwnerGstToBalanceIfApplicable(media, entry, userName);
-
-//         advanceRentalPaymentOnOwnerApproval(media);
-
-//         // ✅ reset ledger the moment the cycle rolls over — old cycle's
-//         // entries are already permanently preserved in ledgerHistory
-//         if (Array.isArray(media.ledger) && media.ledger.length > 0) {
-//           media.ledger = [];
-//           media.markModified("ledger");
-//         }
-
-//         // redundant safety reset — guarantees the live flags are
-//         // false for the NEW cycle
-//         media.agreementDocVerified = {
-//           staff: false,
-//           teamLead: false,
-//           owner: false,
-//         };
-//         media.markModified("agreementDocVerified");
-//       } else {
-//         const step = entry.approvalSteps.find(
-//           (s) => s.role === userType && s.status === 1,
-//         );
-//         if (!step) {
-//           return res.status(400).json({
-//             success: false,
-//             message: "No pending step found for your role",
-//           });
-//         }
-//         step.status = 2;
-//         step.userId = userId;
-//         step.userName = userName;
-//         step.approvedAt = nowIST();
-//         step.docVerified = true;
-//         media.rentalStatus = RENTAL_STATUS_MAP[userType];
-
-//         markRoleVerified(media, entry, userType, userName);
-
-//         const roleIndex = chain.indexOf(userType);
-//         const nextRole = chain[roleIndex + 1];
-
-//         if (nextRole) {
-//           entry.currentPendingRole = nextRole;
-//           entry.approvalStatus = 2;
-//           entry.status = 2;
-//         } else {
-//           entry.currentPendingRole = null;
-//           entry.approvalStatus = 3;
-//           entry.status = 3;
-//           entry.agreementDocVerified = true;
-
-//           if (userType === ROLE.OWNER) {
-//             entry.ownerApprovalDate = nowIST();
-//             applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
-//             // addGstToBalanceIfApplicable(media, entry);
-//             addGstToBalanceIfApplicable(media, entry, userName);
-//             addOwnerGstToBalanceIfApplicable(media, entry, userName);
-//             advanceRentalPaymentOnOwnerApproval(media);
-
-//             if (Array.isArray(media.ledger) && media.ledger.length > 0) {
-//               media.ledger = [];
-//               media.markModified("ledger");
-//             }
-
-//             media.agreementDocVerified = {
-//               staff: false,
-//               teamLead: false,
-//               owner: false,
-//             };
-//             media.markModified("agreementDocVerified");
-//           }
-//         }
-//       }
-
-//       entry.updatedBy = userName;
-//       entry.updatedAt = nowIST();
-
-//       const yearLabel = getYearLabel(entry.dueDate);
-//       const monthLabel = getMonthLabel(entry.dueDate);
-//       const yearBucket = media.rentalDueHistory.find(
-//         (y) => y.year === yearLabel,
-//       );
-//       const monthBucket = yearBucket?.months.find(
-//         (m) => m.month === monthLabel,
-//       );
-//       const historyRecord = monthBucket?.entries.find(
-//         (e) => String(e.rentalDueId) === String(entry._id),
-//       );
-//       if (historyRecord) {
-//         historyRecord.approvalStatus = entry.approvalStatus;
-//         historyRecord.campaignName = entry.campaignName;
-//         historyRecord.updatedAt = nowIST();
-//         historyRecord.updatedBy = userName;
-//       }
-
-//       media.updatedBy = userName;
-//       media.updatedAt = nowIST();
-//       await media.save();
-
-//       // ✅ Send owner-approval mail + persist mailSent on THIS entry/cycle
-//       if (userType === ROLE.OWNER && entry.approvalStatus === 3) {
-//         const mailResult = await sendRentalDueApprovalMail(media, entry);
-//         entry.mailSent = !!mailResult.sent;
-//         await media.save();
-//       }
-//       return res.status(200).json({
-//         success: true,
-//         message: isOwnerOverride
-//           ? "Approved directly by Owner"
-//           : `${ROLE_LABEL[userType]} approval recorded`,
-//         data: {
-//           mediaId: media._id,
-//           rentalDueId: entry._id,
-//           campaignName: entry.campaignName, // ✅ reflects any update
-//           proofOfCampaign: entry.proofOfCampaign, // ✅ reflects any update
-//           approvalSteps: entry.approvalSteps,
-//           approvalStatus: entry.approvalStatus,
-//           currentPendingRole: entry.currentPendingRole,
-//           currentPendingRoleLabel: entry.currentPendingRole
-//             ? ROLE_LABEL[entry.currentPendingRole]
-//             : "Completed",
-//           rentalStatus: media.rentalStatus,
-//           withGst: entry.withGst,
-//           gstAmount: entry.gstAmount,
-//           baseAmount: entry.baseAmount,
-//           netPayable: entry.netPayable,
-//           balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
-//           agreementDocVerified: media.agreementDocVerified,
-//           agreementDocVerificationHistory:
-//             media.agreementDocVerificationHistory,
-//           agreementDocVerificationStatus: getAgreementVerificationStatus(media),
-//           rentalPayment: media.rentalPayment,
-//           ledger: media.ledger,
-//           mailSent: entry.mailSent,
-//         },
-//       });
-//     }
-
-//     // ═══════════════════════════════════════
-//     // BRANCH 2: no pending entry → CREATE (opens a new cycle)
-//     // ═══════════════════════════════════════
-//     if (!campaignName) {
-//       return res
-//         .status(400)
-//         .json({ success: false, message: "campaignName is required" });
-//     }
-
-//     if (userType === ROLE.OWNER) {
-//       const dueDateObjPreCheck = media.rentalPayment?.nextBillingDate
-//         ? new Date(media.rentalPayment.nextBillingDate)
-//         : new Date();
-//       const alreadyClosed = media.rentalDueEntries.some((e) => {
-//         if (e.status !== 3 || !e.dueDate) return false;
-//         if (new Date(e.dueDate).getTime() !== dueDateObjPreCheck.getTime())
-//           return false;
-//         const ownerStep = e.approvalSteps?.find((s) => s.role === ROLE.OWNER);
-//         return ownerStep?.status === 2;
-//       });
-//       if (alreadyClosed) {
-//         return res.status(400).json({
-//           success: false,
-//           message:
-//             "Owner has already approved this document for the current cycle",
-//         });
-//       }
-//     }
-
-//     const dueDateObj = media.rentalPayment?.nextBillingDate
-//       ? new Date(media.rentalPayment.nextBillingDate)
-//       : new Date();
-
-//     const chainSteps = buildApprovalSteps(2);
-//     const steps = [
-//       {
-//         role: ROLE.STAFF,
-//         userId: null,
-//         userName: "",
-//         approvedAt: null,
-//         status: 1,
-//         docVerified: false,
-//         remarks: "",
-//       },
-//       ...chainSteps,
-//     ];
-
-//     const isOwnerOverride = userType === ROLE.OWNER;
-//     const isTeamLeadCreating = userType === ROLE.TEAM_LEAD;
-//     const staffStep = steps.find((s) => s.role === ROLE.STAFF);
-
-//     if (isOwnerOverride) {
-//       steps.forEach((step) => {
-//         if (step.role === ROLE.OWNER) {
-//           step.status = 2;
-//           step.userId = userId;
-//           step.userName = userName;
-//           step.approvedAt = nowIST();
-//           step.docVerified = true;
-//           step.remarks = "Direct owner approval";
-//         } else {
-//           step.status = 3;
-//           step.remarks = "Skipped — owner approved directly";
-//         }
-//       });
-//     } else if (isTeamLeadCreating) {
-//       staffStep.status = 3;
-//       staffStep.remarks = "Skipped — created directly by Team Lead";
-
-//       const teamLeadStep = steps.find((s) => s.role === ROLE.TEAM_LEAD);
-//       teamLeadStep.status = 2;
-//       teamLeadStep.userId = userId;
-//       teamLeadStep.userName = userName;
-//       teamLeadStep.approvedAt = nowIST();
-//       teamLeadStep.docVerified = true;
-//       teamLeadStep.remarks = "Created and approved by Team Lead";
-//     } else {
-//       staffStep.status = 2;
-//       staffStep.userId = userId;
-//       staffStep.userName = userName;
-//       staffStep.approvedAt = nowIST();
-//       staffStep.docVerified = false;
-//       staffStep.remarks = "Entry created by Staff";
-//     }
-
-//     const nextPendingStep = steps.find((s) => s.status === 1);
-//     const allApproved = !nextPendingStep;
-
-//     // ✅ resolve withGst mode for this entry (default to 1 / With GST)
-//     const resolvedWithGst = [1, 2].includes(Number(withGst))
-//       ? Number(withGst)
-//       : 1;
-//     const gstSplit = computeGstSplit(media, resolvedWithGst);
-
-//     const newEntry = {
-//       dueMonth: getDueMonthLabel(dueDateObj),
-//       dueDate: dueDateObj,
-//       netPayable: Number(gstSplit.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
-//       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
-//       customPaymentFrequency:
-//         media.rentalPayment?.paymentFrequency === 7
-//           ? media.rentalPayment?.customPaymentFrequency || 1
-//           : undefined, // ✅ added — only set when frequency is Custom
-//       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
-//       mailSent: false,
-//       gstAddedToBalance: false,
-//       campaignName,
-//       proofOfCampaign: proofOfCampaign,
-//       savedBy: { userId, userName, role: userType, savedAt: nowIST() },
-//       approvalFlow: 2,
-//       approvalSteps: steps,
-//       approvalStatus: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
-//       currentPendingRole: nextPendingStep ? nextPendingStep.role : null,
-//       agreementDocVerified: allApproved,
-//       status: allApproved ? 3 : isTeamLeadCreating ? 2 : 1,
-//       withGst: resolvedWithGst,
-//       gstAmount: Number(gstSplit.gstAmount) || 0,
-//       baseAmount: Number(gstSplit.baseAmount) || 0,
-//       netPayable: Number(gstSplit.netPayable) || 0,
-//       withGst: resolvedWithGst,
-//       gstAmount: Number(gstSplit.gstAmount) || 0,
-//       baseAmount: Number(gstSplit.baseAmount) || 0,
-//       gstAddedToBalance: false,
-//       updatedBy: userName,
-//       updatedAt: nowIST(),
-//     };
-//     media.rentalStatus = RENTAL_STATUS_MAP[userType];
-
-//     media.rentalDueEntries.push(newEntry);
-//     const savedEntry =
-//       media.rentalDueEntries[media.rentalDueEntries.length - 1];
-//     // addGstToBalanceIfApplicable(media, savedEntry,userName);
-//     // addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
-//     if (isOwnerOverride) {
-//       markRoleVerified(media, savedEntry, ROLE.OWNER, userName);
-//     } else if (isTeamLeadCreating) {
-//       markRoleVerified(media, savedEntry, ROLE.TEAM_LEAD, userName);
-//     }
-
-//     if (isOwnerOverride) {
-//       applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag);
-//       // Owner created AND fully approved directly — cycle closes here too
-//       // addGstToBalanceIfApplicable(media, savedEntry);
-//       addGstToBalanceIfApplicable(media, savedEntry, userName);
-//       addOwnerGstToBalanceIfApplicable(media, savedEntry, userName);
-//       advanceRentalPaymentOnOwnerApproval(media);
-
-//       // ✅ reset ledger for the new cycle that just opened
-//       if (Array.isArray(media.ledger) && media.ledger.length > 0) {
-//         media.ledger = [];
-//         media.markModified("ledger");
-//       }
-
-//       media.agreementDocVerified = {
-//         staff: false,
-//         teamLead: false,
-//         owner: false,
-//       };
-//       media.markModified("agreementDocVerified");
-//     }
-
-//     const yearLabel = getYearLabel(dueDateObj);
-//     const monthLabel = getMonthLabel(dueDateObj);
-
-//     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-//     if (!yearBucket) {
-//       media.rentalDueHistory.push({ year: yearLabel, months: [] });
-//       yearBucket = media.rentalDueHistory[media.rentalDueHistory.length - 1];
-//     }
-//     let monthBucket = yearBucket.months.find((m) => m.month === monthLabel);
-//     if (!monthBucket) {
-//       yearBucket.months.push({ month: monthLabel, entries: [] });
-//       monthBucket = yearBucket.months[yearBucket.months.length - 1];
-//     }
-//     monthBucket.entries.push({
-//       rentalDueId: savedEntry._id,
-//       siteName: media.mediaName,
-//       campaignName,
-//       dueDate: dueDateObj,
-//       netPayable: Number(newEntry.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
-//       approvalStatus: newEntry.approvalStatus,
-//       savedBy: userName,
-//       savedByRole: userType,
-//       updatedAt: nowIST(),
-//       updatedBy: userName,
-//     });
-
-//     media.updatedBy = userName;
-//     media.updatedAt = nowIST();
-//     await media.save();
-
-//     if (isOwnerOverride && savedEntry.approvalStatus === 3) {
-//       const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
-//       savedEntry.mailSent = !!mailResult.sent;
-//       await media.save();
-//     }
-//     return res.status(201).json({
-//       success: true,
-//       message: isOwnerOverride
-//         ? "Rental due entry created and approved directly by Owner"
-//         : isTeamLeadCreating
-//           ? "Rental due entry created and approved by Team Lead — waiting on Owner approval"
-//           : "Rental due entry saved — waiting on Team Lead approval",
-//       data: {
-//         rentalDueId: savedEntry._id,
-//         mediaId: media._id,
-//         mediaName: media.mediaName,
-//         campaignName,
-//         proofOfCampaign,
-//         dueDate: dueDateObj,
-//         netPayable: newEntry.netPayable,
-//         withGst: newEntry.withGst,
-//         gstAmount: newEntry.gstAmount,
-//         baseAmount: newEntry.baseAmount,
-//         balanceGstAmount: media.rentalPayment?.balanceGstAmount || 0,
-//         savedBy: {
-//           userId,
-//           userName,
-//           role: userType,
-//           roleLabel: ROLE_LABEL[userType] || "",
-//         },
-//         approvalSteps: steps,
-//         approvalStatus: newEntry.approvalStatus,
-//         currentPendingRole: newEntry.currentPendingRole,
-//         currentPendingRoleLabel: newEntry.currentPendingRole
-//           ? ROLE_LABEL[newEntry.currentPendingRole]
-//           : "Completed",
-//         rentalStatus: media.rentalStatus,
-//         agreementDocVerified: media.agreementDocVerified,
-//         agreementDocVerificationHistory: media.agreementDocVerificationHistory,
-//         agreementDocVerificationStatus: getAgreementVerificationStatus(media),
-//         rentalPayment: media.rentalPayment,
-//         ledger: media.ledger,
-//         mailSent: savedEntry.mailSent,
-//       },
-//     });
-//   } catch (err) {
-//     return res
-//       .status(500)
-//       .json({ success: false, message: "Server error", error: err.message });
-//   }
-// };
 exports.saveRentalDue = async (req, res) => {
   try {
     const { userType, userId, userName } = req.user;
@@ -1799,7 +1023,7 @@ exports.saveRentalDue = async (req, res) => {
       netPayable: Number(gstSplit.netPayable) || 0, // ✅ uses GST split, not raw rentalPayment
       paymentFrequency: media.rentalPayment?.paymentFrequency || 1,
       customPaymentFrequency:
-        media.rentalPayment?.paymentFrequency === 7
+        media.rentalPayment?.paymentFrequency === 6
           ? media.rentalPayment?.customPaymentFrequency || 1
           : undefined, // ✅ only set when frequency is Custom
       ownerApprovalDate: isOwnerOverride ? nowIST() : null,
@@ -2124,7 +1348,7 @@ exports.verifyAgreementDoc = async (req, res) => {
         $push: { agreementDocVerification: verificationRecord },
         $set: { updatedBy: userName, updatedAt: nowIST() },
       },
-      { new: true },
+      { returnDocument: 'after' },
     );
 
     // ── If the atomic update matched nothing, someone else (or a
@@ -2237,522 +1461,94 @@ exports.verifyAgreementDoc = async (req, res) => {
   }
 };
 // ── Helper functions ──
-function getCurrentCycle(nextBillingDate) {
-  if (!nextBillingDate) return null;
+// function getCurrentCycle(nextBillingDate) {
+//   if (!nextBillingDate) return null;
 
-  const billingDate = new Date(nextBillingDate);
-  const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
-  const day = String(billingDate.getDate()).padStart(2, "0");
+//   const billingDate = new Date(nextBillingDate);
+//   const year = billingDate.getFullYear();
+//   const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+//   const day = String(billingDate.getDate()).padStart(2, "0");
 
-  return `${year}-${month}-${day}`;
-}
+//   return `${year}-${month}-${day}`;
+// }
 
-function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return "Unknown";
+// function formatDate(cycleIdentifier) {
+//   if (!cycleIdentifier) return "Unknown";
 
-  if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split("-");
-    const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
+//   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
+//     const [year, month, day] = cycleIdentifier.split("-");
+//     const date = new Date(year, month - 1, day);
+//     return date.toLocaleDateString("en-US", {
+//       year: "numeric",
+//       month: "long",
+//       day: "numeric",
+//     });
+//   }
 
-  return cycleIdentifier;
-}
+//   return cycleIdentifier;
+// }
 
 // ── Helper functions ──
-function getCurrentCycle(nextBillingDate) {
-  if (!nextBillingDate) return null;
+// function getCurrentCycle(nextBillingDate) {
+//   if (!nextBillingDate) return null;
 
-  const billingDate = new Date(nextBillingDate);
-  const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
-  const day = String(billingDate.getDate()).padStart(2, "0");
+//   const billingDate = new Date(nextBillingDate);
+//   const year = billingDate.getFullYear();
+//   const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+//   const day = String(billingDate.getDate()).padStart(2, "0");
 
-  return `${year}-${month}-${day}`;
-}
+//   return `${year}-${month}-${day}`;
+// }
 
-function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return "Unknown";
+// function formatDate(cycleIdentifier) {
+//   if (!cycleIdentifier) return "Unknown";
 
-  if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split("-");
-    const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
+//   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
+//     const [year, month, day] = cycleIdentifier.split("-");
+//     const date = new Date(year, month - 1, day);
+//     return date.toLocaleDateString("en-US", {
+//       year: "numeric",
+//       month: "long",
+//       day: "numeric",
+//     });
+//   }
 
-  return cycleIdentifier;
-}
+//   return cycleIdentifier;
+// }
 // ── Helper function to get current cycle based on nextBillingDate ──
-function getCurrentCycle(nextBillingDate) {
-  if (!nextBillingDate) return null;
+// function getCurrentCycle(nextBillingDate) {
+//   if (!nextBillingDate) return null;
 
-  // Parse the nextBillingDate
-  const billingDate = new Date(nextBillingDate);
+//   // Parse the nextBillingDate
+//   const billingDate = new Date(nextBillingDate);
 
-  // Create a cycle identifier using year, month, and day
-  // This ensures each billing cycle is uniquely identified
-  const year = billingDate.getFullYear();
-  const month = String(billingDate.getMonth() + 1).padStart(2, "0");
-  const day = String(billingDate.getDate()).padStart(2, "0");
+//   // Create a cycle identifier using year, month, and day
+//   // This ensures each billing cycle is uniquely identified
+//   const year = billingDate.getFullYear();
+//   const month = String(billingDate.getMonth() + 1).padStart(2, "0");
+//   const day = String(billingDate.getDate()).padStart(2, "0");
 
-  return `${year}-${month}-${day}`;
-}
+//   return `${year}-${month}-${day}`;
+// }
 
 // ── Helper function to format date for display ──
-function formatDate(cycleIdentifier) {
-  if (!cycleIdentifier) return "Unknown";
+// function formatDate(cycleIdentifier) {
+//   if (!cycleIdentifier) return "Unknown";
 
-  // If it's in YYYY-MM-DD format
-  if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [year, month, day] = cycleIdentifier.split("-");
-    const date = new Date(year, month - 1, day);
-    return date.toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  }
-
-  return cycleIdentifier;
-}
-
-// exports.getRentalDueListWithStats = async (req, res) => {
-//   try {
-//     const {
-//       dueDate,
-//       city,
-//       mediaType,
-//       frequency,
-//       status,
-//       search,
-//       pageNumber = 1,
-//       count = 10,
-//     } = req.body;
-
-//     if (!dueDate) {
-//       return res.status(400).json({
-//         success: false,
-//         message:
-//           "dueDate is required. Please use format MM-YYYY (e.g., 07-2026)",
-//       });
-//     }
-
-//     if (!dueDate.match(/^\d{2}-\d{4}$/)) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Invalid dueDate format. Please use MM-YYYY (e.g., 07-2026)",
-//       });
-//     }
-
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
-//     const skip = (pageNumbers - 1) * pageSize;
-
-//     const [mo, yr] = dueDate.split("-").map(Number);
-//     const monthStart = new Date(yr, mo - 1, 1);
-//     const monthEnd = new Date(yr, mo, 0, 23, 59, 59);
-//     const dateFilter = { $gte: monthStart, $lte: monthEnd };
-
-//     const mediaMatch = { status: 1 };
-//     if (city) mediaMatch.city = { $regex: city, $options: "i" };
-//     if (mediaType) mediaMatch.mediaType = { $regex: mediaType, $options: "i" };
-//     if (frequency)
-//       mediaMatch["rentalPayment.paymentFrequency"] = parseInt(frequency, 10);
-
-//     if (status !== undefined && status !== null && status !== "") {
-//       const statusMap = { active: 1, expiresoon: 2, overdue: 3, expired: 3 };
-//       const parsed = parseInt(status, 10);
-//       const resolvedStatus = isNaN(parsed)
-//         ? statusMap[String(status).toLowerCase()]
-//         : parsed;
-//       if (resolvedStatus) mediaMatch["rentalPayment.status"] = resolvedStatus;
-//     }
-
-//     if (search) {
-//       mediaMatch.$or = [
-//         { mediaCode: { $regex: search, $options: "i" } },
-//         { mediaName: { $regex: search, $options: "i" } },
-//         { city: { $regex: search, $options: "i" } },
-//         { location: { $regex: search, $options: "i" } },
-//       ];
-//     }
-
-//     const totalSites = await Media.countDocuments({ status: 1 });
-
-//     // ✅ FIXED — match on EITHER the live nextBillingDate OR any
-//     // rentalDue entry's dueDate falling in the requested month. This
-//     // way, a site whose cycle already advanced (after Owner approved)
-//     // still counts toward the month it was actually due/approved in.
-//     const monthOrCondition = {
-//       $or: [
-//         {
-//           "rentalPayment.nextBillingDate": { $gte: monthStart, $lte: monthEnd },
-//         },
-//         { "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd } },
-//       ],
-//     };
-
-//     const dueThisMonthAgg = await Media.aggregate([
-//       { $match: { status: 1 } },
-//       { $match: monthOrCondition },
-//       {
-//         // Use the matching rentalDue entry's netPayable if the live
-//         // nextBillingDate has already moved past this month; otherwise
-//         // fall back to rentalPayment.netPayable.
-//         $addFields: {
-//           matchingEntry: {
-//             $first: {
-//               $filter: {
-//                 input: { $ifNull: ["$rentalDue", []] },
-//                 as: "rd",
-//                 cond: {
-//                   $and: [
-//                     { $gte: ["$$rd.dueDate", monthStart] },
-//                     { $lte: ["$$rd.dueDate", monthEnd] },
-//                   ],
-//                 },
-//               },
-//             },
-//           },
-//         },
-//       },
-//       {
-//         $addFields: {
-//           effectiveNetPayable: {
-//             $ifNull: ["$matchingEntry.netPayable", "$rentalPayment.netPayable"],
-//           },
-//         },
-//       },
-//       {
-//         $group: {
-//           _id: null,
-//           totalNetPayable: { $sum: "$effectiveNetPayable" },
-//           count: { $sum: 1 },
-//         },
-//       },
-//     ]);
-//     const dueThisMonth = {
-//       totalNetPayable: dueThisMonthAgg[0]?.totalNetPayable || 0,
-//       count: dueThisMonthAgg[0]?.count || 0,
-//     };
-
-//     // ✅ dueAmountOpen — sites still open (status 2/3) for this month,
-//     // using the same either/or month match
-//     const dueAmountOpenAgg = await Media.aggregate([
-//       { $match: { status: 1, "rentalPayment.status": { $in: [2, 3] } } },
-//       { $match: monthOrCondition },
-//       {
-//         $group: { _id: null, totalOpen: { $sum: "$rentalPayment.netPayable" } },
-//       },
-//     ]);
-//     const dueAmountOpen = dueAmountOpenAgg[0]?.totalOpen || 0;
-
-//     // ✅ overDueSiteCount — same either/or month match
-//     const overDueSiteCount = await Media.countDocuments({
-//       status: 1,
-//       "rentalPayment.status": 3,
-//       ...monthOrCondition,
+//   // If it's in YYYY-MM-DD format
+//   if (cycleIdentifier.match(/^\d{4}-\d{2}-\d{2}$/)) {
+//     const [year, month, day] = cycleIdentifier.split("-");
+//     const date = new Date(year, month - 1, day);
+//     return date.toLocaleDateString("en-US", {
+//       year: "numeric",
+//       month: "long",
+//       day: "numeric",
 //     });
-
-//     // ✅ approvedCount — sites with a rentalDue entry FULLY APPROVED
-//     // (status === 3) for THIS specific month, instead of relying on the
-//     // live top-level rentalStatus + nextBillingDate (which moves once
-//     // approved).
-//     const approvedCount = await Media.countDocuments({
-//       status: 1,
-//       rentalDue: {
-//         $elemMatch: {
-//           status: 3,
-//           dueDate: { $gte: monthStart, $lte: monthEnd },
-//         },
-//       },
-//     });
-
-//     const pendingCount = Math.max(
-//       dueThisMonth.count - approvedCount - overDueSiteCount,
-//       0,
-//     );
-
-//     // ✅ RE-ENABLED — Staff / Team Lead / Owner pending-approval
-//     // breakdown, scoped to rentalDue entries whose dueDate falls in the
-//     // requested month (not just "still pending" globally across all
-//     // months).
-//     const approvalBreakdownAgg = await Media.aggregate([
-//       { $match: { status: 1 } },
-//       { $unwind: "$rentalDue" },
-//       {
-//         $match: {
-//           "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
-//           "rentalDue.approvalStatus": { $in: [1, 2] },
-//         },
-//       },
-//       { $group: { _id: "$rentalDue.currentPendingRole", count: { $sum: 1 } } },
-//     ]);
-//     const pendingByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
-//     approvalBreakdownAgg.forEach(({ _id, count }) => {
-//       if (_id === 1) pendingByRole.staff = count;
-//       if (_id === 2) pendingByRole.teamLead = count;
-//       if (_id === 3) pendingByRole.owner = count;
-//       pendingByRole.total += count;
-//     });
-
-//     // ✅ NEW — actual approval breakdown: how many entries were approved
-//     // by EACH role this month (based on approvalSteps, status === 2 for
-//     // that role's step), so you can see Staff-approved / Team-Lead-approved
-//     // / Owner-approved counts for the month, not just "who's still pending".
-//     const approvalCompletedBreakdownAgg = await Media.aggregate([
-//       { $match: { status: 1 } },
-//       { $unwind: "$rentalDue" },
-//       {
-//         $match: {
-//           "rentalDue.dueDate": { $gte: monthStart, $lte: monthEnd },
-//         },
-//       },
-//       { $unwind: "$rentalDue.approvalSteps" },
-//       {
-//         $match: {
-//           "rentalDue.approvalSteps.status": 2, // 2 = Approved
-//         },
-//       },
-//       {
-//         $group: {
-//           _id: "$rentalDue.approvalSteps.role",
-//           count: { $sum: 1 },
-//         },
-//       },
-//     ]);
-//     const approvedByRole = { staff: 0, teamLead: 0, owner: 0, total: 0 };
-//     approvalCompletedBreakdownAgg.forEach(({ _id, count }) => {
-//       if (_id === 1) approvedByRole.staff = count;
-//       if (_id === 2) approvedByRole.teamLead = count;
-//       if (_id === 3) approvedByRole.owner = count;
-//       approvedByRole.total += count;
-//     });
-
-//     const listMatch = {
-//       ...mediaMatch,
-//       $and: [monthOrCondition],
-//     };
-
-//     const listPipeline = [
-//       { $match: listMatch },
-//       {
-//         $project: {
-//           mediaCode: 1,
-//           mediaName: 1,
-//           landOwners: 1,
-//           appraisal: 1,
-//           mediaType: 1,
-//           city: 1,
-//           state: 1,
-//           rentalStatus: 1,
-//           totalSqFt: 1,
-//           location: 1,
-//           rentalPayment: 1,
-//           gstApplicableFlag: 1,
-//           agreement: 1,
-//           agreementDocVerification: 1,
-//           verificationProgressHistory: 1,
-//           gstBalanceHistory: 1,
-//           rentalDue: 1,
-//           updatedAt: 1,
-//         },
-//       },
-//       {
-//         $facet: {
-//           data: [
-//             { $sort: { updatedAt: -1 } },
-//             { $skip: skip },
-//             { $limit: pageSize },
-//           ],
-//           total: [{ $count: "count" }],
-//         },
-//       },
-//     ];
-
-//     const result = await Media.aggregate(listPipeline);
-//     const data = result[0]?.data || [];
-//     const total = result[0]?.total[0]?.count || 0;
-
-//     const isSameCycle = (a, b) => {
-//       if (!a || !b) return false;
-//       const t1 = new Date(a).getTime();
-//       const t2 = new Date(b).getTime();
-//       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
-//     };
-
-//     const buildVerificationProgress = (item, monthStart, monthEnd) => {
-//       const historyForMonth = (item.verificationProgressHistory || []).filter(
-//         (v) => {
-//           const cycleDate = new Date(v.cycle);
-//           return cycleDate >= monthStart && cycleDate <= monthEnd;
-//         },
-//       );
-
-//       if (historyForMonth.length > 0) {
-//         const latest = historyForMonth[historyForMonth.length - 1];
-//         return {
-//           currentCycle: latest.currentCycleLabel,
-//           staffVerified: latest.staffVerified,
-//           teamLeadVerified: latest.teamLeadVerified,
-//           ownerVerified: latest.ownerVerified,
-//           verifiedCount: latest.verifiedCount,
-//           isComplete: latest.isComplete,
-//           highestVerifiedRole: latest.highestVerifiedRole,
-//         };
-//       }
-
-//       const cycleVerifications = (item.agreementDocVerification || []).filter(
-//         (h) => {
-//           if (!h.isVerified || !h.cycle) return false;
-//           const cycleDate = new Date(h.cycle);
-//           return cycleDate >= monthStart && cycleDate <= monthEnd;
-//         },
-//       );
-
-//       const staffVerified = cycleVerifications.some(
-//         (h) => h.verifiedByRole === ROLE.STAFF,
-//       );
-//       const teamLeadVerified = cycleVerifications.some(
-//         (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
-//       );
-//       const ownerVerified = cycleVerifications.some(
-//         (h) => h.verifiedByRole === ROLE.OWNER,
-//       );
-
-//       const highestVerifiedRole = ownerVerified
-//         ? ROLE.OWNER
-//         : teamLeadVerified
-//           ? ROLE.TEAM_LEAD
-//           : staffVerified
-//             ? ROLE.STAFF
-//             : null;
-
-//       const verifiedCount = [
-//         staffVerified,
-//         teamLeadVerified,
-//         ownerVerified,
-//       ].filter(Boolean).length;
-
-//       const monthStartCycleString = getCurrentCycle(monthStart);
-
-//       return {
-//         currentCycle: formatDate(monthStartCycleString),
-//         staffVerified,
-//         teamLeadVerified,
-//         ownerVerified,
-//         verifiedCount,
-//         isComplete: verifiedCount >= 2,
-//         highestVerifiedRole,
-//       };
-//     };
-
-//     const enriched = data.map((item) => {
-//       const filteredRentalDueEntries = (item.rentalDue || []).filter(
-//         (entry) => {
-//           if (!entry.dueDate) return false;
-//           const entryDate = new Date(entry.dueDate);
-//           return entryDate >= monthStart && entryDate <= monthEnd;
-//         },
-//       );
-//       const filteredAgreementDocVerificationHistory = (
-//         item.agreementDocVerification || []
-//       ).filter((h) => {
-//         if (!h.cycle) return false;
-//         const cycleDate = new Date(h.cycle);
-//         return cycleDate >= monthStart && cycleDate <= monthEnd;
-//       });
-//       return {
-//         _id: item._id,
-//         mediaCode: item.mediaCode,
-//         mediaName: item.mediaName,
-//         mediaType: item.mediaType,
-//         city: item.city,
-//         state: item.state,
-//         location: item.location,
-//         rentalStatus: item.rentalStatus,
-//         totalSqFt: item.totalSqFt,
-//         totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
-//         netPayable: item.rentalPayment?.netPayable || 0,
-//         gstApplicable: item.rentalPayment?.gstApplicable || 0,
-//         gstAmount: item.rentalPayment?.gstAmount || 0,
-//         landOwners: item.landOwners,
-//         appraisal: item.appraisal,
-//         paymentFrequency: item.rentalPayment?.paymentFrequency,
-//         customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
-//         paymentFrequencyLabel:
-//           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
-//         nextBillingDate: item.rentalPayment?.nextBillingDate,
-//         lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
-//         dueStatus: item.rentalPayment?.status,
-//         dueStatusLabel: STATUS_LABEL[item.rentalPayment?.status] || "",
-//         gstApplicableDisplay: resolveGstApplicable(item),
-//         agreementPeriod: {
-//           startDate: item.agreement?.startDate,
-//           endDate: item.agreement?.endDate,
-//           agreementPDF: item.agreement?.agreementPDF,
-//         },
-//         // agreementDocVerificationHistory: item.agreementDocVerification || [],
-//         agreementDocVerificationHistory:
-//           filteredAgreementDocVerificationHistory,
-//         verificationProgress: buildVerificationProgress(
-//           item,
-//           monthStart,
-//           monthEnd,
-//         ),
-//         verificationProgressHistory: item.verificationProgressHistory || [],
-//         gstBalanceHistory: item.gstBalanceHistory || [],
-//         rentalDueEntries: filteredRentalDueEntries,
-//       };
-//     });
-
-//     return res.status(200).json({
-//       success: true,
-//       value: {
-//         totalSites,
-//         dueThisMonth,
-//         dueAmountOpen,
-//         overDue: { siteCount: overDueSiteCount },
-//         approvedCount,
-//         pendingCount,
-//         // ✅ RE-ENABLED — who's still pending approval, this month
-//         pendingApproval: {
-//           staff: pendingByRole.staff,
-//           teamLead: pendingByRole.teamLead,
-//           owner: pendingByRole.owner,
-//           total: pendingByRole.total,
-//         },
-//         // ✅ NEW — who ALREADY approved, this month
-//         approvalBreakdown: {
-//           staff: approvedByRole.staff,
-//           teamLead: approvedByRole.teamLead,
-//           owner: approvedByRole.owner,
-//           total: approvedByRole.total,
-//         },
-//         pagination: {
-//           count: pageSize, // items per page
-//           pageNumber: pageNumbers, // current page
-//           totalCount: total, // total items
-//           totalPages: Math.ceil(total / pageSize), // total pages
-//         },
-//       },
-//       data: enriched,
-//     });
-//   } catch (err) {
-//     return res
-//       .status(500)
-//       .json({ success: false, message: "Server error", error: err.message });
 //   }
-// };
+
+//   return cycleIdentifier;
+// }
+
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const {
@@ -2769,6 +1565,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
       isApproved,
       isPastPending,
       roleType,
+      edit,
     } = req.body;
 
     // ✅ If roleType is provided (1, 2, or 3), we show stats/list for THAT
@@ -3416,7 +2213,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
     if (orFilters.length > 0) {
       listPipeline.push({ $match: { $or: orFilters } });
     }
-
+    const listSortStage = Number(edit) === 1 ? { _id: 1 } : { updatedAt: -1 };
     listPipeline.push(
       {
         $project: {
@@ -3424,6 +2221,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
           mediaName: 1,
           landOwners: 1,
           appraisal: 1,
+          frontView: 1,
           mediaType: 1,
           city: 1,
           state: 1,
@@ -3443,7 +2241,8 @@ exports.getRentalDueListWithStats = async (req, res) => {
       {
         $facet: {
           data: [
-            { $sort: { updatedAt: -1 } },
+            // { $sort: { updatedAt: -1 } },
+            { $sort: listSortStage },
             { $skip: skip },
             { $limit: pageSize },
           ],
@@ -3463,75 +2262,73 @@ exports.getRentalDueListWithStats = async (req, res) => {
       return !Number.isNaN(t1) && !Number.isNaN(t2) && t1 === t2;
     };
 
-    const buildVerificationProgress = (item, targetCycleDate) => {
-      const historyForMonth = (item.verificationProgressHistory || []).filter(
-        (v) => {
-          if (!v.cycle || !targetCycleDate) return false;
-          return (
-            new Date(v.cycle).getTime() === new Date(targetCycleDate).getTime()
-          );
-        },
-      );
+    
+const buildVerificationProgress = (item, targetCycleDate) => {
+  const targetCycleStr = getCurrentCycle(targetCycleDate);
 
-      if (historyForMonth.length > 0) {
-        const latest = historyForMonth[historyForMonth.length - 1];
-        return {
-          currentCycle: latest.currentCycleLabel,
-          staffVerified: latest.staffVerified,
-          teamLeadVerified: latest.teamLeadVerified,
-          ownerVerified: latest.ownerVerified,
-          verifiedCount: latest.verifiedCount,
-          isComplete: latest.isComplete,
-          highestVerifiedRole: latest.highestVerifiedRole,
-        };
-      }
+  const historyForMonth = (item.verificationProgressHistory || []).filter(
+    (v) => {
+      if (!v.cycle || !targetCycleStr) return false;
+      return getCurrentCycle(v.cycle) === targetCycleStr;
+    },
+  );
 
-      const cycleVerifications = (item.agreementDocVerification || []).filter(
-        (h) => {
-          if (!h.isVerified || !h.cycle || !targetCycleDate) return false;
-          return (
-            new Date(h.cycle).getTime() === new Date(targetCycleDate).getTime()
-          );
-        },
-      );
-
-      const staffVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.STAFF,
-      );
-      const teamLeadVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
-      );
-      const ownerVerified = cycleVerifications.some(
-        (h) => h.verifiedByRole === ROLE.OWNER,
-      );
-
-      const highestVerifiedRole = ownerVerified
-        ? ROLE.OWNER
-        : teamLeadVerified
-          ? ROLE.TEAM_LEAD
-          : staffVerified
-            ? ROLE.STAFF
-            : null;
-
-      const verifiedCount = [
-        staffVerified,
-        teamLeadVerified,
-        ownerVerified,
-      ].filter(Boolean).length;
-
-      const cycleString = getCurrentCycle(targetCycleDate);
-
-      return {
-        currentCycle: formatDate(cycleString),
-        staffVerified,
-        teamLeadVerified,
-        ownerVerified,
-        verifiedCount,
-        isComplete: verifiedCount >= 2,
-        highestVerifiedRole,
-      };
+  if (historyForMonth.length > 0) {
+    const latest = historyForMonth[historyForMonth.length - 1];
+    return {
+      currentCycle: latest.currentCycleLabel,
+      staffVerified: latest.staffVerified,
+      teamLeadVerified: latest.teamLeadVerified,
+      ownerVerified: latest.ownerVerified,
+      verifiedCount: latest.verifiedCount,
+      isComplete: latest.isComplete,
+      highestVerifiedRole: latest.highestVerifiedRole,
     };
+  }
 
+  const cycleVerifications = (item.agreementDocVerification || []).filter(
+    (h) => {
+      if (!h.isVerified || !h.cycle || !targetCycleStr) return false;
+      return getCurrentCycle(h.cycle) === targetCycleStr;
+    },
+  );
+
+  const staffVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.STAFF,
+  );
+  const teamLeadVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.TEAM_LEAD,
+  );
+  const ownerVerified = cycleVerifications.some(
+    (h) => h.verifiedByRole === ROLE.OWNER,
+  );
+
+  const highestVerifiedRole = ownerVerified
+    ? ROLE.OWNER
+    : teamLeadVerified
+      ? ROLE.TEAM_LEAD
+      : staffVerified
+        ? ROLE.STAFF
+        : null;
+
+  const verifiedCount = [
+    staffVerified,
+    teamLeadVerified,
+    ownerVerified,
+  ].filter(Boolean).length;
+
+  const cycleString = getCurrentCycle(targetCycleDate);
+
+  return {
+    currentCycle: formatDate(cycleString),
+    staffVerified,
+    teamLeadVerified,
+    ownerVerified,
+    verifiedCount,
+    isComplete: verifiedCount >= 2,
+    highestVerifiedRole,
+  };
+};
     const enriched = data.map((item) => {
       // Determine if we should show past entries or current entries for this item
       const isActuallyPastPending =
@@ -3542,7 +2339,20 @@ exports.getRentalDueListWithStats = async (req, res) => {
         Number(isPastPending) === 1 && isActuallyPastPending;
       const targetCycleDate = usePastDetails
         ? item.rentalPayment.nextBillingDate
-        : monthStart;
+        : (() => {
+    const monthlyEntry = (item.rentalDue || []).find((e) => {
+      if (!e.dueDate) return false;
+      const d = new Date(e.dueDate);
+      return d >= monthStart && d <= monthEnd;
+    });
+    if (monthlyEntry) return monthlyEntry.dueDate;
+    if (item.rentalPayment?.nextBillingDate) {
+      const nbd = new Date(item.rentalPayment.nextBillingDate);
+      if (nbd >= monthStart && nbd <= monthEnd)
+        return item.rentalPayment.nextBillingDate;
+    }
+    return monthStart;
+  })();
 
       const filteredRentalDueEntries = (item.rentalDue || []).filter(
         (entry) => {
@@ -3586,6 +2396,7 @@ exports.getRentalDueListWithStats = async (req, res) => {
         gstAmount: item.rentalPayment?.gstAmount || 0,
         landOwners: item.landOwners,
         appraisal: item.appraisal,
+        frontView: item.frontView,
         paymentFrequency: item.rentalPayment?.paymentFrequency,
         customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
         paymentFrequencyLabel:

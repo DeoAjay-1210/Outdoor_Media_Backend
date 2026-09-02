@@ -6,6 +6,33 @@ const {
   gstBalanceSchema,
   agreementDocVerificationSchema,
 } = require("./RentalDueModel");
+const IST_OFFSET_MS = 330 * 60000; // 5h30m
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
+const toDateOnly = (input) => {
+  const d = new Date(input);
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+  );
+};
+
+const dayKey = (input) => toDateOnly(input).getTime();
+const monthKey = (input) => {
+  const d = toDateOnly(input);
+  return d.getUTCFullYear() * 12 + d.getUTCMonth();
+};
+const thisMonthKey = () => monthKey(nowIST());
+
+const computeAppraisalAmount = (entry, previousRent) => {
+  if (Number(entry.type) === 1) {
+    return Math.floor((previousRent * Number(entry.percentage || 0)) / 100);
+  }
+  if (Number(entry.type) === 2) {
+    return Math.floor(Number(entry.fixedAmount || 0));
+  }
+  return 0;
+};
+
 const rentalAmountHistorySchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0 },
@@ -96,7 +123,7 @@ const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
     newRent: { type: Number, default: 0 },
     frequency: {
       type: Number,
-      enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
+      enum: [1, 2, 3, 4], // 1=1y 2=2Year 3=3Y 4=Custom
     },
     customFrequencyMonths: {
       type: Number,
@@ -143,16 +170,17 @@ const agreementHistorySchema = new mongoose.Schema({
       default: 0,
       min: 0,
     },
+
     paymentFrequency: {
       type: Number,
-      enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+      enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
       required: true,
     },
     customPaymentFrequency: {
       type: Number,
       min: 1,
       required: function () {
-        return this.paymentFrequency === 7;
+        return this.paymentFrequency === 6;
       },
     },
     // ← NEW: who changed totalRentalAmount in this agreement snapshot
@@ -176,7 +204,7 @@ const ledgerSchema = new mongoose.Schema({
     enum: [0, 1], // 0=not Approve 1=Approve
     default: 0,
   },
-  withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
+  withGst: { type: Number, enum: [0, 1, 2], default: 0 }, // 0 Pending 1 withGST 2. withOutGST
   month: {
     type: String,
     trim: true,
@@ -191,6 +219,8 @@ const ledgerSchema = new mongoose.Schema({
   // left null for withGst===1 entries (which live in
   // `media.withGst1Ledger` instead, identified by rentalDueId).
   index: { type: Number, default: null },
+  amount: { type: Number, default: 0, min: 0 },
+  isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -204,7 +234,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     lastBillPaidDate: { type: Date },
     utrNumber: { type: String, trim: true },
     paymentMode: { type: String, enum: ["Cash", "Online"], default: null },
-    withGst: { type: Number, enum: [1, 2], default: null }, // 1 withGST 2. withOutGST
+    withGst: { type: Number, enum: [0, 1, 2], default: 0 }, // 0 Pending 1 withGST 2. withOutGST
     month: {
       type: String,
       trim: true,
@@ -218,8 +248,10 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     // getLedgerHistory / listMediaByLedger can reliably dedupe
     // withGst===2 entries by slot when reading past months.
     index: { type: Number, default: null },
+    amount: { type: Number, default: 0, min: 0 },
+    isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
   },
-  { _id: false },
+  { _id: true },
 );
 
 const ledgerHistoryMonthSchema = new mongoose.Schema(
@@ -283,73 +315,158 @@ const pendingMonthSchema = new mongoose.Schema(
   },
   { _id: false },
 );
+const gstOutstandingHistorySchema = new mongoose.Schema({
+  dueMonth: {
+    type: String, // Format: "MMM YYYY" e.g., "May 2026"
+    required: true,
+  },
+  gstOutStandingAmount: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  updatedAt: {
+    type: Date,
+    default: null,
+  },
+  updatedBy: {
+    type: String,
+    default: "",
+  },
+  paymentMode: {
+    type: String,
+    enum: ["Cash", "Online", "Cash+Online", null],
+    default: null,
+  },
+  utrNumber: { type: String, trim: true, default: null },
+  date: { type: Date, default: null },
+  isPaid: { type: Boolean, default: false },
+  // populated only when paymentMode === "Cash+Online"
+  paymentBreakup: [
+    {
+      paymentMode: { type: String, enum: ["Cash", "Online"] },
+      amount: { type: Number, default: 0 },
+      utrNumber: { type: String, default: null },
+      date: { type: Date, default: null },
+    },
+  ],
+});
+const rentalOutstandingHistorySchema = new mongoose.Schema({
+  dueMonth: {
+    type: String, // Format: "MMM YYYY" e.g., "June 2026"
+    required: true,
+  },
+  baseRentOutstandingAmount: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  withGst: { type: Number, enum: [0, 1, 2], default: 0 }, // 0 Pending 1 withGST 2. withOutGST
+
+  paymentMode: {
+    type: String,
+    enum: ["Cash", "Online", "Cash+Online", null],
+    default: null,
+  },
+  utrNumber: { type: String, trim: true, default: null },
+  date: { type: Date, default: null },
+  isPaid: { type: Boolean, default: false },
+  paymentBreakup: [
+    {
+      paymentMode: { type: String, enum: ["Cash", "Online"] },
+      amount: { type: Number, default: 0 },
+      utrNumber: { type: String, default: null },
+      date: { type: Date, default: null },
+    },
+  ],
+  updatedAt: {
+    type: Date,
+    default: null,
+  },
+  updatedBy: {
+    type: String,
+    default: "",
+  },
+});
 // ─────────────────────────────────────────────────────────────
 // MAIN SCHEMA
 // ─────────────────────────────────────────────────────────────
 const MediaSchema = new mongoose.Schema(
   {
-    // mediaId: {
-    //   type: String,
-    //   unique: true,
-    //   sparse: true,
-    // },
-    mediaCode: {
+    siteCode: {
       type: String,
-      required: true,
-    },
-    mediaName: {
-      type: String,
-      required: true,
       trim: true,
     },
-    mediaType: {
-      type: String,
-      required: true,
-    },
-    state: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    city: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    location: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    // fullAddress: {
-    //   type: String,
-    //   required: true,
-    //   trim: true,
-    // },
-    width: {
+    excelRowNumber: {
       type: Number,
-      required: true,
-      min: 0,
     },
-    height: {
-      type: Number,
-      required: true,
-      min: 0,
-    },
-    totalSqFt: {
-      type: Number,
-      min: 0,
-    },
-    status: {
-      type: Number,
-      enum: [1, 2, 3], // 1=Active 2=InActive 3=Hold
-      default: 1,
-    },
+    mediaDetails: [
+      {
+        mediaCode: {
+          type: String,
+          required: true,
+        },
+        mediaName: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        mediaType: {
+          type: String,
+          required: true,
+        },
+        state: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        city: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        location: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        width: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+        height: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+        totalSqFt: {
+          type: Number,
+          min: 0,
+        },
+        status: {
+          type: Number,
+          enum: [1, 2, 3], // 1=Active 2=InActive 3=Hold
+          default: 2,
+        },
+        siteBillMode: {
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
+      },
+    ],
     numberOfLandOwners: {
       type: Number,
       min: 1,
     },
-
+    landOwnerMasterIds: [
+      // ← ADD THIS
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "LandOwnerMaster",
+      },
+    ],
     // ─────────────────────────────────────────────────────────
     // RENTAL PAYMENT
     // ─────────────────────────────────────────────────────────
@@ -379,29 +496,42 @@ const MediaSchema = new mongoose.Schema(
         type: Number,
         default: 0,
       },
+
+      outStantStatus: {
+        // ← ADDED
+        type: Number,
+        enum: [0, 1], // 0 no 1 yes
+        default: 0,
+      },
+      gstOutstandingHistory: [gstOutstandingHistorySchema],
+      rentalOutstandingHistory: [rentalOutstandingHistorySchema],
       totalRentalAmountWithGst: {
         type: Number,
         default: 0,
       },
       paymentFrequency: {
         type: Number,
-        enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+        enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
         required: true,
       },
       customPaymentFrequency: {
         type: Number,
         min: 1,
         required: function () {
-          return this.paymentFrequency === 7;
+          return this.paymentFrequency === 6;
         },
       },
       lastBillPaidDate: {
         type: Date,
         required: true,
       },
+      previousBillGenerateDate: {
+        type: Date,
+      },
       nextBillingDate: {
         type: Date,
       },
+      billingStartDate: { type: Date, default: null },
       // tdsApplicable: {
       //   type: Number,
       //   enum: [0, 1],
@@ -440,6 +570,13 @@ const MediaSchema = new mongoose.Schema(
     // ─────────────────────────────────────────────────────────
     landOwners: [
       {
+        landOwnerMasterId: {
+          // ← ADD THIS
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "LandOwnerMaster",
+          default: null,
+        },
+
         name: { type: String, trim: true },
         phone: { type: String, trim: true },
         bankName: { type: String, trim: true },
@@ -447,10 +584,29 @@ const MediaSchema = new mongoose.Schema(
         accountNumber: { type: String, trim: true },
         upiId: { type: String, trim: true },
         panNumber: { type: String, trim: true, uppercase: true },
+        aadharCardNumber: { type: String, trim: true },
+
         paymentCategory: {
           type: Number,
           enum: [1, 2, 3], // 1 cash, 2 online 3 cash + online
           required: true,
+        },
+        eligibleMode: {
+          // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = Cash, 2 = Online
+          default: null,
+        },
+        landOwnerBillMode: {
+          // ← ADDED
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
+        },
+           agreementBillMode: {
+          type: Number,
+          enum: [1, 2], // 1 = single, 2 = seperate
+          default: null,
         },
         typeShare: {
           type: Number,
@@ -470,6 +626,15 @@ const MediaSchema = new mongoose.Schema(
           enum: [1, 2, 3], // 1=Bank Transfer  2=UPI  3=Cheque
         },
         panCardImage: {
+          originalName: { type: String },
+          fileName: { type: String },
+          filePath: { type: String },
+          mimeType: { type: String },
+          size: { type: Number },
+          fileType: { type: String, enum: ["image"], default: "image" },
+          uploadedAt: { type: Date, default: null },
+        },
+        aadharCardImage: {
           originalName: { type: String },
           fileName: { type: String },
           filePath: { type: String },
@@ -527,6 +692,7 @@ const MediaSchema = new mongoose.Schema(
           enum: [0, 1], // 0 no  1 yes
           default: 0,
         },
+
         gstPercentage: {
           type: Number,
           min: 0,
@@ -553,6 +719,49 @@ const MediaSchema = new mongoose.Schema(
           default: 0,
         },
         netPayable: { type: Number, min: 0, default: 0 },
+        linkedMediaCount: { type: Number, default: 0, min: 0 },
+
+        // ✅ NEW — ONE landowner can be attached to MANY Media
+        // properties, each with its OWN paymentCategory/amounts (e.g.
+        // Site A = Cash only, Site B = Online only, Site C = Cash+Online).
+        // One entry per linked Media property, upserted (by mediaId) every
+        // time that property's owner data is saved from the Media side.
+        // This is what powers "which site, which landowner, how many
+        // sites, cash or online per site" reporting.
+        linkedSites: [
+          {
+            mediaId: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: "MediaOnboarding",
+            },
+            mediaCode: { type: String, trim: true },
+            mediaName: { type: String, trim: true },
+            siteBillMode: {
+              // ← ADDED
+              type: Number,
+              enum: [1, 2], // 1 = single, 2 = seperate
+              default: null,
+            },
+            // 1=Cash  2=Online  3=Cash+Online — SAME meaning as
+            // MediaSchema.landOwners[].paymentCategory, but scoped to
+            // just this one site, independent of every other site.
+            paymentCategory: { type: Number, enum: [1, 2, 3] },
+            shareAmount: { type: Number, default: 0, min: 0 },
+            cashAmount: { type: Number, default: 0, min: 0 },
+            onlineAmount: { type: Number, default: 0, min: 0 },
+            tdsApplicable: { type: Number, enum: [0, 1], default: 0 },
+            tdsPercentage: { type: Number, min: 0, max: 100, default: 0 },
+            tdsAmount: { type: Number, min: 0, default: 0 },
+
+            // ✅ NEW — GST is per-site now, same reasoning as TDS above.
+            // gstAmount already existed; adding the applicable/percentage
+            // flags so the UI can show "why" this site has a GST amount.
+            gstApplicable: { type: Number, enum: [0, 1], default: 0 },
+            gstPercentage: { type: Number, min: 0, default: 0 },
+            gstAmount: { type: Number, default: 0, min: 0 },
+            updatedAt: { type: Date, default: null },
+          },
+        ],
       },
     ],
 
@@ -573,8 +782,8 @@ const MediaSchema = new mongoose.Schema(
       },
       status: {
         type: Number,
-        enum: [1, 2, 3], // 1=Active 2=Expire Soon 3=Expired
-        default: 1,
+        enum: [0,1, 2, 3], // 1=Active 2=Expire Soon 3=Expired
+        default: 0,
       },
       reason: { type: String, trim: true },
       agreementPDF: {
@@ -598,14 +807,14 @@ const MediaSchema = new mongoose.Schema(
         },
         paymentFrequency: {
           type: Number,
-          enum: [1, 2, 3, 4, 5, 6, 7], // 1=Monthly 2=2M 3=3M 4=6M 5=1Y 6=2Y
+          enum: [1, 2, 3, 4, 5, 6], // 1=Monthly 2=Quarterly 3=Half-Yearly 4=Yearly 5=2Y 6=Custom
           required: true,
         },
         customPaymentFrequency: {
           type: Number,
           min: 1,
           required: function () {
-            return this.paymentFrequency === 7;
+            return this.paymentFrequency === 6;
           },
         },
         updatedBy: { type: String },
@@ -638,7 +847,7 @@ const MediaSchema = new mongoose.Schema(
       },
       frequency: {
         type: Number,
-        enum: [1, 2, 3, 4], // 1=6M 2=Yearly 3=2Y 4=Custom
+        enum: [1, 2, 3, 4], // 1=1y 2=2Year 3=3Y 4=Custom
       },
       customFrequencyMonths: {
         type: Number,
@@ -673,24 +882,33 @@ const MediaSchema = new mongoose.Schema(
       fileType: { type: String, enum: ["image"], default: "image" },
       uploadedAt: { type: Date, default: null },
     },
-    sideView: {
-      originalName: { type: String },
-      fileName: { type: String },
-      filePath: { type: String },
-      mimeType: { type: String },
-      size: { type: Number },
-      fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: null },
-    },
-    locationView: {
-      originalName: { type: String },
-      fileName: { type: String },
-      filePath: { type: String },
-      mimeType: { type: String },
-      size: { type: Number },
-      fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: null },
-    },
+    previousLedger: {
+        originalName: { type: String },
+        fileName: { type: String },
+        filePath: { type: String },
+        mimeType: { type: String },
+        size: { type: Number },
+        fileType: { type: String, enum: ["pdf"], default: "pdf" },
+        uploadedAt: { type: Date, default: null },
+      },
+    // sideView: {
+    //   originalName: { type: String },
+    //   fileName: { type: String },
+    //   filePath: { type: String },
+    //   mimeType: { type: String },
+    //   size: { type: Number },
+    //   fileType: { type: String, enum: ["image"], default: "image" },
+    //   uploadedAt: { type: Date, default: null },
+    // },
+    // locationView: {
+    //   originalName: { type: String },
+    //   fileName: { type: String },
+    //   filePath: { type: String },
+    //   mimeType: { type: String },
+    //   size: { type: Number },
+    //   fileType: { type: String, enum: ["image"], default: "image" },
+    //   uploadedAt: { type: Date, default: null },
+    // },
     additionalImages: {
       originalName: { type: String },
       fileName: { type: String },
@@ -719,20 +937,40 @@ const MediaSchema = new mongoose.Schema(
       enum: [0, 1, 2], // 0 = not set yet (default) | 1 = rentalPayment.gstApplicable is authoritative | 2 = landOwners[].gstApplicable is authoritative
       default: 0,
     },
+    pastgstApplicableFlag: {
+      type: Number,
+      default: 0,
+    },
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],
+    createdAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
   },
-  { timestamps: true },
+  { timestamps: false, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );
+
+// ✅ NEW: Alias for backward compatibility with controllers expecting rentalDueEntries
+MediaSchema.virtual("rentalDueEntries").get(function () {
+  return this.rentalDue || [];
+});
 
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 1 — Total Sq Ft
 // ─────────────────────────────────────────────────────────────
-MediaSchema.pre("save", function () {
-  this.totalSqFt = this.width * this.height;
+MediaSchema.post("init", function (doc) {
+  if (doc.rentalPayment) {
+    doc._originalLastBillPaidDate = doc.rentalPayment.lastBillPaidDate;
+  }
 });
 
+MediaSchema.pre("save", function () {
+  if (Array.isArray(this.mediaDetails)) {
+    this.mediaDetails.forEach((detail) => {
+      detail.totalSqFt = (detail.width || 0) * (detail.height || 0);
+    });
+  }
+});
 
 // ─────────────────────────────────────────────────────────────
 // PRE-SAVE 3 — Next Billing Date
@@ -747,7 +985,7 @@ MediaSchema.pre("save", function () {
 //   rp.gstPercentage = rentalGstApplicable === 1 ? envGstPct : 0;
 //   rp.gstAmount =
 //     rentalGstApplicable === 1
-//       ? Math.round((totalRentalAmount * envGstPct) / 100)
+//       ? Math.floor((totalRentalAmount * envGstPct) / 100)
 //       : 0;
 //   rp.totalRentalAmountWithGst = totalRentalAmount + rp.gstAmount;
 
@@ -774,7 +1012,7 @@ MediaSchema.pre("save", function () {
 
 //     if (Number(owner.typeShare) === 1) {
 //       const sharePercentage = Number(owner.sharePercentage || 0);
-//       resolvedShareAmount = Math.round(
+//       resolvedShareAmount = Math.floor(
 //         (totalRentalAmount * sharePercentage) / 100,
 //       );
 //     } else {
@@ -804,7 +1042,7 @@ MediaSchema.pre("save", function () {
 
 //     const tdsAmount =
 //       tdsApplicable === 1 && tdsPercentage > 0
-//         ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
+//         ? Math.floor((tdsBaseAmount * tdsPercentage) / 100)
 //         : 0;
 //     owner.tdsAmount = tdsAmount;
 
@@ -833,7 +1071,7 @@ MediaSchema.pre("save", function () {
 
 //     const ownerGstAmount =
 //       ownerGstApplicable === 1 && gstBaseAmount > 0
-//         ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+//         ? Math.floor((gstBaseAmount * ownerGstPct) / 100)
 //         : 0;
 
 //     owner.gstPercentage =
@@ -901,6 +1139,78 @@ MediaSchema.pre("save", function () {
 // });
 MediaSchema.pre("save", function () {
   const rp = this.rentalPayment;
+  const appraisal = this.appraisal;
+
+  // ✅ AUTO-APPLY APPRAISAL — If an appraisal is due based on the current month,
+  // apply it to totalRentalAmount before proceeding with financial calculations.
+  if (
+    rp &&
+    appraisal &&
+    Number(appraisal.applicable) === 1 &&
+    Number(appraisal.appraisalHold) !== 1 &&
+    Array.isArray(appraisal.history) &&
+    appraisal.history.length > 0
+  ) {
+    const currentMonth = thisMonthKey();
+    const dueEntries = appraisal.history
+      .filter(
+        (h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth,
+      )
+      .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
+
+    if (dueEntries.length > 0) {
+      const latestDue = dueEntries[0];
+      const appraisedRent = Number(latestDue.newRent || 0);
+
+      if (appraisedRent > 0 && appraisedRent !== rp.totalRentalAmount) {
+        const oldRent = rp.totalRentalAmount;
+        rp.totalRentalAmount = appraisedRent;
+
+        // ✅ Proportional scaling for fixed-amount owners and cash/online splits
+        if (oldRent > 0 && Array.isArray(this.landOwners)) {
+          const ratio = appraisedRent / oldRent;
+          this.landOwners.forEach((owner) => {
+            // Scale fixed-amount shares proportionally
+            if (Number(owner.typeShare) === 2) {
+              owner.shareAmount = Math.floor(
+                Number(owner.shareAmount || 0) * ratio,
+              );
+            }
+
+            const cat = Number(owner.paymentCategory);
+            if (cat === 1) {
+              owner.cashAmount = Math.floor(
+                Number(owner.cashAmount || 0) * ratio,
+              );
+              owner.onlineAmount = 0;
+            } else if (cat === 2) {
+              owner.onlineAmount = Math.floor(
+                Number(owner.onlineAmount || 0) * ratio,
+              );
+              owner.cashAmount = 0;
+            } else if (cat === 3) {
+              owner.cashAmount = Math.floor(
+                Number(owner.cashAmount || 0) * ratio,
+              );
+              owner.onlineAmount = Math.floor(
+                Number(owner.onlineAmount || 0) * ratio,
+              );
+            }
+          });
+        }
+
+        // Record in rentalAmountHistory
+        if (!rp.rentalAmountHistory) rp.rentalAmountHistory = [];
+        rp.rentalAmountHistory.push({
+          amount: appraisedRent,
+          updatedBy: `System (Appraisal applied - ${toDateOnly(latestDue.appraisalDate).toISOString().split("T")[0]})`,
+          updatedAt: nowIST(),
+        });
+        rp.rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
+      }
+    }
+  }
+
   const totalRentalAmount = Number(rp.totalRentalAmount || 0);
   const rentalGstApplicable = Number(rp.gstApplicable || 0);
   const envGstPct = parseFloat(process.env.GST_PERCENTAGE || "18");
@@ -909,12 +1219,12 @@ MediaSchema.pre("save", function () {
   rp.gstPercentage = rentalGstApplicable === 1 ? envGstPct : 0;
   rp.gstAmount =
     rentalGstApplicable === 1
-      ? Math.round((totalRentalAmount * envGstPct) / 100)
+      ? Math.floor((totalRentalAmount * envGstPct) / 100)
       : 0;
   rp.totalRentalAmountWithGst = totalRentalAmount + rp.gstAmount;
 
   if (!this.landOwners || !this.landOwners.length) {
-    rp.netPayable = totalRentalAmount;
+    rp.netPayable = totalRentalAmount + rp.gstAmount;
     return;
   }
 
@@ -923,7 +1233,7 @@ MediaSchema.pre("save", function () {
 
     if (Number(owner.typeShare) === 1) {
       const sharePercentage = Number(owner.sharePercentage || 0);
-      resolvedShareAmount = Math.round(
+      resolvedShareAmount = Math.floor(
         (totalRentalAmount * sharePercentage) / 100,
       );
     } else {
@@ -931,7 +1241,27 @@ MediaSchema.pre("save", function () {
     }
 
     owner.shareAmount = resolvedShareAmount;
+
+    // ✅ AUTO-TDS — If total rental amount is 50,000 or above,
+    // automatically force tdsApplicable to 1 for every land owner.
+    if (totalRentalAmount >= 50000) {
+      owner.tdsApplicable = 1;
+    }
+
     const paymentCategory = Number(owner.paymentCategory || 1);
+
+    // ✅ FIXED — ensure onlineAmount and cashAmount are synced for
+    // Online-only (2) and Cash-only (1) owners. For category 3, they
+    // must be handled by the controller's scaling logic since the
+    // split is manual.
+    if (paymentCategory === 1) {
+      owner.cashAmount = resolvedShareAmount;
+      owner.onlineAmount = 0;
+    } else if (paymentCategory === 2) {
+      owner.cashAmount = 0;
+      owner.onlineAmount = resolvedShareAmount;
+    }
+
     let tdsBaseAmount = 0;
 
     if (paymentCategory === 1) {
@@ -947,13 +1277,13 @@ MediaSchema.pre("save", function () {
       tdsApplicable === 1
         ? envTdsPercent > 0
           ? envTdsPercent
-          : Number(owner.tdsPercentage || 0)
+          : Number(owner.tdsPercentage || 10)
         : 0;
     owner.tdsPercentage = tdsPercentage;
 
     const tdsAmount =
       tdsApplicable === 1 && tdsPercentage > 0
-        ? Math.round((tdsBaseAmount * tdsPercentage) / 100)
+        ? Math.floor((tdsBaseAmount * tdsPercentage) / 100)
         : 0;
     owner.tdsAmount = tdsAmount;
 
@@ -979,7 +1309,7 @@ MediaSchema.pre("save", function () {
 
     const ownerGstAmount =
       ownerGstApplicable === 1 && gstBaseAmount > 0
-        ? Math.round((gstBaseAmount * ownerGstPct) / 100)
+        ? Math.floor((gstBaseAmount * ownerGstPct) / 100)
         : 0;
 
     owner.gstPercentage =
@@ -1000,8 +1330,14 @@ MediaSchema.pre("save", function () {
     0,
   );
 
-    const effectiveGstAmount =
-    rentalGstApplicable === 1 ? rp.gstAmount : totalGstAcrossOwners;
+  // ✅ FIXED — was choosing EITHER rp.gstAmount (rentalPayment-level GST)
+  // OR totalGstAcrossOwners (landOwner-level GST), never both. Here
+  // rentalPayment.gstApplicable is 0 (rp.gstAmount is correctly 0), but
+  // the landOwner has gstApplicable:1 / gstAmount:9000 — that amount was
+  // being dropped from netPayable entirely. Now both are summed:
+  // rp.gstAmount is 0 when rentalGstApplicable isn't 1, so this simply
+  // adds whatever GST actually exists on either side.
+  const effectiveGstAmount = Number(rp.gstAmount || 0) + totalGstAcrossOwners;
 
   rp.netPayable = totalRentalAmount + effectiveGstAmount;
 
@@ -1063,15 +1399,57 @@ MediaSchema.pre("save", function () {
   if (isNewDoc && billingDateProvided) return;
 
   if (rp.lastBillPaidDate && rp.paymentFrequency) {
-    const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+    const frequencyMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
     const monthsToAdd =
-      Number(rp.paymentFrequency) === 7
+      Number(rp.paymentFrequency) === 6
         ? Number(rp.customPaymentFrequency) || 1
         : frequencyMap[Number(rp.paymentFrequency)] || 1;
 
+    // ✅ FIXED: Unconditionally ensure previousBillGenerateDate is consistent
+    // with lastBillPaidDate. If it's missing or inconsistent (not exactly 1 cycle back),
+    // we recalculate it.
+    const expectedPrevDate = new Date(rp.lastBillPaidDate);
+    expectedPrevDate.setMonth(expectedPrevDate.getUTCMonth() - monthsToAdd);
+
+    // ✅ CLAMP — don't go before billingStartDate (onboarding anchor)
+    const anchor = rp.billingStartDate || rp.lastBillPaidDate;
+    if (expectedPrevDate < new Date(anchor)) {
+      rp.previousBillGenerateDate = anchor;
+    } else {
+      rp.previousBillGenerateDate = expectedPrevDate;
+    }
+
+    // ✅ Unconditionally ensure nextBillingDate is also consistent
     const nextDate = new Date(rp.lastBillPaidDate);
-    nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
+    nextDate.setMonth(nextDate.getUTCMonth() + monthsToAdd);
     rp.nextBillingDate = nextDate;
+
+    // ✅ NEW: Sync rentalDue entry if lastBillPaidDate was modified
+    if (!this.isNew && this.isModified("rentalPayment.lastBillPaidDate")) {
+      const newLBP = new Date(rp.lastBillPaidDate);
+      const monthNames = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+      ];
+      const dueMonthLabel = `${monthNames[newLBP.getMonth()]} ${newLBP.getFullYear()}`;
+
+      const matchingDue = (this.rentalDue || []).find(
+        (d) => d.dueMonth === dueMonthLabel,
+      );
+      if (matchingDue) {
+        matchingDue.dueDate = newLBP;
+      }
+    }
   }
 });
 // ─────────────────────────────────────────────────────────────
@@ -1121,5 +1499,155 @@ MediaSchema.pre("save", function () {
     this.rentalPayment.status = 1;
   }
 });
+MediaSchema.pre("save", function () {
+  if (
+    this.isNew &&
+    this.rentalPayment &&
+    !this.rentalPayment.billingStartDate
+  ) {
+    this.rentalPayment.billingStartDate = this.rentalPayment.lastBillPaidDate;
+  }
+});
+// ✅ NEW — advances lastBillPaidDate/nextBillingDate for REAL, based on
+// billingStartDate + paymentFrequency, whenever today's date has moved
+// past what's currently stored. Run this on a schedule (see cron example
+// below) — it's idempotent, safe to run as often as you like, and only
+// writes when a real advance is due.
+const CYCLE_MONTHS_BY_FREQUENCY = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
 
+function addMonthsUTC(date, months) {
+  const d = new Date(date);
+  const originalDay = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+  // Handle month-end overflow (e.g., Jan 31 + 1 month -> March 3)
+  if (d.getUTCDate() !== originalDay) {
+    d.setUTCDate(0);
+  }
+  return d;
+}
+
+MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
+  const activeSites = await this.find({
+    status: 1,
+    "rentalPayment.billingStartDate": { $ne: null },
+  }).select("rentalPayment mediaName landOwners updatedAt");
+
+  let updatedCount = 0;
+  const debugLog = [];
+
+  // ✅ FIXED — compare by CALENDAR MONTH, not exact date. Previously
+  // required the exact billing day (e.g. the 12th) to have passed before
+  // advancing, so "August 7" didn't count as August yet. Everywhere else
+  // in the system (getAllDueCycles, List/History) treats a new calendar
+  // month as the new cycle immediately on the 1st — this now matches
+  // that, while still PRESERVING the original day-of-month for the
+  // resulting stored date (still the 12th, just in the right month).
+  const asOfMonthKey = `${asOfDate.getUTCFullYear()}-${asOfDate.getUTCMonth()}`;
+
+  for (const media of activeSites) {
+    const {
+      billingStartDate,
+      paymentFrequency,
+      customPaymentFrequency,
+      lastBillPaidDate,
+    } = media.rentalPayment || {};
+
+    if (!billingStartDate || !lastBillPaidDate) {
+      debugLog.push({
+        mediaName: media.mediaName,
+        skipped: "missing billingStartDate or lastBillPaidDate",
+      });
+      continue;
+    }
+
+    const cycleMonths =
+      paymentFrequency === 6
+        ? Number(customPaymentFrequency) || 1
+        : CYCLE_MONTHS_BY_FREQUENCY[paymentFrequency] || 1;
+
+    let cursor = new Date(lastBillPaidDate);
+    let previousCursor = new Date(lastBillPaidDate);
+    let advanced = false;
+    let guard = 0;
+
+    while (guard < 240) {
+      const nextCycle = addMonthsUTC(cursor, cycleMonths);
+      const nextCycleMonthKey = `${nextCycle.getUTCFullYear()}-${nextCycle.getUTCMonth()}`;
+      // ✅ CHANGED — advance if the NEXT cycle's month has already
+      // started (its month <= asOfDate's month), not requiring the exact
+      // day to have passed.
+      const nextCycleMonthStarted =
+        nextCycle.getUTCFullYear() < asOfDate.getUTCFullYear() ||
+        (nextCycle.getUTCFullYear() === asOfDate.getUTCFullYear() &&
+          nextCycle.getUTCMonth() <= asOfDate.getUTCMonth());
+      if (!nextCycleMonthStarted) break;
+      previousCursor = new Date(cursor);
+      cursor = nextCycle;
+      advanced = true;
+      guard++;
+    }
+
+    if (advanced) {
+      media.rentalPayment.previousBillGenerateDate = previousCursor;
+      media.rentalPayment.lastBillPaidDate = cursor;
+      media.rentalPayment.nextBillingDate = addMonthsUTC(cursor, cycleMonths);
+      await media.save({ timestamps: false });
+      updatedCount++;
+      debugLog.push({ mediaName: media.mediaName, advancedTo: cursor });
+    } else {
+      // ✅ NEW — Even if not advanced, check if previousBillGenerateDate is consistent.
+      // If it's more than 1 cycle behind lastBillPaidDate, correct it.
+      const expectedPrevDate = addMonthsUTC(lastBillPaidDate, -cycleMonths);
+      const currentPrevDate = media.rentalPayment.previousBillGenerateDate
+        ? new Date(media.rentalPayment.previousBillGenerateDate)
+        : null;
+
+      let needsSave = false;
+
+      if (currentPrevDate && Math.abs(currentPrevDate - expectedPrevDate) > 86400000) { // more than 1 day diff
+          media.rentalPayment.previousBillGenerateDate = expectedPrevDate;
+          needsSave = true;
+      }
+
+      // ✅ NEW — Also check if an appraisal is due. If so, force a save to trigger the pre-save appraisal hook.
+      const appraisal = media.appraisal;
+      if (
+        appraisal &&
+        Number(appraisal.applicable) === 1 &&
+        Number(appraisal.appraisalHold) !== 1 &&
+        Array.isArray(appraisal.history) &&
+        appraisal.history.length > 0
+      ) {
+        const currentMonth = thisMonthKey();
+        const latestDue = appraisal.history
+          .filter((h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth)
+          .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
+
+        if (latestDue && Number(latestDue.newRent || 0) !== Number(media.rentalPayment?.totalRentalAmount || 0)) {
+          needsSave = true;
+        }
+      }
+
+      if (needsSave) {
+          await media.save({ timestamps: false });
+          updatedCount++;
+          debugLog.push({ mediaName: media.mediaName, corrected: true });
+      } else {
+        debugLog.push({
+          mediaName: media.mediaName,
+          notAdvanced: true,
+          lastBillPaidDate,
+          nextCycleWouldBe: addMonthsUTC(new Date(lastBillPaidDate), cycleMonths),
+        });
+      }
+    }
+  }
+
+  return {
+    checked: activeSites.length,
+    updated: updatedCount,
+    asOfDateUsed: asOfDate,
+    debugLog,
+  };
+};
 module.exports = mongoose.model("MediaOnboarding", MediaSchema);

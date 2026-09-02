@@ -1,6 +1,7 @@
 // routes/mediaRoutes.js
 const express = require("express");
 const multer = require("multer");
+const path = require("path");
 const router = express.Router();
 const {
   mediaOnboarding,
@@ -8,6 +9,7 @@ const {
   uploadExcel,
   updateAgreement,
   getMediaById,
+  syncBillingCyclesNow,
 } = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -15,11 +17,14 @@ const protect = require("../../../middleware/authMiddleware");
 const { upload, processFile } = createUploader("mediaImages", {
   "agreement[agreementPDF]": "agreementPDF",
   frontView: "mediaImages", // Save in mediaImages folder
-  sideView: "mediaImages",
-  locationView: "mediaImages",
+  // sideView: "mediaImages",
+  // locationView: "mediaImages",
+  previousLedger: "previousLedger", // Save in previousLedger folder
   additionalImages: "mediaImages",
   bankPassbook: "mediaImages",
   cancelCheckLeaf: "mediaImages",
+  panCardImage: "mediaImages",
+  aadharCardImage: "mediaImages",
 });
 // Only TWO routes
 router.post(
@@ -43,6 +48,7 @@ router.post(
 );
 
 router.post("/media-list", protect, mediaList);
+router.post("/sync-billing-cycles", syncBillingCyclesNow);
 // router.post("/update-agreement",protect, updateAgreement);
 router.post(
   "/update-agreement",
@@ -59,11 +65,14 @@ const uploads = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
   fileFilter: (_req, file, cb) => {
-    const allowed = [
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExts = [".xlsx", ".xls"];
+    const allowedMimeTypes = [
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
       "application/vnd.ms-excel", // .xls
     ];
-    if (allowed.includes(file.mimetype)) {
+
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExts.includes(ext)) {
       cb(null, true);
     } else {
       cb(new Error("Only .xlsx / .xls files are accepted"), false);

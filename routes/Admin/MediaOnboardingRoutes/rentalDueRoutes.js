@@ -10,15 +10,17 @@ const {
   saveRentalDue,
   GstAmountPaid,
   revertAgreementDocVerification,
-  revertRentalApproval
-} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueController");
+  revertRentalApproval,
+  getOverDueHistoryList
+} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
-// Create uploader for rental due campaign proofs
+// Create uploader for rental due campaign proofs and invoices
 const { upload, processFile } = createUploader("rentalDueProofs", {
-  proofOfCampaign: "proofOfCampaign",
+  proofOfCampaign: "rentalDueProofs",
+  invoice: "invoice",
 });
 
 
@@ -29,19 +31,9 @@ const { upload, processFile } = createUploader("rentalDueProofs", {
 // ─────────────────────────────────────────────────────────────
 router.post("/rental-due-list", protect, getRentalDueListWithStats);
 
-
-// router.post(
-//   "/rental-due-save",protect,
-//   upload.single("proofOfCampaign"),
-//   (req, res, next) => {
-//     req.processFile = processFile;
-//     next();
-//   },
-//   ctrl.saveRentalDue,
-// );
 router.post(
   "/rental-due-save", protect,
-  upload.fields([{ name: "proofOfCampaign", maxCount: 1 }]),
+   upload.any(),
   (req, res, next) => {
     req.processFile = processFile;
     next();
@@ -53,6 +45,7 @@ router.post("/verify-agreement", protect, verifyAgreementDoc);
 router.post("/gst-paid",protect, GstAmountPaid);
 router.post("/revert-Agreement",protect, revertAgreementDocVerification);
 router.post("/revert-Approval",protect, revertRentalApproval);
+router.post("/overdue-history-list", protect, getOverDueHistoryList);
 
 
 

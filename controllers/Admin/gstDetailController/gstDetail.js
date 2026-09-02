@@ -244,7 +244,7 @@ const updateGstDetail = async (req, res) => {
         const gstDetail = await GstDetail.findByIdAndUpdate(
             req.params.id,
             updateData,
-            { new: true, runValidators: true }
+            { returnDocument: 'after', runValidators: true }
         );
 
         if (!gstDetail) {

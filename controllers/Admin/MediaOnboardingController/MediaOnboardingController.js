@@ -1,7 +1,16 @@
+
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const path = require("path");
 const XLSX = require("xlsx");
+const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema"); // ✅ ADDED
+
+const mongoose = require("mongoose");
+const {
+  syncOrLinkMediaOwnerToMaster,
+  correctLinkedSiteAmounts,
+} = require("../landOwnerMasterController/landOwnerMasterController");
+const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
 
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
@@ -186,17 +195,7 @@ const validateLandOwnerShares = (
       totalComputedAmount += Math.floor(shareAmount.toFixed(2));
     }
 
-    // ✅ NEW — per-owner TDS validation
-    const tdsApplicable = Number(owner.tdsApplicable);
-    if (tdsApplicable === 1) {
-      const tdsPercentage = Number(owner.tdsPercentage);
-      if (isNaN(tdsPercentage) || tdsPercentage < 0 || tdsPercentage > 100) {
-        return {
-          valid: false,
-          message: `Owner "${owner.name || "Unknown"}": tdsPercentage must be between 0 and 100 when tdsApplicable is 1.`,
-        };
-      }
-    }
+    
   }
 
   if (hasPercentageShare && !hasFixedShare) {
@@ -255,13 +254,23 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
 const toDateOnly = (input) => {
   const d = new Date(input);
+  // Use UTC date parts to construct a UTC date. This prevents the date from
+  // shifting when constructive a midnight-UTC object, regardless of the
+  // server's local time zone.
   return new Date(
     Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
   );
 };
 
 const dayKey = (input) => toDateOnly(input).getTime();
-const todayKey = () => dayKey(new Date());
+const todayKey = () => dayKey(nowIST());
+
+const monthKey = (input) => {
+  const d = toDateOnly(input);
+  return d.getUTCFullYear() * 12 + d.getUTCMonth();
+};
+const thisMonthKey = () => monthKey(nowIST());
+
 const sameDay = (a, b) => dayKey(a) === dayKey(b);
 const isFutureDate = (date) => dayKey(date) > todayKey();
 
@@ -272,15 +281,113 @@ const dateString = (date) => {
   const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 };
+const processGstOutstandingHistory = (rentalPayment, userName) => {
+  if (!rentalPayment) return rentalPayment;
 
-const APPRAISAL_FREQUENCY_MONTHS = { 1: 6, 2: 12, 3: 24 };
+  // If outStandingStatus is 1, manage history
+  if (rentalPayment.outStantStatus === 1) {
+    // ✅ Check if history is provided in request AND has items
+    if (
+      rentalPayment.gstOutstandingHistory &&
+      Array.isArray(rentalPayment.gstOutstandingHistory) &&
+      rentalPayment.gstOutstandingHistory.length > 0
+    ) {
+      // Process each entry - keep existing data
+      rentalPayment.gstOutstandingHistory = rentalPayment.gstOutstandingHistory.map(
+        (item) => ({
+          dueMonth: item.dueMonth,
+          gstOutStandingAmount: item.gstOutStandingAmount || 0,
+          // ✅ Keep existing _id, updatedAt, updatedBy if they exist
+          _id: item._id || new mongoose.Types.ObjectId(),
+          updatedBy: userName,
+          updatedAt: nowIST(),
+        }),
+      );
+
+      // Remove duplicates (keep latest)
+      const uniqueHistory = [];
+      const seenMonths = new Set();
+      for (const item of rentalPayment.gstOutstandingHistory) {
+        if (!seenMonths.has(item.dueMonth)) {
+          seenMonths.add(item.dueMonth);
+          uniqueHistory.push(item);
+        }
+      }
+      rentalPayment.gstOutstandingHistory = uniqueHistory;
+
+      // Calculate total
+      rentalPayment.gstOutStandingAmount = rentalPayment.gstOutstandingHistory.reduce(
+        (sum, item) => sum + (item.gstOutStandingAmount || 0),
+        0,
+      );
+    }
+    // ✅ If history array is empty in request, keep it empty (user intentionally cleared it)
+    else if (
+      rentalPayment.gstOutstandingHistory &&
+      Array.isArray(rentalPayment.gstOutstandingHistory) &&
+      rentalPayment.gstOutstandingHistory.length === 0
+    ) {
+      rentalPayment.gstOutStandingAmount = 0;
+    }
+    // ✅ Auto-generate only if history field is MISSING (undefined) in request AND we have a lastBillPaidDate
+    else if (rentalPayment.lastBillPaidDate) {
+      // Auto-generate from lastBillPaidDate
+      const lastBillDate = new Date(rentalPayment.lastBillPaidDate);
+      const currentDate = nowIST();
+
+      const monthsDiff =
+        (currentDate.getFullYear() - lastBillDate.getFullYear()) * 12 +
+        (currentDate.getMonth() - lastBillDate.getMonth());
+
+      // Start from i=1 to skip the month of lastBillPaidDate, as it's already paid.
+      // This ensures "cannot create against" the paid month.
+      if (monthsDiff >= 1) {
+        const gstAmount =
+          rentalPayment.gstAmount ||
+          (rentalPayment.totalRentalAmount * rentalPayment.gstPercentage) / 100;
+
+        rentalPayment.gstOutstandingHistory = [];
+        for (let i = 1; i <= monthsDiff; i++) {
+          const date = new Date(lastBillDate);
+          date.setMonth(date.getMonth() + i);
+          const dueMonth =
+            date.toLocaleString("default", { month: "short" }) +
+            " " +
+            date.getFullYear();
+
+          rentalPayment.gstOutstandingHistory.push({
+            dueMonth: dueMonth,
+            gstOutStandingAmount: gstAmount,
+            updatedBy: userName,
+            updatedAt: nowIST(),
+          });
+        }
+
+        rentalPayment.gstOutStandingAmount = rentalPayment.gstOutstandingHistory.reduce(
+          (sum, item) => sum + item.gstOutStandingAmount,
+          0,
+        );
+      } else {
+        rentalPayment.gstOutstandingHistory = [];
+        rentalPayment.gstOutStandingAmount = 0;
+      }
+    }
+  } else {
+    // If outStandingStatus is 0, clear everything
+    rentalPayment.gstOutstandingHistory = [];
+    rentalPayment.gstOutStandingAmount = 0;
+  }
+
+  return rentalPayment;
+};
+const APPRAISAL_FREQUENCY_MONTHS = { 1: 12, 2: 24, 3: 36 };
 const APPRAISAL_FREQUENCY_LABEL = {
-  1: "6 Months",
-  2: "Yearly (12 Months)",
-  3: "2 Years (24 Months)",
+  1: "1 Year",
+  2: "2 Years",
+  3: "3 Years",
   4: "Custom",
 };
-const APPRAISAL_FREQUENCY_MONTHS_MAP = { 1: 6, 2: 12, 3: 24 };
+const APPRAISAL_FREQUENCY_MONTHS_MAP = { 1: 12, 2: 24, 3: 36 };
 
 const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
   const incomingAmount = Number(
@@ -291,10 +398,10 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
     return { currentBaseRent: incomingAmount, rentActuallyChanged: false };
   }
 
-  // Carry forward existing history (deep-copy so Mongoose isn't confused).
+  // Carry forward existing history (deep-copy safely without losing Date objects).
   let history = existingMedia
-    ? JSON.parse(
-        JSON.stringify(existingMedia.rentalPayment?.rentalAmountHistory ?? []),
+    ? (existingMedia.rentalPayment?.rentalAmountHistory || []).map((h) =>
+        h.toObject ? h.toObject() : { ...h },
       )
     : [];
 
@@ -323,6 +430,7 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
     // Same amount → no new entry, rentActuallyChanged stays false.
   }
 
+  history.sort((a, b) => b.updatedAt - a.updatedAt);
   mediaData.rentalPayment.rentalAmountHistory = history;
   return { currentBaseRent: incomingAmount, rentActuallyChanged };
 };
@@ -346,7 +454,7 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
     return {
       valid: false,
       message:
-        "appraisal.frequency must be 1 (6 Months), 2 (Yearly), 3 (2 Years), or 4 (Custom)",
+        "appraisal.frequency must be 1 (Year), 2 (Years), 3 (3 Years), or 4 (Custom)",
     };
   }
 
@@ -364,7 +472,6 @@ const validateAppraisalFrequency = (agreement, appraisal) => {
     months = APPRAISAL_FREQUENCY_MONTHS[frequency];
   }
 
-  
   // candidateDate is still computed in case you want to use/display it,
   // but it no longer blocks validation even if it falls on/after endDate.
   const candidateDate = new Date(startDate);
@@ -382,15 +489,47 @@ const computeAppraisalAmount = (entry, previousRent) => {
   return 0;
 };
 
-const cascadeHistory = (history, baseRent) => {
+const cascadeHistory = (
+  history,
+  baseRent,
+  netPayable,
+  rentActuallyChanged = false,
+) => {
+  const today = todayKey();
+  const currentMonth = thisMonthKey();
   const sorted = history
     .filter((h) => h.appraisalDate)
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
 
   let prev = Number(baseRent || 0);
+  let manualRebaseDone = false;
+
   for (const entry of sorted) {
+    const entryDateKey = dayKey(entry.appraisalDate);
+    const entryMonthKey = monthKey(entry.appraisalDate);
+
+    // ✅ Re-baseline from today onwards if the rent was manually changed.
+    // This ensures that if a user updates rent to 60,000, future appraisals
+    // start from 60,000 rather than the old schedule's base.
+    if (rentActuallyChanged && !manualRebaseDone && entryMonthKey >= currentMonth) {
+      prev = Number(netPayable ?? prev);
+      manualRebaseDone = true;
+    }
+
     entry.previousRent = prev;
-    entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+
+    // ✅ FIXED — Only apply bump if it's a current/future entry and NOT a PAST anchor.
+    // "Yesterday don't apply, today it will apply"
+    // (We now allow current-month anchors to have a bump computed so the
+    // appraisalAmount shows up in the summary even after a date update)
+    const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
+
+    if (isPastAnchor || entryMonthKey < currentMonth) {
+      entry.appraisalAmount = 0;
+    } else {
+      entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+    }
+
     entry.newRent = Math.floor(prev + entry.appraisalAmount);
     prev = entry.newRent;
   }
@@ -399,7 +538,7 @@ const cascadeHistory = (history, baseRent) => {
 
 const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
   if (!Array.isArray(landOwners) || !landOwners.length) return;
-  if (!oldAmount || oldAmount <= 0) return;
+  if (!oldAmount || oldAmount <= 0 || !newAmount || newAmount <= 0) return;
 
   const ratio = newAmount / oldAmount;
   if (!isFinite(ratio) || ratio <= 0) return;
@@ -407,37 +546,26 @@ const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
   landOwners.forEach((owner) => {
     const cat = Number(owner.paymentCategory);
 
-    if (cat === 1) {
-      // Cash only
-      owner.cashAmount = Math.floor(
-        (Number(owner.cashAmount || 0) * ratio).toFixed(2),
-      );
-    } else if (cat === 2) {
-      // Online only
-      owner.onlineAmount = Math.floor(
-        (Number(owner.onlineAmount || 0) * ratio).toFixed(2),
-      );
-    } else if (cat === 3) {
-      // Cash + Online split
-      owner.cashAmount = Math.floor(
-        (Number(owner.cashAmount || 0) * ratio).toFixed(2),
-      );
-      owner.onlineAmount = Math.floor(
-        (Number(owner.onlineAmount || 0) * ratio).toFixed(2),
-      );
+    // Scale fixed-amount shares proportionally
+    if (Number(owner.typeShare) === 2) {
+      owner.shareAmount = Math.floor(Number(owner.shareAmount || 0) * ratio);
     }
 
-    // Fixed-amount owners: rescale shareAmount too, since it doesn't
-    // auto-derive from netPayable like percentage-type does.
-    if (Number(owner.typeShare) === 2) {
-      owner.shareAmount = Math.floor(
-        (Number(owner.shareAmount || 0) * ratio).toFixed(2),
-      );
+    if (cat === 1) {
+      // Cash only
+      owner.cashAmount = Math.floor(Number(owner.cashAmount || 0) * ratio);
+      owner.onlineAmount = 0;
+    } else if (cat === 2) {
+      // Online only
+      owner.onlineAmount = Math.floor(Number(owner.onlineAmount || 0) * ratio);
+      owner.cashAmount = 0;
+    } else if (cat === 3) {
+      // Cash + Online split: scale both components
+      owner.cashAmount = Math.floor(Number(owner.cashAmount || 0) * ratio);
+      owner.onlineAmount = Math.floor(Number(owner.onlineAmount || 0) * ratio);
     }
   });
 };
-
-
 
 const buildAppraisalScheduleFromAnchor = ({
   anchorDate,
@@ -481,6 +609,71 @@ const buildAppraisalScheduleFromAnchor = ({
 
   return history;
 };
+const backfillHistoricalAppraisalEntries = (
+  history,
+  agreementStartDate,
+  userName,
+) => {
+  if (!Array.isArray(history) || !history.length || !agreementStartDate)
+    return history;
+
+  const start = toDateOnly(agreementStartDate);
+  history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
+
+  let earliestDate = new Date(history[0].appraisalDate);
+  if (dayKey(earliestDate) <= dayKey(start)) return history;
+
+  const monthsToSub = getFrequencyMonths(
+    history[0].frequency,
+    history[0].customFrequencyMonths,
+  );
+  if (monthsToSub <= 0) return history;
+
+  let current = new Date(earliestDate);
+  let safety = 0;
+
+  while (safety < 60) {
+    safety++;
+    current.setMonth(current.getMonth() - monthsToSub);
+    if (dayKey(current) < dayKey(start)) break;
+
+    const backEntry = {
+      appraisalDate: toDateOnly(current),
+      type: history[0].type,
+      percentage: history[0].percentage,
+      fixedAmount: history[0].fixedAmount,
+      frequency: history[0].frequency,
+      customFrequencyMonths: history[0].customFrequencyMonths,
+      previousRent: 0,
+      appraisalAmount: 0,
+      newRent: 0,
+      updatedBy: userName,
+      updatedAt: nowIST(),
+    };
+    history.unshift(backEntry);
+  }
+
+  // Ensure an anchor entry exists at the agreement start date if missing
+  if (dayKey(history[0].appraisalDate) > dayKey(start)) {
+    history.unshift({
+      appraisalDate: start,
+      type: history[0].type,
+      percentage: history[0].percentage,
+      fixedAmount: history[0].fixedAmount,
+      frequency: history[0].frequency,
+      customFrequencyMonths: history[0].customFrequencyMonths,
+      previousRent: 0,
+      appraisalAmount: 0,
+      newRent: 0,
+      isAnchorEntry: true,
+      updatedBy: userName,
+      updatedAt: nowIST(),
+    });
+  }
+
+  return history;
+};
+
 const handleAppraisalLogic = async (
   mediaData,
   existingMedia,
@@ -493,6 +686,9 @@ const handleAppraisalLogic = async (
 
   if (!appraisal || Number(appraisal.applicable) !== 1) return mediaData;
   if (!agreement?.startDate || !agreement?.endDate) return mediaData;
+
+  const today = todayKey();
+  const currentMonth = thisMonthKey();
 
   const agreementStartDate = new Date(agreement.startDate);
   const agreementEndDate = new Date(agreement.endDate);
@@ -524,6 +720,11 @@ const handleAppraisalLogic = async (
       ? toDateOnly(appraisal.lastAppraisalDate)
       : null;
 
+    // ✅ FIXED — Detect if any dates were explicitly provided in the request
+    // before computing defaults.
+    const hasIncomingLastDate = !!mediaData.appraisal?.lastAppraisalDate;
+    const hasIncomingNextDate = !!mediaData.appraisal?.nextAppraisalDate;
+
     if (!nextDate && !manualLastAppraisalDate) {
       const firstDate = new Date(agreementStartDate);
       firstDate.setMonth(firstDate.getMonth() + months);
@@ -532,6 +733,7 @@ const handleAppraisalLogic = async (
     }
 
     const seedDate = manualLastAppraisalDate || nextDate;
+    const currentMonth = thisMonthKey();
 
     // ✅ Only treat this as a flat "anchor checkpoint" when lastAppraisalDate
     // was explicitly given. When it wasn't (only nextAppraisalDate / computed
@@ -558,16 +760,16 @@ const handleAppraisalLogic = async (
 
       if (!isAnchorSeed) {
         // ✅ NEW — no lastAppraisalDate given, so nextAppraisalDate is a
-        // real, due appraisal event: 50K + fixedAmount/percentage bump
-        // applies directly here (e.g. 50K + 2K fixed = 52K), and this
-        // becomes the entry's newRent in history.
-        seedEntry.appraisalAmount = computeAppraisalAmount(
-          seedEntry,
-          netPayable,
-        );
-        seedEntry.newRent = Math.floor(
-          netPayable + seedEntry.appraisalAmount,
-        );
+        // real, due appraisal event. We apply the bump if it's current month or in the future.
+        if (monthKey(seedDate) >= currentMonth) {
+          seedEntry.appraisalAmount = computeAppraisalAmount(
+            seedEntry,
+            netPayable,
+          );
+        } else {
+          seedEntry.appraisalAmount = 0;
+        }
+        seedEntry.newRent = Math.floor(netPayable + seedEntry.appraisalAmount);
       }
 
       appraisal.history.push(seedEntry);
@@ -577,19 +779,24 @@ const handleAppraisalLogic = async (
         userName,
       );
 
-      // ✅ safety net — only re-flatten index 0 if it's a genuine anchor
-      // checkpoint. Real first-appraisal entries (isAnchorSeed = false)
-      // are left with their computed bump intact.
-      if (
-        isAnchorSeed &&
-        appraisal.history[0] &&
-        dayKey(appraisal.history[0].appraisalDate) === dayKey(seedDate)
-      ) {
-        appraisal.history[0].previousRent = netPayable;
-        appraisal.history[0].appraisalAmount = 0;
-        appraisal.history[0].newRent = netPayable;
-        appraisal.history[0].isAnchorEntry = true;
+      // ✅ FIXED — Only backfill to agreement start date if NO appraisal dates
+      // (neither last nor next) were provided in the request. If the user
+      // provides a date during onboarding, we respect it as the definitive
+      // starting point for history and don't backfill to 2024.
+      if (!hasIncomingLastDate && !hasIncomingNextDate) {
+        appraisal.history = backfillHistoricalAppraisalEntries(
+          appraisal.history,
+          agreement.startDate,
+          userName,
+        );
       }
+
+      appraisal.history = cascadeHistory(
+        appraisal.history,
+        netPayable,
+        netPayable,
+        true,
+      );
 
       const lastEntry = appraisal.history[appraisal.history.length - 1];
       if (lastEntry)
@@ -617,9 +824,13 @@ const handleAppraisalLogic = async (
     .map((h) => ({ ...h }))
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
 
-  const hasAnyExistingAppraisalHistory = history.length > 0;
-  const seedBaseRent = hasAnyExistingAppraisalHistory ? oldRent : netPayable;
-  const today = todayKey();
+  // ✅ FIXED — The seed baseline for recalculating history must be the
+  // previousRent of the FIRST entry in history, not the current total rent.
+  // Using the current rent (which already includes applied appraisals)
+  // would cause the baseline to shift forward every time we save,
+  // leading to "double bumps" where 10% is added on top of 10% repeatedly.
+  const seedBaseRent =
+    history.length > 0 ? Number(history[0].previousRent || 0) : netPayable;
 
   let isNewFutureEntry = false;
 
@@ -637,7 +848,8 @@ const handleAppraisalLogic = async (
       dayKey(incomingLastAppraisalDate) !== dayKey(existingLastAppraisalDate));
 
   const configChanged =
-    Number(appraisal.frequency) !== Number(existingMedia.appraisal?.frequency) ||
+    Number(appraisal.frequency) !==
+      Number(existingMedia.appraisal?.frequency) ||
     Number(appraisal.customFrequencyMonths || 0) !==
       Number(existingMedia.appraisal?.customFrequencyMonths || 0) ||
     Number(appraisal.type) !== Number(existingMedia.appraisal?.type) ||
@@ -652,16 +864,32 @@ const handleAppraisalLogic = async (
       : null;
 
   if (manualLastAppraisalDateUpdate) {
-    history = buildAppraisalScheduleFromAnchor({
+    const anchorMonth = monthKey(manualLastAppraisalDateUpdate);
+    // ✅ PRESERVE existing history entries that occurred BEFORE the new anchor month
+    // This ensures that 2024, 2025, etc. dates do not change when the user
+    // updates the lastAppraisalDate to a later date like 2026-05-15.
+    const preserved = history.filter(
+      (h) => monthKey(h.appraisalDate) < anchorMonth,
+    );
+
+    // If we have preserved entries, the base rent for the new anchor is the last preserved newRent.
+    const newBaseRentForAnchor =
+      preserved.length > 0
+        ? Number(preserved[preserved.length - 1].newRent || 0)
+        : seedBaseRent;
+
+    const newSchedule = buildAppraisalScheduleFromAnchor({
       anchorDate: manualLastAppraisalDateUpdate,
       frequency: appraisal.frequency,
       customFrequencyMonths: appraisal.customFrequencyMonths,
       type: appraisal.type,
       percentage: appraisal.percentage,
       fixedAmount: appraisal.fixedAmount,
-      baseRent: seedBaseRent,
+      baseRent: newBaseRentForAnchor,
       userName,
     });
+
+    history = [...preserved, ...newSchedule];
   } else if (nextDate) {
     const nextDay = dayKey(nextDate);
     const existingIdx = history.findIndex(
@@ -688,15 +916,21 @@ const handleAppraisalLogic = async (
       };
 
       const e = history[existingIdx];
-      const isFutureEntry = dayKey(e.appraisalDate) > today;
+      const currentMonth = thisMonthKey();
+      const isCurrentOrFutureMonth = monthKey(e.appraisalDate) >= currentMonth;
 
-      if (rentActuallyChanged && isFutureEntry) {
+      if (rentActuallyChanged && isCurrentOrFutureMonth) {
         e.previousRent = netPayable;
       }
 
       // ✅ skip bump computation if this entry is an anchor checkpoint
       if (!e.isAnchorEntry) {
-        e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
+        // ✅ Only bump if it's current or future month
+        if (isCurrentOrFutureMonth) {
+          e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
+        } else {
+          e.appraisalAmount = 0;
+        }
         e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
       } else {
         e.appraisalAmount = 0;
@@ -712,9 +946,12 @@ const handleAppraisalLogic = async (
       } else {
         let prev = e.newRent;
         for (let i = existingIdx + 1; i < history.length; i++) {
-          if (dayKey(history[i].appraisalDate) > today) {
+          if (monthKey(history[i].appraisalDate) >= currentMonth) {
             history[i].previousRent = prev;
-            history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
+            history[i].appraisalAmount = computeAppraisalAmount(
+              history[i],
+              prev,
+            );
             history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
             prev = history[i].newRent;
           }
@@ -747,45 +984,13 @@ const handleAppraisalLogic = async (
         movedEntry.updatedBy = userName;
         movedEntry.updatedAt = nowIST();
 
-        if (nextDay > today) isNewFutureEntry = true;
+        if (monthKey(nextDate) >= currentMonth) isNewFutureEntry = true;
 
         history.sort(
           (a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate),
         );
 
-        const newIdx = history.findIndex(
-          (h) => dayKey(h.appraisalDate) === nextDay,
-        );
-
-        let baseForNewEntry;
-        if (newIdx > 0) {
-          baseForNewEntry = history[newIdx - 1].newRent || 0;
-        } else if (rentActuallyChanged && nextDay > today) {
-          baseForNewEntry = netPayable;
-        } else {
-          baseForNewEntry = seedBaseRent;
-        }
-
-        history[newIdx].previousRent = baseForNewEntry;
-        history[newIdx].appraisalAmount = computeAppraisalAmount(
-          history[newIdx],
-          baseForNewEntry,
-        );
-        history[newIdx].newRent = Math.floor(
-          baseForNewEntry + history[newIdx].appraisalAmount,
-        );
-
-        let prev = history[newIdx].newRent;
-        for (let i = newIdx + 1; i < history.length; i++) {
-          if (dayKey(history[i].appraisalDate) > today) {
-            history[i].previousRent = prev;
-            history[i].appraisalAmount = computeAppraisalAmount(history[i], prev);
-            history[i].newRent = Math.floor(prev + history[i].appraisalAmount);
-            prev = history[i].newRent;
-          }
-        }
-
-        appliedEntry = history[newIdx];
+        appliedEntry = history.find((h) => monthKey(h.appraisalDate) === monthKey(nextDate));
       } else {
         // ✅ no existing history at all — nextDate is the first, real
         // appraisal event (no anchor exists), so compute the bump directly
@@ -804,17 +1009,13 @@ const handleAppraisalLogic = async (
           updatedAt: nowIST(),
         });
 
-        const e = history[0];
-        e.appraisalAmount = computeAppraisalAmount(e, e.previousRent);
-        e.newRent = Math.floor(e.previousRent + e.appraisalAmount);
-
-        appliedEntry = e;
+        appliedEntry = history[0];
       }
     }
 
-    if (appliedEntry && dayKey(appliedEntry.appraisalDate) <= today) {
+    if (appliedEntry && monthKey(appliedEntry.appraisalDate) <= currentMonth) {
       const hasLaterEntry = history.some(
-        (h) => dayKey(h.appraisalDate) > dayKey(appliedEntry.appraisalDate),
+        (h) => monthKey(h.appraisalDate) > monthKey(appliedEntry.appraisalDate),
       );
 
       if (!hasLaterEntry) {
@@ -823,134 +1024,47 @@ const handleAppraisalLogic = async (
     }
   }
 
-  for (const entry of history) {
-    if (dayKey(entry.appraisalDate) <= today && !entry.isAnchorEntry) {
-      entry.appraisalAmount = computeAppraisalAmount(entry, entry.previousRent);
-      entry.newRent = Math.floor(entry.previousRent + entry.appraisalAmount);
-    }
-  }
+  // ✅ Only backfill if NO anchor date exists (neither incoming nor existing).
+  // If the user has established an anchor (e.g. 2025), we respect it as the
+  // official start of the appraisal schedule and don't backfill to 2024.
+  const effectiveAnchorDate =
+    incomingLastAppraisalDate || existingLastAppraisalDate;
 
-  history.sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
-
-  // ✅ only flatten index 0 if it's a genuine anchor checkpoint entry.
-  // Real first-appraisal entries (isAnchorEntry: false/undefined) keep
-  // their computed bump — this is what fixes the "no lastAppraisalDate,
-  // only future nextAppraisalDate" case (50K + fixed/percentage = 52K).
-  if (history.length > 0 && history[0].isAnchorEntry) {
-    history[0].appraisalAmount = 0;
-    history[0].newRent = history[0].previousRent;
-  }
-
-  const futureDates = history.filter((h) => dayKey(h.appraisalDate) > today);
-  const todayEntries = history.filter((h) => dayKey(h.appraisalDate) === today);
-
-  if (todayEntries.length > 0) {
-    appraisal.nextAppraisalDate = new Date(
-      todayEntries[todayEntries.length - 1].appraisalDate,
+  if (!effectiveAnchorDate) {
+    history = backfillHistoricalAppraisalEntries(
+      history,
+      agreement.startDate,
+      userName,
     );
-  } else if (futureDates.length > 0) {
-    appraisal.nextAppraisalDate = new Date(futureDates[0].appraisalDate);
-  } else {
-    appraisal.nextAppraisalDate = null;
   }
 
-  const currentEntry = history
-    .filter((h) => dayKey(h.appraisalDate) <= today)
+  // ✅ Use centralized cascade logic to ensure all rents are correct
+  // and past appraisal amounts are forced to 0.
+  appraisal.history = cascadeHistory(
+    history,
+    seedBaseRent,
+    netPayable,
+    rentActuallyChanged,
+  );
+
+  // Set the frequency metadata based on the current/first entry
+  const currentEntryForMeta = history
+    .filter((h) => monthKey(h.appraisalDate) <= currentMonth)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
 
-  if (currentEntry) {
-    appraisal.frequency = currentEntry.frequency;
-    appraisal.customFrequencyMonths = currentEntry.customFrequencyMonths || 0;
+  if (currentEntryForMeta) {
+    appraisal.frequency = currentEntryForMeta.frequency;
+    appraisal.customFrequencyMonths =
+      currentEntryForMeta.customFrequencyMonths || 0;
   } else if (history.length > 0) {
     const firstEntry = history[0];
     appraisal.frequency = firstEntry.frequency;
     appraisal.customFrequencyMonths = firstEntry.customFrequencyMonths || 0;
   }
 
-  appraisal.history = history;
-  mediaData.appraisal = appraisal;
   return mediaData;
 };
-// const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
-//   if (!appraisal) return appraisal;
-//   if (Number(appraisal.applicable) !== 1) {
-//     appraisal.currentRent = Number(fallbackBaseRent || 0);
-//     appraisal.appraisalAmount = 0;
-//     appraisal.totalAppraisalAmount = Number(fallbackBaseRent || 0);
 
-//     return appraisal;
-//   }
-//   const today = todayKey();
-
-//   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
-//     const pendingDate = appraisal.nextAppraisalDate
-//       ? toDateOnly(appraisal.nextAppraisalDate)
-//       : null;
-
-//     appraisal.lastAppraisalDate =
-//       pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
-
-//     return appraisal;
-//   }
-
-//   const sorted = appraisal.history
-//     .filter((h) => h.appraisalDate)
-//     .map((h) => ({ ...h, dateKey: dayKey(h.appraisalDate) }))
-//     .sort((a, b) => a.dateKey - b.dateKey);
-
-//   if (!sorted.length) {
-//     const pendingDate = appraisal.nextAppraisalDate
-//       ? toDateOnly(appraisal.nextAppraisalDate)
-//       : null;
-
-//     appraisal.lastAppraisalDate =
-//       pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
-
-//     return appraisal;
-//   }
-
-//   const baseRent = Number(sorted[0].previousRent ?? fallbackBaseRent ?? 0);
-
-//   const dueEntries = sorted.filter((h) => h.dateKey <= today);
-//   const futureEntries = sorted.filter((h) => h.dateKey > today);
-
-//   // ✅ lastAppraisalDate = the MOST RECENT due entry, always freshly
-//   // derived from history — never left null when a due entry exists.
-//   appraisal.lastAppraisalDate =
-//     dueEntries.length > 0
-//       ? new Date(dueEntries[dueEntries.length - 1].appraisalDate)
-//       : null;
-
-//   const currentEntry =
-//     dueEntries.length > 0 ? dueEntries[dueEntries.length - 1] : null;
-
-//   appraisal.currentRent = currentEntry
-//     ? Number(currentEntry.newRent || currentEntry.previousRent || baseRent)
-//     : baseRent;
-
-//   const nextEntry = futureEntries.length > 0 ? futureEntries[0] : null;
-
-//   appraisal.nextAppraisalDate = nextEntry
-//     ? new Date(nextEntry.appraisalDate)
-//     : null;
-
-//   const displayEntry = nextEntry || currentEntry;
-//   if (displayEntry) {
-//     appraisal.type = displayEntry.type;
-//     appraisal.percentage = displayEntry.percentage || 0;
-//     appraisal.fixedAmount = displayEntry.fixedAmount || 0;
-//     appraisal.appraisalAmount = Number(displayEntry.appraisalAmount || 0);
-//     appraisal.totalAppraisalAmount = Math.floor(
-//       Number(displayEntry.newRent || 0),
-//     );
-//   } else {
-//     appraisal.totalAppraisalAmount = Math.floor(
-//       Number(appraisal.currentRent || 0),
-//     );
-//   }
-
-//   return appraisal;
-// };
 const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   if (!appraisal) return appraisal;
   if (Number(appraisal.applicable) !== 1) {
@@ -960,7 +1074,7 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
 
     return appraisal;
   }
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
 
   if (!Array.isArray(appraisal.history) || !appraisal.history.length) {
     const pendingDate = appraisal.nextAppraisalDate
@@ -968,15 +1082,15 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
       : null;
 
     appraisal.lastAppraisalDate =
-      pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
+      pendingDate && monthKey(pendingDate) <= currentMonth ? pendingDate : null;
 
     return appraisal;
   }
 
   const sorted = appraisal.history
     .filter((h) => h.appraisalDate)
-    .map((h) => ({ ...h, dateKey: dayKey(h.appraisalDate) }))
-    .sort((a, b) => a.dateKey - b.dateKey);
+    .map((h) => ({ ...h, monthKey: monthKey(h.appraisalDate) }))
+    .sort((a, b) => a.monthKey - b.monthKey);
 
   if (!sorted.length) {
     const pendingDate = appraisal.nextAppraisalDate
@@ -984,15 +1098,15 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
       : null;
 
     appraisal.lastAppraisalDate =
-      pendingDate && dayKey(pendingDate) <= today ? pendingDate : null;
+      pendingDate && monthKey(pendingDate) <= currentMonth ? pendingDate : null;
 
     return appraisal;
   }
 
   const baseRent = Number(sorted[0].previousRent ?? fallbackBaseRent ?? 0);
 
-  const dueEntries = sorted.filter((h) => h.dateKey <= today);
-  const futureEntries = sorted.filter((h) => h.dateKey > today);
+  const dueEntries = sorted.filter((h) => h.monthKey <= currentMonth);
+  const futureEntries = sorted.filter((h) => h.monthKey > currentMonth);
 
   appraisal.lastAppraisalDate =
     dueEntries.length > 0
@@ -1043,23 +1157,22 @@ const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
   return appraisal;
 };
 
-
 const getFrequencyMonths = (frequency, customMonths) => {
   // const EXTRA_BUFFER_MONTHS = 1; // every frequency gets +1 month added
 
   if (Number(frequency) === 4) {
-    return (Number(customMonths || 0) || 1)
+    return Number(customMonths || 0) || 1;
     //  + EXTRA_BUFFER_MONTHS;
   }
   return (
-    (APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12) 
+    APPRAISAL_FREQUENCY_MONTHS_MAP[Number(frequency)] || 12
     // + EXTRA_BUFFER_MONTHS
   );
 };
 const autoScheduleFutureAppraisalEntries = (history, userName) => {
   if (!Array.isArray(history) || !history.length) return history;
 
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
   let safety = 0;
 
   while (safety < 60) {
@@ -1070,7 +1183,7 @@ const autoScheduleFutureAppraisalEntries = (history, userName) => {
     );
     const lastEntry = sorted[sorted.length - 1];
 
-    if (dayKey(lastEntry.appraisalDate) > today) break; // already future — stop
+    if (monthKey(lastEntry.appraisalDate) > currentMonth) break; // already future month — stop
 
     const monthsToAdd = getFrequencyMonths(
       lastEntry.frequency,
@@ -1095,10 +1208,14 @@ const autoScheduleFutureAppraisalEntries = (history, userName) => {
       updatedAt: nowIST(),
     };
 
-    autoEntry.appraisalAmount = computeAppraisalAmount(
-      autoEntry,
-      autoEntry.previousRent,
-    );
+    if (monthKey(nextDateOnly) >= currentMonth) {
+      autoEntry.appraisalAmount = computeAppraisalAmount(
+        autoEntry,
+        autoEntry.previousRent,
+      );
+    } else {
+      autoEntry.appraisalAmount = 0;
+    }
     autoEntry.newRent = Math.floor(
       autoEntry.previousRent + autoEntry.appraisalAmount,
     );
@@ -1143,19 +1260,76 @@ const buildNextAppraisalEntry = (appliedEntry, userName) => {
 
   return nextEntry;
 };
+// ✅ NEW — REVERT rent (and every landOwner's share) back to the
+// pre-appraisal base amount the instant appraisal.applicable flips
+// from 1 -> 0 in THIS request. Without this, turning appraisal off
+// left totalRentalAmount — and every landOwner's shareAmount — stuck
+// at the last applied appraisal bump forever, since nothing else in
+// this file undoes an appraisal once applied; applyAppraisalRentIfDuent
+// only ever pushes rent UP when applicable === 1, it never runs (and
+// never reverts anything) once applicable === 0.
+const revertAppraisalRentIfTurnedOff = (mediaData, existingMedia) => {
+  if (!existingMedia) return false;
 
+  const wasApplicable = Number(existingMedia.appraisal?.applicable) === 1;
+  const isNowApplicable = Number(mediaData.appraisal?.applicable) === 1;
+  const wasHeld = Number(existingMedia.appraisal?.appraisalHold) === 1;
+  const isNowHeld = Number(mediaData.appraisal?.appraisalHold) === 1;
+
+  const wasEffectivelyActive = wasApplicable && !wasHeld;
+  const isNowEffectivelyActive = isNowApplicable && !isNowHeld;
+  // Only fires on the exact 1 -> 0 transition, in THIS request.
+  if (!wasApplicable || isNowApplicable) return false;
+
+  const history = Array.isArray(existingMedia.appraisal?.history)
+    ? existingMedia.appraisal.history
+    : [];
+
+  const currentMonth = thisMonthKey();
+
+  // Same "currently active entry" lookup applyAppraisalRentIfDuent uses —
+  // the latest entry whose month has actually arrived.
+  const dueEntries = history
+    .filter((h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth)
+    .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
+
+  // previousRent on that entry IS the base rent from before this
+  // appraisal bump was applied — exactly what we revert back to.
+  const baseRent =
+    dueEntries.length > 0
+      ? Number(dueEntries[0].previousRent || 0)
+      : Number(
+          history[0]?.previousRent ??
+            existingMedia.rentalPayment?.totalRentalAmount ??
+            0,
+        );
+
+  if (!baseRent) return false;
+
+  if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
+  mediaData.rentalPayment.totalRentalAmount = baseRent;
+
+  return true;
+};
 // This is for Appraisal Amout based TotalRentalAmount Calculation
-const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
+const applyAppraisalRentIfDuent = (
+  mediaData,
+  existingMedia,
+  userName,
+  rentActuallyChanged,
+) => {
   const appraisal = mediaData.appraisal;
   if (!appraisal || Number(appraisal.applicable) !== 1) return false;
+
+  if (Number(appraisal.appraisalHold) === 1) return false;
   if (!Array.isArray(appraisal.history) || !appraisal.history.length)
     return false;
 
-  const today = todayKey();
+  const currentMonth = thisMonthKey();
 
-  // Latest entry whose appraisalDate has actually arrived (today or past).
+  // Latest entry whose month has actually arrived (current or past month).
   const dueEntries = appraisal.history
-    .filter((h) => h.appraisalDate && dayKey(h.appraisalDate) <= today)
+    .filter((h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth)
     .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate));
 
   if (!dueEntries.length) return false;
@@ -1193,10 +1367,8 @@ const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
   let history = Array.isArray(mediaData.rentalPayment.rentalAmountHistory)
     ? mediaData.rentalPayment.rentalAmountHistory
     : existingMedia
-      ? JSON.parse(
-          JSON.stringify(
-            existingMedia.rentalPayment?.rentalAmountHistory ?? [],
-          ),
+      ? (existingMedia.rentalPayment?.rentalAmountHistory || []).map((h) =>
+          h.toObject ? h.toObject() : { ...h },
         )
       : [];
 
@@ -1206,6 +1378,7 @@ const applyAppraisalRentIfDuent = (mediaData, existingMedia, userName) => {
     updatedAt: nowIST(),
   });
 
+  history.sort((a, b) => b.updatedAt - a.updatedAt);
   mediaData.rentalPayment.rentalAmountHistory = history;
   return true;
 };
@@ -1233,9 +1406,9 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
 
   if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
 
-  const frequencyMap = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 12, 6: 24 };
+  const frequencyMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
   const monthsToAdd =
-    paymentFrequency === 7
+    paymentFrequency === 6
       ? customPaymentFrequency || 1
       : frequencyMap[paymentFrequency] || 1;
 
@@ -1247,6 +1420,8 @@ const applyOwnerApprovalBillingShift = (mediaData, media, userName) => {
   nextDate.setMonth(nextDate.getMonth() + monthsToAdd);
   const newNextBillingDate = toDateOnly(nextDate);
 
+  // ✅ NEW: store the previous cycle start
+  mediaData.rentalPayment.previousBillGenerateDate = media.rentalPayment.lastBillPaidDate;
   mediaData.rentalPayment.lastBillPaidDate = newLastBillPaidDate;
   mediaData.rentalPayment.nextBillingDate = newNextBillingDate;
 
@@ -1307,7 +1482,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       totalRentalAmount: incomingRentAmt,
       paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
       customPaymentFrequency:
-        Number(incoming.rentalPayment?.paymentFrequency) === 7
+        Number(incoming.rentalPayment?.paymentFrequency) === 6
           ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
           : null,
       // Step 4: include who changed the rental amount in the history snapshot too.
@@ -1353,12 +1528,31 @@ const mediaOnboarding = async (req, res) => {
     const { id } = req.body;
     const mediaData = req.body;
     const userName = req.user?.userName || "Admin";
-
+Object.keys(mediaData).forEach((key) => {
+  const match = key.match(/^mediaDetails\[(\d+)\]siteBillMode$/);
+  if (match) {
+    const index = parseInt(match[1]);
+    if (!mediaData.mediaDetails) mediaData.mediaDetails = [];
+    if (typeof mediaData.mediaDetails === "string") {
+      try {
+        mediaData.mediaDetails = JSON.parse(mediaData.mediaDetails);
+      } catch {
+        mediaData.mediaDetails = [];
+      }
+    }
+    if (Array.isArray(mediaData.mediaDetails)) {
+      if (!mediaData.mediaDetails[index]) mediaData.mediaDetails[index] = {};
+      mediaData.mediaDetails[index].siteBillMode = mediaData[key];
+    }
+  }
+});
     const jsonFields = [
+      "mediaDetails",
       "landOwners",
       "rentalPayment",
       "agreement",
       "appraisal",
+       "gstOutstandingHistory", 
     ];
     jsonFields.forEach((field) => {
       if (mediaData[field] && typeof mediaData[field] === "string") {
@@ -1369,7 +1563,25 @@ const mediaOnboarding = async (req, res) => {
         }
       }
     });
-
+if (
+  mediaData.rentalPayment &&
+  typeof mediaData.rentalPayment.gstOutstandingHistory === "string"
+) {
+  try {
+    mediaData.rentalPayment.gstOutstandingHistory = JSON.parse(
+      mediaData.rentalPayment.gstOutstandingHistory,
+    );
+  } catch {
+    mediaData.rentalPayment.gstOutstandingHistory = [];
+  }
+}
+if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
+  mediaData.rentalPayment.gstOutstandingHistory =
+    mediaData.rentalPayment.gstOutstandingHistory.map((item) => ({
+      ...item,
+      gstOutStandingAmount: Number(item?.gstOutStandingAmount || 0),
+    }));
+}
     if (mediaData.rentalPayment) {
       if (mediaData.rentalPayment.totalRentalAmount !== undefined)
         mediaData.rentalPayment.totalRentalAmount = Number(
@@ -1391,9 +1603,12 @@ const mediaOnboarding = async (req, res) => {
         mediaData.rentalPayment.gstApplicable = Number(
           mediaData.rentalPayment.gstApplicable,
         );
+          if (mediaData.rentalPayment.outStantStatus !== undefined)
+    mediaData.rentalPayment.outStantStatus = Number(
+      mediaData.rentalPayment.outStantStatus,
+    );
     }
 
-   
     const getFileByFieldName = (fieldName) => {
       if (!req.files) return null;
       const file = req.files.find((f) => f.fieldname === fieldName);
@@ -1405,7 +1620,7 @@ const mediaOnboarding = async (req, res) => {
     // matches "landOwners[3][bankPassbook]" -> index "3"
     const parseLandOwnerFile = (fieldname) => {
       const match = fieldname.match(
-        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage)\]$/,
+        /^landOwners\[(\d+)\]\[(bankPassbook|cancelCheckLeaf|panCardImage|aadharCardImage|pancardImage|AAdharCardImage|cancelcheck leaf)\]$/,
       );
       return match ? { index: Number(match[1]), key: match[2] } : null;
     };
@@ -1416,11 +1631,13 @@ const mediaOnboarding = async (req, res) => {
       "bankPassbook",
       "cancelCheckLeaf",
       "panCardImage",
+      "aadharCardImage",
     ];
     const FILE_OBJECT_FIELDS = [
       "frontView",
-      "sideView",
-      "locationView",
+      "previousLedger",
+      // "sideView",
+      // "locationView",
       "additionalImages",
     ];
     if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
@@ -1433,18 +1650,64 @@ const mediaOnboarding = async (req, res) => {
           ownerFileMap[parsed.index][parsed.key] = f;
         }
       });
+       const resolveOwnerImageValue = (fieldValue) => {
+        if (typeof fieldValue !== "string") return null;
+        const urlValue = fieldValue.trim();
+        if (!urlValue.startsWith("http")) return null;
+        return {
+          originalName: urlValue.split("/").pop(),
+          fileName: urlValue.split("/").pop(),
+          filePath: urlValue,
+          mimeType: null,
+          size: null,
+          fileType: "image",
+          uploadedAt: nowIST(),
+        };
+      };
+
       mediaData.landOwners = mediaData.landOwners.map((owner, index) => {
         const ownerFiles = ownerFileMap[index] || {};
 
+        // ✅ FIXED — binary file first, URL string fallback second, for
+        // each of the 4 owner image fields. Supports alternate names from frontend.
         if (ownerFiles.bankPassbook) {
           owner.bankPassbook = req.processFile(ownerFiles.bankPassbook);
+        } else {
+          const urlObj = resolveOwnerImageValue(owner.bankPassbook);
+          if (urlObj) owner.bankPassbook = urlObj;
         }
-        if (ownerFiles.cancelCheckLeaf) {
-          owner.cancelCheckLeaf = req.processFile(ownerFiles.cancelCheckLeaf);
+
+        const cancelCheckFile = ownerFiles.cancelCheckLeaf || ownerFiles["cancelcheck leaf"];
+        const cancelCheckInput = owner.cancelCheckLeaf || owner["cancelcheck leaf"];
+        if (cancelCheckFile) {
+          owner.cancelCheckLeaf = req.processFile(cancelCheckFile);
+        } else {
+          const urlObj = resolveOwnerImageValue(cancelCheckInput);
+          if (urlObj) owner.cancelCheckLeaf = urlObj;
         }
-        if (ownerFiles.panCardImage) {
-          owner.panCardImage = req.processFile(ownerFiles.panCardImage);
+
+        const panFile = ownerFiles.panCardImage || ownerFiles.pancardImage;
+        const panInput = owner.panCardImage || owner.pancardImage;
+        if (panFile) {
+          owner.panCardImage = req.processFile(panFile);
+        } else {
+          const urlObj = resolveOwnerImageValue(panInput);
+          if (urlObj) owner.panCardImage = urlObj;
         }
+
+        const aadharFile = ownerFiles.aadharCardImage || ownerFiles.AAdharCardImage;
+        const aadharInput = owner.aadharCardImage || owner.AAdharCardImage;
+        if (aadharFile) {
+          owner.aadharCardImage = req.processFile(aadharFile);
+        } else {
+          const urlObj = resolveOwnerImageValue(aadharInput);
+          if (urlObj) owner.aadharCardImage = urlObj;
+        }
+
+        // Cleanup alternate names to avoid cluttering DB
+        delete owner.pancardImage;
+        delete owner.AAdharCardImage;
+        delete owner["cancelcheck leaf"];
         // const OWNER_FILE_FIELDS = [
         //   "bankPassbook",
         //   "cancelCheckLeaf",
@@ -1472,27 +1735,29 @@ const mediaOnboarding = async (req, res) => {
           onlineMode: hasValue(owner.onlineMode)
             ? Number(owner.onlineMode)
             : undefined,
-          cashAmount: hasValue(owner.cashAmount) ? Number(owner.cashAmount) : 0,
+          cashAmount: hasValue(owner.cashAmount)
+            ? Number(owner.cashAmount)
+            : undefined,
           onlineAmount: hasValue(owner.onlineAmount)
             ? Number(owner.onlineAmount)
-            : 0,
+            : undefined,
           tdsApplicable: hasValue(owner.tdsApplicable)
             ? Number(owner.tdsApplicable)
-            : 0,
+            : undefined,
           tdsPercentage: hasValue(owner.tdsPercentage)
             ? Number(owner.tdsPercentage)
-            : 0,
-          tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : 0,
+            : undefined,
+          tdsAmount: hasValue(owner.tdsAmount) ? Number(owner.tdsAmount) : undefined,
           gstApplicable: hasValue(owner.gstApplicable)
             ? Number(owner.gstApplicable)
-            : 0,
+            : undefined,
           gstPercentage: hasValue(owner.gstPercentage)
             ? Number(owner.gstPercentage)
-            : 0,
-          gstAmount: hasValue(owner.gstAmount) ? Number(owner.gstAmount) : 0,
+            : undefined,
+          gstAmount: hasValue(owner.gstAmount) ? Number(owner.gstAmount) : undefined,
           totalAmountWithGst: hasValue(owner.totalAmountWithGst)
             ? Number(owner.totalAmountWithGst)
-            : 0,
+            : undefined,
         };
       });
     }
@@ -1533,6 +1798,16 @@ const mediaOnboarding = async (req, res) => {
         mediaData.rentalPayment.lastBillPaidDate,
       );
     }
+    if (mediaData.rentalPayment?.nextBillingDate) {
+      mediaData.rentalPayment.nextBillingDate = toDateOnly(
+        mediaData.rentalPayment.nextBillingDate,
+      );
+    }
+    if (mediaData.rentalPayment?.billingStartDate) {
+      mediaData.rentalPayment.billingStartDate = toDateOnly(
+        mediaData.rentalPayment.billingStartDate,
+      );
+    }
 
     if (mediaData.appraisal) {
       if (mediaData.appraisal.applicable !== undefined)
@@ -1563,9 +1838,17 @@ const mediaOnboarding = async (req, res) => {
       }
     }
 
-    if (mediaData.width) mediaData.width = Number(mediaData.width);
-    if (mediaData.height) mediaData.height = Number(mediaData.height);
-    if (mediaData.status) mediaData.status = Number(mediaData.status);
+    if (mediaData.mediaDetails && Array.isArray(mediaData.mediaDetails)) {
+      mediaData.mediaDetails = mediaData.mediaDetails.map((detail) => ({
+        ...detail,
+        width: detail.width !== undefined ? Number(detail.width) : detail.width,
+        height: detail.height !== undefined ? Number(detail.height) : detail.height,
+       status: detail.status !== undefined && detail.status !== null ? Number(detail.status) : detail.status,
+siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null && detail.siteBillMode !== "" ? Number(detail.siteBillMode) : null,
+
+      }));
+    }
+
     if (mediaData.numberOfLandOwners)
       mediaData.numberOfLandOwners = Number(mediaData.numberOfLandOwners);
     let existingMediaForValidation = null;
@@ -1589,9 +1872,76 @@ const mediaOnboarding = async (req, res) => {
           history: existingAppraisalPlain.history || [],
         };
       }
-  
+    }
+    // ✅ NEW — restore missing financial/profile fields for existing
+    // owners from the database BEFORE scaling and validation. Without
+    // this, partial updates (e.g. only changing the owner's phone)
+    // would wipe out onlineAmount/cashAmount/GST/TDS fields since they
+    // default to undefined in the map() above.
+    if (existingMediaForValidation && Array.isArray(mediaData.landOwners)) {
+      mediaData.landOwners.forEach((owner, idx) => {
+        const existing = existingMediaForValidation.landOwners?.[idx];
+        if (!existing) return;
+
+        const FIELDS_TO_RESTORE = [
+          "typeShare",
+          "sharePercentage",
+          "shareAmount",
+          "paymentCategory",
+          "onlineMode",
+          "cashAmount",
+          "onlineAmount",
+          "tdsApplicable",
+          "tdsPercentage",
+          "tdsAmount",
+          "gstApplicable",
+          "gstPercentage",
+          "gstAmount",
+          "totalAmountWithGst",
+          "phone",
+          "bankName",
+          "ifsc",
+          "accountNumber",
+          "upiId",
+          "panNumber",
+          "aadharCardNumber",
+          "eligibleMode",
+          "landOwnerBillMode",
+          "agreementBillMode"
+        ];
+
+        FIELDS_TO_RESTORE.forEach((field) => {
+          if (owner[field] === undefined && existing[field] !== undefined) {
+            owner[field] = existing[field];
+          }
+        });
+
+        // Special handling for file objects — restore if missing, null,
+        // empty string, or an unconverted URL string.
+        OWNER_FILE_FIELDS.forEach((field) => {
+          const val = owner[field];
+          if (
+            val === undefined ||
+            val === null ||
+            val === "" ||
+            typeof val === "string"
+          ) {
+            if (existing[field]) {
+              owner[field] = existing[field];
+            }
+          }
+        });
+
+        // Preserve _id too for validation/matching
+        if (!owner._id && existing._id) {
+          owner._id = existing._id;
+        }
+      });
     }
 
+    if (id) {
+      revertAppraisalRentIfTurnedOff(mediaData, existingMediaForValidation);
+    }
     // ✅ NEW — auto-rescale landOwners proportionally BEFORE validation,
     // whenever totalRentalAmount changed on update. This fixes the bug
     // where a rent-amount edit (manual OR via appraisal) combined with
@@ -1629,7 +1979,12 @@ const mediaOnboarding = async (req, res) => {
       if (!gstCheck.valid)
         return errorResponse(res, gstCheck.message, null, 400);
     }
-
+ if (mediaData.rentalPayment) {
+      mediaData.rentalPayment = processGstOutstandingHistory(
+        mediaData.rentalPayment,
+        userName
+      );
+    }
     // if (
     //   mediaData.landOwners?.length &&
     //   mediaData.rentalPayment?.totalRentalAmount
@@ -1718,8 +2073,11 @@ const mediaOnboarding = async (req, res) => {
       mediaData.agreement.agreementPDF = req.processFile(uploadedAgreementPDF);
     }
 
-    const frontViewFile = findOtherFile("frontView");
-    if (frontViewFile) mediaData.frontView = req.processFile(frontViewFile);
+      const frontViewFile = findOtherFile("frontView");
+      if (frontViewFile) mediaData.frontView = req.processFile(frontViewFile);
+
+    const previousLedgerFile = findOtherFile("previousLedger");
+    if (previousLedgerFile) mediaData.previousLedger = req.processFile(previousLedgerFile);
 
     const sideViewFile = findOtherFile("sideView");
     if (sideViewFile) mediaData.sideView = req.processFile(sideViewFile);
@@ -1741,7 +2099,22 @@ const mediaOnboarding = async (req, res) => {
         mediaData[field] !== undefined &&
         typeof mediaData[field] === "string"
       ) {
-        delete mediaData[field];
+        const urlValue = mediaData[field].trim();
+        if (urlValue.startsWith("http")) {
+          // ✅ FIX — previousLedger is a PDF, but the generic loop was forcing "image"
+          const isPdf = field === "previousLedger";
+          mediaData[field] = {
+            originalName: urlValue.split("/").pop(),
+            fileName: urlValue.split("/").pop(),
+            filePath: urlValue,
+            mimeType: isPdf ? "application/pdf" : null,
+            size: null,
+            fileType: isPdf ? "pdf" : "image",
+            uploadedAt: nowIST(),
+          };
+        } else {
+          delete mediaData[field];
+        }
       }
     });
 
@@ -1822,31 +2195,103 @@ const mediaOnboarding = async (req, res) => {
       //   });
       // }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
-  mediaData.landOwners.forEach((owner, idx) => {
-    const existingOwner = media.landOwners?.[idx];
+        mediaData.landOwners.forEach((owner, idx) => {
+          const existingOwner = media.landOwners?.[idx];
 
-    // ✅ NEW — preserve the EXISTING owner's real _id, matched by
-    // array position, whenever the frontend doesn't send a valid
-    // matching _id (or sends none at all). Without this, Mongoose
-    // silently generates a BRAND-NEW _id for the owner subdocument on
-    // every update — permanently orphaning every ledger/GST/TDS
-    // record that was already tied to the owner's original _id.
-    if (existingOwner) {
-      const sentIdMatchesExisting =
-        owner._id && String(owner._id) === String(existingOwner._id);
+          // ✅ NEW — preserve the EXISTING owner's real _id, matched by
+          // array position, whenever the frontend doesn't send a valid
+          // matching _id (or sends none at all). Without this, Mongoose
+          // silently generates a BRAND-NEW _id for the owner subdocument on
+          // every update — permanently orphaning every ledger/GST/TDS
+          // record that was already tied to the owner's original _id.
+          if (existingOwner) {
+            const sentIdMatchesExisting =
+              owner._id && String(owner._id) === String(existingOwner._id);
 
-      if (!sentIdMatchesExisting) {
-        owner._id = existingOwner._id;
+            if (!sentIdMatchesExisting) {
+              owner._id = existingOwner._id;
+            }
+          }
+        });
       }
-    }
 
-    OWNER_FILE_FIELDS.forEach((field) => {
-      if (typeof owner[field] === "string") {
-        owner[field] = existingOwner ? existingOwner[field] : undefined;
+      // ✅ NEW — preserve the EXISTING mediaDetails' real _id, matched by
+      // array position, to prevent duplication in rentalDue entries.
+      if (mediaData.mediaDetails && Array.isArray(mediaData.mediaDetails)) {
+        mediaData.mediaDetails.forEach((detail, idx) => {
+          const existingDetail = media.mediaDetails?.[idx];
+          if (existingDetail) {
+            const sentIdMatchesExisting =
+              detail._id && String(detail._id) === String(existingDetail._id);
+
+            if (!sentIdMatchesExisting) {
+              detail._id = existingDetail._id;
+            }
+          }
+        });
       }
-    });
-  });
-}
+      // ✅ ADDED — Media → LandOwnerMaster sync. For any owner that's
+      // already linked (has landOwnerMasterId), push this property's
+      // edits (name, amounts, GST/TDS, etc.) into the linked Master
+      // record. Owners without a landOwnerMasterId are skipped.
+      if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        const details = mediaData.mediaDetails || media.mediaDetails || [];
+        const mediaInfo = {
+          mediaId: media._id,
+          faces: details.map(d => ({
+            _id: d._id,
+            mediaCode: d.mediaCode,
+            mediaName: d.mediaName,
+            totalSqFt: d.totalSqFt,
+            siteBillMode: d.siteBillMode
+          })),
+          siteBillMode: details[0]?.siteBillMode,
+        };
+
+        for (const owner of mediaData.landOwners) {
+          const linkedMaster = await syncOrLinkMediaOwnerToMaster(
+            owner,
+            userName,
+            null,
+            mediaInfo,
+          );
+
+          // ✅ ADDED — pull this owner's OTHER sites from the Master's
+          // linkedSites (which sync just upserted THIS site into),
+          // filtering THIS site out, and denormalize onto the Media
+          // doc's embedded owner for display.
+          if (linkedMaster && Array.isArray(linkedMaster.linkedSites)) {
+            // const otherSites = linkedMaster.linkedSites.filter(
+            //   (site) => String(site.mediaId) !== String(mediaInfo.mediaId),
+            // );
+            const otherSites = linkedMaster.linkedSites;
+            // ✅ CHANGED — full field parity with LandOwnerMaster.linkedSites
+            owner.linkedSites = otherSites.map((site) => {
+              return {
+                mediaId: site.mediaId,
+                mediaDetailId: site.mediaDetailId, // ✅ Individual face ID
+                mediaCode: site.mediaCode,
+                mediaName: site.mediaName,
+                siteBillMode: site.siteBillMode,
+                paymentCategory: site.paymentCategory,
+                shareAmount: site.shareAmount,
+                cashAmount: site.cashAmount,
+                onlineAmount: site.onlineAmount,
+                updatedAt: site.updatedAt,
+              };
+            });
+            owner.linkedMediaCount = linkedMaster.linkedMediaCount;
+          } else {
+            owner.linkedSites = [];
+            owner.linkedMediaCount = 0;
+          }
+        }
+
+        mediaData.landOwnerMasterIds = mediaData.landOwners
+          .map((o) => o.landOwnerMasterId)
+          .filter(Boolean);
+      }
+
       // Step 1 & 2: track totalRentalAmount change; get the effective base rent.
       const { currentBaseRent, rentActuallyChanged } =
         handleRentalAmountHistory(mediaData, media, userName);
@@ -1864,60 +2309,217 @@ const mediaOnboarding = async (req, res) => {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      // if (mediaData.rentalPayment && mediaData.agreement) {
-      //   mediaData.agreement.rentalPayment = {
-      //     totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
-      //     paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
-      //     customPaymentFrequency: mediaData.rentalPayment.customPaymentFrequency || 0,
-      //   };
-      // }
-
       // Step 4: handle agreement history with updatedBy/updatedAt on rentalPayment.
-      applyAppraisalRentIfDuent(mediaData, media, userName);
+      // applyAppraisalRentIfDuent(mediaData, media, userName, rentActuallyChanged); // ✅ MOVED to Model Pre-Save
 
       applyOwnerApprovalBillingShift(mediaData, media, userName);
       if (mediaData.rentalPayment && mediaData.agreement) {
         const pf = mediaData.rentalPayment.paymentFrequency || 1;
+         const existingHistory = mediaData.rentalPayment.gstOutstandingHistory || [];
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: pf,
-          // Only set customPaymentFrequency when frequency is actually Custom (7).
+          // Only set customPaymentFrequency when frequency is actually Custom (6).
           // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
-          // validator, since `required` only applies when paymentFrequency === 7.
-          ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+          // validator, since `required` only applies when paymentFrequency === 6.
+          ...(pf === 6 && mediaData.rentalPayment.customPaymentFrequency
             ? {
                 customPaymentFrequency: Number(
                   mediaData.rentalPayment.customPaymentFrequency,
                 ),
               }
             : {}),
+             gstOutstandingHistory: existingHistory,
         };
       }
       handleAgreementHistory(mediaData, media, userName);
 
+      // ✅ FIXED — manage billingStartDate (the cycle-walking anchor).
+      // If the user manually edits lastBillPaidDate in the property
+      // settings (incoming !== existing), we treat it as a manual
+      // anchor shift and update billingStartDate to match. Otherwise,
+      // we preserve the existing billingStartDate to ensure cycle
+      // stability (e.g. keeping the 31st as the anchor even after a
+      // Feb 28th automatic bill update).
+      if (!mediaData.rentalPayment) mediaData.rentalPayment = {};
+
+      const incomingLBP = mediaData.rentalPayment?.lastBillPaidDate;
+      const existingLBP = media.rentalPayment?.lastBillPaidDate
+        ? toDateOnly(media.rentalPayment.lastBillPaidDate).getTime()
+        : null;
+      const existingBSD = media.rentalPayment?.billingStartDate
+        ? toDateOnly(media.rentalPayment.billingStartDate)
+        : null;
+
+      if (incomingLBP) {
+        const incomingTime = toDateOnly(incomingLBP).getTime();
+
+        if (incomingTime !== existingLBP) {
+          // Manual change detected — update anchor to follow the user's shift.
+          mediaData.rentalPayment.billingStartDate = toDateOnly(incomingLBP);
+
+          // ✅ NEW: store the previous cycle start when manually shifting LBP
+          if (!mediaData.rentalPayment.previousBillGenerateDate && media.rentalPayment?.lastBillPaidDate) {
+            mediaData.rentalPayment.previousBillGenerateDate = media.rentalPayment.lastBillPaidDate;
+          }
+
+          // ✅ NEW: auto-calculate nextBillingDate if not provided to ensure cycle consistency
+          if (!mediaData.rentalPayment.nextBillingDate) {
+            const pf = mediaData.rentalPayment.paymentFrequency || media.rentalPayment?.paymentFrequency || 1;
+            const cpf = mediaData.rentalPayment.customPaymentFrequency || media.rentalPayment?.customPaymentFrequency || 0;
+            const freqMap = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+            const monthsToAdd = pf === 6 ? (cpf || 1) : (freqMap[pf] || 1);
+            const nextDate = new Date(toDateOnly(incomingLBP));
+            nextDate.setUTCMonth(nextDate.getUTCMonth() + monthsToAdd);
+            mediaData.rentalPayment.nextBillingDate = nextDate;
+          }
+        } else if (existingBSD) {
+          // No manual change — preserve the stable anchor.
+          mediaData.rentalPayment.billingStartDate = existingBSD;
+        }
+      } else if (existingBSD) {
+        mediaData.rentalPayment.billingStartDate = existingBSD;
+      }
+
+      // ✅ NEW — preserve previousBillGenerateDate on manual update
+      if (
+        mediaData.rentalPayment &&
+        !mediaData.rentalPayment.previousBillGenerateDate &&
+        media.rentalPayment?.previousBillGenerateDate
+      ) {
+        mediaData.rentalPayment.previousBillGenerateDate =
+          media.rentalPayment.previousBillGenerateDate;
+      }
+
+      const protectedFields = [
+        "_id",
+        "__v",
+        "createdAt",
+        "updatedAt",
+        "mediaId",
+        "rentalDue",
+        "rentalDueEntries",
+        "rentalDueHistory",
+        "ledger",
+        "withGst1Ledger",
+        "ledgerHistory",
+        "tdsBalanceHistory",
+        "pendingMonths",
+        "agreementDocVerification",
+        "verificationProgressHistory",
+        "gstBalanceHistory",
+        "agreementDocVerificationHistory"
+      ];
+
       Object.keys(mediaData).forEach((key) => {
-        if (!["_id", "__v", "createdAt", "mediaId"].includes(key)) {
+        if (!protectedFields.includes(key)) {
           media[key] = mediaData[key];
         }
       });
-
-      await media.save();
-      media = await MediaOnboarding.findById(media._id).lean();
+      media.updatedAt = nowIST();
+      await media.save({ timestamps: false });
+      await generateMissedEntriesForMedia(media, userName);
+      media = (await MediaOnboarding.findById(media._id)).toObject({ virtuals: true });
+      if (media.landOwners && Array.isArray(media.landOwners)) {
+        for (const savedOwner of media.landOwners) {
+          if (savedOwner.landOwnerMasterId) {
+            await correctLinkedSiteAmounts(
+              savedOwner.landOwnerMasterId,
+              media._id,
+              savedOwner,
+              null,
+            );
+          }
+        }
+      }
     } else {
       // ── CREATE ──────────────────────────────────────────────────────────
       isNew = true;
-      if (
-        mediaData.agreement &&
-        typeof mediaData.agreement.agreementPDF === "string"
-      ) {
+       if (
+      mediaData.agreement &&
+      typeof mediaData.agreement.agreementPDF === "string"
+    ) {
+      const urlValue = mediaData.agreement.agreementPDF.trim();
+      if (urlValue.startsWith("http")) {
+        mediaData.agreement.agreementPDF = {
+          originalName: urlValue.split("/").pop(),
+          fileName: urlValue.split("/").pop(),
+          filePath: urlValue,
+          mimeType: null,
+          size: null,
+          fileType: "pdf",
+          uploadedAt: nowIST(),
+        };
+      } else {
         delete mediaData.agreement.agreementPDF;
       }
+    }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
         mediaData.landOwners.forEach((owner) => {
           OWNER_FILE_FIELDS.forEach((field) => {
             if (typeof owner[field] === "string") delete owner[field];
           });
         });
+      }
+      // ✅ ADDED — same Media → LandOwnerMaster sync as the update
+      // branch, in case a brand-new Media property is created with
+      // an owner already picked from the landowner list (has a
+      // landOwnerMasterId attached).
+      if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
+        const generatedMediaId = new mongoose.Types.ObjectId();
+        mediaData._id = generatedMediaId;
+
+        const details = mediaData.mediaDetails || [];
+        const mediaInfo = {
+          mediaId: generatedMediaId,
+          faces: details.map(d => ({
+            _id: d._id,
+            mediaCode: d.mediaCode,
+            mediaName: d.mediaName,
+            totalSqFt: d.totalSqFt,
+            siteBillMode: d.siteBillMode
+          })),
+          siteBillMode: details[0]?.siteBillMode,
+        };
+
+        for (const owner of mediaData.landOwners) {
+          const linkedMaster = await syncOrLinkMediaOwnerToMaster(
+            owner,
+            userName,
+            null,
+            mediaInfo,
+          );
+
+          // ✅ ADDED — same denormalization as UPDATE branch.
+          if (linkedMaster && Array.isArray(linkedMaster.linkedSites)) {
+            // const otherSites = linkedMaster.linkedSites.filter(
+            //   (site) => String(site.mediaId) !== String(mediaInfo.mediaId),
+            // );
+            const otherSites = linkedMaster.linkedSites;
+            owner.linkedSites = otherSites.map((site) => {
+              return {
+                mediaId: site.mediaId,
+                mediaCode: site.mediaCode,
+                mediaName: site.mediaName,
+                mediaDetailsCount: site.mediaDetailsCount,
+                siteBillMode: site.siteBillMode,
+                paymentCategory: site.paymentCategory,
+                shareAmount: site.shareAmount,
+                cashAmount: site.cashAmount,
+                onlineAmount: site.onlineAmount,
+                updatedAt: site.updatedAt,
+              };
+            });
+            owner.linkedMediaCount = linkedMaster.linkedMediaCount; // ✅ Uses the Master's aggregated count
+          } else {
+            owner.linkedSites = [];
+            owner.linkedMediaCount = 0;
+          }
+        }
+
+        mediaData.landOwnerMasterIds = mediaData.landOwners
+          .map((o) => o.landOwnerMasterId)
+          .filter(Boolean);
       }
       // Step 1 & 2: record first-ever totalRentalAmount.
       const { currentBaseRent, rentActuallyChanged } =
@@ -1936,31 +2538,61 @@ const mediaOnboarding = async (req, res) => {
         recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
       }
 
-      applyAppraisalRentIfDuent(mediaData, null, userName);
+      // applyAppraisalRentIfDuent(
+      //   mediaData,
+      //   null,
+      //   userName,
+      //   rentActuallyChanged,
+      // ); // ✅ MOVED to Model Pre-Save
+
       mediaData.gstApplicableFlag = detectInitialGstApplicableFlag(mediaData);
       // Step 4: push first agreement history snapshot.
       if (mediaData.rentalPayment && mediaData.agreement) {
         const pf = mediaData.rentalPayment.paymentFrequency || 1;
+         const existingHistory = mediaData.rentalPayment.gstOutstandingHistory || [];
         mediaData.agreement.rentalPayment = {
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: pf,
-          // Only set customPaymentFrequency when frequency is actually Custom (7).
+          // Only set customPaymentFrequency when frequency is actually Custom (6).
           // Leaving it undefined otherwise avoids tripping the schema's `min: 1`
-          // validator, since `required` only applies when paymentFrequency === 7.
-          ...(pf === 7 && mediaData.rentalPayment.customPaymentFrequency
+          // validator, since `required` only applies when paymentFrequency === 6.
+          ...(pf === 6 && mediaData.rentalPayment.customPaymentFrequency
             ? {
                 customPaymentFrequency: Number(
                   mediaData.rentalPayment.customPaymentFrequency,
                 ),
               }
             : {}),
+             gstOutstandingHistory: existingHistory,
         };
       }
       handleAgreementHistory(mediaData, null, userName);
 
+      // ✅ ADDED — initialize billingStartDate on create so it serves
+      // as the stable anchor for all future cycle walking.
+      if (mediaData.rentalPayment?.lastBillPaidDate) {
+        mediaData.rentalPayment.billingStartDate =
+          mediaData.rentalPayment.lastBillPaidDate;
+      }
+      mediaData.createdAt = nowIST();
+      mediaData.updatedAt = nowIST();
       media = new MediaOnboarding(mediaData);
-      await media.save();
-      media = await MediaOnboarding.findById(media._id).lean();
+      await media.save({ timestamps: false });
+      await generateMissedEntriesForMedia(media, userName);
+      media = (await MediaOnboarding.findById(media._id)).toObject({ virtuals: true });
+      // ✅ ADDED — same pass-2 correction as UPDATE branch.
+      if (media.landOwners && Array.isArray(media.landOwners)) {
+        for (const savedOwner of media.landOwners) {
+          if (savedOwner.landOwnerMasterId) {
+            await correctLinkedSiteAmounts(
+              savedOwner.landOwnerMasterId,
+              media._id,
+              savedOwner,
+              null,
+            );
+          }
+        }
+      }
     }
 
     const message = isNew
@@ -1975,7 +2607,7 @@ const mediaOnboarding = async (req, res) => {
 const resolveActiveAgreement = (historyArr) => {
   if (!historyArr || !historyArr.length) return null;
 
-  const now = new Date();
+  const now = nowIST();
   const today = new Date(now.setHours(0, 0, 0, 0));
 
   const toDay = (d) => new Date(new Date(d).setHours(0, 0, 0, 0));
@@ -2100,8 +2732,8 @@ const updateAgreement = async (req, res) => {
       : (media.agreement?.rentalPayment?.updatedBy ?? userName);
 
     const newAgreement = {
-      startDate: new Date(incoming.startDate),
-      endDate: new Date(incoming.endDate),
+      startDate: toDateOnly(incoming.startDate),
+      endDate: toDateOnly(incoming.endDate),
       reminderBeforeExpiry:
         incoming.reminderBeforeExpiry !== undefined
           ? Number(incoming.reminderBeforeExpiry)
@@ -2153,7 +2785,7 @@ const updateAgreement = async (req, res) => {
       );
     }
 
-    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6, 7];
+    const validPaymentFrequencies = [1, 2, 3, 4, 5, 6];
     if (
       !validPaymentFrequencies.includes(
         newAgreement.rentalPayment.paymentFrequency,
@@ -2161,19 +2793,19 @@ const updateAgreement = async (req, res) => {
     ) {
       return errorResponse(
         res,
-        `paymentFrequency must be one of: ${validPaymentFrequencies.join(", ")} (1=Monthly, 2=2M, 3=3M, 4=6M, 5=1Y, 6=2Y)`,
+        `paymentFrequency must be one of: ${validPaymentFrequencies.join(", ")} (1=Monthly, 2=3M, 3=6M, 4=1Y, 5=2Y)`,
         null,
         400,
       );
     }
     if (
-      newAgreement.rentalPayment.paymentFrequency === 7 &&
+      newAgreement.rentalPayment.paymentFrequency === 6 &&
       (!newAgreement.rentalPayment.customPaymentFrequency ||
         newAgreement.rentalPayment.customPaymentFrequency < 1)
     ) {
       return errorResponse(
         res,
-        "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 7",
+        "customPaymentFrequency (number of months) is required and must be greater than 0 when paymentFrequency is 6 (Custom)",
         null,
         400,
       );
@@ -2456,6 +3088,9 @@ const updateAgreement = async (req, res) => {
           updatedAt: nowIST(),
         });
 
+        // Sort rentalAmountHistory by updatedAt DESC
+        rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
+
         media.rentalPayment.totalRentalAmount = activeTotalRentalAmount;
         media.rentalPayment.rentalAmountHistory = rentalAmountHistory;
         // NOTE: gstAmount, tdsAmount, netPayable, ownerPayments are intentionally
@@ -2466,7 +3101,7 @@ const updateAgreement = async (req, res) => {
     }
 
     media.updatedAt = nowIST();
-    await media.save();
+    await media.save({ timestamps: false });
 
     const saved = await MediaOnboarding.findById(media._id)
       .select("agreement agreementHistory rentalPayment")
@@ -2490,161 +3125,7 @@ const updateAgreement = async (req, res) => {
     );
   }
 };
-// const mediaList = async (req, res) => {
-//   try {
-//     const {
-//       pageNumber = 1,
-//       count = 10,
-//       mediaType,
-//       agreementStatus,
-//       city,
-//       status,
-//       search,
-//     } = req.body;
 
-//     const pageNumbers = parseInt(pageNumber) || 1;
-//     const pageSize = parseInt(count) || 10;
-
-//     // ===============================
-//     // SEARCH FILTER
-//     // ===============================
-
-//     let searchFilter = {};
-
-//     if (search && search.trim() !== "") {
-//       const searchRegex = new RegExp(search.trim(), "i");
-//       searchFilter = {
-//         $or: [
-//           { mediaId: searchRegex },
-//           { mediaCode: searchRegex },
-//           { mediaName: searchRegex },
-//           { mediaType: searchRegex },
-//           { state: searchRegex },
-//           { city: searchRegex },
-//           { location: searchRegex },
-//         ],
-//       };
-//     }
-
-//     // ===============================
-//     // COMBINED FILTER
-//     // ===============================
-
-//     const filter = {};
-//     if (city) filter.city = Array.isArray(city) ? { $in: city } : city;
-//     if (mediaType) {
-//       filter.mediaType = Array.isArray(mediaType)
-//         ? { $in: mediaType }
-//         : mediaType;
-//     }
-//     if (status) {
-//       filter.status = Array.isArray(status) ? { $in: status } : status;
-//     }
-//     if (
-//       agreementStatus !== undefined &&
-//       agreementStatus !== null &&
-//       agreementStatus !== ""
-//     ) {
-//       filter["agreement.status"] = Number(agreementStatus);
-//     }
-//     // Merge search + dropdown filters
-//     const combinedFilter =
-//       Object.keys(searchFilter).length > 0
-//         ? {
-//             $and: [
-//               searchFilter,
-//               ...(Object.keys(filter).length > 0 ? [filter] : []),
-//             ],
-//           }
-//         : filter;
-
-//     // ===============================
-//     // QUERY
-//     // ===============================
-
-//     const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
-
-//     const mediaListData = await MediaOnboarding.find(combinedFilter)
-//       .sort({ updatedAt: -1 })
-//       .skip((pageNumbers - 1) * pageSize)
-//       .limit(pageSize)
-//       .lean();
-
-//     // ===============================
-//     // AGGREGATION FOR STATISTICS
-//     // ===============================
-
-//     // Get active count - using numeric status value (adjust based on your schema)
-//     // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
-//     const activeCount = await MediaOnboarding.countDocuments({
-//       status: 1, // Change this to match your active status number
-//     });
-
-//     // Get agreement expired count (agreement.status = 3)
-//     const agreementExpiredCount = await MediaOnboarding.countDocuments({
-//       "agreement.status": 3,
-//     });
-
-//     // Get total rental amounts from all documents
-//     const rentalAggregation = await MediaOnboarding.aggregate([
-//       {
-//         $group: {
-//           _id: null,
-//           totalRentalAmount: {
-//             $sum: "$rentalPayment.totalRentalAmount",
-//           },
-//           totalNetPayable: {
-//             $sum: "$rentalPayment.netPayable",
-//           },
-//         },
-//       },
-//     ]);
-
-//     const totalRentalAmount =
-//       rentalAggregation.length > 0 ? rentalAggregation[0].totalRentalAmount : 0;
-//     const totalNetPayable =
-//       rentalAggregation.length > 0 ? rentalAggregation[0].totalNetPayable : 0;
-
-//     // ===============================
-//     // FILTER OPTIONS (always from full collection)
-//     // ===============================
-
-//     const allData = await MediaOnboarding.find(
-//       {},
-//       "city mediaType status",
-//     ).lean();
-
-//     const cityFilter = [...new Set(allData.map((item) => item.city))].filter(
-//       Boolean,
-//     );
-//     const mediaTypeFilter = [
-//       ...new Set(allData.map((item) => item.mediaType)),
-//     ].filter(Boolean);
-
-//     return successResponse(
-//       res,
-//       "Media list fetched successfully",
-//       {
-//         pageNumber: pageNumbers,
-//         count: pageSize,
-//         totalCount,
-//         totalPages: Math.ceil(totalCount / pageSize),
-//         cityFilter,
-//         mediaTypeFilter,
-//         mediaList: mediaListData,
-//         // New keys added:
-//         activeCount,
-//         agreementExpiredCount,
-//         totalRentalAmount,
-//         totalNetPayable,
-//       },
-//       200,
-//     );
-//   } catch (error) {
-//     return errorResponse(res, error.message, null, 400);
-//   }
-// };
-// Particular Get
 const mediaList = async (req, res) => {
   try {
     const {
@@ -2655,6 +3136,8 @@ const mediaList = async (req, res) => {
       city,
       status,
       search,
+      landOwnerName,
+      landOwnerMasterId,
     } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -2671,12 +3154,14 @@ const mediaList = async (req, res) => {
       searchFilter = {
         $or: [
           { mediaId: searchRegex },
-          { mediaCode: searchRegex },
-          { mediaName: searchRegex },
-          { mediaType: searchRegex },
-          { state: searchRegex },
-          { city: searchRegex },
-          { location: searchRegex },
+          { siteCode: searchRegex },
+          { "mediaDetails.mediaCode": searchRegex },
+          { "mediaDetails.mediaName": searchRegex },
+          { "mediaDetails.mediaType": searchRegex },
+          { "mediaDetails.state": searchRegex },
+          { "mediaDetails.city": searchRegex },
+          { "mediaDetails.location": searchRegex },
+          { "landOwners.name": searchRegex },
         ],
       };
     }
@@ -2686,13 +3171,32 @@ const mediaList = async (req, res) => {
     // ===============================
 
     const filter = {};
-    if (city) filter.city = Array.isArray(city) ? { $in: city } : city;
+    if (city) filter["mediaDetails.city"] = Array.isArray(city) ? { $in: city } : city;
     if (mediaType) {
-      filter.mediaType = Array.isArray(mediaType)
+      filter["mediaDetails.mediaType"] = Array.isArray(mediaType)
         ? { $in: mediaType }
         : mediaType;
     }
+if (landOwnerMasterId) {
+      const idList = Array.isArray(landOwnerMasterId)
+        ? landOwnerMasterId
+        : [landOwnerMasterId];
+      const validIds = idList
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
 
+      if (validIds.length > 0) {
+        filter["landOwners.landOwnerMasterId"] = { $in: validIds };
+      }
+    } else if (landOwnerName) {
+      const nameList = Array.isArray(landOwnerName)
+        ? landOwnerName
+        : [landOwnerName];
+
+      filter["landOwners.name"] = {
+        $in: nameList.map((n) => new RegExp(n.trim(), "i")),
+      };
+    }
     // ── STATUS FILTER ──────────────────────────────────────────
     // 1 / 2 / 3  -> plain `status` field (unchanged legacy behavior)
     // 4          -> virtual status, maps to agreement.status === 2
@@ -2705,7 +3209,7 @@ const mediaList = async (req, res) => {
       const orConditions = [];
 
       if (regularStatuses.length > 0) {
-        orConditions.push({ status: { $in: regularStatuses } });
+        orConditions.push({ "mediaDetails.status": { $in: regularStatuses } });
       }
       if (statusNums.includes(4)) {
         orConditions.push({ "agreement.status": 2 });
@@ -2743,10 +3247,26 @@ const mediaList = async (req, res) => {
         : filter;
 
     // ===============================
-    // QUERY
+    // QUERY & PAGINATION
     // ===============================
 
-    const totalCount = await MediaOnboarding.countDocuments(combinedFilter);
+    // ✅ Global totals for the system (Cannot reduce based on filter)
+    const globalCounts = await MediaOnboarding.aggregate([
+      {
+        $group: {
+          _id: null,
+          siteCount: { $sum: 1 },
+          faceCount: { $sum: { $size: { $ifNull: ["$mediaDetails", []] } } },
+        },
+      },
+    ]);
+
+    const siteCount = globalCounts[0]?.siteCount || 0;
+    const totalCount = globalCounts[0]?.faceCount || 0;
+    const totalFaces = totalCount;
+
+    // ✅ Filtered count for pagination logic (Based on Sites)
+    const filteredCount = await MediaOnboarding.countDocuments(combinedFilter);
 
     const mediaListData = await MediaOnboarding.find(combinedFilter)
       .sort({ updatedAt: -1 })
@@ -2754,20 +3274,76 @@ const mediaList = async (req, res) => {
       .limit(pageSize)
       .lean();
 
+    // ✅ Process each media item to provide aggregated summary fields
+    mediaListData.forEach((item) => {
+      const parentMediaId = String(item._id);
+      item.mediaId = parentMediaId;
+      if (Array.isArray(item.mediaDetails)) {
+        item.siteCode = item.siteCode || item.mediaDetails[0]?.siteCode;
+        // ✅ FIXED — Filter mediaDetails to only include Active (status 1) faces
+        item.mediaDetails = item.mediaDetails.map((d) => ({
+          ...d,
+          mediaId: parentMediaId,
+          siteCode: item.siteCode,
+        }));
+
+        item.mediaName = item.mediaDetails.map((d) => d.mediaName).join(", ");
+        item.mediaCode = item.mediaDetails.map((d) => d.mediaCode).join(" / ");
+        item.totalSqFt = item.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
+        item.mediaType = item.mediaDetails[0]?.mediaType;
+        item.city = item.mediaDetails[0]?.city;
+        item.state = item.mediaDetails[0]?.state;
+        item.location = item.mediaDetails[0]?.location;
+        item.siteBillMode = item.mediaDetails[0]?.siteBillMode;
+      }
+      if (item.rentalPayment?.rentalAmountHistory) {
+        item.rentalPayment.rentalAmountHistory.sort(
+          (a, b) => b.updatedAt - a.updatedAt
+        );
+      }
+      // ✅ ADDED — ensure previousBillGenerateDate is present and CONSISTENT for display
+      if (
+        item.rentalPayment &&
+        item.rentalPayment.lastBillPaidDate
+      ) {
+        const lp = new Date(item.rentalPayment.lastBillPaidDate);
+        const freq = Number(item.rentalPayment.paymentFrequency || 1);
+        const custom = Number(item.rentalPayment.customPaymentFrequency || 1);
+        const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+        const months = freq === 6 ? custom : (map[freq] || 1);
+
+        const expectedPrev = new Date(lp);
+        expectedPrev.setMonth(expectedPrev.getMonth() - months);
+
+        // ✅ CLAMP — don't go before billingStartDate
+        const anchor = item.rentalPayment.billingStartDate || item.rentalPayment.lastBillPaidDate;
+        if (expectedPrev < new Date(anchor)) {
+          item.rentalPayment.previousBillGenerateDate = anchor;
+        } else {
+          item.rentalPayment.previousBillGenerateDate = expectedPrev;
+        }
+      }
+    });
+
     // ===============================
     // AGGREGATION FOR STATISTICS
     // ===============================
 
-    // Get active count - using numeric status value (adjust based on your schema)
-    // Common conventions: 1 = Active, 0 = Inactive, or 2 = Active, etc.
-    const activeCount = await MediaOnboarding.countDocuments({
-      status: 1, // Change this to match your active status number
-    });
+    // Get active face count
+    const activeCountAgg = await MediaOnboarding.aggregate([
+      { $unwind: "$mediaDetails" },
+      { $match: { "mediaDetails.status": 1 } },
+      { $count: "count" },
+    ]);
+    const activeCount = activeCountAgg[0]?.count || 0;
 
-    // Get agreement expired count (agreement.status = 3)
-    const agreementExpiredCount = await MediaOnboarding.countDocuments({
-      "agreement.status": 3,
-    });
+    // Get agreement expired face count
+    const agreementExpiredCountAgg = await MediaOnboarding.aggregate([
+      { $match: { "agreement.status": 3 } },
+      { $unwind: "$mediaDetails" },
+      { $count: "count" },
+    ]);
+    const agreementExpiredCount = agreementExpiredCountAgg[0]?.count || 0;
 
     // Get total rental amounts from all documents
     const rentalAggregation = await MediaOnboarding.aggregate([
@@ -2795,26 +3371,38 @@ const mediaList = async (req, res) => {
 
     const allData = await MediaOnboarding.find(
       {},
-      "city mediaType status",
+      "mediaDetails.city mediaDetails.mediaType mediaDetails.status landOwners.name",
     ).lean();
 
-    const cityFilter = [...new Set(allData.map((item) => item.city))].filter(
+    const cityFilter = [...new Set(allData.flatMap((item) => (item.mediaDetails || []).map(d => d.city)))].filter(
       Boolean,
     );
     const mediaTypeFilter = [
-      ...new Set(allData.map((item) => item.mediaType)),
+      ...new Set(allData.flatMap((item) => (item.mediaDetails || []).map(d => d.mediaType))),
     ].filter(Boolean);
+const allLandOwnersForNameFilter = await LandOwnerMaster.find({})
+  .select("name updatedAt")
+  .sort({ updatedAt: -1 })
+  .lean();
 
+const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
+  id: item._id,
+  name: item.name,
+}));
     return successResponse(
       res,
       "Media list fetched successfully",
       {
         pageNumber: pageNumbers,
         count: pageSize,
-        totalCount,
-        totalPages: Math.ceil(totalCount / pageSize),
+        totalCount, // Global total Faces (e.g., 422)
+        totalSites: siteCount, // Global total Sites (e.g., 420)
+        totalFaces, // Alias for totalCount
+        filteredCount, // Current filtered Sites count
+        totalPages: Math.ceil(filteredCount / pageSize),
         cityFilter,
         mediaTypeFilter,
+        landOwnerNameFilter,
         mediaList: mediaListData,
         // New keys added:
         activeCount,
@@ -2844,6 +3432,56 @@ const getMediaById = async (req, res) => {
     if (!mediaData) {
       return errorResponse(res, "Media not found", null, 404);
     }
+const parentMediaId = String(mediaData._id);
+mediaData.mediaId = parentMediaId;
+
+    // ✅ Aggregated summary fields
+    if (Array.isArray(mediaData.mediaDetails)) {
+      mediaData.siteCode = mediaData.siteCode || mediaData.mediaDetails[0]?.siteCode;
+      mediaData.mediaDetails = mediaData.mediaDetails.map((d) => ({
+        ...d,
+        mediaId: parentMediaId,
+        siteCode: mediaData.siteCode,
+      }));
+      mediaData.mediaName = mediaData.mediaDetails.map((d) => d.mediaName).join(", ");
+      mediaData.mediaCode = mediaData.mediaDetails.map((d) => d.mediaCode).join(" / ");
+      mediaData.totalSqFt = mediaData.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
+      mediaData.mediaType = mediaData.mediaDetails[0]?.mediaType;
+      mediaData.city = mediaData.mediaDetails[0]?.city;
+      mediaData.state = mediaData.mediaDetails[0]?.state;
+      mediaData.location = mediaData.mediaDetails[0]?.location;
+      mediaData.siteBillMode = mediaData.mediaDetails[0]?.siteBillMode;
+    }
+
+    // ✅ Sort rentalAmountHistory by updatedAt DESC
+    if (mediaData.rentalPayment?.rentalAmountHistory) {
+      mediaData.rentalPayment.rentalAmountHistory.sort(
+        (a, b) => b.updatedAt - a.updatedAt
+      );
+    }
+
+    // ✅ ADDED — ensure previousBillGenerateDate is present and CONSISTENT for display
+    if (
+      mediaData.rentalPayment &&
+      mediaData.rentalPayment.lastBillPaidDate
+    ) {
+      const lp = new Date(mediaData.rentalPayment.lastBillPaidDate);
+      const freq = Number(mediaData.rentalPayment.paymentFrequency || 1);
+      const custom = Number(mediaData.rentalPayment.customPaymentFrequency || 1);
+      const map = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+      const months = freq === 6 ? custom : (map[freq] || 1);
+
+      const expectedPrev = new Date(lp);
+      expectedPrev.setMonth(expectedPrev.getMonth() - months);
+
+      // ✅ CLAMP — don't go before billingStartDate
+      const anchor = mediaData.rentalPayment.billingStartDate || mediaData.rentalPayment.lastBillPaidDate;
+      if (expectedPrev < new Date(anchor)) {
+        mediaData.rentalPayment.previousBillGenerateDate = anchor;
+      } else {
+        mediaData.rentalPayment.previousBillGenerateDate = expectedPrev;
+      }
+    }
 
     // Return success response with media data
     return successResponse(
@@ -2865,14 +3503,15 @@ const getMediaById = async (req, res) => {
 
 // Excel Upload
 const COLUMN_MAP = {
-  State: "state",
-  City: "city",
-  "Media Name": "mediaName", // e.g. Hoarding, Unipole, Wall Graphics
-  "Media Code": "mediaCode",
-  "Media Type": "mediaType",
-  Width: "width",
-  Hight: "height", // note: typo in Excel kept as-is
-  Height: "height",
+  state: "state",
+  city: "city",
+  "media name": "mediaName",
+  "media code": "mediaCode",
+  "media type": "mediaType",
+  width: "width",
+  hight: "height",
+  height: "height",
+  "site code": "siteCode",
 };
 const uploadExcel = async (req, res) => {
   try {
@@ -2895,33 +3534,25 @@ const uploadExcel = async (req, res) => {
 
     const results = { inserted: 0, skipped: 0, errors: [] };
     const bulkOps = [];
+    const today = nowIST();
 
-    // ── Generate starting mediaId counter ONCE before the loop ──
-    const today = new Date();
-    const prefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
-
-    const lastMedia = await MediaOnboarding.findOne({
-      mediaId: { $regex: `^${prefix}MED#` },
-    })
-      .sort({ mediaId: -1 })
-      .limit(1);
-
-    let nextNumber = 1;
-    if (lastMedia) {
-      const match = lastMedia.mediaId.match(/#(\d+)$/);
-      if (match) nextNumber = parseInt(match[1]) + 1;
-    }
     // ────────────────────────────────────────────────────────────
+
+    // ── STEP 1: Map + validate every row, then GROUP by Site Code ──
+    const groups = new Map(); // siteCode -> { details: [], excelRows: [] }
 
     for (const [index, row] of rows.entries()) {
       const excelRow = index + 2;
-
       const mapped = {};
-      for (const [excelCol, schemaField] of Object.entries(COLUMN_MAP)) {
-        if (row[excelCol] !== undefined && row[excelCol] !== null) {
-          mapped[schemaField] = row[excelCol];
+
+      // ✅ Robust case-insensitive header matching
+      Object.keys(row).forEach((excelKey) => {
+        const normalizedKey = excelKey.trim().toLowerCase();
+        const schemaField = COLUMN_MAP[normalizedKey];
+        if (schemaField && row[excelKey] !== undefined && row[excelKey] !== null) {
+          mapped[schemaField] = row[excelKey];
         }
-      }
+      });
 
       mapped.mediaName = mapped.mediaName || `Media-${excelRow}`;
 
@@ -2931,8 +3562,8 @@ const uploadExcel = async (req, res) => {
       if (!mapped.state) missing.push("State");
       if (!mapped.city) missing.push("City");
       if (!mapped.width) missing.push("Width");
-      if (!mapped.height) missing.push("Height (Hight)");
-      if (!mapped.mediaType) missing.push("Media Name (type)");
+      if (!mapped.height) missing.push("Height");
+      if (!mapped.mediaType) missing.push("Media Type");
 
       if (missing.length) {
         results.errors.push({
@@ -2943,48 +3574,327 @@ const uploadExcel = async (req, res) => {
         continue;
       }
 
-      mapped.width = Math.floor(mapped.width);
-      mapped.height = Math.floor(mapped.height);
-      mapped.totalSqFt = Math.floor((mapped.width * mapped.height).toFixed(2));
-      mapped.excelRowNumber = excelRow;
+      const mediaDetail = {
+        mediaCode: mapped.mediaCode,
+        mediaName: mapped.mediaName,
+        mediaType: mapped.mediaType,
+        state: mapped.state,
+        city: mapped.city,
+        location: mapped.location || "",
+        width: Math.floor(Number(mapped.width) || 0),
+        height: Math.floor(Number(mapped.height) || 0),
+        status: 2,          // ✅ explicit — pipeline updates skip schema defaults entirely
+  siteBillMode: null, 
+      };
+      mediaDetail.totalSqFt = mediaDetail.width * mediaDetail.height;
 
-      // ── Assign unique mediaId from in-memory counter ──
-      mapped.mediaId = `${prefix}MED#${nextNumber}`;
-      nextNumber++; // increment for next row
-      // ─────────────────────────────────────────────────
+      // Rows without a Site Code fall back to their own mediaCode,
+      // so they still become a standalone document (1 object in the array).
+      const siteCode = mapped.siteCode || mapped.mediaCode;
+
+      if (!groups.has(siteCode)) {
+        groups.set(siteCode, { details: [], excelRows: [] });
+      }
+      groups.get(siteCode).details.push(mediaDetail);
+      groups.get(siteCode).excelRows.push(excelRow);
+    }
+
+    // ── STEP 2: Guard against duplicate mediaCode WITHIN the same group ──
+    for (const [siteCode, group] of groups) {
+      const seen = new Set();
+      const deduped = [];
+      for (let i = 0; i < group.details.length; i++) {
+        const code = group.details[i].mediaCode;
+        if (seen.has(code)) {
+          results.errors.push({
+            row: group.excelRows[i],
+            reason: `Duplicate Media Code "${code}" within Site Code "${siteCode}"`,
+          });
+          results.skipped++;
+          continue;
+        }
+        seen.add(code);
+        deduped.push(group.details[i]);
+      }
+      group.details = deduped;
+    }
+
+    // ── STEP 3: One bulk op per GROUP — append into mediaDetails, never overwrite ──
+    let groupIdx = 0;
+    const groupCount = groups.size;
+    for (const [siteCode, group] of groups) {
+      if (!group.details.length) continue;
+
+      const newDetailCodes = group.details.map((d) => d.mediaCode);
+      const firstRow = group.excelRows[0];
+
+      // To preserve Excel order in a DESCENDING list (updatedAt: -1),
+      // the first site in Excel (groupIdx 0) gets the largest offset
+      // so it has the latest timestamp.
+      const timestamp = new Date(today.getTime() + (groupCount - groupIdx));
 
       bulkOps.push({
         updateOne: {
-          filter: { mediaCode: mapped.mediaCode },
-          update: { $setOnInsert: mapped },
+          filter: {
+            $or: [
+              { siteCode: siteCode },
+              { "mediaDetails.mediaCode": { $in: newDetailCodes } },
+            ],
+          },
+          update: [
+            // STAGE 1: compute the merged array, but stash it in a TEMP field
+            {
+              $set: {
+                siteCode: siteCode,
+                excelRowNumber: firstRow,
+                createdAt: { $ifNull: ["$createdAt", timestamp] },
+                _mergedDetails: {
+                  $let: {
+                    vars: {
+                      existing: { $cond: [{ $isArray: "$mediaDetails" }, "$mediaDetails", []] },
+                    },
+                    in: {
+                      $concatArrays: [
+                        {
+                          $map: {
+                            input: "$$existing",
+                            as: "e",
+                            in: {
+                              $let: {
+                                vars: {
+                                  match: {
+                                    $first: {
+                                      $filter: {
+                                        input: group.details,
+                                        as: "d",
+                                        cond: { $eq: ["$$d.mediaCode", "$$e.mediaCode"] },
+                                      },
+                                    },
+                                  },
+                                },
+                                in: { $ifNull: ["$$match", "$$e"] },
+                              },
+                            },
+                          },
+                        },
+                        {
+                          $filter: {
+                            input: group.details,
+                            as: "d",
+                            cond: {
+                              $not: [
+                                {
+                                  $in: [
+                                    "$$d.mediaCode",
+                                    { $map: { input: "$$existing", as: "e", in: "$$e.mediaCode" } },
+                                  ],
+                                },
+                              ],
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+            // STAGE 2: Apply the merge and update timestamp
+            {
+              $set: {
+                updatedAt: timestamp,
+                mediaDetails: "$_mergedDetails",
+              },
+            },
+            // STAGE 3: drop the temp field
+            { $unset: "_mergedDetails" },
+          ],
           upsert: true,
         },
       });
+      groupIdx++;
     }
 
     if (bulkOps.length) {
-      const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
-        ordered: false,
-      });
-      results.inserted = bulkResult.upsertedCount;
-      results.skipped += bulkResult.matchedCount;
+  try {
+    const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
+      ordered: false,
+      timestamps: false,
+    });
+    results.inserted = bulkResult.upsertedCount;
+    results.skipped += bulkResult.matchedCount;
+  } catch (bulkErr) {
+    // With ordered:false, Mongo still attempts every op — failures land here
+    // instead of aborting the whole batch.
+    if (bulkErr.writeErrors) {
+      for (const we of bulkErr.writeErrors) {
+        results.errors.push({
+          reason: `DB error: ${we.errmsg}`,
+          op: we.op,
+        });
+        results.skipped++;
+      }
+      results.inserted = bulkErr.result?.nUpserted ?? 0;
+    } else {
+      throw bulkErr; // unrecognized error shape — let outer catch handle it
     }
+  }
+}
+
+    let totalFaces = 0;
+    groups.forEach((g) => {
+      totalFaces += g.details.length;
+    });
 
     return res.status(200).json({
       success: true,
-      message: `Upload complete. Inserted: ${results.inserted}, Skipped (duplicate/error): ${results.skipped}`,
-      details: results,
+      message: `Upload complete. Total Faces: ${totalFaces}, Sites: ${results.inserted + results.skipped}. (Inserted: ${results.inserted}, Updated/Matched: ${results.skipped})`,
+      details: { ...results, totalFaces },
     });
   } catch (err) {
     console.error("Excel upload error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+// const uploadExcel = async (req, res) => {
+//   try {
+//     if (!req.file) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "No file uploaded." });
+//     }
 
+//     const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+//     const sheetName = workbook.SheetNames[0];
+//     const sheet = workbook.Sheets[sheetName];
+//     const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+
+//     if (!rows.length) {
+//       return res
+//         .status(400)
+//         .json({ success: false, message: "Excel sheet is empty." });
+//     }
+
+//     const results = { inserted: 0, skipped: 0, errors: [] };
+//     const bulkOps = [];
+
+//     // ── Generate starting mediaId counter ONCE before the loop ──
+//     const today = nowIST();
+//     const prefix = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+
+//     const lastMedia = await MediaOnboarding.findOne({
+//       mediaId: { $regex: `^${prefix}MED#` },
+//     })
+//       .sort({ mediaId: -1 })
+//       .limit(1);
+
+//     let nextNumber = 1;
+//     if (lastMedia) {
+//       const match = lastMedia.mediaId.match(/#(\d+)$/);
+//       if (match) nextNumber = parseInt(match[1]) + 1;
+//     }
+//     // ────────────────────────────────────────────────────────────
+
+//     for (const [index, row] of rows.entries()) {
+//       const excelRow = index + 2;
+//       const mapped = {};
+
+//       // ✅ Robust case-insensitive header matching
+//       Object.keys(row).forEach((excelKey) => {
+//         const normalizedKey = excelKey.trim().toLowerCase();
+//         const schemaField = COLUMN_MAP[normalizedKey];
+//         if (schemaField && (row[excelKey] !== undefined && row[excelKey] !== null)) {
+//           mapped[schemaField] = row[excelKey];
+//         }
+//       });
+
+//       mapped.mediaName = mapped.mediaName || `Media-${excelRow}`;
+
+//       const missing = [];
+//       if (!mapped.mediaCode) missing.push("Media Code");
+//       if (!mapped.mediaName) missing.push("Media Name");
+//       if (!mapped.state) missing.push("State");
+//       if (!mapped.city) missing.push("City");
+//       if (!mapped.width) missing.push("Width");
+//       if (!mapped.height) missing.push("Height");
+//       if (!mapped.mediaType) missing.push("Media Type");
+
+//       if (missing.length) {
+//         results.errors.push({
+//           row: excelRow,
+//           reason: `Missing: ${missing.join(", ")}`,
+//         });
+//         results.skipped++;
+//         continue;
+//       }
+
+//       const mediaDetail = {
+//         mediaCode: mapped.mediaCode,
+//         mediaName: mapped.mediaName,
+//         mediaType: mapped.mediaType,
+//         state: mapped.state,
+//         city: mapped.city,
+//         location: mapped.location || "",
+//         width: Math.floor(Number(mapped.width) || 0),
+//         height: Math.floor(Number(mapped.height) || 0),
+//       };
+//       mediaDetail.totalSqFt = mediaDetail.width * mediaDetail.height;
+
+//       const mediaDocData = {
+//         mediaId: `${prefix}MED#${nextNumber}`,
+//         mediaDetails: [mediaDetail],
+//         excelRowNumber: excelRow,
+//         createdAt: new Date(today.getTime() + (rows.length - index)),
+//         updatedAt: new Date(today.getTime() + (rows.length - index)),
+//       };
+
+//       nextNumber++;
+
+//       bulkOps.push({
+//         updateOne: {
+//           filter: { "mediaDetails.mediaCode": mapped.mediaCode },
+//           update: {
+//             $set: {
+//               ...mediaDocData,
+//             },
+//           },
+//           upsert: true,
+//         },
+//       });
+//     }
+
+//     if (bulkOps.length) {
+//       const bulkResult = await MediaOnboarding.bulkWrite(bulkOps, {
+//         ordered: false,
+//         timestamps: false,
+//       });
+//       results.inserted = bulkResult.upsertedCount;
+//       results.skipped += bulkResult.matchedCount;
+//     }
+
+//     return res.status(200).json({
+//       success: true,
+//       message: `Upload complete. Inserted: ${results.inserted}, Skipped (duplicate/error): ${results.skipped}`,
+//       details: results,
+//     });
+//   } catch (err) {
+//     console.error("Excel upload error:", err);
+//     return res.status(500).json({ success: false, message: err.message });
+//   }
+// };
+const syncBillingCyclesNow = async (req, res) => {
+  try {
+    const result = await MediaOnboarding.syncBillingCycles();
+    return successResponse(res, "Billing cycles synced", result, 200);
+  } catch (error) {
+    return errorResponse(res, "Failed to sync billing cycles", { error: error.message }, 500);
+  }
+};
 module.exports = {
   mediaOnboarding,
   mediaList,
   uploadExcel,
   updateAgreement,
   getMediaById,
+  syncBillingCyclesNow
 };

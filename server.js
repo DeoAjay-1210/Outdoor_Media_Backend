@@ -1,6 +1,6 @@
 const dns = require("dns");
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
-
+const cron = require("node-cron");
 
 require("dotenv").config();
 const path = require("path");   
@@ -11,9 +11,28 @@ const authRoutes = require("./routes/Admin/UserRoutes/UserRoutes");
 const mediaRoutes = require("./routes/Admin/MediaOnboardingRoutes/MediaOnboardingRoutes");
 const ledgerRoutes = require("./routes/Admin/MediaOnboardingRoutes/LedgerRoutes");
 const RentalDue = require("./routes/Admin/MediaOnboardingRoutes/rentalDueRoutes");
+const RentalOOHExcelRoutes = require("./routes/Admin/MediaOnboardingRoutes/RentalOOHExcelRoutes");
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
+const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
+const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
+(async () => {
+  try {
+    const result = await Media.syncBillingCycles();
+    // console.log(`[syncBillingCycles startup] checked=${result.checked} updated=${result.updated}`);
+  } catch (err) {
+    // console.error("[syncBillingCycles startup] failed:", err.message);
+  }
+})();
 
+cron.schedule("5 0 * * *", async () => {
+  try {
+    const result = await Media.syncBillingCycles();
+    console.log(`[syncBillingCycles] checked=${result.checked} updated=${result.updated}`);
+  } catch (err) {
+    console.error("[syncBillingCycles] failed:", err.message);
+  }
+});
 const app = express();
 
 app.use(cors());
@@ -24,6 +43,8 @@ app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
 app.use("/admin", ledgerRoutes);
 app.use("/admin", RentalDue);
+app.use("/admin", RentalOOHExcelRoutes);
+app.use("/admin", LandownerMasterRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
@@ -38,12 +59,17 @@ app.listen(PORT, () => {
 app.use(cors({
   origin: [
     "http://localhost:8080",
-    "http://127.0.0.1:8080",
-    "https://yourfrontend.com",
+    "http://localhost:5000",
     "https://peaceful-entremet-3dd657.netlify.app",
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com",
     "https://adinn-outdoor-media.netlify.app",
-    "http://192.168.1.42:5000"
+    "http://192.168.1.42:5000",
+    "http://192.168.1.39:5000",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH",
+    "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH/",
+    "http://localhost:54571/",
+    "http://localhost:54571",
+
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]

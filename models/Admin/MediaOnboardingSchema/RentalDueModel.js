@@ -107,7 +107,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     dueDate: { type: Date, required: true }, // actual due date
 
     netPayable: { type: Number, default: 0, min: 0 },
-    withGst: { type: Number, enum: [0,1, 2], default: null }, // 1 withGST 2. withOutGST
+    withGst: { type: Number, enum: [0,1, 2], default: 0 }, // 1 withGST 2. withOutGST
 
     // ✅ NEW — snapshot of the GST amount for THIS cycle (only relevant
     // when withGst === 1). Stored on the entry itself so the historical
@@ -133,8 +133,13 @@ const rentalDueEntrySchema = new mongoose.Schema(
     ownerApprovalDate: { type: Date, default: null },
     // ✅ NEW — cycle-based mail status for this entry's approval mail
     mailSent: { type: Boolean, default: false },
+
+    // ✅ NEW — identifies which face this entry belongs to (Separate Bill mode)
+    mediaDetailId: { type: mongoose.Schema.Types.ObjectId, default: null },
+
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
+    reason: { type: String, trim: true },
     proofOfCampaign: {
       originalName: { type: String },
       fileName: { type: String },
@@ -142,6 +147,15 @@ const rentalDueEntrySchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["image"], default: "image" },
+      uploadedAt: { type: Date, default: Date.now },
+    },
+    invoice: {
+      originalName: { type: String },
+      fileName: { type: String },
+      filePath: { type: String },
+      mimeType: { type: String },
+      size: { type: Number },
+      fileType: { type: String, enum: ["pdf"], default: "pdf" },
       uploadedAt: { type: Date, default: Date.now },
     },
 
@@ -168,6 +182,9 @@ const rentalDueEntrySchema = new mongoose.Schema(
     gstAmount: { type: Number, default: 0, min: 0 },
     baseAmount: { type: Number, default: 0, min: 0 },
     gstAddedToBalance: { type: Boolean, default: false },
+    gstApplicableFlag: { type: Number, default: 0 },
+pastgstApplicableFlag: { type: Number, default: 0 },
+
     remarks: { type: String, trim: true },
     updatedBy: { type: String, trim: true },
     updatedAt: { type: Date, default: null },
@@ -183,6 +200,7 @@ const rentalDueHistoryEntrySchema = new mongoose.Schema(
     rentalDueId: { type: mongoose.Schema.Types.ObjectId },
     siteName: { type: String, trim: true },
     campaignName: { type: String, trim: true },
+    reason: { type: String, trim: true },
     dueDate: { type: Date },
     netPayable: { type: Number },
     approvalStatus: { type: Number, enum: [1, 2, 3, 4] },
@@ -231,6 +249,9 @@ const gstBalanceSchema = new mongoose.Schema(
     ownerName: { type: String, trim: true, default: "" },
      utrNumber: { type: String, trim: true, default: "" },
     date: { type: Date, default: null },
+    isUtrEntry: { type: Boolean, default: false },
+    updatedBy: { type: String, trim: true, default: null },   // ← ADDED
+    updatedAt: { type: Date, default: null },                 
   },
   { _id: true }, // needs its own _id so it can be targeted by the new API
 );
