@@ -664,7 +664,8 @@ const downloadRentalOOHExcel = async (req, res) => {
                              (media.mediaName && (media.mediaName.includes(",") || media.mediaName.includes("+")));
 
            if (isCombined) {
-             const combinedCode = media.mediaCode || mediaDetails.map(m => m.mediaCode).join(" / ");
+             const rawCode = media.mediaCode || mediaDetails.map(m => m.mediaCode).join(", ");
+             const combinedCode = String(rawCode).split(" / ").join(", ").split(" + ").join(", ");
              const combinedName = (media.mediaName || mediaDetails.map(m => m.mediaName).join(", ")).split(" + ").join(", ").split(" / ").join(", ");
              const allNames = new Set([...siteWideNames]);
              Array.from(namesByFace.values()).forEach(s => s.forEach(n => allNames.add(n)));
@@ -718,15 +719,15 @@ const downloadRentalOOHExcel = async (req, res) => {
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-    const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
-    const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
-    const styleTotalRow = (isEven) => ({ fill: { fgColor: { rgb: isEven ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center" } });
-    const styleGrandTotal = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center" } };
-    const styleData = { alignment: { vertical: "center" }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+    const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
+    const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, alignment: { vertical: "center", wrapText: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+    const styleTotalRow = (isEven) => ({ fill: { fgColor: { rgb: isEven ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } });
+    const styleGrandTotal = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    const styleData = { border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
     const numFormat = "₹ #,##,##0";
 
-    ws["A1"].s = { fill: { fgColor: { rgb: "FFFFFF" } }, font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center" } };
-    ws["A2"].s = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" } };
+    ws["A1"].s = { fill: { fgColor: { rgb: "FFFFFF" } }, font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    ws["A2"].s = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
 
     let monthCounter = 0;
     for (let r = 0; r < aoa.length; r++) {
@@ -744,7 +745,14 @@ const downloadRentalOOHExcel = async (req, res) => {
           ws[addr].s = styleGrandTotal;
           if (c >= 7) ws[addr].z = numFormat;
         } else if (r > headerRowIdx && aoa[r].length > 0) {
-          ws[addr].s = { ...styleData, alignment: { horizontal: (c === 0 || c === 4 || c === 6 || c >= 7) ? "center" : "left" } };
+          ws[addr].s = {
+            ...styleData,
+            alignment: {
+              vertical: "center",
+              wrapText: true,
+              horizontal: (c === 0 || c === 4 || c === 6 || c >= 7) ? "center" : "left"
+            }
+          };
           if (c >= 7) ws[addr].z = numFormat;
         }
       }
