@@ -416,18 +416,18 @@ const downloadRentalOOHExcel = async (req, res) => {
     const merges = [];
 
     // --- 1. BUILD COMPACT HEADER ---
-    aoa.push(["LEDGER SUMMARY REPORT", "", "", "", "", "", "", "", ""]);
-    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } });
+    aoa.push(["LEDGER SUMMARY REPORT", "", "", "", "", "", "", "", "", ""]);
+    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: 9 } });
 
     const startMonth = monthLabels[0];
     const endMonth = monthLabels[monthLabels.length - 1];
     const periodText = monthLabels.length > 1 ? `${startMonth} to ${endMonth}` : startMonth;
-    aoa.push([`Report Period: ${periodText}`, "", "", "", "", "", "", "", ""]);
-    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: 8 } });
+    aoa.push([`Report Period: ${periodText}`, "", "", "", "", "", "", "", "", ""]);
+    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: 9 } });
 
     const colHeaders = [
       "📅 Month", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "👥 Total Landowners", "👤 Landowner Name",
-      "📊 Rent Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
+      "📌 GST Applicable", "📊 Rent Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
     ];
     aoa.push(colHeaders);
     const headerRowIdx = 2;
@@ -448,8 +448,8 @@ const downloadRentalOOHExcel = async (req, res) => {
       let serialNo = 1;
 
       const monthHeaderIdx = aoa.length;
-      aoa.push([`🗓️ ${monthLabel.toUpperCase()}`, "", "", "", "", "", "", "", ""]);
-      merges.push({ s: { r: monthHeaderIdx, c: 0 }, e: { r: monthHeaderIdx, c: 8 } });
+      aoa.push([`🗓️ ${monthLabel.toUpperCase()}`, "", "", "", "", "", "", "", "", ""]);
+      merges.push({ s: { r: monthHeaderIdx, c: 0 }, e: { r: monthHeaderIdx, c: 9 } });
 
       for (const media of mediaDocs) {
         const mediaDetails = media.mediaDetails || [];
@@ -643,6 +643,21 @@ const downloadRentalOOHExcel = async (req, res) => {
         const totalLedger = Array.from(ledgerByFace.values()).reduce((a,b) => a+b, 0) + siteWideLedger;
         const totalGst = Array.from(gstByFace.values()).reduce((a,b) => a+b, 0) + siteWideGst;
 
+        const isGstApplicableSite =
+          Number(media.rentalPayment?.gstApplicable) === 1 ||
+          (media.landOwners || []).some(
+            (o) =>
+              Number(o.gstApplicable) === 1 ||
+              Number(o.gstPercentage) > 0 ||
+              Number(o.gstAmount) > 0,
+          ) ||
+          Number(media.rentalPayment?.gstPercentage) > 0 ||
+          Number(media.rentalPayment?.gstAmount) > 0 ||
+          Number(media.gstApplicableFlag) === 1 ||
+          Number(media.gstApplicableFlag) === 2;
+
+        const gstApplyText = isGstApplicableSite ? "Yes" : "No";
+
         if (totalLedger > 0 || totalGst > 0) {
            const isCombined = Number(media.siteBillMode) === 1 ||
                              (mediaDetails.length > 0 && Number(mediaDetails[0].siteBillMode) === 1) ||
@@ -657,7 +672,7 @@ const downloadRentalOOHExcel = async (req, res) => {
 
              monthDataRows.push([
                 serialNo++, combinedCode, combinedName, media.mediaType || mediaDetails[0]?.mediaType, owners.length, combinedOwnerNames,
-                totalLedger, totalGst, totalLedger + totalGst
+                gstApplyText, totalLedger, totalGst, totalLedger + totalGst
              ]);
              monthLedgerTotal += totalLedger; monthGstTotal += totalGst; monthOwnerTotal += owners.length;
            } else {
@@ -669,7 +684,7 @@ const downloadRentalOOHExcel = async (req, res) => {
 
                monthDataRows.push([
                   serialNo++, mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, owners.length, dNames,
-                  dLedger, dGst, dLedger + dGst
+                  gstApplyText, dLedger, dGst, dLedger + dGst
                ]);
                monthLedgerTotal += dLedger; monthGstTotal += dGst; monthOwnerTotal += owners.length;
              });
@@ -680,7 +695,7 @@ const downloadRentalOOHExcel = async (req, res) => {
       if (monthDataRows.length > 0) {
         aoa.push(...monthDataRows);
         const totalRowIdx = aoa.length;
-        aoa.push([`🏷️ ${monthLabel.toUpperCase()} TOTAL`, "", "", "", monthOwnerTotal, "", monthLedgerTotal, monthGstTotal, monthLedgerTotal + monthGstTotal]);
+        aoa.push([`🏷️ ${monthLabel.toUpperCase()} TOTAL`, "", "", "", monthOwnerTotal, "", "", monthLedgerTotal, monthGstTotal, monthLedgerTotal + monthGstTotal]);
         merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 3 } });
         aoa.push([]);
 
@@ -697,7 +712,7 @@ const downloadRentalOOHExcel = async (req, res) => {
       ? `📊 GRAND TOTAL (${startMonth} - ${endMonth})`
       : `📊 GRAND TOTAL (${startMonth})`;
 
-    aoa.push([grandTotalLabel, "", "", "", grandOwnerTotal, "", grandLedgerTotal, grandGstTotal, grandLedgerTotal + grandGstTotal]);
+    aoa.push([grandTotalLabel, "", "", "", grandOwnerTotal, "", "", grandLedgerTotal, grandGstTotal, grandLedgerTotal + grandGstTotal]);
     merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 3 } });
 
     const wb = XLSX.utils.book_new();
@@ -715,7 +730,7 @@ const downloadRentalOOHExcel = async (req, res) => {
 
     let monthCounter = 0;
     for (let r = 0; r < aoa.length; r++) {
-      for (let c = 0; c < 9; c++) {
+      for (let c = 0; c < 10; c++) {
         const addr = XLSX.utils.encode_cell({ r, c });
         if (!ws[addr]) continue;
 
@@ -723,20 +738,31 @@ const downloadRentalOOHExcel = async (req, res) => {
         else if (aoa[r][0] && String(aoa[r][0]).startsWith("🗓️")) ws[addr].s = styleMonthHeader;
         else if (aoa[r][0] && String(aoa[r][0]).startsWith("🏷️")) {
           ws[addr].s = styleTotalRow(monthCounter % 2 === 0);
-          if (c >= 6) ws[addr].z = numFormat;
-          if (c === 8) monthCounter++;
+          if (c >= 7) ws[addr].z = numFormat;
+          if (c === 9) monthCounter++;
         } else if (aoa[r][0] && String(aoa[r][0]).startsWith("📊")) {
           ws[addr].s = styleGrandTotal;
-          if (c >= 6) ws[addr].z = numFormat;
+          if (c >= 7) ws[addr].z = numFormat;
         } else if (r > headerRowIdx && aoa[r].length > 0) {
-          ws[addr].s = { ...styleData, alignment: { horizontal: (c === 0 || c === 4 || c >= 6) ? "center" : "left" } };
-          if (c >= 6) ws[addr].z = numFormat;
+          ws[addr].s = { ...styleData, alignment: { horizontal: (c === 0 || c === 4 || c === 6 || c >= 7) ? "center" : "left" } };
+          if (c >= 7) ws[addr].z = numFormat;
         }
       }
     }
 
     ws["!merges"] = merges;
-    ws["!cols"] = [{ wch: 15 }, { wch: 20 }, { wch: 40 }, { wch: 20 }, { wch: 25 }, { wch: 35 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
+    ws["!cols"] = [
+      { wch: 15 }, // A: Month #
+      { wch: 20 }, // B: Media Code
+      { wch: 40 }, // C: Media Name
+      { wch: 20 }, // D: Media Type
+      { wch: 20 }, // E: Total Landowners
+      { wch: 35 }, // F: Landowner Name
+      { wch: 18 }, // G: GST Applicable
+      { wch: 20 }, // H: Rent Amount
+      { wch: 20 }, // I: GST Amount
+      { wch: 20 }  // J: Total Amount
+    ];
     ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 35 }];
 
     XLSX.utils.book_append_sheet(wb, ws, "Rental OOH Report");
