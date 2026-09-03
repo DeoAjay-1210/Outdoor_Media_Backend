@@ -1460,6 +1460,7 @@ async function processSingleRentalDueInternal({
       entry.currentPendingRole = null;
       entry.agreementDocVerified = true;
       entry.ownerApprovalDate = nowIST();
+      media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
     } else if (isTeamLeadOverride) {
       entry.approvalSteps.forEach((step) => {
         if (step.status === 1) {
@@ -1487,6 +1488,7 @@ async function processSingleRentalDueInternal({
         entry.status = 3;
         entry.agreementDocVerified = true;
       }
+      media.rentalStatus = RENTAL_STATUS_MAP[ROLE.TEAM_LEAD];
     } else {
       const step = entry.approvalSteps.find((s) => s.role === userType && s.status === 1);
       if (step) {
@@ -1509,6 +1511,7 @@ async function processSingleRentalDueInternal({
           entry.agreementDocVerified = true;
           if (userType === ROLE.OWNER) entry.ownerApprovalDate = nowIST();
         }
+        media.rentalStatus = RENTAL_STATUS_MAP[userType];
       }
     }
 
@@ -2748,7 +2751,7 @@ exports.GstAmountPaid = async (req, res) => {
 };
 
 // ── revertAgreementDocVerification — one site ──────────────────
-async function processSingleRevertVerification({ mediaId, role }) {
+async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
   const userType = Number(role);
 
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
@@ -2772,9 +2775,29 @@ async function processSingleRevertVerification({ mediaId, role }) {
     };
   }
 
+  const entriesList = Array.isArray(media.rentalDue)
+    ? media.rentalDue
+    : Array.isArray(media.rentalDueEntries)
+      ? media.rentalDueEntries
+      : [];
+
+  const targetEntry = rentalDueId
+    ? entriesList.find((e) => String(e._id) === String(rentalDueId))
+    : null;
+
+  const targetCycle = targetEntry?.dueDate ? getCurrentCycle(targetEntry.dueDate) : null;
+
   const match = media.agreementDocVerification
     .map((rec, i) => ({ rec, i }))
-    .filter(({ rec }) => rec.verifiedByRole === userType && rec.isVerified)
+    .filter(({ rec }) => {
+      if (rec.verifiedByRole !== userType || !rec.isVerified) return false;
+      if (rentalDueId) {
+        if (rec.rentalDueId && String(rec.rentalDueId) === String(rentalDueId)) return true;
+        if (targetCycle && rec.cycle && isSameCycle(rec.cycle, targetCycle)) return true;
+        return false;
+      }
+      return true;
+    })
     .sort((a, b) => new Date(b.rec.verifiedAt) - new Date(a.rec.verifiedAt))[0];
 
   if (!match) {
@@ -2808,7 +2831,14 @@ async function processSingleRevertVerification({ mediaId, role }) {
   media.markModified("agreementDocVerification");
 
   if (Array.isArray(media.verificationProgressHistory) && media.verificationProgressHistory.length) {
-    media.verificationProgressHistory.pop();
+    const histIdx = media.verificationProgressHistory.findIndex(
+      (h) => (rentalDueId && String(h.rentalDueId || "") === String(rentalDueId)) || (cycle && isSameCycle(h.cycle, cycle))
+    );
+    if (histIdx !== -1) {
+      media.verificationProgressHistory.splice(histIdx, 1);
+    } else {
+      media.verificationProgressHistory.pop();
+    }
     media.markModified("verificationProgressHistory");
   }
 
@@ -2819,21 +2849,19 @@ async function processSingleRevertVerification({ mediaId, role }) {
   }
 
   if (Array.isArray(media.agreementDocVerificationHistory)) {
-    const pendingEntry = Array.isArray(media.rentalDueEntries)
-      ? [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3) ||
-        media.rentalDueEntries[media.rentalDueEntries.length - 1]
-      : null;
+    const targetId = rentalDueId || (targetEntry ? targetEntry._id : null);
+    const histMatch = media.agreementDocVerificationHistory
+      .map((h, i) => ({ h, i }))
+      .filter(({ h }) => {
+        if (h.verifiedByRole !== userType) return false;
+        if (targetId) return String(h.rentalDueId) === String(targetId);
+        return true;
+      })
+      .sort((a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt))[0];
 
-    if (pendingEntry) {
-      const histMatch = media.agreementDocVerificationHistory
-        .map((h, i) => ({ h, i }))
-        .filter(({ h }) => h.verifiedByRole === userType && String(h.rentalDueId) === String(pendingEntry._id))
-        .sort((a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt))[0];
-
-      if (histMatch) {
-        media.agreementDocVerificationHistory.splice(histMatch.i, 1);
-        media.markModified("agreementDocVerificationHistory");
-      }
+    if (histMatch) {
+      media.agreementDocVerificationHistory.splice(histMatch.i, 1);
+      media.markModified("agreementDocVerificationHistory");
     }
   }
 
@@ -2857,13 +2885,13 @@ async function processSingleRevertVerification({ mediaId, role }) {
 // ═════════════════════════════════════════════════════════════
 exports.revertAgreementDocVerification = async (req, res) => {
   try {
-    const { mediaId, mediaIds, role } = req.body;
+    const { mediaId, rentalDueId, mediaIds, role } = req.body;
 
     // ── NEW — batch mode ──
     if (Array.isArray(mediaIds) && mediaIds.length > 0) {
       const results = [];
       for (const id of mediaIds) {
-        const result = await processSingleRevertVerification({ mediaId: id, role });
+        const result = await processSingleRevertVerification({ mediaId: id, rentalDueId, role });
         results.push(result);
       }
 
@@ -2878,7 +2906,7 @@ exports.revertAgreementDocVerification = async (req, res) => {
     }
 
     // ── OLD — single mediaId request, response shape UNCHANGED ──
-    const result = await processSingleRevertVerification({ mediaId, role });
+    const result = await processSingleRevertVerification({ mediaId, rentalDueId, role });
 
     if (!result.success) {
       const statusCode = result.message === "Media not found" ? 404 : 400;
@@ -2906,7 +2934,7 @@ exports.revertAgreementDocVerification = async (req, res) => {
 };
 
 // ── revertRentalApproval — one site ─────────────────────────────
-async function processSingleRevertApproval({ mediaId, role }) {
+async function processSingleRevertApproval({ mediaId, rentalDueId, role }) {
   const userType = Number(role);
 
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
@@ -2937,10 +2965,32 @@ async function processSingleRevertApproval({ mediaId, role }) {
   }
 
   const entries = media[entriesField];
-  const entry = entries[entries.length - 1];
+  let entry = entries[entries.length - 1];
+  if (rentalDueId) {
+    const found = entries.find((e) => String(e._id) === String(rentalDueId));
+    if (found) entry = found;
+  }
+
+  ensureApprovalStepsPopulated(entry);
   let reverted = false;
 
   if (userType === ROLE.STAFF) {
+    const staffStep = entry.approvalSteps?.find((s) => s.role === ROLE.STAFF);
+    const isStaffApproved =
+      staffStep?.status === 2 ||
+      staffStep?.status === 3 ||
+      entry.approvalStatus >= 2 ||
+      media.rentalStatus === 1;
+
+    if (!isStaffApproved) {
+      return {
+        success: false,
+        mediaId,
+        mediaName: media.mediaName,
+        message: "Staff approval hasn't happened yet for this cycle",
+      };
+    }
+
     const laterStepsUntouched = entry.approvalSteps
       ?.filter((s) => s.role !== ROLE.STAFF)
       .every((s) => s.status === 1);
@@ -2953,20 +3003,27 @@ async function processSingleRevertApproval({ mediaId, role }) {
         message: "Cannot revert Staff approval — Team Lead/Owner has already acted on this entry",
       };
     }
-    if (media.rentalStatus !== 1) {
-      return {
-        success: false,
-        mediaId,
-        mediaName: media.mediaName,
-        message: "Staff approval hasn't happened yet for this cycle",
-      };
-    }
 
     media.rentalStatus = 0;
     reverted = true;
 
-    media[entriesField] = entries.slice(0, -1);
-    media.markModified(entriesField);
+    if (entry.savedBy?.userName === "System (auto-generated)") {
+      entry.approvalStatus = 1;
+      entry.currentPendingRole = ROLE.STAFF;
+      entry.status = 1;
+      entry.agreementDocVerified = false;
+      if (staffStep) {
+        staffStep.userId = null;
+        staffStep.userName = "";
+        staffStep.approvedAt = null;
+        staffStep.status = 1;
+        staffStep.docVerified = false;
+      }
+      media.markModified(entriesField);
+    } else {
+      media[entriesField] = entries.filter((e) => String(e._id) !== String(entry._id));
+      media.markModified(entriesField);
+    }
 
     const yearLabel = getYearLabel(entry.dueDate);
     const monthLabel = getMonthLabel(entry.dueDate);
@@ -2979,7 +3036,13 @@ async function processSingleRevertApproval({ mediaId, role }) {
       media.markModified("rentalDueHistory");
     }
   } else if (userType === ROLE.TEAM_LEAD) {
-    if (media.rentalStatus !== 2) {
+    const tlStep = entry.approvalSteps?.find((s) => s.role === ROLE.TEAM_LEAD);
+    const isTeamLeadApproved =
+      tlStep?.status === 2 ||
+      media.rentalStatus === 2 ||
+      (entry.approvalStatus >= 2 && entry.currentPendingRole === ROLE.OWNER);
+
+    if (!isTeamLeadApproved) {
       return {
         success: false,
         mediaId,
@@ -2996,7 +3059,6 @@ async function processSingleRevertApproval({ mediaId, role }) {
     entry.status = 1;
     entry.agreementDocVerified = false;
 
-    const tlStep = entry.approvalSteps?.find((s) => s.role === ROLE.TEAM_LEAD);
     if (tlStep) {
       tlStep.userId = null;
       tlStep.userName = "";
@@ -3006,7 +3068,13 @@ async function processSingleRevertApproval({ mediaId, role }) {
     }
     media.markModified(entriesField);
   } else if (userType === ROLE.OWNER) {
-    if (media.rentalStatus !== 3) {
+    const ownerStep = entry.approvalSteps?.find((s) => s.role === ROLE.OWNER);
+    const isOwnerApproved =
+      ownerStep?.status === 2 ||
+      media.rentalStatus === 3 ||
+      entry.approvalStatus === 3;
+
+    if (!isOwnerApproved) {
       return {
         success: false,
         mediaId,
@@ -3024,7 +3092,6 @@ async function processSingleRevertApproval({ mediaId, role }) {
     entry.agreementDocVerified = false;
     entry.ownerApprovalDate = null;
 
-    const ownerStep = entry.approvalSteps?.find((s) => s.role === ROLE.OWNER);
     if (ownerStep) {
       ownerStep.userId = null;
       ownerStep.userName = "";
@@ -3043,19 +3110,17 @@ async function processSingleRevertApproval({ mediaId, role }) {
     media.markModified("agreementDocVerified");
   }
 
-  if (userType !== ROLE.STAFF) {
-    const yearLabel = getYearLabel(entry.dueDate);
-    const monthLabel = getMonthLabel(entry.dueDate);
-    const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-    const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
-    const historyRecord = monthBucket?.entries.find(
-      (e) => String(e.rentalDueId) === String(entry._id),
-    );
-    if (historyRecord) {
-      historyRecord.approvalStatus = entry.approvalStatus;
-      historyRecord.updatedAt = nowIST();
-      media.markModified("rentalDueHistory");
-    }
+  const yearLabel = getYearLabel(entry.dueDate);
+  const monthLabel = getMonthLabel(entry.dueDate);
+  const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+  const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+  const historyRecord = monthBucket?.entries.find(
+    (e) => String(e.rentalDueId) === String(entry._id),
+  );
+  if (historyRecord) {
+    historyRecord.approvalStatus = entry.approvalStatus;
+    historyRecord.updatedAt = nowIST();
+    media.markModified("rentalDueHistory");
   }
 
   await media.save({ timestamps: false });
@@ -3079,13 +3144,13 @@ async function processSingleRevertApproval({ mediaId, role }) {
 // ═════════════════════════════════════════════════════════════
 exports.revertRentalApproval = async (req, res) => {
   try {
-    const { mediaId, mediaIds, role } = req.body;
+    const { mediaId, rentalDueId, mediaIds, role } = req.body;
 
     // ── NEW — batch mode ──
     if (Array.isArray(mediaIds) && mediaIds.length > 0) {
       const results = [];
       for (const id of mediaIds) {
-        const result = await processSingleRevertApproval({ mediaId: id, role });
+        const result = await processSingleRevertApproval({ mediaId: id, rentalDueId, role });
         results.push(result);
       }
 
@@ -3100,7 +3165,7 @@ exports.revertRentalApproval = async (req, res) => {
     }
 
     // ── OLD — single mediaId request, response shape UNCHANGED ──
-    const result = await processSingleRevertApproval({ mediaId, role });
+    const result = await processSingleRevertApproval({ mediaId, rentalDueId, role });
 
     if (!result.success) {
       const statusCode = result.message === "Media not found" ? 404 : 400;
