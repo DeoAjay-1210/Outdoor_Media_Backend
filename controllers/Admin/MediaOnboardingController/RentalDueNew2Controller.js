@@ -2422,7 +2422,14 @@ exports.verifyAgreementDoc = async (req, res) => {
  */
 exports.getOverDueHistoryList = async (req, res) => {
   try {
-    const { pageNumber = 1, count = 10, search, dueMonth, dueYear, status } = req.body;
+    const {
+      pageNumber = 1,
+      count = 10,
+      search,
+      startDueMonth,
+      endDueMonth,
+      status,
+    } = req.body;
 
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
@@ -2446,33 +2453,97 @@ exports.getOverDueHistoryList = async (req, res) => {
       "December",
     ];
 
-    // ── 1) Month / Year Filter (Base Context) ──
-    if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
-      const [mo, yr] = dueMonth.split("-").map(Number);
-      const monthName = monthNames[mo - 1];
-      if (monthName) {
-        monthYearConditions.push({ dueMonth: `${monthName} ${yr}` });
-      }
-    } else if (dueMonth || dueYear) {
-      const mo = parseInt(dueMonth);
-      const yr = parseInt(dueYear);
+    // ── 1) Month / Year Filter (startDueMonth to endDueMonth Range) ──
+    let effectiveStart = startDueMonth;
+    let effectiveEnd = endDueMonth;
 
-      let monthName = null;
-      if (!isNaN(mo) && mo >= 1 && mo <= 12) {
-        monthName = monthNames[mo - 1];
-      } else if (typeof dueMonth === "string" && isNaN(mo)) {
-        monthName = dueMonth;
+    if (effectiveStart && !effectiveEnd) {
+      effectiveEnd = effectiveStart;
+    } else if (effectiveEnd && !effectiveStart) {
+      effectiveStart = effectiveEnd;
+    }
+
+    const parseMonthYear = (val) => {
+      if (!val) return null;
+      const mNames = [
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december"
+      ];
+      if (typeof val === "string") {
+        const trimmed = val.trim();
+        let match = trimmed.match(/^(\d{1,2})[-/](\d{4})$/);
+        if (match) {
+          const mo = parseInt(match[1], 10);
+          const yr = parseInt(match[2], 10);
+          if (mo >= 1 && mo <= 12) return { month: mo, year: yr };
+        }
+        match = trimmed.match(/^(\d{4})[-/](\d{1,2})$/);
+        if (match) {
+          const yr = parseInt(match[1], 10);
+          const mo = parseInt(match[2], 10);
+          if (mo >= 1 && mo <= 12) return { month: mo, year: yr };
+        }
+        const parts = trimmed.split(/\s+/);
+        if (parts.length >= 2) {
+          const mStr = parts[0].toLowerCase();
+          const yr = parseInt(parts[1], 10);
+          const mIdx = mNames.findIndex((m) => m.startsWith(mStr));
+          if (mIdx !== -1 && !isNaN(yr)) {
+            return { month: mIdx + 1, year: yr };
+          }
+        }
+      }
+      return null;
+    };
+
+    const startObj = parseMonthYear(effectiveStart);
+    const endObj = parseMonthYear(effectiveEnd);
+
+    if (startObj && endObj) {
+      let sObj = startObj;
+      let eObj = endObj;
+      if (
+        startObj.year > endObj.year ||
+        (startObj.year === endObj.year && startObj.month > endObj.month)
+      ) {
+        sObj = endObj;
+        eObj = startObj;
       }
 
-      if (monthName && !isNaN(yr)) {
-        monthYearConditions.push({
-          dueMonth: new RegExp(`${monthName}.*${yr}`, "i"),
-        });
-      } else if (monthName) {
-        monthYearConditions.push({ dueMonth: { $regex: monthName, $options: "i" } });
-      } else if (!isNaN(yr)) {
-        monthYearConditions.push({ dueMonth: { $regex: String(yr), $options: "i" } });
+      const startDate = new Date(Date.UTC(sObj.year, sObj.month - 1, 1, 0, 0, 0, 0));
+      const endDate = new Date(Date.UTC(eObj.year, eObj.month, 0, 23, 59, 59, 999));
+
+      const dueMonthOrConditions = [];
+      let curYr = sObj.year;
+      let curMo = sObj.month;
+
+      while (
+        curYr < eObj.year ||
+        (curYr === eObj.year && curMo <= eObj.month)
+      ) {
+        const mName = monthNames[curMo - 1];
+        if (mName) {
+          dueMonthOrConditions.push({
+            dueMonth: new RegExp(`${mName}.*${curYr}`, "i"),
+          });
+          dueMonthOrConditions.push({
+            dueMonth: new RegExp(`^0?${curMo}[-/]${curYr}$`, "i"),
+          });
+        }
+        curMo++;
+        if (curMo > 12) {
+          curMo = 1;
+          curYr++;
+        }
       }
+
+      const monthRangeOr = [
+        { dueDate: { $gte: startDate, $lte: endDate } },
+        { currentBillDate: { $gte: startDate, $lte: endDate } },
+        ...dueMonthOrConditions,
+      ];
+
+      monthYearConditions.push({ $or: monthRangeOr });
     }
 
     // ── 2) Search / Status Filter (Table Specific) ──
