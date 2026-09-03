@@ -1387,9 +1387,13 @@ async function processSingleRentalDueInternal({
   }
 
   const entry = pendingEntry;
+  ensureApprovalStepsPopulated(entry);
+
   const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
   const isOwnerOverride =
     userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
+  const isTeamLeadOverride =
+    userType === ROLE.TEAM_LEAD && entry.currentPendingRole === ROLE.STAFF;
   const isStaffOrTeamLead = userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
 
   if (!isOwnerOverride && !isStaffOrTeamLead && userType !== entry.currentPendingRole) {
@@ -1431,7 +1435,11 @@ async function processSingleRentalDueInternal({
     }
   }
 
-  if (isOwnerOverride || userType === entry.currentPendingRole) {
+  if (!entry.savedBy?.userId && entry.savedBy?.userName === "System (auto-generated)") {
+    entry.savedBy = { userId, userName, role: userType, savedAt: nowIST() };
+  }
+
+  if (isOwnerOverride || isTeamLeadOverride || userType === entry.currentPendingRole) {
     if (isOwnerOverride) {
       entry.approvalSteps.forEach((step) => {
         if (step.status === 1) {
@@ -1452,6 +1460,33 @@ async function processSingleRentalDueInternal({
       entry.currentPendingRole = null;
       entry.agreementDocVerified = true;
       entry.ownerApprovalDate = nowIST();
+    } else if (isTeamLeadOverride) {
+      entry.approvalSteps.forEach((step) => {
+        if (step.status === 1) {
+          if (step.role === ROLE.TEAM_LEAD) {
+            step.status = 2;
+            step.userId = userId;
+            step.userName = userName;
+            step.approvedAt = nowIST();
+            step.docVerified = true;
+          } else if (step.role === ROLE.STAFF) {
+            step.status = 3;
+            step.remarks = "Skipped — approved directly by Team Lead";
+          }
+        }
+      });
+      const roleIndex = chain.indexOf(ROLE.TEAM_LEAD);
+      const nextRole = chain[roleIndex + 1];
+      if (nextRole) {
+        entry.currentPendingRole = nextRole;
+        entry.approvalStatus = 2;
+        entry.status = 2;
+      } else {
+        entry.currentPendingRole = null;
+        entry.approvalStatus = 3;
+        entry.status = 3;
+        entry.agreementDocVerified = true;
+      }
     } else {
       const step = entry.approvalSteps.find((s) => s.role === userType && s.status === 1);
       if (step) {
@@ -1488,6 +1523,7 @@ async function processSingleRentalDueInternal({
     }
   }
 
+  media.markModified("rentalDue");
   entry.updatedBy = userName;
   entry.updatedAt = nowIST();
 
@@ -1501,6 +1537,7 @@ async function processSingleRentalDueInternal({
     historyRecord.campaignName = entry.campaignName;
     historyRecord.updatedAt = nowIST();
     historyRecord.updatedBy = userName;
+    media.markModified("rentalDueHistory");
   }
 
   return {

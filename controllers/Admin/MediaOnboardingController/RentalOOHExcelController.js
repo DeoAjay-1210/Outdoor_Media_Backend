@@ -504,28 +504,43 @@ const downloadRentalOOHExcel = async (req, res) => {
               (g.utrNumber && String(g.utrNumber).trim() !== "" && g.date),
           ),
           ...(media.rentalPayment?.gstOutstandingHistory || [])
-            .filter((g) => g.isPaid)
+            .filter(
+              (g) =>
+                g.isPaid === true ||
+                g.isPaid === "true" ||
+                Number(g.paidAmount) > 0 ||
+                (g.utrNumber && String(g.utrNumber).trim() !== "" && g.date),
+            )
             .map((g) => ({ ...g, gstAmount: g.gstOutStandingAmount })),
         ].filter((g) => normalizeMonth(g.dueMonth) === targetMonthNormalized);
+
+        const fallbackOwnerId = (owners && owners[0])
+          ? String(owners[0]._id || owners[0].landOwnerMasterId || "no-owner")
+          : "no-owner";
+
+        const resolveOwnerId = (obj) => {
+          if (!obj) return fallbackOwnerId;
+          const id = obj.landOwnerId || obj.ownerId;
+          return id ? String(id) : fallbackOwnerId;
+        };
 
         const uniqueGst = new Map();
         Array.from(uniqueLedgers.values())
           .filter((e) => e.isUtrEntry === true)
           .forEach((g) => {
-            const rIdStr = g.rentalDueId ? String(g.rentalDueId) : "no-due";
-            const oIdStr = g.landOwnerId || g.ownerId ? String(g.landOwnerId || g.ownerId) : "no-owner";
-            const key = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
+            const oIdStr = resolveOwnerId(g);
+            const key = `${oIdStr}-${targetMonthNormalized}`;
+            const amt = Number(g.amount || 0);
             const current = uniqueGst.get(key)?.amount || 0;
-            uniqueGst.set(key, { amount: current + Number(g.amount || 0) });
+            uniqueGst.set(key, { amount: Math.max(current, amt) });
           });
 
         monthGstEntries.forEach((g) => {
-          const rIdStr = g.rentalDueId ? String(g.rentalDueId) : "no-due";
-          const oIdStr = g.ownerId || g.landOwnerId ? String(g.ownerId || g.landOwnerId) : "no-owner";
-          const key = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
-          if (!uniqueGst.has(key)) {
-            uniqueGst.set(key, { amount: Number(g.gstAmount || g.paidAmount || 0) });
-          }
+          const oIdStr = resolveOwnerId(g);
+          const key = `${oIdStr}-${targetMonthNormalized}`;
+          const amt = Number(g.gstAmount || g.paidAmount || 0);
+          const current = uniqueGst.get(key)?.amount || 0;
+          uniqueGst.set(key, { amount: Math.max(current, amt) });
         });
 
         const ledgerByFace = new Map();
@@ -533,6 +548,7 @@ const downloadRentalOOHExcel = async (req, res) => {
         const namesByFace = new Map();
         let siteWideLedger = 0, siteWideGst = 0;
         const siteWideNames = new Set();
+        const gstProcessedForOwnerMonth = new Set();
 
         const siteGstPct = media.rentalPayment?.gstPercentage !== undefined ? Number(media.rentalPayment.gstPercentage) : 18;
         const isSiteGstApplicable = Number(media.rentalPayment?.gstApplicable) === 1;
@@ -543,10 +559,11 @@ const downloadRentalOOHExcel = async (req, res) => {
             const mId = dueToMediaMap.get(String(e.rentalDueId));
             const eWithGst = e.withGst !== undefined ? Number(e.withGst) : 2;
 
-            const rIdStr = e.rentalDueId ? String(e.rentalDueId) : "no-due";
-            const oIdStr = e.landOwnerId || e.ownerId ? String(e.landOwnerId || e.ownerId) : "no-owner";
+            const oIdStr = resolveOwnerId(e);
 
-            const primaryGstKey = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
+            const primaryGstKey = `${oIdStr}-${targetMonthNormalized}`;
+            const gstOwnerKey = `${oIdStr}-${targetMonthNormalized}`;
+            const alreadyProcessedGst = gstProcessedForOwnerMonth.has(gstOwnerKey);
 
             let ledgerAmt = Number(e.amount) || 0;
             let gstAmt = 0;
@@ -567,9 +584,9 @@ const downloadRentalOOHExcel = async (req, res) => {
             // Find if an actual GST entry exists for this owner/month
             let existingGst = uniqueGst.get(primaryGstKey);
             if (!existingGst) {
-              // Fallback: search for any entry for this owner/month if rId mismatch
+              // Fallback: search for any entry for this owner/month
               for (const [key, val] of uniqueGst.entries()) {
-                if (key.includes(`-${oIdStr}-${targetMonthNormalized}`)) {
+                if (key.endsWith(`-${targetMonthNormalized}`)) {
                   existingGst = val;
                   uniqueGst.delete(key);
                   break;
@@ -585,8 +602,9 @@ const downloadRentalOOHExcel = async (req, res) => {
               if (eWithGst === 2 && ledgerAmt > gstAmt) {
                 ledgerAmt = ledgerAmt - gstAmt;
               }
-            } else if (eWithGst === 2 && isGstApplicableForThisRow) {
-              // withGst === 2 (Direct GST mode): GST amount is automatically included / calculated from ledger entry
+              gstProcessedForOwnerMonth.add(gstOwnerKey);
+            } else if (eWithGst === 2 && isGstApplicableForThisRow && !alreadyProcessedGst) {
+              // withGst === 2 (Direct GST mode): GST amount is automatically included / calculated from ledger entry ONCE per owner/month
               let baseShare = owner
                 ? Number(owner.shareAmount || 0)
                 : Number(media.rentalPayment?.totalRentalAmount || 0) /
@@ -613,9 +631,9 @@ const downloadRentalOOHExcel = async (req, res) => {
                 gstAmt = Math.round(ledgerAmt - base);
                 ledgerAmt = Math.round(base);
               }
+              gstProcessedForOwnerMonth.add(gstOwnerKey);
             } else {
-              // withGst === 1 (Hold GST mode) or withGst === 0: Check gstBalanceHistory only.
-              // Since no paid GST entry exists in gstBalanceHistory, GST Amount = 0
+              // withGst === 1 (Hold GST mode) or already processed GST for this owner/month:
               gstAmt = 0;
               ledgerAmt = Math.round(ledgerAmt);
             }
@@ -632,12 +650,18 @@ const downloadRentalOOHExcel = async (req, res) => {
           }
         });
 
-        // Restore handling for standalone GST entries (e.g. GST-only payments)
+        // Restore handling for standalone GST entries (e.g. GST-only payments) where GST was NOT consumed by the ledger loop
         uniqueGst.forEach((g, k) => {
+          const oIdFromKey = k.split("-")[0];
+          const gstOwnerKey = `${oIdFromKey}-${targetMonthNormalized}`;
+          if (gstProcessedForOwnerMonth.has(gstOwnerKey)) return;
+
           const rId = k.split("-")[0];
           const mId = dueToMediaMap.get(String(rId));
           if (mId && mId !== "SITE") gstByFace.set(mId, (gstByFace.get(mId) || 0) + (g.amount || 0));
           else siteWideGst += (g.amount || 0);
+
+          gstProcessedForOwnerMonth.add(gstOwnerKey);
         });
 
         const totalLedger = Array.from(ledgerByFace.values()).reduce((a,b) => a+b, 0) + siteWideLedger;
@@ -664,15 +688,30 @@ const downloadRentalOOHExcel = async (req, res) => {
                              (media.mediaName && (media.mediaName.includes(",") || media.mediaName.includes("+")));
 
            if (isCombined) {
-             const rawCode = media.mediaCode || mediaDetails.map(m => m.mediaCode).join(", ");
+             const rawCode = mediaDetails.length > 0
+               ? mediaDetails.map(m => m.mediaCode).filter(Boolean).join(", ")
+               : (media.mediaCode || "");
              const combinedCode = String(rawCode).split(" / ").join(", ").split(" + ").join(", ");
-             const combinedName = (media.mediaName || mediaDetails.map(m => m.mediaName).join(", ")).split(" + ").join(", ").split(" / ").join(", ");
+
+             const rawName = mediaDetails.length > 0
+               ? mediaDetails.map(m => m.mediaName).filter(Boolean).join(", ")
+               : (media.mediaName || "");
+             const combinedName = String(rawName).split(" + ").join(", ").split(" / ").join(", ");
+
+             const rawType = mediaDetails.length > 0
+               ? mediaDetails.map(m => m.mediaType).filter(Boolean).join(", ")
+               : (media.mediaType || "");
+             const combinedMediaType = String(rawType).split(" / ").join(", ").split(" + ").join(", ");
+
              const allNames = new Set([...siteWideNames]);
              Array.from(namesByFace.values()).forEach(s => s.forEach(n => allNames.add(n)));
-             const combinedOwnerNames = Array.from(allNames).join(", ");
+             let combinedOwnerNames = Array.from(allNames).filter(Boolean).join(", ");
+             if (!combinedOwnerNames) {
+               combinedOwnerNames = owners.map(o => o.name).filter(Boolean).join(", ");
+             }
 
              monthDataRows.push([
-                serialNo++, combinedCode, combinedName, media.mediaType || mediaDetails[0]?.mediaType, owners.length, combinedOwnerNames,
+                serialNo++, combinedCode, combinedName, combinedMediaType, owners.length, combinedOwnerNames,
                 gstApplyText, totalLedger, totalGst, totalLedger + totalGst
              ]);
              monthLedgerTotal += totalLedger; monthGstTotal += totalGst; monthOwnerTotal += owners.length;
@@ -681,7 +720,10 @@ const downloadRentalOOHExcel = async (req, res) => {
                const mId = String(mDetail._id);
                const dLedger = ledgerByFace.get(mId) || (siteWideLedger / mediaDetails.length);
                const dGst = gstByFace.get(mId) || (siteWideGst / mediaDetails.length);
-               const dNames = Array.from(namesByFace.get(mId) || siteWideNames).join(", ");
+               let dNames = Array.from(namesByFace.get(mId) || siteWideNames).filter(Boolean).join(", ");
+               if (!dNames) {
+                 dNames = owners.map(o => o.name).filter(Boolean).join(", ");
+               }
 
                monthDataRows.push([
                   serialNo++, mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, owners.length, dNames,
