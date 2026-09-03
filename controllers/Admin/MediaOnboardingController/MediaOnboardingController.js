@@ -5,6 +5,8 @@ const path = require("path");
 const XLSX = require("xlsx");
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema"); // ✅ ADDED
 
+const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
+
 const mongoose = require("mongoose");
 const {
   syncOrLinkMediaOwnerToMaster,
@@ -3189,7 +3191,7 @@ const mediaList = async (req, res) => {
     let searchFilter = {};
 
     if (search && search.trim() !== "") {
-      const searchRegex = new RegExp(search.trim(), "i");
+      const searchRegex = new RegExp(escapeRegex(search.trim()), "i");
       searchFilter = {
         $or: [
           { mediaId: searchRegex },
@@ -3233,7 +3235,7 @@ if (landOwnerMasterId) {
         : [landOwnerName];
 
       filter["landOwners.name"] = {
-        $in: nameList.map((n) => new RegExp(n.trim(), "i")),
+        $in: nameList.map((n) => new RegExp(escapeRegex(n.trim()), "i")),
       };
     }
     // ── STATUS FILTER ──────────────────────────────────────────
