@@ -1299,8 +1299,15 @@ function applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, pastg
 }
 
 const resolveGstApplicable = (item, entryGstFlag, entryPastFlag) => {
-  let flag = entryGstFlag !== undefined ? Number(entryGstFlag) : (Number(item.gstApplicableFlag) || 0);
-  const pastgstApplicableFlag = entryPastFlag !== undefined ? Number(entryPastFlag) : (Number(item.pastgstApplicableFlag) || 0);
+  let flag =
+    entryGstFlag !== undefined && entryGstFlag !== null && Number(entryGstFlag) !== 0
+      ? Number(entryGstFlag)
+      : Number(item.gstApplicableFlag) || 0;
+
+  const pastgstApplicableFlag =
+    entryPastFlag !== undefined && entryPastFlag !== null && Number(entryPastFlag) !== 0
+      ? Number(entryPastFlag)
+      : Number(item.pastgstApplicableFlag) || 0;
 
   // ✅ FIXED — Default to 2 if GST is present anywhere
   if (flag === 0) {
@@ -1474,6 +1481,17 @@ async function processSingleRentalDueInternal({
     }
   }
 
+  if (requestedPastFlag !== undefined && requestedPastFlag !== null && requestedPastFlag !== "") {
+    const parsedPast = Number(requestedPastFlag);
+    if ([0, 1, 2].includes(parsedPast)) {
+      entry.pastgstApplicableFlag = parsedPast;
+      media.pastgstApplicableFlag = parsedPast;
+      media.markModified("pastgstApplicableFlag");
+    }
+  } else if ((!entry.pastgstApplicableFlag || entry.pastgstApplicableFlag === 0) && media.pastgstApplicableFlag) {
+    entry.pastgstApplicableFlag = media.pastgstApplicableFlag;
+  }
+
   if ([1, 2].includes(Number(withGst))) {
     const newWithGst = Number(withGst);
     if (entry.withGst !== newWithGst) {
@@ -1594,6 +1612,8 @@ async function processSingleRentalDueInternal({
     media.markModified("rentalDueHistory");
   }
 
+  const resGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
+
   return {
     success: true,
     mediaId,
@@ -1601,6 +1621,9 @@ async function processSingleRentalDueInternal({
     rentalDueId: entry._id,
     approvalStatus: entry.approvalStatus,
     entryDoc: entry,
+    gstApplicableFlag: resGst.gstApplicableFlag,
+    pastgstApplicableFlag: resGst.pastgstApplicableFlag,
+    gstApplicableDisplay: resGst,
   };
 }
 
@@ -1751,6 +1774,13 @@ async function processSingleRentalDue({
       media.agreementDocVerified = { staff: false, teamLead: false, owner: false };
     }
 
+    if (requestedPastFlag !== undefined && requestedPastFlag !== null && requestedPastFlag !== "") {
+      const parsedPast = Number(requestedPastFlag);
+      if ([0, 1, 2].includes(parsedPast)) {
+        media.pastgstApplicableFlag = parsedPast;
+      }
+    }
+
     const yearLabel = getYearLabel(dueDateObj);
     const monthLabel = getMonthLabel(dueDateObj);
     let yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
@@ -1768,7 +1798,7 @@ async function processSingleRentalDue({
     }
 
     const resGst = resolveGstApplicable(media, savedEntry.gstApplicableFlag, savedEntry.pastgstApplicableFlag);
-    return { success: true, mediaId: media._id, mediaName: media.mediaName, rentalDueId: savedEntry._id, approvalStatus: savedEntry.approvalStatus, entryDoc: savedEntry, gstApplicableFlag: resGst.gstApplicableFlag, gstApplicableDisplay: resGst };
+    return { success: true, mediaId: media._id, mediaName: media.mediaName, rentalDueId: savedEntry._id, approvalStatus: savedEntry.approvalStatus, entryDoc: savedEntry, gstApplicableFlag: resGst.gstApplicableFlag, pastgstApplicableFlag: resGst.pastgstApplicableFlag, gstApplicableDisplay: resGst };
   }
 
   return { success: false, mediaId, message: "No pending cycle found" };
@@ -4085,6 +4115,7 @@ if (Number(isPastPending) === 1) {
         agreementDocVerification: 1,
         verificationProgressHistory: 1,
         gstApplicableFlag: 1,
+        pastgstApplicableFlag: 1,
         gstBalanceHistory: 1,
         rentalDue: 1,
         updatedAt: 1,
@@ -4290,6 +4321,7 @@ const entryVerificationProgressHistory = (
     ...entryObj,
     gstAmount: resolvedEntryGstAmount,
     gstApplicableFlag: resolvedGstDisplay.gstApplicableFlag,
+    pastgstApplicableFlag: resolvedGstDisplay.pastgstApplicableFlag,
     verificationProgress: buildVerificationProgress(item, entryObj.dueDate, entryObj._id),
     verificationProgressHistory: entryVerificationProgressHistory,
     gstApplicableDisplay: resolvedGstDisplay,
@@ -4435,25 +4467,42 @@ const details = (item.mediaDetails || []).map((d) => ({
         })(),
         dueStatus: resolvedDueStatus,
         dueStatusLabel: STATUS_LABEL[resolvedDueStatus] || "",
-       gstApplicableDisplay: (() => {
-  // Find the entry for the current requested month to get its specific flags
-  const currentEntry = (item.rentalDue || []).find((e) => {
-    if (!e.dueDate) return false;
-    const d = new Date(e.dueDate);
-    return d >= monthStart && d <= monthEnd;
-  });
-  if (currentEntry) {
-    return resolveGstApplicable(item, currentEntry.gstApplicableFlag, currentEntry.pastgstApplicableFlag);
-  }
-   const anyEntryWithFlag = (item.rentalDue || []).find(
-    (e) => Number(e.gstApplicableFlag) === 1 || Number(e.gstApplicableFlag) === 2,
-  );
-  if (anyEntryWithFlag) {
-    return resolveGstApplicable(item, anyEntryWithFlag.gstApplicableFlag, anyEntryWithFlag.pastgstApplicableFlag);
-  }
+        pastgstApplicableFlag: (() => {
+          const currentEntry = (item.rentalDue || []).find((e) => {
+            if (!e.dueDate) return false;
+            const d = new Date(e.dueDate);
+            return d >= monthStart && d <= monthEnd;
+          });
+          if (currentEntry) {
+            return resolveGstApplicable(item, currentEntry.gstApplicableFlag, currentEntry.pastgstApplicableFlag).pastgstApplicableFlag;
+          }
+          const anyEntryWithFlag = (item.rentalDue || []).find(
+            (e) => Number(e.gstApplicableFlag) === 1 || Number(e.gstApplicableFlag) === 2 || Number(e.pastgstApplicableFlag) === 1 || Number(e.pastgstApplicableFlag) === 2,
+          );
+          if (anyEntryWithFlag) {
+            return resolveGstApplicable(item, anyEntryWithFlag.gstApplicableFlag, anyEntryWithFlag.pastgstApplicableFlag).pastgstApplicableFlag;
+          }
+          return resolveGstApplicable(item).pastgstApplicableFlag;
+        })(),
+        gstApplicableDisplay: (() => {
+          // Find the entry for the current requested month to get its specific flags
+          const currentEntry = (item.rentalDue || []).find((e) => {
+            if (!e.dueDate) return false;
+            const d = new Date(e.dueDate);
+            return d >= monthStart && d <= monthEnd;
+          });
+          if (currentEntry) {
+            return resolveGstApplicable(item, currentEntry.gstApplicableFlag, currentEntry.pastgstApplicableFlag);
+          }
+          const anyEntryWithFlag = (item.rentalDue || []).find(
+            (e) => Number(e.gstApplicableFlag) === 1 || Number(e.gstApplicableFlag) === 2 || Number(e.pastgstApplicableFlag) === 1 || Number(e.pastgstApplicableFlag) === 2,
+          );
+          if (anyEntryWithFlag) {
+            return resolveGstApplicable(item, anyEntryWithFlag.gstApplicableFlag, anyEntryWithFlag.pastgstApplicableFlag);
+          }
 
-  return resolveGstApplicable(item);
-})(),
+          return resolveGstApplicable(item);
+        })(),
 
         agreementPeriod: {
           startDate: item.agreement?.startDate,
