@@ -76,18 +76,18 @@ const downloadRentalOOHExcel = async (req, res) => {
     const merges = [];
 
     // --- 1. BUILD COMPACT HEADER ---
-    aoa.push(["LEDGER SUMMARY REPORT", "", "", "", "", "", "", "", ""]);
-    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } });
+    aoa.push(["LEDGER SUMMARY REPORT", "", "", "", "", "", "", "", "", ""]);
+    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: 9 } });
 
     const startMonth = monthLabels[0];
     const endMonth = monthLabels[monthLabels.length - 1];
     const periodText = monthLabels.length > 1 ? `${startMonth} to ${endMonth}` : startMonth;
-    aoa.push([`Report Period: ${periodText}`, "", "", "", "", "", "", "", ""]);
-    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: 8 } });
+    aoa.push([`Report Period: ${periodText}`, "", "", "", "", "", "", "", "", ""]);
+    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: 9 } });
 
     const colHeaders = [
       "📅 Month", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "👥 Total Landowners", "👤 Landowner Name",
-      "📊 Ledger Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
+      "📌 GST Applicable", "📊 Rent Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
     ];
     aoa.push(colHeaders);
     const headerRowIdx = 2;
@@ -108,8 +108,8 @@ const downloadRentalOOHExcel = async (req, res) => {
       let serialNo = 1;
 
       const monthHeaderIdx = aoa.length;
-      aoa.push([`🗓️ ${monthLabel.toUpperCase()}`, "", "", "", "", "", "", "", ""]);
-      merges.push({ s: { r: monthHeaderIdx, c: 0 }, e: { r: monthHeaderIdx, c: 8 } });
+      aoa.push([`🗓️ ${monthLabel.toUpperCase()}`, "", "", "", "", "", "", "", "", ""]);
+      merges.push({ s: { r: monthHeaderIdx, c: 0 }, e: { r: monthHeaderIdx, c: 9 } });
 
       for (const media of mediaDocs) {
         const mediaDetails = media.mediaDetails || [];
@@ -132,7 +132,7 @@ const downloadRentalOOHExcel = async (req, res) => {
           ...(media.withGst1Ledger || []).map(e => ({ ...e, withGst: e.withGst || 1, status: 1 })),
           ...(media.rentalPayment?.rentalOutstandingHistory || [])
             .filter(h => h.isPaid)
-            .map(h => ({ ...h, amount: h.baseRentOutstandingAmount, month: h.dueMonth, isOutstanding: true, status: 1 }))
+            .map(h => ({ ...h, amount: h.baseRentOutstandingAmount, month: h.dueMonth, isOutstanding: true, status: 1, withGst: 1 }))
         ];
 
         if (media.ledgerHistory) {
@@ -156,19 +156,51 @@ const downloadRentalOOHExcel = async (req, res) => {
         });
 
         const monthGstEntries = [
-          ...(media.gstBalanceHistory || []),
+          ...(media.gstBalanceHistory || []).filter(
+            (g) =>
+              g.isPaid === true ||
+              g.isPaid === "true" ||
+              Number(g.paidAmount) > 0 ||
+              (g.utrNumber && String(g.utrNumber).trim() !== "" && g.date),
+          ),
           ...(media.rentalPayment?.gstOutstandingHistory || [])
-            .filter(g => g.isPaid)
-            .map(g => ({ ...g, gstAmount: g.gstOutStandingAmount }))
-        ].filter(g => normalizeMonth(g.dueMonth) === targetMonthNormalized);
+            .filter(
+              (g) =>
+                g.isPaid === true ||
+                g.isPaid === "true" ||
+                Number(g.paidAmount) > 0 ||
+                (g.utrNumber && String(g.utrNumber).trim() !== "" && g.date),
+            )
+            .map((g) => ({ ...g, gstAmount: g.gstOutStandingAmount })),
+        ].filter((g) => normalizeMonth(g.dueMonth) === targetMonthNormalized);
+
+        const fallbackOwnerId = (owners && owners[0])
+          ? String(owners[0]._id || owners[0].landOwnerMasterId || "no-owner")
+          : "no-owner";
+
+        const resolveOwnerId = (obj) => {
+          if (!obj) return fallbackOwnerId;
+          const id = obj.landOwnerId || obj.ownerId;
+          return id ? String(id) : fallbackOwnerId;
+        };
 
         const uniqueGst = new Map();
-        Array.from(uniqueLedgers.values()).filter(e => e.isUtrEntry).forEach(g => {
-          uniqueGst.set(`${g.rentalDueId || "no-due"}-${g.landOwnerId || "no-owner"}-${targetMonthNormalized}`, { amount: Number(g.amount) });
-        });
-        monthGstEntries.forEach(g => {
-          const key = `${g.rentalDueId || "no-due"}-${g.ownerId || g.landOwnerId || "rental"}-${targetMonthNormalized}`;
-          if (!uniqueGst.has(key)) uniqueGst.set(key, { amount: Number(g.gstAmount) });
+        Array.from(uniqueLedgers.values())
+          .filter((e) => e.isUtrEntry === true)
+          .forEach((g) => {
+            const oIdStr = resolveOwnerId(g);
+            const key = `${oIdStr}-${targetMonthNormalized}`;
+            const amt = Number(g.amount || 0);
+            const current = uniqueGst.get(key)?.amount || 0;
+            uniqueGst.set(key, { amount: Math.max(current, amt) });
+          });
+
+        monthGstEntries.forEach((g) => {
+          const oIdStr = resolveOwnerId(g);
+          const key = `${oIdStr}-${targetMonthNormalized}`;
+          const amt = Number(g.gstAmount || g.paidAmount || 0);
+          const current = uniqueGst.get(key)?.amount || 0;
+          uniqueGst.set(key, { amount: Math.max(current, amt) });
         });
 
         const ledgerByFace = new Map();
@@ -176,47 +208,139 @@ const downloadRentalOOHExcel = async (req, res) => {
         const namesByFace = new Map();
         let siteWideLedger = 0, siteWideGst = 0;
         const siteWideNames = new Set();
+        const gstProcessedForOwnerMonth = new Set();
 
         const siteGstPct = media.rentalPayment?.gstPercentage !== undefined ? Number(media.rentalPayment.gstPercentage) : 18;
         const isSiteGstApplicable = Number(media.rentalPayment?.gstApplicable) === 1;
 
-        Array.from(uniqueLedgers.values()).filter(e => !e.isUtrEntry).forEach(e => {
-          const mId = dueToMediaMap.get(String(e.rentalDueId));
-          let amt = Number(e.amount) || 0;
-          let gstAmt = 0;
+        Array.from(uniqueLedgers.values())
+          .filter((e) => !e.isUtrEntry)
+          .forEach((e) => {
+            const mId = dueToMediaMap.get(String(e.rentalDueId));
+            const eWithGst = e.withGst !== undefined ? Number(e.withGst) : 2;
 
-          const eWithGst = e.withGst !== undefined ? Number(e.withGst) : 2;
-          // IMPORTANT: Only split if it's EXPLICITLY inclusive (2).
-          // If it's "gst hold" (1), keep it as full Ledger amount.
-          const isInclusive = eWithGst === 2;
+            const oIdStr = resolveOwnerId(e);
 
-          if (isInclusive && isSiteGstApplicable && amt > 0) {
-            const base = amt / (1 + (siteGstPct / 100));
-            gstAmt = Math.round(amt - base);
-            amt = Math.round(base);
-          }
+            const primaryGstKey = `${oIdStr}-${targetMonthNormalized}`;
+            const gstOwnerKey = `${oIdStr}-${targetMonthNormalized}`;
+            const alreadyProcessedGst = gstProcessedForOwnerMonth.has(gstOwnerKey);
+
+            let ledgerAmt = Number(e.amount) || 0;
+            let gstAmt = 0;
+
+            const owner = owners.find(
+              (o) =>
+                String(o._id) === oIdStr ||
+                String(o.landOwnerMasterId) === oIdStr,
+            );
+
+            const isGstApplicableForThisRow =
+              Number(media.rentalPayment?.gstApplicable) === 1 ||
+              Number(owner?.gstApplicable) === 1 ||
+              Number(media.rentalPayment?.gstPercentage) > 0 ||
+              (owner && Number(owner.gstPercentage) > 0) ||
+              Number(media.rentalPayment?.gstAmount) > 0;
+
+            // Find if an actual GST entry exists for this owner/month
+            let existingGst = uniqueGst.get(primaryGstKey);
+            if (!existingGst) {
+              // Fallback: search for any entry for this owner/month
+              for (const [key, val] of uniqueGst.entries()) {
+                if (key.endsWith(`-${targetMonthNormalized}`)) {
+                  existingGst = val;
+                  uniqueGst.delete(key);
+                  break;
+                }
+              }
+            } else {
+              uniqueGst.delete(primaryGstKey);
+            }
+
+            if (existingGst) {
+              // If an explicit GST entry was made, use its actual amount
+              gstAmt = Math.round(Number(existingGst.amount) || 0);
+              if (eWithGst === 2 && ledgerAmt > gstAmt) {
+                ledgerAmt = ledgerAmt - gstAmt;
+              }
+              gstProcessedForOwnerMonth.add(gstOwnerKey);
+            } else if (eWithGst === 2 && isGstApplicableForThisRow && !alreadyProcessedGst) {
+              // withGst === 2 (Direct GST mode): GST amount is automatically included / calculated from ledger entry ONCE per owner/month
+              let baseShare = owner
+                ? Number(owner.shareAmount || 0)
+                : Number(media.rentalPayment?.totalRentalAmount || 0) /
+                  (owners.length || 1);
+              let gstShare = owner
+                ? Number(owner.gstAmount || 0)
+                : Number(media.rentalPayment?.gstAmount || 0) /
+                  (owners.length || 1);
+
+              if (gstShare === 0 && siteGstPct > 0) {
+                gstShare = baseShare * (siteGstPct / 100);
+              }
+
+              const totalWithGst = baseShare + gstShare;
+
+              if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
+                ledgerAmt = Math.round(baseShare);
+                gstAmt = Math.round(gstShare);
+              } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
+                ledgerAmt = Math.round(baseShare);
+                gstAmt = Math.round(gstShare);
+              } else {
+                const base = ledgerAmt / (1 + siteGstPct / 100);
+                gstAmt = Math.round(ledgerAmt - base);
+                ledgerAmt = Math.round(base);
+              }
+              gstProcessedForOwnerMonth.add(gstOwnerKey);
+            } else {
+              // withGst === 1 (Hold GST mode) or already processed GST for this owner/month:
+              gstAmt = 0;
+              ledgerAmt = Math.round(ledgerAmt);
+            }
 
           if (mId && mId !== "SITE") {
-            ledgerByFace.set(mId, (ledgerByFace.get(mId) || 0) + amt);
+            ledgerByFace.set(mId, (ledgerByFace.get(mId) || 0) + ledgerAmt);
             gstByFace.set(mId, (gstByFace.get(mId) || 0) + gstAmt);
             if (!namesByFace.has(mId)) namesByFace.set(mId, new Set());
             if (e.landOwnerName) namesByFace.get(mId).add(e.landOwnerName);
           } else {
-            siteWideLedger += amt;
+            siteWideLedger += ledgerAmt;
             siteWideGst += gstAmt;
             if (e.landOwnerName) siteWideNames.add(e.landOwnerName);
           }
         });
 
+        // Restore handling for standalone GST entries (e.g. GST-only payments) where GST was NOT consumed by the ledger loop
         uniqueGst.forEach((g, k) => {
+          const oIdFromKey = k.split("-")[0];
+          const gstOwnerKey = `${oIdFromKey}-${targetMonthNormalized}`;
+          if (gstProcessedForOwnerMonth.has(gstOwnerKey)) return;
+
           const rId = k.split("-")[0];
           const mId = dueToMediaMap.get(String(rId));
           if (mId && mId !== "SITE") gstByFace.set(mId, (gstByFace.get(mId) || 0) + (g.amount || 0));
           else siteWideGst += (g.amount || 0);
+
+          gstProcessedForOwnerMonth.add(gstOwnerKey);
         });
 
         const totalLedger = Array.from(ledgerByFace.values()).reduce((a,b) => a+b, 0) + siteWideLedger;
         const totalGst = Array.from(gstByFace.values()).reduce((a,b) => a+b, 0) + siteWideGst;
+
+        const isGstApplicableSite =
+          Number(media.rentalPayment?.gstApplicable) === 1 ||
+          (media.landOwners || []).some(
+            (o) =>
+              Number(o.gstApplicable) === 1 ||
+              Number(o.gstPercentage) > 0 ||
+              Number(o.gstAmount) > 0,
+          ) ||
+          Number(media.rentalPayment?.gstPercentage) > 0 ||
+          Number(media.rentalPayment?.gstAmount) > 0 ||
+          Number(media.gstApplicableFlag) === 1 ||
+          Number(media.gstApplicableFlag) === 2;
+
+        const gstApplyText = isGstApplicableSite ? "Yes" : "No";
 
         if (totalLedger > 0 || totalGst > 0) {
            const isCombined = Number(media.siteBillMode) === 1 ||
@@ -224,15 +348,31 @@ const downloadRentalOOHExcel = async (req, res) => {
                              (media.mediaName && (media.mediaName.includes(",") || media.mediaName.includes("+")));
 
            if (isCombined) {
-             const combinedCode = media.mediaCode || mediaDetails.map(m => m.mediaCode).join(" / ");
-             const combinedName = (media.mediaName || mediaDetails.map(m => m.mediaName).join(", ")).split(" + ").join(", ").split(" / ").join(", ");
+             const rawCode = mediaDetails.length > 0
+               ? mediaDetails.map(m => m.mediaCode).filter(Boolean).join(", ")
+               : (media.mediaCode || "");
+             const combinedCode = String(rawCode).split(" / ").join(", ").split(" + ").join(", ");
+
+             const rawName = mediaDetails.length > 0
+               ? mediaDetails.map(m => m.mediaName).filter(Boolean).join(", ")
+               : (media.mediaName || "");
+             const combinedName = String(rawName).split(" + ").join(", ").split(" / ").join(", ");
+
+             const rawType = mediaDetails.length > 0
+               ? mediaDetails.map(m => m.mediaType).filter(Boolean).join(", ")
+               : (media.mediaType || "");
+             const combinedMediaType = String(rawType).split(" / ").join(", ").split(" + ").join(", ");
+
              const allNames = new Set([...siteWideNames]);
              Array.from(namesByFace.values()).forEach(s => s.forEach(n => allNames.add(n)));
-             const combinedOwnerNames = Array.from(allNames).join(", ");
+             let combinedOwnerNames = Array.from(allNames).filter(Boolean).join(", ");
+             if (!combinedOwnerNames) {
+               combinedOwnerNames = owners.map(o => o.name).filter(Boolean).join(", ");
+             }
 
              monthDataRows.push([
-                serialNo++, combinedCode, combinedName, media.mediaType || mediaDetails[0]?.mediaType, owners.length, combinedOwnerNames,
-                totalLedger, totalGst, totalLedger + totalGst
+                serialNo++, combinedCode, combinedName, combinedMediaType, owners.length, combinedOwnerNames,
+                gstApplyText, totalLedger, totalGst, totalLedger + totalGst
              ]);
              monthLedgerTotal += totalLedger; monthGstTotal += totalGst; monthOwnerTotal += owners.length;
            } else {
@@ -240,11 +380,14 @@ const downloadRentalOOHExcel = async (req, res) => {
                const mId = String(mDetail._id);
                const dLedger = ledgerByFace.get(mId) || (siteWideLedger / mediaDetails.length);
                const dGst = gstByFace.get(mId) || (siteWideGst / mediaDetails.length);
-               const dNames = Array.from(namesByFace.get(mId) || siteWideNames).join(", ");
+               let dNames = Array.from(namesByFace.get(mId) || siteWideNames).filter(Boolean).join(", ");
+               if (!dNames) {
+                 dNames = owners.map(o => o.name).filter(Boolean).join(", ");
+               }
 
                monthDataRows.push([
                   serialNo++, mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, owners.length, dNames,
-                  dLedger, dGst, dLedger + dGst
+                  gstApplyText, dLedger, dGst, dLedger + dGst
                ]);
                monthLedgerTotal += dLedger; monthGstTotal += dGst; monthOwnerTotal += owners.length;
              });
@@ -255,7 +398,7 @@ const downloadRentalOOHExcel = async (req, res) => {
       if (monthDataRows.length > 0) {
         aoa.push(...monthDataRows);
         const totalRowIdx = aoa.length;
-        aoa.push([`🏷️ ${monthLabel.toUpperCase()} TOTAL`, "", "", "", monthOwnerTotal, "", monthLedgerTotal, monthGstTotal, monthLedgerTotal + monthGstTotal]);
+        aoa.push([`🏷️ ${monthLabel.toUpperCase()} TOTAL`, "", "", "", monthOwnerTotal, "", "", monthLedgerTotal, monthGstTotal, monthLedgerTotal + monthGstTotal]);
         merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 3 } });
         aoa.push([]);
 
@@ -272,25 +415,25 @@ const downloadRentalOOHExcel = async (req, res) => {
       ? `📊 GRAND TOTAL (${startMonth} - ${endMonth})`
       : `📊 GRAND TOTAL (${startMonth})`;
 
-    aoa.push([grandTotalLabel, "", "", "", grandOwnerTotal, "", grandLedgerTotal, grandGstTotal, grandLedgerTotal + grandGstTotal]);
+    aoa.push([grandTotalLabel, "", "", "", grandOwnerTotal, "", "", grandLedgerTotal, grandGstTotal, grandLedgerTotal + grandGstTotal]);
     merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 3 } });
 
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-    const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
-    const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
-    const styleTotalRow = (isEven) => ({ fill: { fgColor: { rgb: isEven ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center" } });
-    const styleGrandTotal = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center" } };
-    const styleData = { alignment: { vertical: "center" }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+    const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
+    const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, alignment: { vertical: "center", wrapText: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+    const styleTotalRow = (isEven) => ({ fill: { fgColor: { rgb: isEven ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } });
+    const styleGrandTotal = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    const styleData = { border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
     const numFormat = "₹ #,##,##0";
 
-    ws["A1"].s = { font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center" } };
-    ws["A2"].s = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" } };
+    ws["A1"].s = { fill: { fgColor: { rgb: "FFFFFF" } }, font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    ws["A2"].s = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
 
     let monthCounter = 0;
     for (let r = 0; r < aoa.length; r++) {
-      for (let c = 0; c < 9; c++) {
+      for (let c = 0; c < 10; c++) {
         const addr = XLSX.utils.encode_cell({ r, c });
         if (!ws[addr]) continue;
 
@@ -298,20 +441,38 @@ const downloadRentalOOHExcel = async (req, res) => {
         else if (aoa[r][0] && String(aoa[r][0]).startsWith("🗓️")) ws[addr].s = styleMonthHeader;
         else if (aoa[r][0] && String(aoa[r][0]).startsWith("🏷️")) {
           ws[addr].s = styleTotalRow(monthCounter % 2 === 0);
-          if (c >= 6) ws[addr].z = numFormat;
-          if (c === 8) monthCounter++;
+          if (c >= 7) ws[addr].z = numFormat;
+          if (c === 9) monthCounter++;
         } else if (aoa[r][0] && String(aoa[r][0]).startsWith("📊")) {
           ws[addr].s = styleGrandTotal;
-          if (c >= 6) ws[addr].z = numFormat;
+          if (c >= 7) ws[addr].z = numFormat;
         } else if (r > headerRowIdx && aoa[r].length > 0) {
-          ws[addr].s = { ...styleData, alignment: { horizontal: (c === 0 || c === 4 || c >= 6) ? "center" : "left" } };
-          if (c >= 6) ws[addr].z = numFormat;
+          ws[addr].s = {
+            ...styleData,
+            alignment: {
+              vertical: "center",
+              wrapText: true,
+              horizontal: (c === 0 || c === 4 || c === 6 || c >= 7) ? "center" : "left"
+            }
+          };
+          if (c >= 7) ws[addr].z = numFormat;
         }
       }
     }
 
     ws["!merges"] = merges;
-    ws["!cols"] = [{ wch: 15 }, { wch: 20 }, { wch: 40 }, { wch: 20 }, { wch: 25 }, { wch: 35 }, { wch: 20 }, { wch: 20 }, { wch: 20 }];
+    ws["!cols"] = [
+      { wch: 15 }, // A: Month #
+      { wch: 20 }, // B: Media Code
+      { wch: 40 }, // C: Media Name
+      { wch: 20 }, // D: Media Type
+      { wch: 20 }, // E: Total Landowners
+      { wch: 35 }, // F: Landowner Name
+      { wch: 18 }, // G: GST Applicable
+      { wch: 20 }, // H: Rent Amount
+      { wch: 20 }, // I: GST Amount
+      { wch: 20 }  // J: Total Amount
+    ];
     ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 35 }];
 
     XLSX.utils.book_append_sheet(wb, ws, "Rental OOH Report");

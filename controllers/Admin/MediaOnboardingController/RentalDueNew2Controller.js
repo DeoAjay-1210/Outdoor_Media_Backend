@@ -485,10 +485,17 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     const baseAmount = Number(entry.netPayable || 0);
     const isGstApplicable = resolvedGst > 0;
 
+    const mDetails = (media.mediaDetails || []).map(d => ({
+      mediaCode: d.mediaCode,
+      mediaName: d.mediaName,
+      mediaType: d.mediaType,
+      city: d.city,
+      location: d.location
+    }));
+
     await OverDueHistory.create({
       mediaId: media._id,
-      mediaName: media.mediaName,
-      mediaCode: media.mediaCode,
+      mediaDetails: mDetails,
       previousBillDate: media.rentalPayment?.previousBillGenerateDate,
       currentBillDate: entry.dueDate,
       nextBillDate: media.rentalPayment?.nextBillingDate,
@@ -882,8 +889,17 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
         group.forEach((item) => {
           const e = item.entry;
-          totalAgreementRental += Number(e.baseAmount || 0);
-          totalAgreementGst += Number(e.gstAmount || 0);
+          let entryGst = Number(e.gstAmount || 0);
+          if (entryGst <= 0 && Number(e.withGst) !== 0) {
+            entryGst = Number(site.rentalPayment?.gstAmount || 0);
+            if (entryGst <= 0) {
+              entryGst = (site.landOwners || [])
+                .filter((o) => Number(o.gstApplicable) === 1)
+                .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+            }
+          }
+          totalAgreementRental += Number(e.netPayable || e.baseAmount || 0);
+          totalAgreementGst += entryGst;
           if (e.proofOfCampaign?.filePath) proofs.push(e.proofOfCampaign.filePath);
           if (e.invoice?.filePath) invoices.push(e.invoice.filePath);
         });
@@ -913,8 +929,17 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
           });
         }
 
-        totalAgreementRental = Number(e.baseAmount || 0);
-        totalAgreementGst = Number(e.gstAmount || 0);
+        let entryGst = Number(e.gstAmount || 0);
+        if (entryGst <= 0 && Number(e.withGst) !== 0) {
+          entryGst = Number(site.rentalPayment?.gstAmount || 0);
+          if (entryGst <= 0) {
+            entryGst = (site.landOwners || [])
+              .filter((o) => Number(o.gstApplicable) === 1)
+              .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+          }
+        }
+        totalAgreementRental = Number(e.netPayable || e.baseAmount || 0);
+        totalAgreementGst = entryGst;
         if (e.proofOfCampaign?.filePath) proofs.push(e.proofOfCampaign.filePath);
         if (e.invoice?.filePath) invoices.push(e.invoice.filePath);
       }
@@ -956,12 +981,34 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       const rp = site.rentalPayment || {};
       const agreement = site.agreement || {};
 
+      const isSiteGstApplicable = Number(rp.gstApplicable) === 1;
+
+      let totalRentalAmount = Number(rp.totalRentalAmount || 0);
+      if (totalRentalAmount <= 0) {
+        totalRentalAmount = Number(firstItem.entry?.netPayable || firstItem.entry?.baseAmount || totalAgreementRental || 0);
+      }
+
+      let gstAmountVal = 0;
+      let gstNumberVal = "";
+      let gstApplicableVal = 0;
+
+      if (isSiteGstApplicable) {
+        gstApplicableVal = 1;
+        gstNumberVal = rp.gstNumber || "";
+        gstAmountVal = Number(rp.gstAmount || firstItem.entry?.gstAmount || 0);
+      }
+
+      const totalGstForSite = gstAmountVal > 0 ? gstAmountVal : totalAgreementGst;
+      const netPayableVal = totalRentalAmount + totalGstForSite;
+
       return {
         mediaDetails: activeFaces,
         rentalPayment: {
-          totalRentalAmount: totalAgreementRental,
-          gstAmount: totalAgreementGst,
-          netPayable: totalAgreementRental + totalAgreementGst,
+          totalRentalAmount: totalRentalAmount,
+          gstApplicable: gstApplicableVal,
+          gstNumber: gstNumberVal,
+          gstAmount: gstAmountVal,
+          netPayable: netPayableVal,
           paymentFrequency: firstItem.entry?.paymentFrequency || rp.paymentFrequency || 0,
           lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
           nextBillingDate: formatYMD(rp.nextBillingDate),
@@ -989,10 +1036,21 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     };
 
 
+    const parseEmailList = (mailStr) => {
+      if (!mailStr) return [];
+      if (Array.isArray(mailStr)) {
+        return mailStr.flatMap((s) => String(s).split(",")).map((e) => e.trim()).filter(Boolean);
+      }
+      return String(mailStr).split(",").map((e) => e.trim()).filter(Boolean);
+    };
+
+    const toArray = parseEmailList(toMail);
+    const ccArray = parseEmailList(ccMail);
+
     const mailPayload = {
       mailtype: "cmdapproval",
-      to: [toMail],
-       cc: [ccMail],
+      to: toArray,
+      cc: ccArray,
       data: data,
     };
 
@@ -1007,8 +1065,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       );
       return {
         mailtype: "cmdapproval",
-        to: [toMail],
-        cc: [ccMail],
+        to: toArray,
+        cc: ccArray,
         success: true,
         sent: false,
         statusCode: 200,
@@ -1033,8 +1091,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
     return {
       mailtype: "cmdapproval",
-      to: [toMail],
-      cc: [ccMail],
+      to: toArray,
+      cc: ccArray,
       success: !!isMailSuccess,
       sent: !!isMailSuccess,
       statusCode: response.status || (isMailSuccess ? 200 : 500),
@@ -1050,8 +1108,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     );
     return {
       mailtype: "cmdapproval",
-      to: [process.env.T0_EMail],
-      cc: [process.env.CC_EMail],
+      to: parseEmailList(process.env.T0_EMail),
+      cc: parseEmailList(process.env.CC_EMail),
       success: false,
       sent: false,
       statusCode: 500,
@@ -1380,9 +1438,13 @@ async function processSingleRentalDueInternal({
   }
 
   const entry = pendingEntry;
+  ensureApprovalStepsPopulated(entry);
+
   const chain = FLOW_CHAIN[entry.approvalFlow] || FLOW_CHAIN[1];
   const isOwnerOverride =
     userType === ROLE.OWNER && entry.currentPendingRole !== ROLE.OWNER;
+  const isTeamLeadOverride =
+    userType === ROLE.TEAM_LEAD && entry.currentPendingRole === ROLE.STAFF;
   const isStaffOrTeamLead = userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
 
   if (!isOwnerOverride && !isStaffOrTeamLead && userType !== entry.currentPendingRole) {
@@ -1424,7 +1486,11 @@ async function processSingleRentalDueInternal({
     }
   }
 
-  if (isOwnerOverride || userType === entry.currentPendingRole) {
+  if (!entry.savedBy?.userId && entry.savedBy?.userName === "System (auto-generated)") {
+    entry.savedBy = { userId, userName, role: userType, savedAt: nowIST() };
+  }
+
+  if (isOwnerOverride || isTeamLeadOverride || userType === entry.currentPendingRole) {
     if (isOwnerOverride) {
       entry.approvalSteps.forEach((step) => {
         if (step.status === 1) {
@@ -1445,6 +1511,35 @@ async function processSingleRentalDueInternal({
       entry.currentPendingRole = null;
       entry.agreementDocVerified = true;
       entry.ownerApprovalDate = nowIST();
+      media.rentalStatus = RENTAL_STATUS_MAP[ROLE.OWNER];
+    } else if (isTeamLeadOverride) {
+      entry.approvalSteps.forEach((step) => {
+        if (step.status === 1) {
+          if (step.role === ROLE.TEAM_LEAD) {
+            step.status = 2;
+            step.userId = userId;
+            step.userName = userName;
+            step.approvedAt = nowIST();
+            step.docVerified = true;
+          } else if (step.role === ROLE.STAFF) {
+            step.status = 3;
+            step.remarks = "Skipped — approved directly by Team Lead";
+          }
+        }
+      });
+      const roleIndex = chain.indexOf(ROLE.TEAM_LEAD);
+      const nextRole = chain[roleIndex + 1];
+      if (nextRole) {
+        entry.currentPendingRole = nextRole;
+        entry.approvalStatus = 2;
+        entry.status = 2;
+      } else {
+        entry.currentPendingRole = null;
+        entry.approvalStatus = 3;
+        entry.status = 3;
+        entry.agreementDocVerified = true;
+      }
+      media.rentalStatus = RENTAL_STATUS_MAP[ROLE.TEAM_LEAD];
     } else {
       const step = entry.approvalSteps.find((s) => s.role === userType && s.status === 1);
       if (step) {
@@ -1467,6 +1562,7 @@ async function processSingleRentalDueInternal({
           entry.agreementDocVerified = true;
           if (userType === ROLE.OWNER) entry.ownerApprovalDate = nowIST();
         }
+        media.rentalStatus = RENTAL_STATUS_MAP[userType];
       }
     }
 
@@ -1481,6 +1577,7 @@ async function processSingleRentalDueInternal({
     }
   }
 
+  media.markModified("rentalDue");
   entry.updatedBy = userName;
   entry.updatedAt = nowIST();
 
@@ -1494,6 +1591,7 @@ async function processSingleRentalDueInternal({
     historyRecord.campaignName = entry.campaignName;
     historyRecord.updatedAt = nowIST();
     historyRecord.updatedBy = userName;
+    media.markModified("rentalDueHistory");
   }
 
   return {
@@ -2300,75 +2398,102 @@ exports.getOverDueHistoryList = async (req, res) => {
     const pageSize = parseInt(count) || 10;
     const skip = (pageNumbers - 1) * pageSize;
 
-    const filter = {};
+    const monthYearConditions = [];
+    const searchStatusConditions = [];
 
-    if (search) {
-      filter.$or = [
-        { mediaName: { $regex: search, $options: "i" } },
-        { mediaCode: { $regex: search, $options: "i" } },
-      ];
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+
+    // ── 1) Month / Year Filter (Base Context) ──
+    if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
+      const [mo, yr] = dueMonth.split("-").map(Number);
+      const monthName = monthNames[mo - 1];
+      if (monthName) {
+        monthYearConditions.push({ dueMonth: `${monthName} ${yr}` });
+      }
+    } else if (dueMonth || dueYear) {
+      const mo = parseInt(dueMonth);
+      const yr = parseInt(dueYear);
+
+      let monthName = null;
+      if (!isNaN(mo) && mo >= 1 && mo <= 12) {
+        monthName = monthNames[mo - 1];
+      } else if (typeof dueMonth === "string" && isNaN(mo)) {
+        monthName = dueMonth;
+      }
+
+      if (monthName && !isNaN(yr)) {
+        monthYearConditions.push({
+          dueMonth: new RegExp(`${monthName}.*${yr}`, "i"),
+        });
+      } else if (monthName) {
+        monthYearConditions.push({ dueMonth: { $regex: monthName, $options: "i" } });
+      } else if (!isNaN(yr)) {
+        monthYearConditions.push({ dueMonth: { $regex: String(yr), $options: "i" } });
+      }
     }
 
-    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-    if (dueMonth && dueMonth.match(/^\d{2}-\d{4}$/)) {
-        const [mo, yr] = dueMonth.split("-").map(Number);
-        const monthName = monthNames[mo - 1]; // Reverted to standard 1-based mapping (08 = August)
-        if (monthName) {
-            filter.dueMonth = `${monthName} ${yr}`;
-        }
-    } else if (dueMonth || dueYear) {
-        // Support separate dueMonth and dueYear
-        const mo = parseInt(dueMonth);
-        const yr = parseInt(dueYear);
-
-        let monthName = null;
-        if (!isNaN(mo) && mo >= 1 && mo <= 12) {
-            monthName = monthNames[mo - 1]; // Standard 1-based mapping
-        } else if (typeof dueMonth === 'string' && isNaN(mo)) {
-            monthName = dueMonth; // User sent "August"
-        }
-
-        if (monthName && !isNaN(yr)) {
-            filter.dueMonth = new RegExp(`${monthName}.*${yr}`, "i");
-        } else if (monthName) {
-            filter.dueMonth = { $regex: monthName, $options: "i" };
-        } else if (!isNaN(yr)) {
-            filter.dueMonth = { $regex: String(yr), $options: "i" };
-        }
+    // ── 2) Search / Status Filter (Table Specific) ──
+    if (search) {
+      searchStatusConditions.push({
+        $or: [
+          { "mediaDetails.mediaName": { $regex: search, $options: "i" } },
+          { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
+        ],
+      });
     }
 
     if (status !== undefined && status !== null && status !== "") {
-        const s = Number(status);
-        if (s === 0) {
-            // Pending: Both are null
-            filter.ledgerEntryDate = null;
-            filter.gstEntryDate = null;
-        } else if (s === 1) {
-            // Rent Entry only
-            filter.ledgerEntryDate = { $ne: null };
-            filter.gstEntryDate = null;
-        } else if (s === 2) {
-            // GST Entry only
-            filter.ledgerEntryDate = null;
-            filter.gstEntryDate = { $ne: null };
-        } else if (s === 3) {
-            // Complete
-            // We can't easily filter "Complete" with a single condition because it depends on withGst
-            // However, we can approximate or use $or
-            filter.$or = [
-                { ledgerEntryDate: { $ne: null }, gstEntryDate: { $ne: null } },
-                { ledgerEntryDate: { $ne: null }, withGst: 2 }
-            ];
-        }
+      const s = Number(status);
+      if (s === 0) {
+        searchStatusConditions.push({ ledgerEntryDate: null, gstEntryDate: null });
+      } else if (s === 1) {
+        searchStatusConditions.push({
+          ledgerEntryDate: { $ne: null },
+          gstEntryDate: null,
+        });
+      } else if (s === 2) {
+        searchStatusConditions.push({
+          ledgerEntryDate: null,
+          gstEntryDate: { $ne: null },
+        });
+      } else if (s === 3) {
+        searchStatusConditions.push({
+          $or: [
+            { ledgerEntryDate: { $ne: null }, gstEntryDate: { $ne: null } },
+            { ledgerEntryDate: { $ne: null }, withGst: 2 },
+          ],
+        });
+      }
     }
+
+    // ── 3) Build Final Filters ──
+    // Summary Filter: Based ONLY on Month/Year (Stays stable during search/status filtering)
+    const summaryFilter =
+      monthYearConditions.length > 0 ? { $and: monthYearConditions } : {};
+
+    // List Filter: Combined Base + Search/Status
+    const listConditions = [...monthYearConditions, ...searchStatusConditions];
+    const listFilter = listConditions.length > 0 ? { $and: listConditions } : {};
 
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
 
-    // 1) Summary Statistics
+    // 1) Summary Statistics (Uses Summary Filter)
     const statsAgg = await OverDueHistory.aggregate([
-      { $match: filter },
+      { $match: summaryFilter },
       {
         $facet: {
           totals: [
@@ -2432,14 +2557,14 @@ exports.getOverDueHistoryList = async (req, res) => {
       totalOverdueAmount: 0
     };
 
-    // 2) Data Fetch
+    // 2) Data Fetch (Uses Full Filter)
     const [history, totalCount] = await Promise.all([
-      OverDueHistory.find(filter)
+      OverDueHistory.find(listFilter)
         .sort({ approvedDate: -1 })
         .skip(skip)
         .limit(pageSize)
         .lean(),
-      OverDueHistory.countDocuments(filter)
+      OverDueHistory.countDocuments(listFilter)
     ]);
 
     // 3) Enrichment for UI
@@ -2677,7 +2802,7 @@ exports.GstAmountPaid = async (req, res) => {
 };
 
 // ── revertAgreementDocVerification — one site ──────────────────
-async function processSingleRevertVerification({ mediaId, role }) {
+async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
   const userType = Number(role);
 
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
@@ -2701,9 +2826,29 @@ async function processSingleRevertVerification({ mediaId, role }) {
     };
   }
 
+  const entriesList = Array.isArray(media.rentalDue)
+    ? media.rentalDue
+    : Array.isArray(media.rentalDueEntries)
+      ? media.rentalDueEntries
+      : [];
+
+  const targetEntry = rentalDueId
+    ? entriesList.find((e) => String(e._id) === String(rentalDueId))
+    : null;
+
+  const targetCycle = targetEntry?.dueDate ? getCurrentCycle(targetEntry.dueDate) : null;
+
   const match = media.agreementDocVerification
     .map((rec, i) => ({ rec, i }))
-    .filter(({ rec }) => rec.verifiedByRole === userType && rec.isVerified)
+    .filter(({ rec }) => {
+      if (rec.verifiedByRole !== userType || !rec.isVerified) return false;
+      if (rentalDueId) {
+        if (rec.rentalDueId && String(rec.rentalDueId) === String(rentalDueId)) return true;
+        if (targetCycle && rec.cycle && isSameCycle(rec.cycle, targetCycle)) return true;
+        return false;
+      }
+      return true;
+    })
     .sort((a, b) => new Date(b.rec.verifiedAt) - new Date(a.rec.verifiedAt))[0];
 
   if (!match) {
@@ -2737,7 +2882,14 @@ async function processSingleRevertVerification({ mediaId, role }) {
   media.markModified("agreementDocVerification");
 
   if (Array.isArray(media.verificationProgressHistory) && media.verificationProgressHistory.length) {
-    media.verificationProgressHistory.pop();
+    const histIdx = media.verificationProgressHistory.findIndex(
+      (h) => (rentalDueId && String(h.rentalDueId || "") === String(rentalDueId)) || (cycle && isSameCycle(h.cycle, cycle))
+    );
+    if (histIdx !== -1) {
+      media.verificationProgressHistory.splice(histIdx, 1);
+    } else {
+      media.verificationProgressHistory.pop();
+    }
     media.markModified("verificationProgressHistory");
   }
 
@@ -2748,21 +2900,19 @@ async function processSingleRevertVerification({ mediaId, role }) {
   }
 
   if (Array.isArray(media.agreementDocVerificationHistory)) {
-    const pendingEntry = Array.isArray(media.rentalDueEntries)
-      ? [...media.rentalDueEntries].reverse().find((e) => e.approvalStatus !== 3) ||
-        media.rentalDueEntries[media.rentalDueEntries.length - 1]
-      : null;
+    const targetId = rentalDueId || (targetEntry ? targetEntry._id : null);
+    const histMatch = media.agreementDocVerificationHistory
+      .map((h, i) => ({ h, i }))
+      .filter(({ h }) => {
+        if (h.verifiedByRole !== userType) return false;
+        if (targetId) return String(h.rentalDueId) === String(targetId);
+        return true;
+      })
+      .sort((a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt))[0];
 
-    if (pendingEntry) {
-      const histMatch = media.agreementDocVerificationHistory
-        .map((h, i) => ({ h, i }))
-        .filter(({ h }) => h.verifiedByRole === userType && String(h.rentalDueId) === String(pendingEntry._id))
-        .sort((a, b) => new Date(b.h.verifiedAt) - new Date(a.h.verifiedAt))[0];
-
-      if (histMatch) {
-        media.agreementDocVerificationHistory.splice(histMatch.i, 1);
-        media.markModified("agreementDocVerificationHistory");
-      }
+    if (histMatch) {
+      media.agreementDocVerificationHistory.splice(histMatch.i, 1);
+      media.markModified("agreementDocVerificationHistory");
     }
   }
 
@@ -2786,13 +2936,13 @@ async function processSingleRevertVerification({ mediaId, role }) {
 // ═════════════════════════════════════════════════════════════
 exports.revertAgreementDocVerification = async (req, res) => {
   try {
-    const { mediaId, mediaIds, role } = req.body;
+    const { mediaId, rentalDueId, mediaIds, role } = req.body;
 
     // ── NEW — batch mode ──
     if (Array.isArray(mediaIds) && mediaIds.length > 0) {
       const results = [];
       for (const id of mediaIds) {
-        const result = await processSingleRevertVerification({ mediaId: id, role });
+        const result = await processSingleRevertVerification({ mediaId: id, rentalDueId, role });
         results.push(result);
       }
 
@@ -2807,7 +2957,7 @@ exports.revertAgreementDocVerification = async (req, res) => {
     }
 
     // ── OLD — single mediaId request, response shape UNCHANGED ──
-    const result = await processSingleRevertVerification({ mediaId, role });
+    const result = await processSingleRevertVerification({ mediaId, rentalDueId, role });
 
     if (!result.success) {
       const statusCode = result.message === "Media not found" ? 404 : 400;
@@ -2835,7 +2985,7 @@ exports.revertAgreementDocVerification = async (req, res) => {
 };
 
 // ── revertRentalApproval — one site ─────────────────────────────
-async function processSingleRevertApproval({ mediaId, role }) {
+async function processSingleRevertApproval({ mediaId, rentalDueId, role }) {
   const userType = Number(role);
 
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
@@ -2866,10 +3016,32 @@ async function processSingleRevertApproval({ mediaId, role }) {
   }
 
   const entries = media[entriesField];
-  const entry = entries[entries.length - 1];
+  let entry = entries[entries.length - 1];
+  if (rentalDueId) {
+    const found = entries.find((e) => String(e._id) === String(rentalDueId));
+    if (found) entry = found;
+  }
+
+  ensureApprovalStepsPopulated(entry);
   let reverted = false;
 
   if (userType === ROLE.STAFF) {
+    const staffStep = entry.approvalSteps?.find((s) => s.role === ROLE.STAFF);
+    const isStaffApproved =
+      staffStep?.status === 2 ||
+      staffStep?.status === 3 ||
+      entry.approvalStatus >= 2 ||
+      media.rentalStatus === 1;
+
+    if (!isStaffApproved) {
+      return {
+        success: false,
+        mediaId,
+        mediaName: media.mediaName,
+        message: "Staff approval hasn't happened yet for this cycle",
+      };
+    }
+
     const laterStepsUntouched = entry.approvalSteps
       ?.filter((s) => s.role !== ROLE.STAFF)
       .every((s) => s.status === 1);
@@ -2882,20 +3054,27 @@ async function processSingleRevertApproval({ mediaId, role }) {
         message: "Cannot revert Staff approval — Team Lead/Owner has already acted on this entry",
       };
     }
-    if (media.rentalStatus !== 1) {
-      return {
-        success: false,
-        mediaId,
-        mediaName: media.mediaName,
-        message: "Staff approval hasn't happened yet for this cycle",
-      };
-    }
 
     media.rentalStatus = 0;
     reverted = true;
 
-    media[entriesField] = entries.slice(0, -1);
-    media.markModified(entriesField);
+    if (entry.savedBy?.userName === "System (auto-generated)") {
+      entry.approvalStatus = 1;
+      entry.currentPendingRole = ROLE.STAFF;
+      entry.status = 1;
+      entry.agreementDocVerified = false;
+      if (staffStep) {
+        staffStep.userId = null;
+        staffStep.userName = "";
+        staffStep.approvedAt = null;
+        staffStep.status = 1;
+        staffStep.docVerified = false;
+      }
+      media.markModified(entriesField);
+    } else {
+      media[entriesField] = entries.filter((e) => String(e._id) !== String(entry._id));
+      media.markModified(entriesField);
+    }
 
     const yearLabel = getYearLabel(entry.dueDate);
     const monthLabel = getMonthLabel(entry.dueDate);
@@ -2908,7 +3087,13 @@ async function processSingleRevertApproval({ mediaId, role }) {
       media.markModified("rentalDueHistory");
     }
   } else if (userType === ROLE.TEAM_LEAD) {
-    if (media.rentalStatus !== 2) {
+    const tlStep = entry.approvalSteps?.find((s) => s.role === ROLE.TEAM_LEAD);
+    const isTeamLeadApproved =
+      tlStep?.status === 2 ||
+      media.rentalStatus === 2 ||
+      (entry.approvalStatus >= 2 && entry.currentPendingRole === ROLE.OWNER);
+
+    if (!isTeamLeadApproved) {
       return {
         success: false,
         mediaId,
@@ -2925,7 +3110,6 @@ async function processSingleRevertApproval({ mediaId, role }) {
     entry.status = 1;
     entry.agreementDocVerified = false;
 
-    const tlStep = entry.approvalSteps?.find((s) => s.role === ROLE.TEAM_LEAD);
     if (tlStep) {
       tlStep.userId = null;
       tlStep.userName = "";
@@ -2935,7 +3119,13 @@ async function processSingleRevertApproval({ mediaId, role }) {
     }
     media.markModified(entriesField);
   } else if (userType === ROLE.OWNER) {
-    if (media.rentalStatus !== 3) {
+    const ownerStep = entry.approvalSteps?.find((s) => s.role === ROLE.OWNER);
+    const isOwnerApproved =
+      ownerStep?.status === 2 ||
+      media.rentalStatus === 3 ||
+      entry.approvalStatus === 3;
+
+    if (!isOwnerApproved) {
       return {
         success: false,
         mediaId,
@@ -2953,7 +3143,6 @@ async function processSingleRevertApproval({ mediaId, role }) {
     entry.agreementDocVerified = false;
     entry.ownerApprovalDate = null;
 
-    const ownerStep = entry.approvalSteps?.find((s) => s.role === ROLE.OWNER);
     if (ownerStep) {
       ownerStep.userId = null;
       ownerStep.userName = "";
@@ -2972,19 +3161,17 @@ async function processSingleRevertApproval({ mediaId, role }) {
     media.markModified("agreementDocVerified");
   }
 
-  if (userType !== ROLE.STAFF) {
-    const yearLabel = getYearLabel(entry.dueDate);
-    const monthLabel = getMonthLabel(entry.dueDate);
-    const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
-    const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
-    const historyRecord = monthBucket?.entries.find(
-      (e) => String(e.rentalDueId) === String(entry._id),
-    );
-    if (historyRecord) {
-      historyRecord.approvalStatus = entry.approvalStatus;
-      historyRecord.updatedAt = nowIST();
-      media.markModified("rentalDueHistory");
-    }
+  const yearLabel = getYearLabel(entry.dueDate);
+  const monthLabel = getMonthLabel(entry.dueDate);
+  const yearBucket = media.rentalDueHistory.find((y) => y.year === yearLabel);
+  const monthBucket = yearBucket?.months.find((m) => m.month === monthLabel);
+  const historyRecord = monthBucket?.entries.find(
+    (e) => String(e.rentalDueId) === String(entry._id),
+  );
+  if (historyRecord) {
+    historyRecord.approvalStatus = entry.approvalStatus;
+    historyRecord.updatedAt = nowIST();
+    media.markModified("rentalDueHistory");
   }
 
   await media.save({ timestamps: false });
@@ -3008,13 +3195,13 @@ async function processSingleRevertApproval({ mediaId, role }) {
 // ═════════════════════════════════════════════════════════════
 exports.revertRentalApproval = async (req, res) => {
   try {
-    const { mediaId, mediaIds, role } = req.body;
+    const { mediaId, rentalDueId, mediaIds, role } = req.body;
 
     // ── NEW — batch mode ──
     if (Array.isArray(mediaIds) && mediaIds.length > 0) {
       const results = [];
       for (const id of mediaIds) {
-        const result = await processSingleRevertApproval({ mediaId: id, role });
+        const result = await processSingleRevertApproval({ mediaId: id, rentalDueId, role });
         results.push(result);
       }
 
@@ -3029,7 +3216,7 @@ exports.revertRentalApproval = async (req, res) => {
     }
 
     // ── OLD — single mediaId request, response shape UNCHANGED ──
-    const result = await processSingleRevertApproval({ mediaId, role });
+    const result = await processSingleRevertApproval({ mediaId, rentalDueId, role });
 
     if (!result.success) {
       const statusCode = result.message === "Media not found" ? 404 : 400;

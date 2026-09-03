@@ -5,10 +5,13 @@ const path = require("path");
 const XLSX = require("xlsx");
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema"); // ✅ ADDED
 
+const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
+
 const mongoose = require("mongoose");
 const {
   syncOrLinkMediaOwnerToMaster,
   correctLinkedSiteAmounts,
+  removeLinkedSiteFromMaster,
 } = require("../landOwnerMasterController/landOwnerMasterController");
 const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
 
@@ -1879,8 +1882,15 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
     // would wipe out onlineAmount/cashAmount/GST/TDS fields since they
     // default to undefined in the map() above.
     if (existingMediaForValidation && Array.isArray(mediaData.landOwners)) {
-      mediaData.landOwners.forEach((owner, idx) => {
-        const existing = existingMediaForValidation.landOwners?.[idx];
+      mediaData.landOwners.forEach((owner) => {
+        // ✅ Match by landOwnerMasterId (best) or _id (fallback)
+        const existing = existingMediaForValidation.landOwners?.find(
+          (ex) =>
+            (owner.landOwnerMasterId &&
+              ex.landOwnerMasterId &&
+              String(ex.landOwnerMasterId) === String(owner.landOwnerMasterId)) ||
+            (owner._id && String(ex._id) === String(owner._id))
+        );
         if (!existing) return;
 
         const FIELDS_TO_RESTORE = [
@@ -2136,6 +2146,27 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       media = existingMediaForValidation;
       delete mediaData.id;
 
+      // ✅ NEW — Identify removed landowners and cleanup their Master links
+      if (media.landOwners && Array.isArray(mediaData.landOwners)) {
+        const incomingMasterIds = new Set(
+          mediaData.landOwners
+            .map((o) => o.landOwnerMasterId && String(o.landOwnerMasterId))
+            .filter(Boolean)
+        );
+
+        for (const existingOwner of media.landOwners) {
+          if (
+            existingOwner.landOwnerMasterId &&
+            !incomingMasterIds.has(String(existingOwner.landOwnerMasterId))
+          ) {
+            await removeLinkedSiteFromMaster(
+              existingOwner.landOwnerMasterId,
+              media._id
+            );
+          }
+        }
+      }
+
       if (mediaData.agreement) {
         const pdf = mediaData.agreement.agreementPDF;
 
@@ -2194,11 +2225,18 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       //   });
       // }
       if (mediaData.landOwners && Array.isArray(mediaData.landOwners)) {
-        mediaData.landOwners.forEach((owner, idx) => {
-          const existingOwner = media.landOwners?.[idx];
+        mediaData.landOwners.forEach((owner) => {
+          // ✅ Match by landOwnerMasterId (best) or _id (fallback) instead of index
+          const existingOwner = media.landOwners?.find(
+            (ex) =>
+              (owner.landOwnerMasterId &&
+                ex.landOwnerMasterId &&
+                String(ex.landOwnerMasterId) === String(owner.landOwnerMasterId)) ||
+              (owner._id && String(ex._id) === String(owner._id))
+          );
 
           // ✅ NEW — preserve the EXISTING owner's real _id, matched by
-          // array position, whenever the frontend doesn't send a valid
+          // landowner identity, whenever the frontend doesn't send a valid
           // matching _id (or sends none at all). Without this, Mongoose
           // silently generates a BRAND-NEW _id for the owner subdocument on
           // every update — permanently orphaning every ledger/GST/TDS
@@ -2215,10 +2253,14 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       }
 
       // ✅ NEW — preserve the EXISTING mediaDetails' real _id, matched by
-      // array position, to prevent duplication in rentalDue entries.
+      // mediaCode, to prevent duplication in rentalDue entries.
       if (mediaData.mediaDetails && Array.isArray(mediaData.mediaDetails)) {
-        mediaData.mediaDetails.forEach((detail, idx) => {
-          const existingDetail = media.mediaDetails?.[idx];
+        mediaData.mediaDetails.forEach((detail) => {
+          const existingDetail = media.mediaDetails?.find(
+            (ex) =>
+              (detail.mediaCode && ex.mediaCode && String(ex.mediaCode) === String(detail.mediaCode)) ||
+              (detail._id && String(ex._id) === String(detail._id))
+          );
           if (existingDetail) {
             const sentIdMatchesExisting =
               detail._id && String(detail._id) === String(existingDetail._id);
@@ -3149,7 +3191,7 @@ const mediaList = async (req, res) => {
     let searchFilter = {};
 
     if (search && search.trim() !== "") {
-      const searchRegex = new RegExp(search.trim(), "i");
+      const searchRegex = new RegExp(escapeRegex(search.trim()), "i");
       searchFilter = {
         $or: [
           { mediaId: searchRegex },
@@ -3193,7 +3235,7 @@ if (landOwnerMasterId) {
         : [landOwnerName];
 
       filter["landOwners.name"] = {
-        $in: nameList.map((n) => new RegExp(n.trim(), "i")),
+        $in: nameList.map((n) => new RegExp(escapeRegex(n.trim()), "i")),
       };
     }
     // ── STATUS FILTER ──────────────────────────────────────────

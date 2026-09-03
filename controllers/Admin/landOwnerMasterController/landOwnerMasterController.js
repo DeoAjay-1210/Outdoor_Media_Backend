@@ -21,6 +21,8 @@ getRequiredModesShared,
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 
+const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
+
 // ─────────────────────────────────────────────────────────────
 // FIND MASTER BY PRIORITY — phone, then panNumber, then aadhaar.
 // Only used on CREATE (no id in owner payload) to avoid creating
@@ -273,6 +275,55 @@ const syncOrLinkMediaOwnerToMaster = async (
   owner.landOwnerMasterId = landOwnerMaster._id;
 
   return landOwnerMaster;
+};
+
+const removeLinkedSiteFromMaster = async (masterId, mediaId, session) => {
+  if (!masterId || !mediaId) return;
+
+  const landOwnerMaster = await LandOwnerMaster.findOne({
+    _id: masterId,
+  }).session(session || null);
+
+  if (!landOwnerMaster) return;
+
+  if (Array.isArray(landOwnerMaster.linkedSites)) {
+    const mediaIdStr = String(mediaId);
+    landOwnerMaster.linkedSites = landOwnerMaster.linkedSites.filter(
+      (site) => String(site.mediaId) !== mediaIdStr,
+    );
+
+    // Recalculate Master-level aggregates
+    const uniqueMediaIds = new Set(
+      landOwnerMaster.linkedSites.map((s) => String(s.mediaId)),
+    );
+    landOwnerMaster.linkedMediaCount = uniqueMediaIds.size;
+
+    const uniqueDocEntries = [];
+    const seen = new Set();
+    landOwnerMaster.linkedSites.forEach((s) => {
+      const mid = String(s.mediaId);
+      if (!seen.has(mid)) {
+        uniqueDocEntries.push(s);
+        seen.add(mid);
+      }
+    });
+
+    landOwnerMaster.totalShareAmount = uniqueDocEntries.reduce(
+      (sum, s) => sum + Number(s.shareAmount || 0),
+      0,
+    );
+    landOwnerMaster.totalGstAmount = uniqueDocEntries.reduce(
+      (sum, s) => sum + Number(s.gstAmount || 0),
+      0,
+    );
+    landOwnerMaster.totalNetPayableToOwner = uniqueDocEntries.reduce(
+      (sum, s) => sum + Number(s.netPayableToOwner || 0),
+      0,
+    );
+
+    landOwnerMaster.updatedAt = nowIST();
+    await landOwnerMaster.save({ session });
+  }
 };
 
 const correctLinkedSiteAmounts = async (
@@ -699,7 +750,7 @@ const landOwnerList = async (req, res) => {
     const filter = {};
 
     if (search && search.trim() !== "") {
-      const searchRegex = new RegExp(search.trim(), "i");
+      const searchRegex = new RegExp(escapeRegex(search.trim()), "i");
       filter.$or = [
         { name: searchRegex },
         { phone: searchRegex },
@@ -720,7 +771,7 @@ const landOwnerList = async (req, res) => {
     } else if (landOwnerName && landOwnerName.trim() !== "") {
       // ✅ UNCHANGED — kept for backward compatibility with any caller
       // still sending the old name-based filter.
-      const nameRegex = new RegExp(landOwnerName.trim(), "i");
+      const nameRegex = new RegExp(escapeRegex(landOwnerName.trim()), "i");
       if (!filter.$and) filter.$and = [];
       filter.$and.push({ name: nameRegex });
     }
@@ -985,10 +1036,10 @@ const landOwnerSiteFilter = async (req, res) => {
 
     // let ownerFilter = {};
     const genericSearchRegex =
-      search && search.trim() !== "" ? new RegExp(search.trim(), "i") : null;
+      search && search.trim() !== "" ? new RegExp(escapeRegex(search.trim()), "i") : null;
     const mediaSearchRegex =
       req.body?.mediaSearch && req.body.mediaSearch.trim() !== ""
-        ? new RegExp(req.body.mediaSearch.trim(), "i")
+        ? new RegExp(escapeRegex(req.body.mediaSearch.trim()), "i")
         : null;
     // combined regex used against media docs — either explicit
     // mediaSearch, or fall back to the generic `search` term
@@ -1080,26 +1131,7 @@ const landOwnerSiteFilter = async (req, res) => {
       mediaProjection,
     ).lean();
 
-    // ✅ Filter by roleType if provided (Relevant to Role logic)
-    if (targetRole !== null) {
-      relatedMediaDocs = relatedMediaDocs.filter((media) => {
-        const currentMonthEntry = (media.rentalDue || []).find((e) => {
-          if (!e.dueDate) return false;
-          const d = new Date(e.dueDate);
-          return d >= statsMonthStart && d <= statsMonthEnd;
-        });
-
-        // If no entry for this month, it's not relevant to any role's current action/approval
-        if (!currentMonthEntry) return false;
-
-        const isApprovedOverall = currentMonthEntry.approvalStatus === 3;
-        const roleStep = (currentMonthEntry.approvalSteps || []).find((s) => s.role === targetRole);
-        const hasRoleApproved = roleStep && roleStep.status === 2;
-        const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
-
-        return hasRoleApproved || (!isApprovedOverall && !hasRoleActed);
-      });
-    }
+    // roleType filter does NOT reduce landowners or sites; it only recalculates header summary totals.
 
     // ✅ Ensure all site cycles are processed for the requested month
     for (const media of relatedMediaDocs) {
@@ -2898,4 +2930,5 @@ module.exports = {
   landOwnerSiteFilter,
   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
+  removeLinkedSiteFromMaster, // used by mediaOnboardingController.js
 };
