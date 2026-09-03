@@ -427,7 +427,7 @@ const downloadRentalOOHExcel = async (req, res) => {
 
     const colHeaders = [
       "📅 Month", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "👥 Total Landowners", "👤 Landowner Name",
-      "📊 Ledger Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
+      "📊 Rent Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
     ];
     aoa.push(colHeaders);
     const headerRowIdx = 2;
@@ -496,22 +496,35 @@ const downloadRentalOOHExcel = async (req, res) => {
         });
 
         const monthGstEntries = [
-          ...(media.gstBalanceHistory || []),
+          ...(media.gstBalanceHistory || []).filter(
+            (g) =>
+              g.isPaid === true ||
+              g.isPaid === "true" ||
+              Number(g.paidAmount) > 0 ||
+              (g.utrNumber && String(g.utrNumber).trim() !== "" && g.date),
+          ),
           ...(media.rentalPayment?.gstOutstandingHistory || [])
-            .filter(g => g.isPaid)
-            .map(g => ({ ...g, gstAmount: g.gstOutStandingAmount }))
-        ].filter(g => normalizeMonth(g.dueMonth) === targetMonthNormalized);
+            .filter((g) => g.isPaid)
+            .map((g) => ({ ...g, gstAmount: g.gstOutStandingAmount })),
+        ].filter((g) => normalizeMonth(g.dueMonth) === targetMonthNormalized);
 
         const uniqueGst = new Map();
-        Array.from(uniqueLedgers.values()).filter(e => e.isUtrEntry).forEach(g => {
-          const key = `${g.rentalDueId || "no-due"}-${g.landOwnerId || g.ownerId || "no-owner"}-${targetMonthNormalized}`;
-          const current = uniqueGst.get(key)?.amount || 0;
-          uniqueGst.set(key, { amount: current + Number(g.amount) });
-        });
-        monthGstEntries.forEach(g => {
-          const key = `${g.rentalDueId || "no-due"}-${g.landOwnerId || g.ownerId || "no-owner"}-${targetMonthNormalized}`;
+        Array.from(uniqueLedgers.values())
+          .filter((e) => e.isUtrEntry === true)
+          .forEach((g) => {
+            const rIdStr = g.rentalDueId ? String(g.rentalDueId) : "no-due";
+            const oIdStr = g.landOwnerId || g.ownerId ? String(g.landOwnerId || g.ownerId) : "no-owner";
+            const key = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
+            const current = uniqueGst.get(key)?.amount || 0;
+            uniqueGst.set(key, { amount: current + Number(g.amount || 0) });
+          });
+
+        monthGstEntries.forEach((g) => {
+          const rIdStr = g.rentalDueId ? String(g.rentalDueId) : "no-due";
+          const oIdStr = g.ownerId || g.landOwnerId ? String(g.ownerId || g.landOwnerId) : "no-owner";
+          const key = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
           if (!uniqueGst.has(key)) {
-            uniqueGst.set(key, { amount: Number(g.gstAmount) });
+            uniqueGst.set(key, { amount: Number(g.gstAmount || g.paidAmount || 0) });
           }
         });
 
@@ -524,86 +537,88 @@ const downloadRentalOOHExcel = async (req, res) => {
         const siteGstPct = media.rentalPayment?.gstPercentage !== undefined ? Number(media.rentalPayment.gstPercentage) : 18;
         const isSiteGstApplicable = Number(media.rentalPayment?.gstApplicable) === 1;
 
-        Array.from(uniqueLedgers.values()).filter(e => !e.isUtrEntry).forEach(e => {
-          const mId = dueToMediaMap.get(String(e.rentalDueId));
-          const eWithGst = e.withGst !== undefined ? Number(e.withGst) : 2;
+        Array.from(uniqueLedgers.values())
+          .filter((e) => !e.isUtrEntry)
+          .forEach((e) => {
+            const mId = dueToMediaMap.get(String(e.rentalDueId));
+            const eWithGst = e.withGst !== undefined ? Number(e.withGst) : 2;
 
-          const rIdStr = e.rentalDueId ? String(e.rentalDueId) : "no-due";
-          const oIdStr = (e.landOwnerId || e.ownerId) ? String(e.landOwnerId || e.ownerId) : "no-owner";
+            const rIdStr = e.rentalDueId ? String(e.rentalDueId) : "no-due";
+            const oIdStr = e.landOwnerId || e.ownerId ? String(e.landOwnerId || e.ownerId) : "no-owner";
 
-          const primaryGstKey = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
-          const fallbackGstKey = `fallback-${oIdStr}-${targetMonthNormalized}`;
+            const primaryGstKey = `${rIdStr}-${oIdStr}-${targetMonthNormalized}`;
 
-          let ledgerAmt = Number(e.amount) || 0;
-          let gstAmt = 0;
+            let ledgerAmt = Number(e.amount) || 0;
+            let gstAmt = 0;
 
-          // Find the owner configuration to get the canonical base/gst split
-          const owner = owners.find(o => String(o._id) === oIdStr);
+            const owner = owners.find(
+              (o) =>
+                String(o._id) === oIdStr ||
+                String(o.landOwnerMasterId) === oIdStr,
+            );
 
-          // Improved applicability check: check flags OR check if config has GST values
-          const isGstApplicableForThisRow =
-            (media.rentalPayment?.gstApplicable === 1) ||
-            (owner?.gstApplicable === 1) ||
-            (Number(media.rentalPayment?.gstPercentage) > 0) ||
-            (owner && Number(owner.gstPercentage) > 0) ||
-            (Number(media.rentalPayment?.gstAmount) > 0);
+            const isGstApplicableForThisRow =
+              Number(media.rentalPayment?.gstApplicable) === 1 ||
+              Number(owner?.gstApplicable) === 1 ||
+              Number(media.rentalPayment?.gstPercentage) > 0 ||
+              (owner && Number(owner.gstPercentage) > 0) ||
+              Number(media.rentalPayment?.gstAmount) > 0;
 
-          // 1. Check if a corresponding GST entry exists in the ledger (PRIORITY to prevent doubling)
-          let existingGst = uniqueGst.get(primaryGstKey);
-          if (!existingGst) {
-            // Fallback: search for any entry for this owner/month if rId mismatch
-            for (const [key, val] of uniqueGst.entries()) {
-              if (key.includes(`-${oIdStr}-${targetMonthNormalized}`)) {
-                existingGst = val;
-                uniqueGst.delete(key);
-                break;
+            // Find if an actual GST entry exists for this owner/month
+            let existingGst = uniqueGst.get(primaryGstKey);
+            if (!existingGst) {
+              // Fallback: search for any entry for this owner/month if rId mismatch
+              for (const [key, val] of uniqueGst.entries()) {
+                if (key.includes(`-${oIdStr}-${targetMonthNormalized}`)) {
+                  existingGst = val;
+                  uniqueGst.delete(key);
+                  break;
+                }
               }
-            }
-          } else {
-            uniqueGst.delete(primaryGstKey);
-          }
-
-          if (existingGst) {
-            // If an explicit GST entry exists, use its actual amount
-            gstAmt = Math.round(Number(existingGst.amount) || 0);
-            if (eWithGst === 2 && isGstApplicableForThisRow) {
-              // If the main entry was inclusive, subtract the real GST entry amount to get the base
-              ledgerAmt = ledgerAmt - gstAmt;
-            }
-          } else if (isGstApplicableForThisRow) {
-            // Configuration values
-            let baseShare = owner ? Number(owner.shareAmount || 0) : (Number(media.rentalPayment?.totalRentalAmount || 0) / (owners.length || 1));
-            let gstShare = owner ? Number(owner.gstAmount || 0) : (Number(media.rentalPayment?.gstAmount || 0) / (owners.length || 1));
-
-            // Fallback: If gstShare is 0 but percentage exists, calculate it
-            if (gstShare === 0 && siteGstPct > 0) {
-               gstShare = baseShare * (siteGstPct / 100);
-            }
-
-            const totalWithGst = baseShare + gstShare;
-
-            if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
-              // It's the total amount. Split it into configured base and gst.
-              ledgerAmt = Math.round(baseShare);
-              gstAmt = Math.round(gstShare);
-            } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
-              // It's the base amount. Use config base and show config gst.
-              ledgerAmt = Math.round(baseShare);
-              gstAmt = Math.round(gstShare);
             } else {
-              // Fallback for partials or non-standard amounts
-              if (eWithGst === 2) {
-                const base = ledgerAmt / (1 + (siteGstPct / 100));
+              uniqueGst.delete(primaryGstKey);
+            }
+
+            if (existingGst) {
+              // If an explicit GST entry was made, use its actual amount
+              gstAmt = Math.round(Number(existingGst.amount) || 0);
+              if (eWithGst === 2 && ledgerAmt > gstAmt) {
+                ledgerAmt = ledgerAmt - gstAmt;
+              }
+            } else if (eWithGst === 2 && isGstApplicableForThisRow) {
+              // withGst === 2 (Direct GST mode): GST amount is automatically included / calculated from ledger entry
+              let baseShare = owner
+                ? Number(owner.shareAmount || 0)
+                : Number(media.rentalPayment?.totalRentalAmount || 0) /
+                  (owners.length || 1);
+              let gstShare = owner
+                ? Number(owner.gstAmount || 0)
+                : Number(media.rentalPayment?.gstAmount || 0) /
+                  (owners.length || 1);
+
+              if (gstShare === 0 && siteGstPct > 0) {
+                gstShare = baseShare * (siteGstPct / 100);
+              }
+
+              const totalWithGst = baseShare + gstShare;
+
+              if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
+                ledgerAmt = Math.round(baseShare);
+                gstAmt = Math.round(gstShare);
+              } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
+                ledgerAmt = Math.round(baseShare);
+                gstAmt = Math.round(gstShare);
+              } else {
+                const base = ledgerAmt / (1 + siteGstPct / 100);
                 gstAmt = Math.round(ledgerAmt - base);
                 ledgerAmt = Math.round(base);
-              } else {
-                gstAmt = Math.round(ledgerAmt * (siteGstPct / 100));
               }
+            } else {
+              // withGst === 1 (Hold GST mode) or withGst === 0: Check gstBalanceHistory only.
+              // Since no paid GST entry exists in gstBalanceHistory, GST Amount = 0
+              gstAmt = 0;
+              ledgerAmt = Math.round(ledgerAmt);
             }
-          } else {
-            gstAmt = 0;
-            ledgerAmt = Math.round(ledgerAmt);
-          }
 
           if (mId && mId !== "SITE") {
             ledgerByFace.set(mId, (ledgerByFace.get(mId) || 0) + ledgerAmt);
