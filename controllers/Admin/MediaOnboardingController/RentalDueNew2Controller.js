@@ -889,8 +889,17 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
         group.forEach((item) => {
           const e = item.entry;
-          totalAgreementRental += Number(e.baseAmount || 0);
-          totalAgreementGst += Number(e.gstAmount || 0);
+          let entryGst = Number(e.gstAmount || 0);
+          if (entryGst <= 0 && Number(e.withGst) !== 0) {
+            entryGst = Number(site.rentalPayment?.gstAmount || 0);
+            if (entryGst <= 0) {
+              entryGst = (site.landOwners || [])
+                .filter((o) => Number(o.gstApplicable) === 1)
+                .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+            }
+          }
+          totalAgreementRental += Number(e.netPayable || e.baseAmount || 0);
+          totalAgreementGst += entryGst;
           if (e.proofOfCampaign?.filePath) proofs.push(e.proofOfCampaign.filePath);
           if (e.invoice?.filePath) invoices.push(e.invoice.filePath);
         });
@@ -920,8 +929,17 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
           });
         }
 
-        totalAgreementRental = Number(e.baseAmount || 0);
-        totalAgreementGst = Number(e.gstAmount || 0);
+        let entryGst = Number(e.gstAmount || 0);
+        if (entryGst <= 0 && Number(e.withGst) !== 0) {
+          entryGst = Number(site.rentalPayment?.gstAmount || 0);
+          if (entryGst <= 0) {
+            entryGst = (site.landOwners || [])
+              .filter((o) => Number(o.gstApplicable) === 1)
+              .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+          }
+        }
+        totalAgreementRental = Number(e.netPayable || e.baseAmount || 0);
+        totalAgreementGst = entryGst;
         if (e.proofOfCampaign?.filePath) proofs.push(e.proofOfCampaign.filePath);
         if (e.invoice?.filePath) invoices.push(e.invoice.filePath);
       }
@@ -963,12 +981,34 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       const rp = site.rentalPayment || {};
       const agreement = site.agreement || {};
 
+      const isSiteGstApplicable = Number(rp.gstApplicable) === 1;
+
+      let totalRentalAmount = Number(rp.totalRentalAmount || 0);
+      if (totalRentalAmount <= 0) {
+        totalRentalAmount = Number(firstItem.entry?.netPayable || firstItem.entry?.baseAmount || totalAgreementRental || 0);
+      }
+
+      let gstAmountVal = 0;
+      let gstNumberVal = "";
+      let gstApplicableVal = 0;
+
+      if (isSiteGstApplicable) {
+        gstApplicableVal = 1;
+        gstNumberVal = rp.gstNumber || "";
+        gstAmountVal = Number(rp.gstAmount || firstItem.entry?.gstAmount || 0);
+      }
+
+      const totalGstForSite = gstAmountVal > 0 ? gstAmountVal : totalAgreementGst;
+      const netPayableVal = totalRentalAmount + totalGstForSite;
+
       return {
         mediaDetails: activeFaces,
         rentalPayment: {
-          totalRentalAmount: totalAgreementRental,
-          gstAmount: totalAgreementGst,
-          netPayable: totalAgreementRental + totalAgreementGst,
+          totalRentalAmount: totalRentalAmount,
+          gstApplicable: gstApplicableVal,
+          gstNumber: gstNumberVal,
+          gstAmount: gstAmountVal,
+          netPayable: netPayableVal,
           paymentFrequency: firstItem.entry?.paymentFrequency || rp.paymentFrequency || 0,
           lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
           nextBillingDate: formatYMD(rp.nextBillingDate),
@@ -996,10 +1036,21 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     };
 
 
+    const parseEmailList = (mailStr) => {
+      if (!mailStr) return [];
+      if (Array.isArray(mailStr)) {
+        return mailStr.flatMap((s) => String(s).split(",")).map((e) => e.trim()).filter(Boolean);
+      }
+      return String(mailStr).split(",").map((e) => e.trim()).filter(Boolean);
+    };
+
+    const toArray = parseEmailList(toMail);
+    const ccArray = parseEmailList(ccMail);
+
     const mailPayload = {
       mailtype: "cmdapproval",
-      to: [toMail],
-       cc: [ccMail],
+      to: toArray,
+      cc: ccArray,
       data: data,
     };
 
@@ -1014,8 +1065,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       );
       return {
         mailtype: "cmdapproval",
-        to: [toMail],
-        cc: [ccMail],
+        to: toArray,
+        cc: ccArray,
         success: true,
         sent: false,
         statusCode: 200,
@@ -1040,8 +1091,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
     return {
       mailtype: "cmdapproval",
-      to: [toMail],
-      cc: [ccMail],
+      to: toArray,
+      cc: ccArray,
       success: !!isMailSuccess,
       sent: !!isMailSuccess,
       statusCode: response.status || (isMailSuccess ? 200 : 500),
@@ -1057,8 +1108,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     );
     return {
       mailtype: "cmdapproval",
-      to: [process.env.T0_EMail],
-      cc: [process.env.CC_EMail],
+      to: parseEmailList(process.env.T0_EMail),
+      cc: parseEmailList(process.env.CC_EMail),
       success: false,
       sent: false,
       statusCode: 500,
