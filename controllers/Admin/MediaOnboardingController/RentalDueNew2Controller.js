@@ -2580,7 +2580,24 @@ exports.getOverDueHistoryList = async (req, res) => {
       }
     }
 
-    // ── 3) Build Final Filters ──
+    // ── 3) Build Final Filters & Sorting ──
+    // Determine sort order based on month range (earlier months first, e.g. July then August)
+    let sortDirection = 1;
+    if (startObj && endObj) {
+      if (
+        startObj.year > endObj.year ||
+        (startObj.year === endObj.year && startObj.month > endObj.month)
+      ) {
+        sortDirection = -1;
+      }
+    }
+
+    const sortOrder = {
+      dueDate: sortDirection,
+      currentBillDate: sortDirection,
+      approvedDate: -1,
+    };
+
     // Summary Filter: Based ONLY on Month/Year (Stays stable during search/status filtering)
     const summaryFilter =
       monthYearConditions.length > 0 ? { $and: monthYearConditions } : {};
@@ -2658,10 +2675,10 @@ exports.getOverDueHistoryList = async (req, res) => {
       totalOverdueAmount: 0
     };
 
-    // 2) Data Fetch (Uses Full Filter)
+    // 2) Data Fetch (Uses Full Filter & Chronological Sorting)
     const [history, totalCount] = await Promise.all([
       OverDueHistory.find(listFilter)
-        .sort({ approvedDate: -1 })
+        .sort(sortOrder)
         .skip(skip)
         .limit(pageSize)
         .lean(),
