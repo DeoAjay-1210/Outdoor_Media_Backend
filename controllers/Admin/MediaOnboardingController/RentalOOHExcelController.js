@@ -1,7 +1,172 @@
 const mongoose = require("mongoose");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const XLSX = require("xlsx-js-style");
+const zlib = require("zlib");
 const { successResponse, errorResponse } = require("../../../utils/response");
+
+// Helper function to calculate CRC32 of a Buffer
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i];
+    for (let j = 0; j < 8; j++) {
+      c = (c >>> 1) ^ (c & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (c ^ -1) >>> 0;
+}
+
+/**
+ * Injects <pane ySplit="N"/> into sheet1.xml of the generated XLSX ZIP buffer
+ * to ensure freeze panes work reliably in MS Excel, Google Sheets, and LibreOffice.
+ */
+function freezeHeaderInXlsxBuffer(buf, freezeRows = 3) {
+  try {
+    let eocdPos = buf.length - 22;
+    while (eocdPos >= 0) {
+      if (buf[eocdPos] === 0x50 && buf[eocdPos+1] === 0x4b && buf[eocdPos+2] === 0x05 && buf[eocdPos+3] === 0x06) {
+        break;
+      }
+      eocdPos--;
+    }
+
+    if (eocdPos < 0) return buf;
+
+    const cdCount = buf.readUInt16LE(eocdPos + 10);
+    const cdOffset = buf.readUInt32LE(eocdPos + 16);
+
+    const entries = [];
+    let cdPos = cdOffset;
+
+    for (let i = 0; i < cdCount; i++) {
+      if (buf[cdPos] !== 0x50 || buf[cdPos+1] !== 0x4b || buf[cdPos+2] !== 0x01 || buf[cdPos+3] !== 0x02) {
+        break;
+      }
+
+      const compMethod = buf.readUInt16LE(cdPos + 10);
+      const crc = buf.readUInt32LE(cdPos + 16);
+      const compSize = buf.readUInt32LE(cdPos + 20);
+      const uncompSize = buf.readUInt32LE(cdPos + 24);
+      const fnLen = buf.readUInt16LE(cdPos + 28);
+      const extraLen = buf.readUInt16LE(cdPos + 30);
+      const commentLen = buf.readUInt16LE(cdPos + 32);
+      const localOffset = buf.readUInt32LE(cdPos + 42);
+
+      const fn = buf.toString("utf8", cdPos + 46, cdPos + 46 + fnLen);
+
+      const localFnLen = buf.readUInt16LE(localOffset + 26);
+      const localExtraLen = buf.readUInt16LE(localOffset + 28);
+      const dataStart = localOffset + 30 + localFnLen + localExtraLen;
+      const rawData = buf.subarray(dataStart, dataStart + compSize);
+
+      entries.push({
+        fn,
+        compMethod,
+        crc,
+        compSize,
+        uncompSize,
+        data: rawData,
+        extra: buf.subarray(localOffset + 30 + localFnLen, dataStart),
+        cdExtra: buf.subarray(cdPos + 46 + fnLen, cdPos + 46 + fnLen + extraLen),
+        cdComment: buf.subarray(cdPos + 46 + fnLen + extraLen, cdPos + 46 + fnLen + extraLen + commentLen),
+      });
+
+      cdPos += 46 + fnLen + extraLen + commentLen;
+    }
+
+    const sheetEntry = entries.find((e) => e.fn === "xl/worksheets/sheet1.xml");
+    if (!sheetEntry) return buf;
+
+    let xmlStr;
+    if (sheetEntry.compMethod === 8) {
+      xmlStr = zlib.inflateRawSync(sheetEntry.data).toString("utf8");
+    } else {
+      xmlStr = sheetEntry.data.toString("utf8");
+    }
+
+    const paneXml = `<pane ySplit="${freezeRows}" topLeftCell="A${freezeRows + 1}" activePane="bottomLeft" state="frozen"/>`;
+    let modifiedXml;
+    if (xmlStr.includes("</sheetView>")) {
+      modifiedXml = xmlStr.replace("</sheetView>", `${paneXml}</sheetView>`);
+    } else {
+      modifiedXml = xmlStr.replace(/<sheetView([^/>]*)\/>/, `<sheetView$1>${paneXml}</sheetView>`);
+    }
+
+    const newXmlBuf = Buffer.from(modifiedXml, "utf8");
+    const newCompBuf = zlib.deflateRawSync(newXmlBuf);
+
+    sheetEntry.compMethod = 8;
+    sheetEntry.crc = crc32(newXmlBuf);
+    sheetEntry.compSize = newCompBuf.length;
+    sheetEntry.uncompSize = newXmlBuf.length;
+    sheetEntry.data = newCompBuf;
+
+    const localParts = [];
+    const cdParts = [];
+    let currentOffset = 0;
+
+    for (const entry of entries) {
+      const fnBuf = Buffer.from(entry.fn, "utf8");
+      const localHeader = Buffer.alloc(30);
+
+      localHeader.writeUInt32LE(0x04034b50, 0);
+      localHeader.writeUInt16LE(20, 4);
+      localHeader.writeUInt16LE(0, 6);
+      localHeader.writeUInt16LE(entry.compMethod, 8);
+      localHeader.writeUInt16LE(0, 10);
+      localHeader.writeUInt16LE(0, 12);
+      localHeader.writeUInt32LE(entry.crc, 14);
+      localHeader.writeUInt32LE(entry.compSize, 18);
+      localHeader.writeUInt32LE(entry.uncompSize, 22);
+      localHeader.writeUInt16LE(fnBuf.length, 26);
+      localHeader.writeUInt16LE(entry.extra.length, 28);
+
+      const entryLocalOffset = currentOffset;
+      localParts.push(localHeader, fnBuf, entry.extra, entry.data);
+      currentOffset += localHeader.length + fnBuf.length + entry.extra.length + entry.data.length;
+
+      const cdHeader = Buffer.alloc(46);
+      cdHeader.writeUInt32LE(0x02014b50, 0);
+      cdHeader.writeUInt16LE(20, 4);
+      cdHeader.writeUInt16LE(20, 6);
+      cdHeader.writeUInt16LE(0, 8);
+      cdHeader.writeUInt16LE(entry.compMethod, 10);
+      cdHeader.writeUInt16LE(0, 12);
+      cdHeader.writeUInt16LE(0, 14);
+      cdHeader.writeUInt32LE(entry.crc, 16);
+      cdHeader.writeUInt32LE(entry.compSize, 20);
+      cdHeader.writeUInt32LE(entry.uncompSize, 24);
+      cdHeader.writeUInt16LE(fnBuf.length, 28);
+      cdHeader.writeUInt16LE(entry.cdExtra.length, 30);
+      cdHeader.writeUInt16LE(entry.cdComment.length, 32);
+      cdHeader.writeUInt16LE(0, 34);
+      cdHeader.writeUInt16LE(0, 36);
+      cdHeader.writeUInt32LE(0, 38);
+      cdHeader.writeUInt32LE(entryLocalOffset, 42);
+
+      cdParts.push(cdHeader, fnBuf, entry.cdExtra, entry.cdComment);
+    }
+
+    const newCdOffset = currentOffset;
+    const cdBuf = Buffer.concat(cdParts);
+    const newCdSize = cdBuf.length;
+
+    const newEocd = Buffer.alloc(22);
+    newEocd.writeUInt32LE(0x06054b50, 0);
+    newEocd.writeUInt16LE(0, 4);
+    newEocd.writeUInt16LE(0, 6);
+    newEocd.writeUInt16LE(entries.length, 8);
+    newEocd.writeUInt16LE(entries.length, 10);
+    newEocd.writeUInt32LE(newCdSize, 12);
+    newEocd.writeUInt32LE(newCdOffset, 16);
+    newEocd.writeUInt16LE(0, 20);
+
+    return Buffer.concat([...localParts, cdBuf, newEocd]);
+  } catch (err) {
+    console.error("❌ Error freezing header rows in XLSX:", err.message);
+    return buf;
+  }
+}
 
 /**
  * Normalize month strings (e.g. "Aug 2026" or "August 2026") to "August 2026"
@@ -259,12 +424,13 @@ const downloadRentalOOHExcel = async (req, res) => {
             if (existingGst) {
               // If an explicit GST entry was made, use its actual amount
               gstAmt = Math.round(Number(existingGst.amount) || 0);
-              if (eWithGst === 2 && ledgerAmt > gstAmt) {
-                ledgerAmt = ledgerAmt - gstAmt;
+              if (eWithGst === 2) {
+                if (ledgerAmt > gstAmt) ledgerAmt = ledgerAmt - gstAmt;
+              } else {
+                ledgerAmt = Math.round(ledgerAmt);
               }
               gstProcessedForOwnerMonth.add(gstOwnerKey);
-            } else if (eWithGst === 2 && isGstApplicableForThisRow && !alreadyProcessedGst) {
-              // withGst === 2 (Direct GST mode): GST amount is automatically included / calculated from ledger entry ONCE per owner/month
+            } else if (isGstApplicableForThisRow && !alreadyProcessedGst) {
               let baseShare = owner
                 ? Number(owner.shareAmount || 0)
                 : Number(media.rentalPayment?.totalRentalAmount || 0) /
@@ -278,22 +444,38 @@ const downloadRentalOOHExcel = async (req, res) => {
                 gstShare = baseShare * (siteGstPct / 100);
               }
 
-              const totalWithGst = baseShare + gstShare;
-
-              if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
-                ledgerAmt = Math.round(baseShare);
-                gstAmt = Math.round(gstShare);
-              } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
-                ledgerAmt = Math.round(baseShare);
-                gstAmt = Math.round(gstShare);
+              if (eWithGst === 1) {
+                // withGst === 1 (Hold GST / Base Rent mode):
+                // ledgerAmt is the Base Rent (e.g. 90,000). Do NOT reduce ledgerAmt!
+                ledgerAmt = Math.round(ledgerAmt);
+                if (gstShare > 0) {
+                  gstAmt = Math.round(gstShare);
+                } else if (siteGstPct > 0) {
+                  gstAmt = Math.round(ledgerAmt * (siteGstPct / 100));
+                }
               } else {
-                const base = ledgerAmt / (1 + siteGstPct / 100);
-                gstAmt = Math.round(ledgerAmt - base);
-                ledgerAmt = Math.round(base);
+                // withGst === 2 (Direct GST mode):
+                // ledgerAmt includes GST, so separate baseShare and gstShare
+                const totalWithGst = baseShare + gstShare;
+
+                if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
+                  ledgerAmt = Math.round(baseShare);
+                  gstAmt = Math.round(gstShare);
+                } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
+                  ledgerAmt = Math.round(baseShare);
+                  gstAmt = Math.round(gstShare);
+                } else if (gstShare > 0) {
+                  gstAmt = Math.round(gstShare);
+                  ledgerAmt = Math.round(ledgerAmt > gstAmt ? ledgerAmt - gstAmt : ledgerAmt);
+                } else if (siteGstPct > 0) {
+                  const base = ledgerAmt / (1 + siteGstPct / 100);
+                  gstAmt = Math.round(ledgerAmt - base);
+                  ledgerAmt = Math.round(base);
+                }
               }
               gstProcessedForOwnerMonth.add(gstOwnerKey);
             } else {
-              // withGst === 1 (Hold GST mode) or already processed GST for this owner/month:
+              // GST not applicable for this owner/row
               gstAmt = 0;
               ledgerAmt = Math.round(ledgerAmt);
             }
@@ -461,6 +643,22 @@ const downloadRentalOOHExcel = async (req, res) => {
     }
 
     ws["!merges"] = merges;
+    ws["!freeze"] = {
+      xSplit: "0",
+      ySplit: "3",
+      topLeftCell: "A4",
+      activePane: "bottomLeft",
+      state: "frozen"
+    };
+    ws["!views"] = [
+      {
+        state: "frozen",
+        xSplit: 0,
+        ySplit: 3,
+        topLeftCell: "A4",
+        activePane: "bottomLeft"
+      }
+    ];
     ws["!cols"] = [
       { wch: 15 }, // A: Month #
       { wch: 20 }, // B: Media Code
@@ -476,7 +674,8 @@ const downloadRentalOOHExcel = async (req, res) => {
     ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 35 }];
 
     XLSX.utils.book_append_sheet(wb, ws, "Rental OOH Report");
-    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    const rawBuffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    const buffer = freezeHeaderInXlsxBuffer(rawBuffer, 3);
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename=Rental_OOH_Report_${fromMonth}_to_${toMonth}.xlsx`);
