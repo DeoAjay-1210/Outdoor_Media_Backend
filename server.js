@@ -69,6 +69,7 @@ app.use(cors({
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH/",
     "http://localhost:54571/",
     "http://localhost:54571",
+    "https://adinntech.in/ooh-bills/api",
 
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
