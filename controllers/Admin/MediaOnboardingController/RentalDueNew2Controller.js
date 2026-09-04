@@ -2648,12 +2648,11 @@ exports.getOverDueHistoryList = async (req, res) => {
       } else if (s === 1) {
         searchStatusConditions.push({
           ledgerEntryDate: { $ne: null },
-          gstEntryDate: null,
         });
       } else if (s === 2) {
         searchStatusConditions.push({
-          ledgerEntryDate: null,
           gstEntryDate: { $ne: null },
+          withGst: { $ne: 2 },
         });
       } else if (s === 3) {
         searchStatusConditions.push({
@@ -2719,7 +2718,10 @@ exports.getOverDueHistoryList = async (req, res) => {
                 },
                 gstEntry: {
                   $sum: {
-                    $cond: [{ $ne: ["$ledgerEntryDate", null] }, 1, 0]
+                    $cond: [
+                      { $and: [{ $ne: ["$gstEntryDate", null] }, { $ne: ["$withGst", 2] }] },
+                      1, 0
+                    ]
                   }
                 },
                 bothEntry: {
