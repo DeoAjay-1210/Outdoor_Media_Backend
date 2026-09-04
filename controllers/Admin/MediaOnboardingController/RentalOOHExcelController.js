@@ -424,12 +424,13 @@ const downloadRentalOOHExcel = async (req, res) => {
             if (existingGst) {
               // If an explicit GST entry was made, use its actual amount
               gstAmt = Math.round(Number(existingGst.amount) || 0);
-              if (eWithGst === 2 && ledgerAmt > gstAmt) {
-                ledgerAmt = ledgerAmt - gstAmt;
+              if (eWithGst === 2) {
+                if (ledgerAmt > gstAmt) ledgerAmt = ledgerAmt - gstAmt;
+              } else {
+                ledgerAmt = Math.round(ledgerAmt);
               }
               gstProcessedForOwnerMonth.add(gstOwnerKey);
-            } else if (eWithGst === 2 && isGstApplicableForThisRow && !alreadyProcessedGst) {
-              // withGst === 2 (Direct GST mode): GST amount is automatically included / calculated from ledger entry ONCE per owner/month
+            } else if (isGstApplicableForThisRow && !alreadyProcessedGst) {
               let baseShare = owner
                 ? Number(owner.shareAmount || 0)
                 : Number(media.rentalPayment?.totalRentalAmount || 0) /
@@ -443,22 +444,38 @@ const downloadRentalOOHExcel = async (req, res) => {
                 gstShare = baseShare * (siteGstPct / 100);
               }
 
-              const totalWithGst = baseShare + gstShare;
-
-              if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
-                ledgerAmt = Math.round(baseShare);
-                gstAmt = Math.round(gstShare);
-              } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
-                ledgerAmt = Math.round(baseShare);
-                gstAmt = Math.round(gstShare);
+              if (eWithGst === 1) {
+                // withGst === 1 (Hold GST / Base Rent mode):
+                // ledgerAmt is the Base Rent (e.g. 90,000). Do NOT reduce ledgerAmt!
+                ledgerAmt = Math.round(ledgerAmt);
+                if (gstShare > 0) {
+                  gstAmt = Math.round(gstShare);
+                } else if (siteGstPct > 0) {
+                  gstAmt = Math.round(ledgerAmt * (siteGstPct / 100));
+                }
               } else {
-                const base = ledgerAmt / (1 + siteGstPct / 100);
-                gstAmt = Math.round(ledgerAmt - base);
-                ledgerAmt = Math.round(base);
+                // withGst === 2 (Direct GST mode):
+                // ledgerAmt includes GST, so separate baseShare and gstShare
+                const totalWithGst = baseShare + gstShare;
+
+                if (totalWithGst > 0 && Math.abs(ledgerAmt - totalWithGst) < 10) {
+                  ledgerAmt = Math.round(baseShare);
+                  gstAmt = Math.round(gstShare);
+                } else if (baseShare > 0 && Math.abs(ledgerAmt - baseShare) < 10) {
+                  ledgerAmt = Math.round(baseShare);
+                  gstAmt = Math.round(gstShare);
+                } else if (gstShare > 0) {
+                  gstAmt = Math.round(gstShare);
+                  ledgerAmt = Math.round(ledgerAmt > gstAmt ? ledgerAmt - gstAmt : ledgerAmt);
+                } else if (siteGstPct > 0) {
+                  const base = ledgerAmt / (1 + siteGstPct / 100);
+                  gstAmt = Math.round(ledgerAmt - base);
+                  ledgerAmt = Math.round(base);
+                }
               }
               gstProcessedForOwnerMonth.add(gstOwnerKey);
             } else {
-              // withGst === 1 (Hold GST mode) or already processed GST for this owner/month:
+              // GST not applicable for this owner/row
               gstAmt = 0;
               ledgerAmt = Math.round(ledgerAmt);
             }
