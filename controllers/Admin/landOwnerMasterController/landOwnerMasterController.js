@@ -75,8 +75,13 @@ const findExactDuplicate = async (owner, session, excludeId = null) => {
 
   const query = { $or: conditions };
 
-  if (excludeId && mongoose.Types.ObjectId.isValid(excludeId)) {
-    query._id = { $ne: new mongoose.Types.ObjectId(String(excludeId)) };
+  if (excludeId) {
+    const excStr = String(excludeId);
+    const neList = [excStr];
+    if (mongoose.Types.ObjectId.isValid(excStr)) {
+      neList.push(new mongoose.Types.ObjectId(excStr));
+    }
+    query._id = { $nin: neList };
   }
 
   return await LandOwnerMaster.findOne(query).session(session || null);
@@ -580,16 +585,17 @@ const saveSingleLandOwner = async (owner, userName, session) => {
   sanitizeOwnerFileFields(owner);
 
   let landOwner;
+  const targetId = owner.id || owner._id || owner.landOwnerMasterId;
 
-  if (owner.id) {
+  if (targetId) {
     // ── UPDATE ──────────────────────────────────────────────
     landOwner = await LandOwnerMaster.findOne({
-      _id: owner.id,
+      _id: targetId,
       // isDeleted: false,
     }).session(session);
 
     if (!landOwner) {
-      const err = new Error(`LandOwner not found with id ${owner.id}`);
+      const err = new Error(`LandOwner not found with id ${targetId}`);
       err.statusCode = 404;
       throw err;
     }
@@ -707,7 +713,8 @@ const landOwnerSave = async (req, res) => {
     // same pattern as mediaOnboardingController.js
     const userName = req.user?.userName || "Admin";
 
-    const isNew = !owner.id;
+    const targetId = owner.id || owner._id || owner.landOwnerMasterId;
+    const isNew = !targetId;
 
     if (processFile) {
       attachFilesToOwner(owner, files, processFile);
