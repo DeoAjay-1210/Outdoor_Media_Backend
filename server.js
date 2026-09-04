@@ -70,6 +70,8 @@ app.use(cors({
     "http://localhost:54571/",
     "http://localhost:54571",
     "https://adinntech.in/ooh-bills/api",
+    "https://adinntech.in/",
+    "https://adinntech.in"
 
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
