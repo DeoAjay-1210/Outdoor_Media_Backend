@@ -493,9 +493,32 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       location: d.location
     }));
 
+    const lOwners = (media.landOwners || []).map(o => ({
+      landOwnerMasterId: o.landOwnerMasterId || null,
+      name: o.name || o.landOwnerName || "",
+      landOwnerName: o.name || o.landOwnerName || "",
+      phone: o.phone || "",
+      panNumber: o.panNumber || "",
+      accountNumber: o.accountNumber || "",
+      bankName: o.bankName || "",
+      ifsc: o.ifsc || "",
+      paymentCategory: o.paymentCategory,
+      sharePercentage: o.sharePercentage,
+      shareAmount: o.shareAmount,
+      gstApplicable: o.gstApplicable,
+      gstAmount: o.gstAmount,
+    }));
+
+    const mainLandOwnerName = lOwners
+      .map((o) => o.name || o.landOwnerName)
+      .filter(Boolean)
+      .join(", ");
+
     await OverDueHistory.create({
       mediaId: media._id,
       mediaDetails: mDetails,
+      landOwners: lOwners,
+      landOwnerName: mainLandOwnerName,
       previousBillDate: media.rentalPayment?.previousBillGenerateDate,
       currentBillDate: entry.dueDate,
       nextBillDate: media.rentalPayment?.nextBillingDate,
@@ -515,6 +538,60 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     });
   } catch (err) {
     console.error("❌ Error saving OverDue History:", err.message);
+  }
+}
+
+/**
+ * Ensures existing OverDueHistory documents in DB have landOwners and landOwnerName populated.
+ */
+async function ensureOverDueHistoryLandOwnersPopulated() {
+  try {
+    const unpopulated = await OverDueHistory.find({
+      $or: [
+        { landOwners: { $exists: false } },
+        { landOwners: { $size: 0 } },
+        { landOwnerName: { $exists: false } },
+        { landOwnerName: "" },
+        { landOwnerName: null },
+      ],
+    }).limit(200).lean();
+
+    if (!unpopulated || unpopulated.length === 0) return;
+
+    const mediaIds = [...new Set(unpopulated.map((u) => u.mediaId).filter(Boolean))];
+    const mediaDocs = await Media.find({ _id: { $in: mediaIds } }).select("landOwners").lean();
+    const mediaMap = new Map(mediaDocs.map((m) => [String(m._id), m.landOwners || []]));
+
+    for (const doc of unpopulated) {
+      const owners = mediaMap.get(String(doc.mediaId)) || [];
+      const lOwners = owners.map((o) => ({
+        landOwnerMasterId: o.landOwnerMasterId || null,
+        name: o.name || o.landOwnerName || "",
+        landOwnerName: o.name || o.landOwnerName || "",
+        phone: o.phone || "",
+        panNumber: o.panNumber || "",
+        accountNumber: o.accountNumber || "",
+        bankName: o.bankName || "",
+        ifsc: o.ifsc || "",
+        paymentCategory: o.paymentCategory,
+        sharePercentage: o.sharePercentage,
+        shareAmount: o.shareAmount,
+        gstApplicable: o.gstApplicable,
+        gstAmount: o.gstAmount,
+      }));
+
+      const landOwnerName = lOwners
+        .map((o) => o.name || o.landOwnerName)
+        .filter(Boolean)
+        .join(", ");
+
+      await OverDueHistory.updateOne(
+        { _id: doc._id },
+        { $set: { landOwners: lOwners, landOwnerName } }
+      );
+    }
+  } catch (err) {
+    console.error("❌ Error ensuring OverDueHistory landOwners populated:", err.message);
   }
 }
 
@@ -2422,6 +2499,8 @@ exports.verifyAgreementDoc = async (req, res) => {
  */
 exports.getOverDueHistoryList = async (req, res) => {
   try {
+    await ensureOverDueHistoryLandOwnersPopulated();
+
     const {
       pageNumber = 1,
       count = 10,
@@ -2547,11 +2626,17 @@ exports.getOverDueHistoryList = async (req, res) => {
     }
 
     // ── 2) Search / Status Filter (Table Specific) ──
-    if (search) {
+    if (search && typeof search === "string" && search.trim() !== "") {
+      const escapedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = new RegExp(escapedSearch, "i");
+
       searchStatusConditions.push({
         $or: [
-          { "mediaDetails.mediaName": { $regex: search, $options: "i" } },
-          { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
+          { "mediaDetails.mediaName": searchRegex },
+          { "mediaDetails.mediaCode": searchRegex },
+          { "landOwners.name": searchRegex },
+          { "landOwners.landOwnerName": searchRegex },
+          { landOwnerName: searchRegex },
         ],
       });
     }
@@ -2634,7 +2719,7 @@ exports.getOverDueHistoryList = async (req, res) => {
                 },
                 gstEntry: {
                   $sum: {
-                    $cond: [{ $ne: ["$gstEntryDate", null] }, 1, 0]
+                    $cond: [{ $ne: ["$ledgerEntryDate", null] }, 1, 0]
                   }
                 },
                 bothEntry: {
@@ -2678,6 +2763,7 @@ exports.getOverDueHistoryList = async (req, res) => {
     // 2) Data Fetch (Uses Full Filter & Chronological Sorting)
     const [history, totalCount] = await Promise.all([
       OverDueHistory.find(listFilter)
+        .populate({ path: "mediaId", select: "landOwners" })
         .sort(sortOrder)
         .skip(skip)
         .limit(pageSize)
@@ -2688,6 +2774,31 @@ exports.getOverDueHistoryList = async (req, res) => {
     // 3) Enrichment for UI
     const enrichedHistory = history.map(item => {
         const dDate = item.dueDate ? new Date(item.dueDate) : null;
+
+        const rawLandOwners = (Array.isArray(item.landOwners) && item.landOwners.length > 0)
+          ? item.landOwners
+          : (item.mediaId && Array.isArray(item.mediaId.landOwners) ? item.mediaId.landOwners : []);
+
+        const landOwners = rawLandOwners.map(o => ({
+          _id: o._id,
+          landOwnerMasterId: o.landOwnerMasterId || null,
+          name: o.name || o.landOwnerName || "",
+          landOwnerName: o.name || o.landOwnerName || "",
+          phone: o.phone || "",
+          panNumber: o.panNumber || "",
+          accountNumber: o.accountNumber || "",
+          bankName: o.bankName || "",
+          ifsc: o.ifsc || "",
+          paymentCategory: o.paymentCategory,
+          sharePercentage: o.sharePercentage,
+          shareAmount: o.shareAmount,
+          gstApplicable: o.gstApplicable,
+          gstAmount: o.gstAmount,
+        }));
+
+        const mainLandOwnerName = item.landOwnerName || landOwners.map(o => o.name || o.landOwnerName).filter(Boolean).join(", ");
+
+        const mediaIdVal = (item.mediaId && item.mediaId._id) ? item.mediaId._id : item.mediaId;
 
         const calcOverdueBy = (date) => {
             if (!date || !dDate) return "-";
@@ -2728,6 +2839,9 @@ exports.getOverDueHistoryList = async (req, res) => {
 
         return {
             ...item,
+            mediaId: mediaIdVal,
+            landOwners,
+            landOwnerName: mainLandOwnerName,
             rentAmount,
             overDueAmount: totalAmount,
             totalAmount: totalAmount,
