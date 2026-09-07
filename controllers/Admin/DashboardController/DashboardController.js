@@ -359,7 +359,7 @@ const getAdminDashboard = async (req, res) => {
 
     const onlineByMode = {
       bankTransfer: 0,
-      upi: 0,
+      // upi: 0,
       cheque: 0,
     };
 
@@ -427,7 +427,7 @@ const getAdminDashboard = async (req, res) => {
         pending: Math.round(onlinePending),
         byMode: {
           bankTransfer: Math.round(onlineByMode.bankTransfer),
-          upi: Math.round(onlineByMode.upi),
+          // upi: Math.round(onlineByMode.upi),
           cheque: Math.round(onlineByMode.cheque),
         },
       },
