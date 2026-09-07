@@ -62,12 +62,14 @@ const getAdminDashboard = async (req, res) => {
     today.setUTCHours(0, 0, 0, 0);
 
     // ==========================================
-    // 1. MEDIA DASHBOARD OBJECT (MediaOnboardingController logic)
+    // 1. MEDIA DASHBOARD OBJECT
+    // - totalSites, activeSites, inactiveSites & sitesByMediaType are mediaDetails (face) based
+    // - agreement counts are document (site) level based
     // ==========================================
     // Fetch all MediaOnboarding docs
     const allMediaDocs = await MediaOnboarding.find({}).lean();
 
-    let totalSitesCount = allMediaDocs.length;
+    let totalSitesCount = 0;
     let activeSitesCount = 0;
     let inactiveSitesCount = 0;
 
@@ -78,25 +80,7 @@ const getAdminDashboard = async (req, res) => {
     const sitesByMediaType = {};
 
     allMediaDocs.forEach((site) => {
-      const hasActiveFace = (site.mediaDetails || []).some((d) => Number(d.status) === 1);
-      if (hasActiveFace) {
-        activeSitesCount++;
-      } else {
-        inactiveSitesCount++;
-      }
-
-      // Sites by Media Type breakdown
-      const typesInSite = new Set();
-      (site.mediaDetails || []).forEach((detail) => {
-        if (detail.mediaType && typeof detail.mediaType === "string" && detail.mediaType.trim()) {
-          typesInSite.add(detail.mediaType.trim());
-        }
-      });
-      typesInSite.forEach((t) => {
-        sitesByMediaType[t] = (sitesByMediaType[t] || 0) + 1;
-      });
-
-      // Evaluate agreement status relative to selected month end
+      // 1. Evaluate agreement status at Document / Site level (old logic)
       const agreement = site.agreement || {};
       if (agreement.startDate && agreement.endDate) {
         const endDate = new Date(agreement.endDate);
@@ -110,7 +94,30 @@ const getAdminDashboard = async (req, res) => {
         } else {
           activeAgreementCount++;
         }
+      }
+
+      // 2. Calculate site counts & media types at mediaDetails (face) level
+      const details = site.mediaDetails || [];
+
+      if (details.length > 0) {
+        details.forEach((detail) => {
+          totalSitesCount++;
+
+          // Active vs Inactive face count (1 = Active)
+          if (Number(detail.status) === 1) {
+            activeSitesCount++;
+          } else {
+            inactiveSitesCount++;
+          }
+
+          // Sites by Media Type breakdown
+          if (detail.mediaType && typeof detail.mediaType === "string" && detail.mediaType.trim()) {
+            const t = detail.mediaType.trim();
+            sitesByMediaType[t] = (sitesByMediaType[t] || 0) + 1;
+          }
+        });
       } else {
+        totalSitesCount++;
         inactiveSitesCount++;
       }
     });
