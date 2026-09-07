@@ -470,12 +470,71 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
 
     if (!isOverdue) return;
 
+    // Extract approval details from entry steps
+    const staffStep = (entry.approvalSteps || []).find(
+      (s) => Number(s.role) === 1 && (Number(s.status) === 2 || s.approvedAt)
+    );
+    const teamLeadStep = (entry.approvalSteps || []).find(
+      (s) => Number(s.role) === 2 && (Number(s.status) === 2 || s.approvedAt)
+    );
+    const ownerStep = (entry.approvalSteps || []).find(
+      (s) => Number(s.role) === 3 && (Number(s.status) === 2 || s.approvedAt)
+    );
+
+    const staffApprovedAt = staffStep?.approvedAt || null;
+    const staffApprovedBy = staffStep?.userName || null;
+
+    const teamLeadApprovedAt = teamLeadStep?.approvedAt || null;
+    const teamLeadApprovedBy = teamLeadStep?.userName || null;
+
+    const ownerApprovedAt =
+      ownerStep?.approvedAt ||
+      entry.ownerApprovalDate ||
+      (Number(entry.approvalStatus) === 3 ? entry.updatedAt || nowIST() : null);
+    const ownerApprovedBy =
+      ownerStep?.userName ||
+      (Number(entry.approvalStatus) === 3 ? userName : null);
+
+    const calcDiffDays = (date) => {
+      if (!date || !entry.dueDate) return "-";
+      const diff = Math.floor((new Date(date) - new Date(entry.dueDate)) / 86400000);
+      return diff > 0 ? `${diff} days` : "0 days";
+    };
+
+    const OverdueByStaff = calcDiffDays(staffApprovedAt);
+    const OverdueByTeamLead = calcDiffDays(teamLeadApprovedAt);
+    const OverdueByCMD = calcDiffDays(ownerApprovedAt);
+
     // Check for duplicate for this specific cycle/media to avoid double logging
     const existing = await OverDueHistory.findOne({
       mediaId: media._id,
       rentalDueId: entry._id,
     });
-    if (existing) return;
+    if (existing) {
+      let updated = false;
+      if (!existing.staffApprovedAt && staffApprovedAt) {
+        existing.staffApprovedAt = staffApprovedAt;
+        existing.staffApprovedBy = staffApprovedBy;
+        existing.OverdueByStaff = OverdueByStaff;
+        updated = true;
+      }
+      if (!existing.teamLeadApprovedAt && teamLeadApprovedAt) {
+        existing.teamLeadApprovedAt = teamLeadApprovedAt;
+        existing.teamLeadApprovedBy = teamLeadApprovedBy;
+        existing.OverdueByTeamLead = OverdueByTeamLead;
+        updated = true;
+      }
+      if (!existing.ownerApprovedAt && ownerApprovedAt) {
+        existing.ownerApprovedAt = ownerApprovedAt;
+        existing.ownerApprovedBy = ownerApprovedBy;
+        existing.OverdueByCMD = OverdueByCMD;
+        updated = true;
+      }
+      if (updated) {
+        await existing.save();
+      }
+      return;
+    }
 
     const entryGst = Number(entry.gstAmount || 0);
     const siteGst = Number(media.rentalPayment?.gstAmount || 0);
@@ -527,6 +586,15 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       isGstApplicable,
       approvedDate: nowIST(),
       removedDate: nowIST(),
+      staffApprovedAt,
+      staffApprovedBy,
+      teamLeadApprovedAt,
+      teamLeadApprovedBy,
+      ownerApprovedAt,
+      ownerApprovedBy,
+      OverdueByStaff,
+      OverdueByTeamLead,
+      OverdueByCMD,
       dueMonth: entry.dueMonth,
       dueDate: entry.dueDate,
       rentalDueId: entry._id,
@@ -2677,6 +2745,7 @@ exports.getOverDueHistoryList = async (req, res) => {
     }
 
     const sortOrder = {
+      updatedAt: -1,
       dueDate: sortDirection,
       currentBillDate: sortDirection,
       approvedDate: -1,
@@ -2851,6 +2920,15 @@ exports.getOverDueHistoryList = async (req, res) => {
             approvalOverdueBy: calcOverdueBy(item.approvedDate),
             ledgerOverdueBy: calcOverdueBy(item.ledgerEntryDate),
             gstOverdueBy: calcOverdueBy(item.gstEntryDate),
+            staffApprovedAt: item.staffApprovedAt || null,
+            staffApprovedBy: item.staffApprovedBy || "",
+            teamLeadApprovedAt: item.teamLeadApprovedAt || null,
+            teamLeadApprovedBy: item.teamLeadApprovedBy || "",
+            ownerApprovedAt: item.ownerApprovedAt || null,
+            ownerApprovedBy: item.ownerApprovedBy || "",
+            OverdueByStaff: item.OverdueByStaff || calcOverdueBy(item.staffApprovedAt),
+            OverdueByTeamLead: item.OverdueByTeamLead || calcOverdueBy(item.teamLeadApprovedAt),
+            OverdueByCMD: item.OverdueByCMD || calcOverdueBy(item.ownerApprovedAt),
             calculatedStatus,
             statusLabel
         };

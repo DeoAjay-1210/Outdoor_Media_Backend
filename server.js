@@ -14,6 +14,7 @@ const RentalDue = require("./routes/Admin/MediaOnboardingRoutes/rentalDueRoutes"
 const RentalOOHExcelRoutes = require("./routes/Admin/MediaOnboardingRoutes/RentalOOHExcelRoutes");
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
 const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
+const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
 (async () => {
@@ -45,6 +46,7 @@ app.use("/admin", ledgerRoutes);
 app.use("/admin", RentalDue);
 app.use("/admin", RentalOOHExcelRoutes);
 app.use("/admin", LandownerMasterRoutes);
+app.use("/admin", dashboardRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
@@ -69,6 +71,9 @@ app.use(cors({
     "https://adinn-space.sgp1.cdn.digitaloceanspaces.com/Rental-OOH/",
     "http://localhost:54571/",
     "http://localhost:54571",
+    "https://adinntech.in/ooh-bills/api",
+    "https://adinntech.in/",
+    "https://adinntech.in"
 
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
