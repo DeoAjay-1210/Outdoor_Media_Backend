@@ -161,7 +161,7 @@ const agreementHistorySchema = new mongoose.Schema({
     mimeType: { type: String },
     size: { type: Number },
     fileType: { type: String, enum: ["pdf"], default: "pdf" },
-    uploadedAt: { type: Date, default: Date.now },
+    uploadedAt: { type: Date, default: null },
   },
   reason: { type: String, trim: true },
   rentalPayment: {
@@ -190,7 +190,7 @@ const agreementHistorySchema = new mongoose.Schema({
   updatedBy: {
     type: String,
   },
-  uploadedAt: { type: Date, default: Date.now }, // timestamp when this snapshot was pushed
+  uploadedAt: { type: Date, default: null }, // timestamp when this snapshot was pushed
 });
 
 const ledgerSchema = new mongoose.Schema({
@@ -798,7 +798,7 @@ const MediaSchema = new mongoose.Schema(
       updatedBy: {
         type: String,
       },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
       rentalPayment: {
         totalRentalAmount: {
           type: Number,
