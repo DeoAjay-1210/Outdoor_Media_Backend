@@ -442,7 +442,7 @@ const getAdminDashboard = async (req, res) => {
 
     const landownersList = recentLandownersRaw.map((owner) => {
       const ownerIdStr = String(owner._id);
-      const siteDetailsMap = new Map();
+      const sitesArray = [];
 
       linkedMediaDocs.forEach((media) => {
         const isLinked = (media.landOwners || []).some(
@@ -450,23 +450,27 @@ const getAdminDashboard = async (req, res) => {
         );
 
         if (isLinked) {
-          const siteCodeStr = media.siteCode || String(media._id);
-          const firstDetail = (media.mediaDetails || [])[0] || {};
-          const siteName = firstDetail.mediaName || siteCodeStr;
-          const mediaCode = (media.mediaDetails || []).map((d) => d.mediaCode).join(" / ") || siteCodeStr;
-          const mediaName = (media.mediaDetails || []).map((d) => d.mediaName).join(", ") || siteName;
-
-          if (!siteDetailsMap.has(siteCodeStr)) {
-            siteDetailsMap.set(siteCodeStr, {
-              siteName,
-              mediaCode,
-              mediaName,
+          const details = media.mediaDetails || [];
+          if (details.length > 0) {
+            details.forEach((detail) => {
+              const name = detail.mediaName || detail.mediaCode || media.siteCode || String(media._id);
+              const code = detail.mediaCode || media.siteCode || String(media._id);
+              sitesArray.push({
+                siteName: name,
+                mediaCode: code,
+                mediaName: name,
+              });
+            });
+          } else {
+            const siteCodeStr = media.siteCode || String(media._id);
+            sitesArray.push({
+              siteName: siteCodeStr,
+              mediaCode: siteCodeStr,
+              mediaName: siteCodeStr,
             });
           }
         }
       });
-
-      const sitesArray = Array.from(siteDetailsMap.values());
 
       return {
         landOwnerName: owner.name || "Unknown Landowner",
