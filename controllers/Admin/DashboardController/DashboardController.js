@@ -1,7 +1,12 @@
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 const { generateMissedEntriesForMedia } = require("../MediaOnboardingController/RentalDueNew2Controller");
-const { calculateOverallLedgerSummary } = require("../MediaOnboardingController/LedgerNew2Controller");
+const {
+  calculateOverallLedgerSummary,
+  isOwnerModePaidForCycle,
+  getAllDueCycles,
+  getRequiredModesShared,
+} = require("../MediaOnboardingController/LedgerNew2Controller");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const mongoose = require("mongoose");
 
@@ -70,6 +75,8 @@ const getAdminDashboard = async (req, res) => {
     let expiredAgreementCount = 0;
     let expireSoonAgreementCount = 0;
 
+    const sitesByMediaType = {};
+
     allMediaDocs.forEach((site) => {
       const hasActiveFace = (site.mediaDetails || []).some((d) => Number(d.status) === 1);
       if (hasActiveFace) {
@@ -77,6 +84,17 @@ const getAdminDashboard = async (req, res) => {
       } else {
         inactiveSitesCount++;
       }
+
+      // Sites by Media Type breakdown
+      const typesInSite = new Set();
+      (site.mediaDetails || []).forEach((detail) => {
+        if (detail.mediaType && typeof detail.mediaType === "string" && detail.mediaType.trim()) {
+          typesInSite.add(detail.mediaType.trim());
+        }
+      });
+      typesInSite.forEach((t) => {
+        sitesByMediaType[t] = (sitesByMediaType[t] || 0) + 1;
+      });
 
       // Evaluate agreement status relative to selected month end
       const agreement = site.agreement || {};
@@ -104,6 +122,7 @@ const getAdminDashboard = async (req, res) => {
       activeAgreement: activeAgreementCount,
       expiredAgreement: expiredAgreementCount,
       expireSoonAgreement: expireSoonAgreementCount,
+      sitesByMediaType,
     };
 
     // ==========================================
@@ -321,7 +340,94 @@ const getAdminDashboard = async (req, res) => {
     };
 
     // ==========================================
-    // 4. LATEST UPDATED LANDOWNER SECTION (LandOwnerMaster relationship)
+    // 4. DISBURSEMENT SPLIT OBJECT (Cash vs Online Breakdown for selectedMonth)
+    // ==========================================
+    let cashTotalDue = 0;
+    let cashPaid = 0;
+    let cashPending = 0;
+
+    let onlineTotalDue = 0;
+    let onlinePaid = 0;
+    let onlinePending = 0;
+
+    const onlineByMode = {
+      bankTransfer: 0,
+      upi: 0,
+      cheque: 0,
+    };
+
+    const targetKey = `${yearNum}-${monthNum - 1}`;
+
+    for (const site of activeMediaDocs) {
+      const cycles = getAllDueCycles(site, parsedMonthYearObj);
+
+      cycles.forEach((cycleDate) => {
+        const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
+        if (cycleKey !== targetKey) return;
+
+        const landowners = site.landOwners || [];
+        landowners.forEach((owner) => {
+          const paymentCategory = Number(owner.paymentCategory || 1);
+          const requiredModes = getRequiredModesShared(paymentCategory);
+
+          requiredModes.forEach((mode) => {
+            let rentAmount = (mode === "Cash"
+              ? Number(owner.cashAmount || owner.shareAmount || 0)
+              : Number(owner.onlineAmount || owner.shareAmount || 0));
+
+            if (rentAmount <= 0) return;
+
+            const isPaid = isOwnerModePaidForCycle(site, owner, mode, cycleDate);
+
+            if (mode === "Cash") {
+              cashTotalDue += rentAmount;
+              if (isPaid) {
+                cashPaid += rentAmount;
+              } else {
+                cashPending += rentAmount;
+              }
+            } else if (mode === "Online") {
+              onlineTotalDue += rentAmount;
+              if (isPaid) {
+                onlinePaid += rentAmount;
+              } else {
+                onlinePending += rentAmount;
+              }
+
+              const modeVal = Number(owner.onlineMode);
+              if (modeVal === 2) {
+                onlineByMode.upi += rentAmount;
+              } else if (modeVal === 3) {
+                onlineByMode.cheque += rentAmount;
+              } else {
+                onlineByMode.bankTransfer += rentAmount;
+              }
+            }
+          });
+        });
+      });
+    }
+
+    const disbursementSplitObj = {
+      cash: {
+        totalDue: Math.round(cashTotalDue),
+        paid: Math.round(cashPaid),
+        pending: Math.round(cashPending),
+      },
+      online: {
+        totalDue: Math.round(onlineTotalDue),
+        paid: Math.round(onlinePaid),
+        pending: Math.round(onlinePending),
+        byMode: {
+          bankTransfer: Math.round(onlineByMode.bankTransfer),
+          upi: Math.round(onlineByMode.upi),
+          cheque: Math.round(onlineByMode.cheque),
+        },
+      },
+    };
+
+    // ==========================================
+    // 5. LATEST UPDATED LANDOWNER SECTION (LandOwnerMaster relationship)
     // ==========================================
     const recentLandownersRaw = await LandOwnerMaster.find({})
       .sort({ updatedAt: -1, createdAt: -1 })
@@ -382,6 +488,7 @@ const getAdminDashboard = async (req, res) => {
       media: mediaObj,
       rental: rentalObj,
       ledger: ledgerObj,
+      disbursementSplit: disbursementSplitObj,
       latestUpdates: latestUpdatesObj,
     });
   } catch (error) {

@@ -6745,3 +6745,4 @@ exports.ensureRentalDueForCycles = ensureRentalDueForCycles; // ✅ NEW
 exports.isOwnerModePaidForCycle = isOwnerModePaidForCycle; // ✅ NEW
 exports.isGstPaidForCycle = isGstPaidForCycle; // ✅ NEW
 exports.getRequiredModesShared = getRequiredModesShared;
+exports.getAllDueCycles = getAllDueCycles;
