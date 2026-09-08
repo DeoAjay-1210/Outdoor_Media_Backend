@@ -74,6 +74,7 @@ app.use(cors({
     "https://adinntech.in/ooh-bills/api",
     "https://adinntech.in/",
     "https://adinntech.in"
+    
 
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
