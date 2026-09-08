@@ -1637,11 +1637,14 @@ async function processSingleRentalDueInternal({
     entry.pastgstApplicableFlag = media.pastgstApplicableFlag;
   }
 
-  if ([1, 2].includes(Number(withGst))) {
+  if ([0, 1, 2].includes(Number(withGst)) && withGst !== undefined && withGst !== null && withGst !== "") {
     const newWithGst = Number(withGst);
-    if (entry.withGst !== newWithGst) {
+    if (entry.withGst !== newWithGst || (!entry.gstAmount && newWithGst > 0)) {
       entry.withGst = newWithGst;
-      entry.gstApplicableFlag = newWithGst;
+      if (newWithGst > 0) {
+        entry.gstApplicableFlag = newWithGst;
+        media.gstApplicableFlag = newWithGst;
+      }
       const recomputedSplit = computeGstSplit(media, newWithGst, entry.mediaDetailId);
       entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
       entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
