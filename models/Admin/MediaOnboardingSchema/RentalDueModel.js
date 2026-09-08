@@ -147,7 +147,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["image"], default: "image" },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
     },
     invoice: {
       originalName: { type: String },
@@ -156,7 +156,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
       mimeType: { type: String },
       size: { type: Number },
       fileType: { type: String, enum: ["pdf"], default: "pdf" },
-      uploadedAt: { type: Date, default: Date.now },
+      uploadedAt: { type: Date, default: null },
     },
 
     // ── Who Saved This Entry ──────────────────────────────────
@@ -164,7 +164,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
       userId: { type: mongoose.Schema.Types.ObjectId },
       userName: { type: String, trim: true },
       role: { type: Number, enum: [1, 2, 3] },
-      savedAt: { type: Date, default: Date.now },
+      savedAt: { type: Date, default: null },
     },
 
     // ── Approval Chain ────────────────────────────────────────
