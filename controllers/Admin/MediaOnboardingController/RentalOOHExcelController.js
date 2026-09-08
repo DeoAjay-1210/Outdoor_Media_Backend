@@ -293,8 +293,8 @@ const downloadRentalOOHExcel = async (req, res) => {
         });
 
         const allLedgerEntries = [
-          ...(media.ledger || []).map(e => ({ ...e, withGst: e.withGst || 2, status: 1 })),
-          ...(media.withGst1Ledger || []).map(e => ({ ...e, withGst: e.withGst || 1, status: 1 })),
+          ...(media.ledger || []).map(e => ({ ...e, withGst: e.withGst !== undefined ? e.withGst : 2, status: 1 })),
+          ...(media.withGst1Ledger || []).map(e => ({ ...e, withGst: e.withGst !== undefined ? e.withGst : 1, status: 1 })),
           ...(media.rentalPayment?.rentalOutstandingHistory || [])
             .filter(h => h.isPaid)
             .map(h => ({ ...h, amount: h.baseRentOutstandingAmount, month: h.dueMonth, isOutstanding: true, status: 1, withGst: 1 }))
@@ -446,13 +446,9 @@ const downloadRentalOOHExcel = async (req, res) => {
 
               if (eWithGst === 1) {
                 // withGst === 1 (Hold GST / Base Rent mode):
-                // ledgerAmt is the Base Rent (e.g. 90,000). Do NOT reduce ledgerAmt!
+                // ledgerAmt is the Base Rent (e.g. 50,000). GST is on hold, so gstAmt is 0 unless an explicit GST payment exists.
                 ledgerAmt = Math.round(ledgerAmt);
-                if (gstShare > 0) {
-                  gstAmt = Math.round(gstShare);
-                } else if (siteGstPct > 0) {
-                  gstAmt = Math.round(ledgerAmt * (siteGstPct / 100));
-                }
+                gstAmt = 0;
               } else {
                 // withGst === 2 (Direct GST mode):
                 // ledgerAmt includes GST, so separate baseShare and gstShare
