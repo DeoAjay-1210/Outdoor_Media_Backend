@@ -3667,6 +3667,19 @@ latestLedger = latestLedger.sort((a, b) => {
 
       const expectedGstPerCycleTotal = resolveExpectedGstForCycle(mediaObj);
       const isGstApplicableForOwner = (owner) => {
+        if (!owner) return false;
+        const owners = mediaObj.landOwners || [];
+        const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0);
+        const gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+
+        if (ownerGstAny || gstFlag === 2) {
+          return Number(owner.gstApplicable) === 1 || Number(owner.gstAmount || 0) > 0;
+        }
+
+        if (Number(owner.gstApplicable) === 0 && owner.gstApplicable !== undefined) {
+          return false;
+        }
+
         if (Number(mediaObj.rentalPayment?.gstApplicable) === 1) return true;
         if (Number(owner.gstApplicable) === 1 || Number(owner.gstAmount || 0) > 0) return true;
         const siteFlag = Number(mediaObj.gstApplicableFlag || 0);
@@ -3716,17 +3729,19 @@ latestLedger = latestLedger.sort((a, b) => {
             let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
             if (gstFlag === 0) {
               const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
-              const anyOwnerGst = (mediaObj.landOwners || []).some(o => Number(o.gstApplicable) === 1);
+              const anyOwnerGst = (mediaObj.landOwners || []).some(o => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0);
               if (anyOwnerGst) gstFlag = 2;
               else if (siteGst) gstFlag = 1;
             }
-            if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+            if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
+              expectedOwnerGst = 0;
+            } else if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
               expectedOwnerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
-            if (expectedOwnerGst <= 0 && expectedGstPerCycleTotal > 0) {
+            if (expectedOwnerGst <= 0 && expectedGstPerCycleTotal > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               expectedOwnerGst = expectedGstPerCycleTotal / ownerCount;
             }
@@ -4154,6 +4169,19 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
     const computeGstPendingAmountForDoc = (mediaObj) => {
       const expectedGstPerCycleTotal = resolveExpectedGstForCycle(mediaObj);
       const isGstApplicableForOwner = (owner) => {
+        if (!owner) return false;
+        const owners = mediaObj.landOwners || [];
+        const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0);
+        const gstFlag = Number(mediaObj.gstApplicableFlag || 0);
+
+        if (ownerGstAny || gstFlag === 2) {
+          return Number(owner.gstApplicable) === 1 || Number(owner.gstAmount || 0) > 0;
+        }
+
+        if (Number(owner.gstApplicable) === 0 && owner.gstApplicable !== undefined) {
+          return false;
+        }
+
         if (Number(mediaObj.rentalPayment?.gstApplicable) === 1) return true;
         if (Number(owner.gstApplicable) === 1 || Number(owner.gstAmount || 0) > 0) return true;
         const siteFlag = Number(mediaObj.gstApplicableFlag || 0);
@@ -4204,17 +4232,19 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
             let gstFlag = Number(mediaObj.gstApplicableFlag || 0);
             if (gstFlag === 0) {
               const siteGst = Number(mediaObj.rentalPayment?.gstApplicable) === 1;
-              const anyOwnerGst = (mediaObj.landOwners || []).some(o => Number(o.gstApplicable) === 1);
+              const anyOwnerGst = (mediaObj.landOwners || []).some(o => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0);
               if (anyOwnerGst) gstFlag = 2;
               else if (siteGst) gstFlag = 1;
             }
-            if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+            if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
+              expectedOwnerGst = 0;
+            } else if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
               expectedOwnerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
-            if (expectedOwnerGst <= 0 && expectedGstPerCycleTotal > 0) {
+            if (expectedOwnerGst <= 0 && expectedGstPerCycleTotal > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               expectedOwnerGst = expectedGstPerCycleTotal / ownerCount;
             }
@@ -4896,6 +4926,19 @@ const details = (media.mediaDetails || []).map((d) => ({
   }
 
   const isGstApplicableForOwner = (owner) => {
+    if (!owner) return false;
+    const owners = media.landOwners || [];
+    const ownerGstAny = owners.some((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0);
+    const gstFlag = Number(media.gstApplicableFlag || 0);
+
+    if (ownerGstAny || gstFlag === 2) {
+      return Number(owner.gstApplicable) === 1 || Number(owner.gstAmount || 0) > 0;
+    }
+
+    if (Number(owner.gstApplicable) === 0 && owner.gstApplicable !== undefined) {
+      return false;
+    }
+
     if (Number(media.rentalPayment?.gstApplicable) === 1) return true;
     if (Number(owner.gstApplicable) === 1 || Number(owner.gstAmount || 0) > 0) return true;
     const siteFlag = Number(media.gstApplicableFlag || 0);
@@ -4978,19 +5021,21 @@ const details = (media.mediaDetails || []).map((d) => ({
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
             const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
-            const anyOwnerGst = (media.landOwners || []).some(o => Number(o.gstApplicable) === 1);
+            const anyOwnerGst = (media.landOwners || []).some(o => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0);
             if (anyOwnerGst) gstFlag = 2;
             else if (siteGst) gstFlag = 1;
           }
 
-          if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
+          if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
+            ownerGst = 0;
+          } else if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
             const ownerCount = (media.landOwners || []).length || 1;
             ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
           } else {
             ownerGst = Number(owner.gstAmount || 0);
           }
 
-          if (ownerGst <= 0 && expectedGstPerCycleTotal > 0) {
+          if (ownerGst <= 0 && expectedGstPerCycleTotal > 0 && gstFlag !== 2) {
             const ownerCount = (media.landOwners || []).length || 1;
             ownerGst = expectedGstPerCycleTotal / ownerCount;
           }
@@ -5792,13 +5837,15 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           if (gstFlag === 0) {
             const siteGst = Number(media.rentalPayment?.gstApplicable) === 1;
             const ownerGstArr = (media.landOwners || []).some(
-              (o) => Number(o.gstApplicable) === 1,
+              (o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount || 0) > 0,
             );
             if (ownerGstArr) gstFlag = 2;
             else if (siteGst) gstFlag = 1;
           }
 
-          if (
+          if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
+            ownerGst = 0;
+          } else if (
             gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
           ) {
             const ownerCount = matchingLandOwners.length || 1;

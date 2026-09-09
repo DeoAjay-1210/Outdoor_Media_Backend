@@ -61,6 +61,16 @@ const overDueHistorySchema = new mongoose.Schema(
     ledgerEntryDate: { type: Date, default: null },
     gstEntryDate: { type: Date, default: null },
     status: { type: Number },
+    remarks: { type: String, trim: true, default: "" },
+    overDueRemarks: [
+      {
+        mediaDetailId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        remarks: { type: String, trim: true },
+        addedBy: { type: String, trim: true },
+        addedAt: { type: Date, default: Date.now },
+      },
+    ],
     updatedBy: { type: String },
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
