@@ -12,7 +12,8 @@ const {
   revertAgreementDocVerification,
   revertRentalApproval,
   getOverDueHistoryList,
-  overDueRemark
+  overDueRemark,
+  getOverDueRemarks
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -47,6 +48,8 @@ router.post("/gst-paid",protect, GstAmountPaid);
 router.post("/revert-Agreement",protect, revertAgreementDocVerification);
 router.post("/revert-Approval",protect, revertRentalApproval);
 router.post("/overdue-history-list", protect, getOverDueHistoryList);
+router.get("/overdue-remarks", protect, getOverDueRemarks);
+// router.post("/overdue-remarks", protect, getOverDueRemarks);
 router.post("/overdue-remark", protect, overDueRemark);
 
 module.exports = router;

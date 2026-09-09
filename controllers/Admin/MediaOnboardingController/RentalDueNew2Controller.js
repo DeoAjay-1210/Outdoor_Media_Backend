@@ -574,6 +574,10 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
 
     if (existing) {
       let updated = false;
+      if (Number(entry.withGst || 0) !== Number(existing.withGst || 0)) {
+        existing.withGst = Number(entry.withGst || 0);
+        updated = true;
+      }
       if (baseAmount > 0 && existing.overDueAmount !== baseAmount) {
         existing.overDueAmount = baseAmount;
         updated = true;
@@ -3213,130 +3217,216 @@ exports.overDueRemark = async (req, res) => {
   try {
     const {
       mediaId,
+      rentalDueId,
       mediaDetailId,
       mediaDetailsId,
       landOwnerId,
       landownerId,
       remarks,
+      entries,
     } = req.body;
 
-    const resolvedMediaDetailId = mediaDetailId || mediaDetailsId;
-    const resolvedLandOwnerId = landOwnerId || landownerId;
+    let entriesArray = [];
 
-    if (!mediaId || !resolvedMediaDetailId || !resolvedLandOwnerId || !remarks) {
-      return res.status(400).json({
-        success: false,
-        message: "mediaId, mediaDetailId, landOwnerId, and remarks are required",
-      });
+    if (Array.isArray(mediaId) || Array.isArray(rentalDueId) || Array.isArray(mediaDetailId) || Array.isArray(mediaDetailsId) || Array.isArray(landOwnerId) || Array.isArray(landownerId)) {
+      const mediaIds = Array.isArray(mediaId) ? mediaId : (mediaId ? [mediaId] : []);
+      const rentalDueIds = Array.isArray(rentalDueId) ? rentalDueId : (rentalDueId ? [rentalDueId] : []);
+      const mediaDetailIds = Array.isArray(mediaDetailId || mediaDetailsId) ? (mediaDetailId || mediaDetailsId) : ((mediaDetailId || mediaDetailsId) ? [mediaDetailId || mediaDetailsId] : []);
+      const landOwnerIds = Array.isArray(landOwnerId || landownerId) ? (landOwnerId || landownerId) : ((landOwnerId || landownerId) ? [landOwnerId || landownerId] : []);
+
+      const maxLength = Math.max(mediaIds.length, rentalDueIds.length, mediaDetailIds.length, landOwnerIds.length);
+      for (let i = 0; i < maxLength; i++) {
+        entriesArray.push({
+          mediaId: mediaIds[i] || mediaIds[0],
+          rentalDueId: rentalDueIds[i] || rentalDueIds[0] || null,
+          mediaDetailId: mediaDetailIds[i] || mediaDetailIds[0] || null,
+          landOwnerId: landOwnerIds[i] || landOwnerIds[0] || null,
+          remarks: remarks,
+        });
+      }
+    } else if (Array.isArray(entries)) {
+      entriesArray = entries;
+    } else if (entries && typeof entries === "object") {
+      const keys = Object.keys(entries).filter(k => !isNaN(k));
+      if (keys.length > 0) {
+        entriesArray = keys.sort((a, b) => Number(a) - Number(b)).map(k => entries[k]);
+      }
     }
 
-    if (!mongoose.Types.ObjectId.isValid(mediaId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid mediaId",
+    if (entriesArray.length === 0) {
+      const manualEntries = {};
+      Object.keys(req.body).forEach(key => {
+        const match = key.match(/^entries\[(\d+)\]\[(\w+)\]$/);
+        if (match) {
+          const index = match[1];
+          const field = match[2];
+          if (!manualEntries[index]) manualEntries[index] = {};
+          manualEntries[index][field] = req.body[key];
+        }
       });
+      const indices = Object.keys(manualEntries).sort((a, b) => Number(a) - Number(b));
+      if (indices.length > 0) {
+        entriesArray = indices.map(i => manualEntries[i]);
+      }
     }
 
-    if (!mongoose.Types.ObjectId.isValid(resolvedMediaDetailId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid mediaDetailId",
-      });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(resolvedLandOwnerId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid landOwnerId",
-      });
-    }
-
-    const trimmedRemarks = typeof remarks === "string" ? remarks.trim() : "";
-    if (!trimmedRemarks) {
-      return res.status(400).json({
-        success: false,
-        message: "remarks cannot be empty",
-      });
+    if (entriesArray.length === 0) {
+      entriesArray = [{
+        mediaId: Array.isArray(mediaId) ? mediaId[0] : mediaId,
+        rentalDueId: Array.isArray(rentalDueId) ? rentalDueId[0] : rentalDueId,
+        mediaDetailId: Array.isArray(mediaDetailId || mediaDetailsId) ? (mediaDetailId || mediaDetailsId)[0] : (mediaDetailId || mediaDetailsId),
+        landOwnerId: Array.isArray(landOwnerId || landownerId) ? (landOwnerId || landownerId)[0] : (landOwnerId || landownerId),
+        remarks,
+      }];
     }
 
     const userName = req.user?.userName || "Admin";
+    const savedResults = [];
 
-    const media = await Media.findById(mediaId);
-    if (!media) {
-      return res.status(404).json({
-        success: false,
-        message: "Media record not found",
-      });
-    }
+    for (const item of entriesArray) {
+      const mId = item.mediaId;
+      const rId = item.rentalDueId;
+      const mDetailId = item.mediaDetailId || item.mediaDetailsId;
+      const lOwnerId = item.landOwnerId || item.landownerId;
+      const rem = item.remarks || remarks;
 
-    const newRemark = {
-      mediaDetailId: new mongoose.Types.ObjectId(resolvedMediaDetailId),
-      landOwnerId: new mongoose.Types.ObjectId(resolvedLandOwnerId),
-      remarks: trimmedRemarks,
-      addedBy: userName,
-      addedAt: nowIST(),
-    };
+      if (!mId || !rem) continue;
+      if (!mongoose.Types.ObjectId.isValid(mId)) continue;
 
-    const overdueRecords = await OverDueHistory.find({ mediaId });
+      const trimmedRemarks = typeof rem === "string" ? rem.trim() : "";
+      if (!trimmedRemarks) continue;
 
-    if (overdueRecords.length > 0) {
-      for (const record of overdueRecords) {
-        if (!Array.isArray(record.overDueRemarks)) {
-          record.overDueRemarks = [];
-        }
-        record.overDueRemarks.push(newRemark);
-        record.remarks = trimmedRemarks;
-        record.updatedBy = userName;
-        record.updatedAt = nowIST();
-        await record.save();
-      }
-    } else {
-      await OverDueHistory.create({
-        mediaId: media._id,
-        mediaDetails: (media.mediaDetails || []).map((d) => ({
-          mediaCode: d.mediaCode,
-          mediaName: d.mediaName,
-          mediaType: d.mediaType,
-          city: d.city,
-          location: d.location,
-        })),
-        landOwners: (media.landOwners || []).map((o) => ({
-          landOwnerMasterId: o.landOwnerMasterId || null,
-          name: o.name || o.landOwnerName || "",
-          landOwnerName: o.name || o.landOwnerName || "",
-          phone: o.phone || "",
-          panNumber: o.panNumber || "",
-          accountNumber: o.accountNumber || "",
-          bankName: o.bankName || "",
-          ifsc: o.ifsc || "",
-          paymentCategory: o.paymentCategory,
-          sharePercentage: o.sharePercentage,
-          shareAmount: o.shareAmount,
-          gstApplicable: o.gstApplicable,
-          gstAmount: o.gstAmount,
-        })),
+      const media = await Media.findById(mId);
+      if (!media) continue;
+
+      const newRemark = {
+        mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
+        landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
         remarks: trimmedRemarks,
-        overDueRemarks: [newRemark],
-        updatedBy: userName,
-        createdAt: nowIST(),
-        updatedAt: nowIST(),
+        addedBy: userName,
+        addedAt: nowIST(),
+      };
+
+      const query = { mediaId: media._id };
+      if (rId && mongoose.Types.ObjectId.isValid(rId)) {
+        query.rentalDueId = new mongoose.Types.ObjectId(rId);
+      }
+
+      let overdueRecords = await OverDueHistory.find(query);
+      if (overdueRecords.length === 0 && rId && mongoose.Types.ObjectId.isValid(rId)) {
+        overdueRecords = await OverDueHistory.find({ mediaId: media._id });
+      }
+
+      if (overdueRecords.length > 0) {
+        for (const record of overdueRecords) {
+          if (!Array.isArray(record.overDueRemarks)) {
+            record.overDueRemarks = [];
+          }
+          record.overDueRemarks.push(newRemark);
+          record.remarks = trimmedRemarks;
+          record.updatedBy = userName;
+          record.updatedAt = nowIST();
+          await record.save();
+        }
+      } else {
+        await OverDueHistory.create({
+          mediaId: media._id,
+          rentalDueId: rId && mongoose.Types.ObjectId.isValid(rId) ? new mongoose.Types.ObjectId(rId) : null,
+          mediaDetails: (media.mediaDetails || []).map((d) => ({
+            mediaCode: d.mediaCode,
+            mediaName: d.mediaName,
+            mediaType: d.mediaType,
+            city: d.city,
+            location: d.location,
+          })),
+          landOwners: (media.landOwners || []).map((o) => ({
+            landOwnerMasterId: o.landOwnerMasterId || null,
+            name: o.name || o.landOwnerName || "",
+            landOwnerName: o.name || o.landOwnerName || "",
+            phone: o.phone || "",
+            panNumber: o.panNumber || "",
+            accountNumber: o.accountNumber || "",
+            bankName: o.bankName || "",
+            ifsc: o.ifsc || "",
+            paymentCategory: o.paymentCategory,
+            sharePercentage: o.sharePercentage,
+            shareAmount: o.shareAmount,
+            gstApplicable: o.gstApplicable,
+            gstAmount: o.gstAmount,
+          })),
+          remarks: trimmedRemarks,
+          overDueRemarks: [newRemark],
+          updatedBy: userName,
+          createdAt: nowIST(),
+          updatedAt: nowIST(),
+        });
+      }
+
+      savedResults.push({
+        mediaId: String(mId),
+        rentalDueId: rId ? String(rId) : null,
+        mediaDetailId: mDetailId ? String(mDetailId) : null,
+        landOwnerId: lOwnerId ? String(lOwnerId) : null,
+        remarks: trimmedRemarks,
+        addedBy: userName,
+        addedAt: newRemark.addedAt,
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "Overdue remark saved successfully",
-      data: {
-        mediaId: String(mediaId),
-        mediaDetailId: String(resolvedMediaDetailId),
-        landOwnerId: String(resolvedLandOwnerId),
-        remarks: trimmedRemarks,
-        addedBy: userName,
-        addedAt: newRemark.addedAt,
-      },
+      message: "Overdue remarks saved successfully",
+      data: savedResults,
     });
   } catch (err) {
     console.error("overDueRemark error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
+  }
+};
+
+exports.getOverDueRemarks = async (req, res) => {
+  try {
+    const mediaIdParam = req.query.mediaId || req.body?.mediaId;
+    const rentalDueIdParam = req.query.rentalDueId || req.body?.rentalDueId;
+
+    let mediaIds = [];
+    if (mediaIdParam) {
+      mediaIds = Array.isArray(mediaIdParam) ? mediaIdParam : String(mediaIdParam).split(",").map(id => id.trim());
+    }
+
+    let rentalDueIds = [];
+    if (rentalDueIdParam) {
+      rentalDueIds = Array.isArray(rentalDueIdParam) ? rentalDueIdParam : String(rentalDueIdParam).split(",").map(id => id.trim());
+    }
+
+    const query = {};
+    if (mediaIds.length > 0) {
+      const validMediaIds = mediaIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+      if (validMediaIds.length > 0) {
+        query.mediaId = { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) };
+      }
+    }
+
+    if (rentalDueIds.length > 0) {
+      const validRentalDueIds = rentalDueIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+      if (validRentalDueIds.length > 0) {
+        query.rentalDueId = { $in: validRentalDueIds.map(id => new mongoose.Types.ObjectId(id)) };
+      }
+    }
+
+    const records = await OverDueHistory.find(query).lean();
+
+    return res.status(200).json({
+      success: true,
+      message: "Overdue remarks fetched successfully",
+      data: records,
+    });
+  } catch (err) {
+    console.error("getOverDueRemarks error:", err);
     return res.status(500).json({
       success: false,
       message: "Server error",
