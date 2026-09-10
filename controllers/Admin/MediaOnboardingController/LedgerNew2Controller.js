@@ -4601,18 +4601,47 @@ exports.getLedgerHistory = async (req, res) => {
     const foundIds = new Set(mediaDocs.map((m) => String(m._id)));
     const notFoundIds = validMediaIds.filter((id) => !foundIds.has(String(id)));
 
+    const overdueHistories = validMediaIds.length > 0 ? await OverDueHistory.find({ mediaId: { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) } }).lean() : [];
+    const overdueHistoryMap = new Map();
+    overdueHistories.forEach((oh) => {
+      const mId = String(oh.mediaId);
+      if (!overdueHistoryMap.has(mId)) {
+        overdueHistoryMap.set(mId, []);
+      }
+      overdueHistoryMap.get(mId).push(oh);
+    });
+
     const mediaHistoryList = [];
     for (const media of mediaDocs) {
       // ✅ NEW — ensure rentalDue exists for all elapsed cycles so history can link to real IDs
       await ensureRentalDueForCycles(media, autoCurrentMonthYM, req.user?.userName || "Admin");
 
-      mediaHistoryList.push(buildSingleMediaHistoryBlock(media, {
+      const block = buildSingleMediaHistoryBlock(media, {
         year,
         ownerMasterIdFilter,
         rangeStart,
         rangeEnd,
         autoCurrentMonthYM,
-      }));
+      });
+
+      const siteOverdueRecords = overdueHistoryMap.get(String(media._id)) || [];
+      const siteOverDueRemarks = [];
+      siteOverdueRecords.forEach((oh) => {
+        if (Array.isArray(oh.overDueRemarks)) {
+          oh.overDueRemarks.forEach((r) => {
+            const remarkObj = r.toObject ? r.toObject() : r;
+            siteOverDueRemarks.push({
+              ...remarkObj,
+              dueMonth: oh.dueMonth || "",
+            });
+          });
+        }
+      });
+
+      mediaHistoryList.push({
+        ...block,
+        overDueRemarks: siteOverDueRemarks,
+      });
     }
 
     const summary = mediaHistoryList.reduce(
