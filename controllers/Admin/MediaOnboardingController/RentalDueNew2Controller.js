@@ -574,9 +574,12 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
 
     if (existing) {
       let updated = false;
+      let significantChange = false;
+
       if (Number(entry.withGst || 0) !== Number(existing.withGst || 0)) {
         existing.withGst = Number(entry.withGst || 0);
         updated = true;
+        significantChange = true;
       }
       if (baseAmount > 0 && existing.overDueAmount !== baseAmount) {
         existing.overDueAmount = baseAmount;
@@ -606,18 +609,21 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       if (entry.approvalStatus && existing.status !== entry.approvalStatus) {
         existing.status = entry.approvalStatus;
         updated = true;
+        significantChange = true;
       }
       if (!existing.staffApprovedAt && staffApprovedAt) {
         existing.staffApprovedAt = staffApprovedAt;
         existing.staffApprovedBy = staffApprovedBy;
         existing.OverdueByStaff = OverdueByStaff;
         updated = true;
+        significantChange = true;
       }
       if (!existing.teamLeadApprovedAt && teamLeadApprovedAt) {
         existing.teamLeadApprovedAt = teamLeadApprovedAt;
         existing.teamLeadApprovedBy = teamLeadApprovedBy;
         existing.OverdueByTeamLead = OverdueByTeamLead;
         updated = true;
+        significantChange = true;
       }
       if (!existing.ownerApprovedAt && ownerApprovedAt) {
         existing.ownerApprovedAt = ownerApprovedAt;
@@ -625,11 +631,15 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
         existing.approvedDate = ownerApprovedAt;
         existing.removedDate = ownerApprovedAt;
         existing.OverdueByCMD = OverdueByCMD;
+        existing.approvalOverdueBy = OverdueByCMD;
         updated = true;
+        significantChange = true;
       }
       if (updated) {
         existing.updatedBy = userName || existing.updatedBy;
-        existing.updatedAt = nowIST();
+        if (significantChange || !existing.updatedAt) {
+          existing.updatedAt = nowIST();
+        }
         await existing.save();
       }
       return;
@@ -657,6 +667,7 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       OverdueByStaff,
       OverdueByTeamLead,
       OverdueByCMD,
+      approvalOverdueBy: ownerApprovedAt ? OverdueByCMD : "-",
       dueMonth: entry.dueMonth,
       dueDate: entry.dueDate,
       rentalDueId: entry._id,
@@ -3160,7 +3171,9 @@ exports.getOverDueHistoryList = async (req, res) => {
         const isOwnerApproved = !!(item.ownerApprovedAt || Number(item.status) === 3);
         const resolvedApprovedDate = isOwnerApproved ? (item.approvedDate || item.ownerApprovedAt || null) : null;
         const resolvedRemovedDate = isOwnerApproved ? (item.removedDate || item.ownerApprovedAt || null) : null;
-        const approvalOverdueBy = isOwnerApproved ? calcOverdueBy(resolvedApprovedDate) : "-";
+        const approvalOverdueBy = item.approvalOverdueBy && item.approvalOverdueBy !== "-"
+          ? item.approvalOverdueBy
+          : (isOwnerApproved ? (item.OverdueByCMD && item.OverdueByCMD !== "-" ? item.OverdueByCMD : calcOverdueBy(resolvedApprovedDate)) : "-");
 
         return {
             ...item,

@@ -54,6 +54,7 @@ const overDueHistorySchema = new mongoose.Schema(
     OverdueByStaff: { type: String, trim: true, default: "-" },
     OverdueByTeamLead: { type: String, trim: true, default: "-" },
     OverdueByCMD: { type: String, trim: true, default: "-" },
+    approvalOverdueBy: { type: String, trim: true, default: "-" },
     dueMonth: { type: String, trim: true },
     dueDate: { type: Date },
     rentalDueId: { type: mongoose.Schema.Types.ObjectId },
