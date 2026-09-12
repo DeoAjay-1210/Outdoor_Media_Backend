@@ -377,6 +377,8 @@ async function generateMissedEntriesForMedia(media, userName) {
     media.markModified("rentalPayment");
   }
 
+  await syncAllOverdueEntriesForMedia(media, userName);
+
   if (generatedEntries.length > 0) {
     media.markModified("rentalDueHistory");
     await media.save({ timestamps: false });
@@ -505,35 +507,32 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     const OverdueByTeamLead = calcDiffDays(teamLeadApprovedAt);
     const OverdueByCMD = calcDiffDays(ownerApprovedAt);
 
-    // Check for duplicate for this specific cycle/media to avoid double logging
-    const existing = await OverDueHistory.findOne({
+    // Check for duplicate for this specific cycle/media
+    let existing = await OverDueHistory.findOne({
       mediaId: media._id,
       rentalDueId: entry._id,
     });
-    if (existing) {
-      let updated = false;
-      if (!existing.staffApprovedAt && staffApprovedAt) {
-        existing.staffApprovedAt = staffApprovedAt;
-        existing.staffApprovedBy = staffApprovedBy;
-        existing.OverdueByStaff = OverdueByStaff;
-        updated = true;
+
+    if (!existing && entry.dueMonth) {
+      existing = await OverDueHistory.findOne({
+        mediaId: media._id,
+        dueMonth: entry.dueMonth,
+      });
+      if (existing && !existing.rentalDueId) {
+        existing.rentalDueId = entry._id;
       }
-      if (!existing.teamLeadApprovedAt && teamLeadApprovedAt) {
-        existing.teamLeadApprovedAt = teamLeadApprovedAt;
-        existing.teamLeadApprovedBy = teamLeadApprovedBy;
-        existing.OverdueByTeamLead = OverdueByTeamLead;
-        updated = true;
+    }
+
+    if (!existing) {
+      existing = await OverDueHistory.findOne({
+        mediaId: media._id,
+        $or: [{ rentalDueId: null }, { rentalDueId: { $exists: false } }],
+      });
+      if (existing) {
+        existing.rentalDueId = entry._id;
+        existing.dueMonth = entry.dueMonth;
+        existing.dueDate = entry.dueDate;
       }
-      if (!existing.ownerApprovedAt && ownerApprovedAt) {
-        existing.ownerApprovedAt = ownerApprovedAt;
-        existing.ownerApprovedBy = ownerApprovedBy;
-        existing.OverdueByCMD = OverdueByCMD;
-        updated = true;
-      }
-      if (updated) {
-        await existing.save();
-      }
-      return;
     }
 
     const entryGst = Number(entry.gstAmount || 0);
@@ -573,6 +572,79 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       .filter(Boolean)
       .join(", ");
 
+    if (existing) {
+      let updated = false;
+      let significantChange = false;
+
+      if (Number(entry.withGst || 0) !== Number(existing.withGst || 0)) {
+        existing.withGst = Number(entry.withGst || 0);
+        updated = true;
+        significantChange = true;
+      }
+      if (baseAmount > 0 && existing.overDueAmount !== baseAmount) {
+        existing.overDueAmount = baseAmount;
+        updated = true;
+      }
+      if (resolvedGst > 0 && existing.gstAmount !== resolvedGst) {
+        existing.gstAmount = resolvedGst;
+        updated = true;
+      }
+      if (entry.dueMonth && existing.dueMonth !== entry.dueMonth) {
+        existing.dueMonth = entry.dueMonth;
+        updated = true;
+      }
+      if (entry.dueDate && existing.dueDate !== entry.dueDate) {
+        existing.dueDate = entry.dueDate;
+        updated = true;
+      }
+      if (mDetails.length > 0 && (!existing.mediaDetails || existing.mediaDetails.length === 0)) {
+        existing.mediaDetails = mDetails;
+        updated = true;
+      }
+      if (lOwners.length > 0 && (!existing.landOwners || existing.landOwners.length === 0)) {
+        existing.landOwners = lOwners;
+        existing.landOwnerName = mainLandOwnerName;
+        updated = true;
+      }
+      if (entry.approvalStatus && existing.status !== entry.approvalStatus) {
+        existing.status = entry.approvalStatus;
+        updated = true;
+        significantChange = true;
+      }
+      if (!existing.staffApprovedAt && staffApprovedAt) {
+        existing.staffApprovedAt = staffApprovedAt;
+        existing.staffApprovedBy = staffApprovedBy;
+        existing.OverdueByStaff = OverdueByStaff;
+        updated = true;
+        significantChange = true;
+      }
+      if (!existing.teamLeadApprovedAt && teamLeadApprovedAt) {
+        existing.teamLeadApprovedAt = teamLeadApprovedAt;
+        existing.teamLeadApprovedBy = teamLeadApprovedBy;
+        existing.OverdueByTeamLead = OverdueByTeamLead;
+        updated = true;
+        significantChange = true;
+      }
+      if (!existing.ownerApprovedAt && ownerApprovedAt) {
+        existing.ownerApprovedAt = ownerApprovedAt;
+        existing.ownerApprovedBy = ownerApprovedBy;
+        existing.approvedDate = ownerApprovedAt;
+        existing.removedDate = ownerApprovedAt;
+        existing.OverdueByCMD = OverdueByCMD;
+        existing.approvalOverdueBy = OverdueByCMD;
+        updated = true;
+        significantChange = true;
+      }
+      if (updated) {
+        existing.updatedBy = userName || existing.updatedBy;
+        if (significantChange || !existing.updatedAt) {
+          existing.updatedAt = nowIST();
+        }
+        await existing.save();
+      }
+      return;
+    }
+
     await OverDueHistory.create({
       mediaId: media._id,
       mediaDetails: mDetails,
@@ -584,8 +656,8 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       overDueAmount: baseAmount,
       gstAmount: resolvedGst,
       isGstApplicable,
-      approvedDate: nowIST(),
-      removedDate: nowIST(),
+      approvedDate: ownerApprovedAt || null,
+      removedDate: ownerApprovedAt || null,
       staffApprovedAt,
       staffApprovedBy,
       teamLeadApprovedAt,
@@ -595,17 +667,129 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       OverdueByStaff,
       OverdueByTeamLead,
       OverdueByCMD,
+      approvalOverdueBy: ownerApprovedAt ? OverdueByCMD : "-",
       dueMonth: entry.dueMonth,
       dueDate: entry.dueDate,
       rentalDueId: entry._id,
       withGst: Number(entry.withGst || 0),
-      status: 2, // 2: Pending Entry
+      status: entry.approvalStatus || 2, // 2: Pending Entry
       updatedBy: userName,
       createdAt: nowIST(),
       updatedAt: nowIST(),
     });
   } catch (err) {
     console.error("❌ Error saving OverDue History:", err.message);
+  }
+}
+
+async function syncAllOverdueEntriesForMedia(media, userName = "System") {
+  if (!media || !Array.isArray(media.rentalDue)) return;
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+
+  for (const entry of media.rentalDue) {
+    const isOverdue =
+      Number(media.rentalPayment?.status) === 3 ||
+      (entry.dueDate && new Date(entry.dueDate) < today);
+    if (isOverdue) {
+      await saveOverDueHistoryIfApplicable(media, entry, userName);
+    }
+  }
+}
+
+async function cleanupDuplicateOverDueHistoryRecords() {
+  try {
+    const allOverdue = await OverDueHistory.find({}).lean();
+    if (!allOverdue || allOverdue.length <= 1) return;
+
+    const mediaGroups = new Map();
+    allOverdue.forEach((item) => {
+      const mId = String(item.mediaId);
+      if (!mediaGroups.has(mId)) mediaGroups.set(mId, []);
+      mediaGroups.get(mId).push(item);
+    });
+
+    for (const [mId, records] of mediaGroups.entries()) {
+      if (records.length <= 1) continue;
+
+      const cycleGroups = new Map();
+      const orphans = [];
+
+      records.forEach((rec) => {
+        const key = rec.rentalDueId
+          ? String(rec.rentalDueId)
+          : rec.dueMonth
+          ? String(rec.dueMonth)
+          : null;
+        if (key) {
+          if (!cycleGroups.has(key)) cycleGroups.set(key, []);
+          cycleGroups.get(key).push(rec);
+        } else {
+          orphans.push(rec);
+        }
+      });
+
+      // Handle orphans with 0 amount / no rentalDueId
+      for (const orphan of orphans) {
+        const realRecord = records.find(
+          (r) => r._id.toString() !== orphan._id.toString() && r.rentalDueId
+        );
+        if (realRecord) {
+          if (orphan.remarks || (orphan.overDueRemarks && orphan.overDueRemarks.length > 0)) {
+            const mergedRemarks = [
+              ...(realRecord.overDueRemarks || []),
+              ...(orphan.overDueRemarks || []),
+            ];
+            await OverDueHistory.updateOne(
+              { _id: realRecord._id },
+              {
+                $set: {
+                  remarks: orphan.remarks || realRecord.remarks,
+                  overDueRemarks: mergedRemarks,
+                },
+              }
+            );
+          }
+          await OverDueHistory.deleteOne({ _id: orphan._id });
+        }
+      }
+
+      // Handle duplicates sharing the same rentalDueId / dueMonth
+      for (const [key, cycleRecs] of cycleGroups.entries()) {
+        if (cycleRecs.length <= 1) continue;
+
+        cycleRecs.sort((a, b) => {
+          const scoreA =
+            (a.ownerApprovedAt ? 10 : 0) +
+            (a.overDueRemarks?.length || 0) +
+            (a.overDueAmount ? 5 : 0);
+          const scoreB =
+            (b.ownerApprovedAt ? 10 : 0) +
+            (b.overDueRemarks?.length || 0) +
+            (b.overDueAmount ? 5 : 0);
+          return scoreB - scoreA;
+        });
+
+        const primary = cycleRecs[0];
+        const duplicates = cycleRecs.slice(1);
+
+        for (const dup of duplicates) {
+          if (dup.remarks || (dup.overDueRemarks && dup.overDueRemarks.length > 0)) {
+            const merged = [
+              ...(primary.overDueRemarks || []),
+              ...(dup.overDueRemarks || []),
+            ];
+            await OverDueHistory.updateOne(
+              { _id: primary._id },
+              { $set: { overDueRemarks: merged, remarks: primary.remarks || dup.remarks } }
+            );
+          }
+          await OverDueHistory.deleteOne({ _id: dup._id });
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error cleaning duplicate OverDueHistory records:", err.message);
   }
 }
 
@@ -1637,11 +1821,14 @@ async function processSingleRentalDueInternal({
     entry.pastgstApplicableFlag = media.pastgstApplicableFlag;
   }
 
-  if ([1, 2].includes(Number(withGst))) {
+  if ([0, 1, 2].includes(Number(withGst)) && withGst !== undefined && withGst !== null && withGst !== "") {
     const newWithGst = Number(withGst);
-    if (entry.withGst !== newWithGst) {
+    if (entry.withGst !== newWithGst || (!entry.gstAmount && newWithGst > 0)) {
       entry.withGst = newWithGst;
-      entry.gstApplicableFlag = newWithGst;
+      if (newWithGst > 0) {
+        entry.gstApplicableFlag = newWithGst;
+        media.gstApplicableFlag = newWithGst;
+      }
       const recomputedSplit = computeGstSplit(media, newWithGst, entry.mediaDetailId);
       entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
       entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
@@ -1729,8 +1916,9 @@ async function processSingleRentalDueInternal({
       }
     }
 
+    await saveOverDueHistoryIfApplicable(media, entry, userName);
+
     if (entry.approvalStatus === 3) {
-      await saveOverDueHistoryIfApplicable(media, entry, userName);
       applyGstApplicableFlagIfOwner(media, userType, gstApplicableFlag, requestedPastFlag);
       addGstToBalanceIfApplicable(media, entry, userName);
       addOwnerGstToBalanceIfApplicable(media, entry, userName);
@@ -2567,7 +2755,14 @@ exports.verifyAgreementDoc = async (req, res) => {
  */
 exports.getOverDueHistoryList = async (req, res) => {
   try {
+    await cleanupDuplicateOverDueHistoryRecords();
     await ensureOverDueHistoryLandOwnersPopulated();
+
+    // Sweep active sites and sync overdue entries
+    const activeSites = await Media.find({ "mediaDetails.status": 1 });
+    for (const siteDoc of activeSites) {
+      await syncAllOverdueEntriesForMedia(siteDoc, "");
+    }
 
     const {
       pageNumber = 1,
@@ -2714,10 +2909,14 @@ exports.getOverDueHistoryList = async (req, res) => {
       if (s === 0) {
         searchStatusConditions.push({
           $or: [
-            { withGst: 2, ledgerEntryDate: null },
             {
-              withGst: { $ne: 2 },
+              withGst: 1,
+              gstAmount: { $gt: 0 },
               $or: [{ ledgerEntryDate: null }, { gstEntryDate: null }],
+            },
+            {
+              withGst: { $ne: 1 },
+              ledgerEntryDate: null,
             },
           ],
         });
@@ -2728,13 +2927,21 @@ exports.getOverDueHistoryList = async (req, res) => {
       } else if (s === 2) {
         searchStatusConditions.push({
           gstEntryDate: { $ne: null },
-          withGst: { $ne: 2 },
+          gstAmount: { $gt: 0 },
         });
       } else if (s === 3) {
         searchStatusConditions.push({
           $or: [
-            { ledgerEntryDate: { $ne: null }, gstEntryDate: { $ne: null } },
-            { ledgerEntryDate: { $ne: null }, withGst: 2 },
+            {
+              withGst: 1,
+              gstAmount: { $gt: 0 },
+              ledgerEntryDate: { $ne: null },
+              gstEntryDate: { $ne: null },
+            },
+            {
+              withGst: { $ne: 1 },
+              ledgerEntryDate: { $ne: null },
+            },
           ],
         });
       }
@@ -2785,8 +2992,24 @@ exports.getOverDueHistoryList = async (req, res) => {
                     $cond: [
                       {
                         $or: [
-                          { $and: [{ $eq: ["$withGst", 2] }, { $eq: ["$ledgerEntryDate", null] }] },
-                          { $and: [{ $ne: ["$withGst", 2] }, { $or: [{ $eq: ["$ledgerEntryDate", null] }, { $eq: ["$gstEntryDate", null] }] }] }
+                          {
+                            $and: [
+                              { $eq: ["$withGst", 1] },
+                              { $gt: ["$gstAmount", 0] },
+                              {
+                                $or: [
+                                  { $eq: ["$ledgerEntryDate", null] },
+                                  { $eq: ["$gstEntryDate", null] }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            $and: [
+                              { $ne: ["$withGst", 1] },
+                              { $eq: ["$ledgerEntryDate", null] }
+                            ]
+                          }
                         ]
                       },
                       1, 0
@@ -2801,7 +3024,12 @@ exports.getOverDueHistoryList = async (req, res) => {
                 gstEntry: {
                   $sum: {
                     $cond: [
-                      { $and: [{ $ne: ["$gstEntryDate", null] }, { $ne: ["$withGst", 2] }] },
+                      {
+                        $and: [
+                          { $ne: ["$gstEntryDate", null] },
+                          { $gt: ["$gstAmount", 0] }
+                        ]
+                      },
                       1, 0
                     ]
                   }
@@ -2811,8 +3039,20 @@ exports.getOverDueHistoryList = async (req, res) => {
                     $cond: [
                       {
                         $or: [
-                          { $and: [{ $ne: ["$ledgerEntryDate", null] }, { $ne: ["$gstEntryDate", null] }] },
-                          { $and: [{ $ne: ["$ledgerEntryDate", null] }, { $eq: ["$withGst", 2] }] }
+                          {
+                            $and: [
+                              { $eq: ["$withGst", 1] },
+                              { $gt: ["$gstAmount", 0] },
+                              { $ne: ["$ledgerEntryDate", null] },
+                              { $ne: ["$gstEntryDate", null] }
+                            ]
+                          },
+                          {
+                            $and: [
+                              { $ne: ["$withGst", 1] },
+                              { $ne: ["$ledgerEntryDate", null] }
+                            ]
+                          }
                         ]
                       },
                       1, 0
@@ -2893,18 +3133,13 @@ exports.getOverDueHistoryList = async (req, res) => {
         const ledgerDate = item.ledgerEntryDate;
         const gstDate = item.gstEntryDate;
         const withGst = Number(item.withGst || 0);
+        const gstAmt = Number(item.gstAmount || 0);
 
         let calculatedStatus = 0;
         let statusLabel = "Pending";
 
-        if (withGst === 2) {
-            // Rental Only (GST folded or not handled separately)
-            if (ledgerDate) {
-                calculatedStatus = 3;
-                statusLabel = "Rent Entry (Complete)";
-            }
-        } else {
-            // Tracked GST (withGst: 1) or Other
+        if (withGst === 1 && gstAmt > 0) {
+            // Tracked GST
             if (ledgerDate && gstDate) {
                 calculatedStatus = 3;
                 statusLabel = "Rent + GST Entry";
@@ -2914,12 +3149,31 @@ exports.getOverDueHistoryList = async (req, res) => {
             } else if (gstDate) {
                 calculatedStatus = 2;
                 statusLabel = "GST Entry";
+            } else {
+                calculatedStatus = 0;
+                statusLabel = "Pending";
+            }
+        } else {
+            // Non-tracked GST / GST cannot be held (withGst: 0 or 2, etc.)
+            if (ledgerDate) {
+                calculatedStatus = 3;
+                statusLabel = "Rent Entry (Complete)";
+            } else {
+                calculatedStatus = 0;
+                statusLabel = "Pending";
             }
         }
 
         const isDirect = withGst === 2;
         const rentAmount = isDirect ? Math.max((item.overDueAmount || 0) - (item.gstAmount || 0), 0) : (item.overDueAmount || 0);
         const totalAmount = isDirect ? (item.overDueAmount || 0) : (item.overDueAmount || 0) + (item.gstAmount || 0);
+
+        const isOwnerApproved = !!(item.ownerApprovedAt || Number(item.status) === 3);
+        const resolvedApprovedDate = isOwnerApproved ? (item.approvedDate || item.ownerApprovedAt || null) : null;
+        const resolvedRemovedDate = isOwnerApproved ? (item.removedDate || item.ownerApprovedAt || null) : null;
+        const approvalOverdueBy = item.approvalOverdueBy && item.approvalOverdueBy !== "-"
+          ? item.approvalOverdueBy
+          : (isOwnerApproved ? (item.OverdueByCMD && item.OverdueByCMD !== "-" ? item.OverdueByCMD : calcOverdueBy(resolvedApprovedDate)) : "-");
 
         return {
             ...item,
@@ -2929,8 +3183,10 @@ exports.getOverDueHistoryList = async (req, res) => {
             rentAmount,
             overDueAmount: totalAmount,
             totalAmount: totalAmount,
+            approvedDate: resolvedApprovedDate,
+            removedDate: resolvedRemovedDate,
             overdueDays: dDate ? Math.floor((today - dDate) / 86400000) : 0,
-            approvalOverdueBy: calcOverdueBy(item.approvedDate),
+            approvalOverdueBy,
             ledgerOverdueBy: calcOverdueBy(item.ledgerEntryDate),
             gstOverdueBy: calcOverdueBy(item.gstEntryDate),
             staffApprovedAt: item.staffApprovedAt || null,
@@ -2939,9 +3195,9 @@ exports.getOverDueHistoryList = async (req, res) => {
             teamLeadApprovedBy: item.teamLeadApprovedBy || "",
             ownerApprovedAt: item.ownerApprovedAt || null,
             ownerApprovedBy: item.ownerApprovedBy || "",
-            OverdueByStaff: item.OverdueByStaff || calcOverdueBy(item.staffApprovedAt),
-            OverdueByTeamLead: item.OverdueByTeamLead || calcOverdueBy(item.teamLeadApprovedAt),
-            OverdueByCMD: item.OverdueByCMD || calcOverdueBy(item.ownerApprovedAt),
+            OverdueByStaff: item.staffApprovedAt ? (item.OverdueByStaff !== "-" ? item.OverdueByStaff : calcOverdueBy(item.staffApprovedAt)) : "-",
+            OverdueByTeamLead: item.teamLeadApprovedAt ? (item.OverdueByTeamLead !== "-" ? item.OverdueByTeamLead : calcOverdueBy(item.teamLeadApprovedAt)) : "-",
+            OverdueByCMD: isOwnerApproved ? (item.OverdueByCMD !== "-" ? item.OverdueByCMD : calcOverdueBy(item.ownerApprovedAt)) : "-",
             calculatedStatus,
             statusLabel
         };
@@ -2964,6 +3220,231 @@ exports.getOverDueHistoryList = async (req, res) => {
   } catch (err) {
     console.error("getOverDueHistoryList error:", err);
     return errorResponse(res, "Something went wrong while fetching overdue history", { error: err.message }, 500);
+  }
+};
+
+/**
+ * ✅ NEW — API to save overdue remarks for a media site / face / landowner
+ */
+exports.overDueRemark = async (req, res) => {
+  try {
+    const {
+      mediaId,
+      rentalDueId,
+      mediaDetailId,
+      mediaDetailsId,
+      landOwnerId,
+      landownerId,
+      remarks,
+      entries,
+    } = req.body;
+
+    let entriesArray = [];
+
+    if (Array.isArray(mediaId) || Array.isArray(rentalDueId) || Array.isArray(mediaDetailId) || Array.isArray(mediaDetailsId) || Array.isArray(landOwnerId) || Array.isArray(landownerId)) {
+      const mediaIds = Array.isArray(mediaId) ? mediaId : (mediaId ? [mediaId] : []);
+      const rentalDueIds = Array.isArray(rentalDueId) ? rentalDueId : (rentalDueId ? [rentalDueId] : []);
+      const mediaDetailIds = Array.isArray(mediaDetailId || mediaDetailsId) ? (mediaDetailId || mediaDetailsId) : ((mediaDetailId || mediaDetailsId) ? [mediaDetailId || mediaDetailsId] : []);
+      const landOwnerIds = Array.isArray(landOwnerId || landownerId) ? (landOwnerId || landownerId) : ((landOwnerId || landownerId) ? [landOwnerId || landownerId] : []);
+
+      const maxLength = Math.max(mediaIds.length, rentalDueIds.length, mediaDetailIds.length, landOwnerIds.length);
+      for (let i = 0; i < maxLength; i++) {
+        entriesArray.push({
+          mediaId: mediaIds[i] || mediaIds[0],
+          rentalDueId: rentalDueIds[i] || rentalDueIds[0] || null,
+          mediaDetailId: mediaDetailIds[i] || mediaDetailIds[0] || null,
+          landOwnerId: landOwnerIds[i] || landOwnerIds[0] || null,
+          remarks: remarks,
+        });
+      }
+    } else if (Array.isArray(entries)) {
+      entriesArray = entries;
+    } else if (entries && typeof entries === "object") {
+      const keys = Object.keys(entries).filter(k => !isNaN(k));
+      if (keys.length > 0) {
+        entriesArray = keys.sort((a, b) => Number(a) - Number(b)).map(k => entries[k]);
+      }
+    }
+
+    if (entriesArray.length === 0) {
+      const manualEntries = {};
+      Object.keys(req.body).forEach(key => {
+        const match = key.match(/^entries\[(\d+)\]\[(\w+)\]$/);
+        if (match) {
+          const index = match[1];
+          const field = match[2];
+          if (!manualEntries[index]) manualEntries[index] = {};
+          manualEntries[index][field] = req.body[key];
+        }
+      });
+      const indices = Object.keys(manualEntries).sort((a, b) => Number(a) - Number(b));
+      if (indices.length > 0) {
+        entriesArray = indices.map(i => manualEntries[i]);
+      }
+    }
+
+    if (entriesArray.length === 0) {
+      entriesArray = [{
+        mediaId: Array.isArray(mediaId) ? mediaId[0] : mediaId,
+        rentalDueId: Array.isArray(rentalDueId) ? rentalDueId[0] : rentalDueId,
+        mediaDetailId: Array.isArray(mediaDetailId || mediaDetailsId) ? (mediaDetailId || mediaDetailsId)[0] : (mediaDetailId || mediaDetailsId),
+        landOwnerId: Array.isArray(landOwnerId || landownerId) ? (landOwnerId || landownerId)[0] : (landOwnerId || landownerId),
+        remarks,
+      }];
+    }
+
+    const userName = req.user?.userName || "Admin";
+    const savedResults = [];
+
+    for (const item of entriesArray) {
+      const mId = item.mediaId;
+      const rId = item.rentalDueId;
+      const mDetailId = item.mediaDetailId || item.mediaDetailsId;
+      const lOwnerId = item.landOwnerId || item.landownerId;
+      const rem = item.remarks || remarks;
+
+      if (!mId || !rem) continue;
+      if (!mongoose.Types.ObjectId.isValid(mId)) continue;
+
+      const trimmedRemarks = typeof rem === "string" ? rem.trim() : "";
+      if (!trimmedRemarks) continue;
+
+      const media = await Media.findById(mId);
+      if (!media) continue;
+
+      const newRemark = {
+        mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
+        landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
+        remarks: trimmedRemarks,
+        addedBy: userName,
+        addedAt: nowIST(),
+      };
+
+      const query = { mediaId: media._id };
+      if (rId && mongoose.Types.ObjectId.isValid(rId)) {
+        query.rentalDueId = new mongoose.Types.ObjectId(rId);
+      }
+
+      let overdueRecords = await OverDueHistory.find(query);
+      if (overdueRecords.length === 0 && rId && mongoose.Types.ObjectId.isValid(rId)) {
+        overdueRecords = await OverDueHistory.find({ mediaId: media._id });
+      }
+
+      if (overdueRecords.length > 0) {
+        for (const record of overdueRecords) {
+          if (!Array.isArray(record.overDueRemarks)) {
+            record.overDueRemarks = [];
+          }
+          record.overDueRemarks.push(newRemark);
+          record.remarks = trimmedRemarks;
+          record.updatedBy = userName;
+          record.updatedAt = nowIST();
+          await record.save();
+        }
+      } else {
+        await OverDueHistory.create({
+          mediaId: media._id,
+          rentalDueId: rId && mongoose.Types.ObjectId.isValid(rId) ? new mongoose.Types.ObjectId(rId) : null,
+          mediaDetails: (media.mediaDetails || []).map((d) => ({
+            mediaCode: d.mediaCode,
+            mediaName: d.mediaName,
+            mediaType: d.mediaType,
+            city: d.city,
+            location: d.location,
+          })),
+          landOwners: (media.landOwners || []).map((o) => ({
+            landOwnerMasterId: o.landOwnerMasterId || null,
+            name: o.name || o.landOwnerName || "",
+            landOwnerName: o.name || o.landOwnerName || "",
+            phone: o.phone || "",
+            panNumber: o.panNumber || "",
+            accountNumber: o.accountNumber || "",
+            bankName: o.bankName || "",
+            ifsc: o.ifsc || "",
+            paymentCategory: o.paymentCategory,
+            sharePercentage: o.sharePercentage,
+            shareAmount: o.shareAmount,
+            gstApplicable: o.gstApplicable,
+            gstAmount: o.gstAmount,
+          })),
+          remarks: trimmedRemarks,
+          overDueRemarks: [newRemark],
+          updatedBy: userName,
+          createdAt: nowIST(),
+          updatedAt: nowIST(),
+        });
+      }
+
+      savedResults.push({
+        mediaId: String(mId),
+        rentalDueId: rId ? String(rId) : null,
+        mediaDetailId: mDetailId ? String(mDetailId) : null,
+        landOwnerId: lOwnerId ? String(lOwnerId) : null,
+        remarks: trimmedRemarks,
+        addedBy: userName,
+        addedAt: newRemark.addedAt,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Overdue remarks saved successfully",
+      data: savedResults,
+    });
+  } catch (err) {
+    console.error("overDueRemark error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
+  }
+};
+
+exports.getOverDueRemarks = async (req, res) => {
+  try {
+    const mediaIdParam = req.query.mediaId || req.body?.mediaId;
+    const rentalDueIdParam = req.query.rentalDueId || req.body?.rentalDueId;
+
+    let mediaIds = [];
+    if (mediaIdParam) {
+      mediaIds = Array.isArray(mediaIdParam) ? mediaIdParam : String(mediaIdParam).split(",").map(id => id.trim());
+    }
+
+    let rentalDueIds = [];
+    if (rentalDueIdParam) {
+      rentalDueIds = Array.isArray(rentalDueIdParam) ? rentalDueIdParam : String(rentalDueIdParam).split(",").map(id => id.trim());
+    }
+
+    const query = {};
+    if (mediaIds.length > 0) {
+      const validMediaIds = mediaIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+      if (validMediaIds.length > 0) {
+        query.mediaId = { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) };
+      }
+    }
+
+    if (rentalDueIds.length > 0) {
+      const validRentalDueIds = rentalDueIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+      if (validRentalDueIds.length > 0) {
+        query.rentalDueId = { $in: validRentalDueIds.map(id => new mongoose.Types.ObjectId(id)) };
+      }
+    }
+
+    const records = await OverDueHistory.find(query).lean();
+
+    return res.status(200).json({
+      success: true,
+      message: "Overdue remarks fetched successfully",
+      data: records,
+    });
+  } catch (err) {
+    console.error("getOverDueRemarks error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message,
+    });
   }
 };
 
