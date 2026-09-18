@@ -933,216 +933,614 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
   };
 }
 
-// async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
-//   try {
-//     const toMail = process.env.T0_EMail;
-//     const ccMail = process.env.CC_EMail;
-//     const mailMode = process.env.MAIL_MODE || "development";
 
-//     const formatYMD = (date) =>
-//       date ? new Date(date).toISOString().split("T")[0] : null;
+  // async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
+  //   try {
+  //     const toMail = process.env.T0_EMail;
+  //     const ccMail = process.env.CC_EMail;
+  //     const mailMode = process.env.MAIL_MODE || "development";
 
-//     const targetDueMonth = entry.dueMonth;
+  //     const formatYMD = (date) => {
+  //       if (!date) return null;
+  //       const d = new Date(date);
+  //       if (isNaN(d.getTime())) return null;
+  //       return d.toISOString().split("T")[0];
+  //     };
 
-//     // ── GROUPING LOGIC ──
-//     // ✅ FIXED — Removed automatic DB lookup for other sites.
-//     // If batchSites is provided (from batch approval), use them.
-//     // Otherwise, it's a single site mail as requested.
-//     let sitesInGroupData = [];
-//     if (Array.isArray(batchSites) && batchSites.length > 0) {
-//       sitesInGroupData = batchSites;
-//     } else {
-//       sitesInGroupData = [{ media, entry }];
-//     }
+  //     const parseEmailList = (mailStr) => {
+  //       if (!mailStr) return [];
+  //       if (Array.isArray(mailStr)) {
+  //         return mailStr.flatMap((s) => String(s).split(",")).map((e) => e.trim()).filter(Boolean);
+  //       }
+  //       return String(mailStr).split(",").map((e) => e.trim()).filter(Boolean);
+  //     };
 
-//     // Identify unique landowners across the provided sites
-//     const uniqueOwnersMap = new Map();
-//     sitesInGroupData.forEach(({ media: siteMedia }) => {
-//       (siteMedia.landOwners || []).forEach((owner) => {
-//         if (owner.landOwnerMasterId) {
-//           const key = String(owner.landOwnerMasterId);
-//           if (!uniqueOwnersMap.has(key)) {
-//             uniqueOwnersMap.set(key, owner.toObject ? owner.toObject() : owner);
-//           }
-//         }
-//       });
-//     });
+  //     const toArray = parseEmailList(toMail);
+  //     const ccArray = parseEmailList(ccMail);
 
-//     const uniqueOwners = Array.from(uniqueOwnersMap.values());
-//     const ownerRefs = {};
-//     uniqueOwners.forEach((owner, idx) => {
-//       const ref = `LO-${String(idx + 1).padStart(2, "0")}`;
-//       ownerRefs[String(owner.landOwnerMasterId)] = ref;
-//       owner.ownerRef = ref;
-//     });
+  //     // ── GROUPING LOGIC ──
+  //     let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
+  //       ? batchSites
+  //       : [{ media, entry }];
 
-//     // ── DATA AGGREGATION ──
-//     const allFaces = [];
-//     const allOwnersMap = new Map();
-//     const allProofs = [];
-//     const allInvoices = [];
-//     let totalRental = 0;
-//     let totalGst = 0;
-//     let totalNet = 0;
+  //     const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
+  //       if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
+  //         return {};
+  //       }
 
-//     sitesInGroupData.forEach(({ media: site, entry: siteInputEntry }) => {
-//       const siteEntry = (site.rentalDue || []).find((e) => e.dueMonth === targetDueMonth) || siteInputEntry;
-//       const rp = site.rentalPayment || {};
+  //       // Check if appraisal applies to current month / cycle
+  //       const isCurrentMonthAppraisal = () => {
+  //         const entryDate = siteEntry?.dueDate
+  //           ? new Date(siteEntry.dueDate)
+  //           : siteEntry?.cycle
+  //           ? new Date(siteEntry.cycle)
+  //           : nowIST();
 
-//       // 1. Collect Faces (Media Details)
-//       (site.mediaDetails || []).forEach((d) => {
-//         if (Number(d.status) === 1) {
-//           allFaces.push({
-//             mediaCode: d.mediaCode || "",
-//             mediaName: d.mediaName || "",
-//             mediaType: d.mediaType || "",
-//             state: d.state || "",
-//             city: d.city || "",
-//             location: d.location || "",
-//             width: d.width || 0,
-//             height: d.height || 0,
-//             totalSqFt: d.totalSqFt || 0,
-//             status: d.status || 0,
-//           });
-//         }
-//       });
+  //         const entryYear = !isNaN(entryDate.getTime())
+  //           ? entryDate.getFullYear()
+  //           : new Date().getFullYear();
+  //         const entryMonth = !isNaN(entryDate.getTime())
+  //           ? entryDate.getMonth()
+  //           : new Date().getMonth();
 
-//       // 2. Sum Payments
-//       const siteBaseRent = Number(rp.totalRentalAmount || 0);
-//       const siteGstAmount = Number(siteEntry?.gstAmount || 0);
-//       totalRental += siteBaseRent;
-//       totalGst += siteGstAmount;
-//       totalNet += (siteBaseRent + siteGstAmount);
+  //         const entryMonthLabel = siteEntry?.dueMonth
+  //           ? String(siteEntry.dueMonth).toLowerCase()
+  //           : "";
 
-//       // 3. Merge LandOwners
-//       (site.landOwners || []).forEach((o) => {
-//         const id = String(o.landOwnerMasterId);
-//         if (allOwnersMap.has(id)) {
-//           const existing = allOwnersMap.get(id);
-//           existing.shareAmount = (Number(existing.shareAmount) || 0) + (Number(o.shareAmount) || 0);
-//           existing.gstAmount = (Number(existing.gstAmount) || 0) + (Number(o.gstAmount) || 0);
-//           existing.totalAmountWithGst = (Number(existing.totalAmountWithGst) || 0) + (Number(o.totalAmountWithGst) || 0);
-//         } else {
-//           allOwnersMap.set(id, { ...(o.toObject ? o.toObject() : o) });
-//         }
-//       });
+  //         const checkDateMatch = (dateInput) => {
+  //           if (!dateInput) return false;
+  //           const d = new Date(dateInput);
+  //           if (isNaN(d.getTime())) return false;
+  //           if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) {
+  //             return true;
+  //           }
+  //           if (entryMonthLabel) {
+  //             const monthName = d.toLocaleString("en-US", { month: "long" }).toLowerCase();
+  //             const shortMonthName = d.toLocaleString("en-US", { month: "short" }).toLowerCase();
+  //             const yearStr = String(d.getFullYear());
+  //             if (
+  //               (entryMonthLabel.includes(monthName) || entryMonthLabel.includes(shortMonthName)) &&
+  //               entryMonthLabel.includes(yearStr)
+  //             ) {
+  //               return true;
+  //             }
+  //           }
+  //           return false;
+  //         };
 
-//       // 4. Collect Proofs
-//       if (siteEntry?.proofOfCampaign?.filePath) allProofs.push(siteEntry.proofOfCampaign.filePath);
-//       if (siteEntry?.invoice?.filePath) allInvoices.push(siteEntry.invoice.filePath);
-//     });
+  //         if (checkDateMatch(siteAppraisal.nextAppraisalDate)) return true;
+  //         if (checkDateMatch(siteAppraisal.lastAppraisalDate)) return true;
+  //         if (checkDateMatch(siteAppraisal.appraisalDate)) return true;
+  //         if (checkDateMatch(siteEntry?.appraisalDate)) return true;
 
-//     const isSingleBill = (media.mediaDetails?.some(d => d.siteBillMode === 1) || media.siteBillMode === 1);
+  //         if (!siteAppraisal.nextAppraisalDate && !siteAppraisal.lastAppraisalDate) {
+  //           return true;
+  //         }
 
-//     const data = {
-//       billingType: isSingleBill ? "single_bill" : "separate_bill",
-//       mediaDetails: allFaces,
-//       rentalPayment: {
-//         totalRentalAmount: totalRental,
-//         gstAmount: totalGst,
-//         netPayable: totalNet,
-//         paymentFrequency: entry.paymentFrequency || media.rentalPayment?.paymentFrequency || 0,
-//         lastBillPaidDate: formatYMD(media.rentalPayment?.lastBillPaidDate),
-//         nextBillingDate: formatYMD(media.rentalPayment?.nextBillingDate),
-//       },
-//       landOwners: Array.from(allOwnersMap.values()).map((o, idx) => ({
-//         ownerRef: `LO-${String(idx + 1).padStart(2, "0")}`,
-//         name: o.name || "",
-//         phone: o.phone || "",
-//         bankName: o.bankName || "",
-//         ifsc: o.ifsc || "",
-//         accountNumber: o.accountNumber || "",
-//         panNumber: o.panNumber || "",
-//         shareAmount: o.shareAmount || 0,
-//         gstAmount: o.gstAmount || 0,
-//         totalAmountWithGst: o.totalAmountWithGst || 0,
-//         tdsPercentage: o.tdsPercentage || 0,
-//         tdsAmount: o.tdsAmount || 0,
-//         paymentCategory: o.paymentCategory || 0,
-//         onlineMode: o.onlineMode || 0,
-//       })),
-//       proof_of_campaign: allProofs,
-//       invoice: allInvoices,
-//       numberOfLandOwners: allOwnersMap.size,
-//     };
+  //         return false;
+  //       };
 
-//     if (isSingleBill) {
-//       data.numberOfSites = sitesInGroupData.length;
-//     }
+  //       if (!isCurrentMonthAppraisal()) {
+  //         return {};
+  //       }
+
+  //       const appObj = {
+  //         applicable: 1,
+  //         type: Number(siteAppraisal.type || 1),
+  //       };
+
+  //       if (Number(siteAppraisal.type) === 1) {
+  //         if (siteAppraisal.percentage !== undefined && siteAppraisal.percentage !== null) {
+  //           appObj.percentage = Number(siteAppraisal.percentage);
+  //         }
+  //       } else if (Number(siteAppraisal.type) === 2) {
+  //         if (siteAppraisal.fixedAmount !== undefined && siteAppraisal.fixedAmount !== null) {
+  //           appObj.fixedAmount = Number(siteAppraisal.fixedAmount);
+  //         }
+  //       }
+
+  //       appObj.appraisalAmount = Number(siteAppraisal.appraisalAmount || 0);
+  //       if (siteAppraisal.frequency) {
+  //         appObj.frequency = Number(siteAppraisal.frequency);
+  //       }
+  //       if (siteAppraisal.lastAppraisalDate) {
+  //         appObj.lastAppraisalDate = formatYMD(siteAppraisal.lastAppraisalDate);
+  //       }
+  //       if (siteAppraisal.nextAppraisalDate) {
+  //         appObj.nextAppraisalDate = formatYMD(siteAppraisal.nextAppraisalDate);
+  //       }
+  //       appObj.includedInCurrentRent = Number(
+  //         siteAppraisal.includedInCurrentRent !== undefined
+  //           ? siteAppraisal.includedInCurrentRent
+  //           : 1
+  //       );
+
+  //       return appObj;
+  //     };
+
+  //     const buildAgreementPayload = (ag) => {
+  //       if (!ag || (!ag.startDate && !ag.endDate)) return null;
+
+  //       // Agreement Status Mapping for Mail Payload:
+  //       // 3 -> Active (when DB status is 1)
+  //       // 4 -> Expired (when DB status is 3)
+  //       // 5 -> Expired soon (when DB status is 2)
+  //       const rawStatus = Number(ag.status || 1);
+  //       let mappedStatus = 3;
+  //       if (rawStatus === 1) {
+  //         mappedStatus = 3; // 3 -> Active
+  //       } else if (rawStatus === 3) {
+  //         mappedStatus = 4; // 4 -> Expired
+  //       } else if (rawStatus === 2) {
+  //         mappedStatus = 5; // 5 -> Expired soon
+  //       } else {
+  //         mappedStatus = rawStatus;
+  //       }
+
+  //       return {
+  //         startDate: formatYMD(ag.startDate),
+  //         endDate: formatYMD(ag.endDate),
+  //         reminderBeforeExpiry: Number(ag.reminderBeforeExpiry || 30),
+  //         advanceRent: Number(ag.advanceRent || 0),
+  //         status: mappedStatus,
+  //       };
+  //     };
+
+  //     const buildLandOwnerObject = (o, siteEntry) => {
+  //       const isGstHold = Number(siteEntry?.withGst) === 1 || Number(o.gstHold) === 1 ? 1 : 0;
+  //       const isTdsHold = Number(siteEntry?.tdsHold) === 1 || Number(o.tdsHold) === 1 ? 1 : 0;
+  //       return {
+  //         name: o.name || "",
+  //         phone: o.phone || "",
+  //         bankName: o.bankName || "",
+  //         ifsc: o.ifsc || "",
+  //         accountNumber: o.accountNumber || "",
+  //         panNumber: o.panNumber || "",
+  //         paymentCategory: Number(o.paymentCategory || 1),
+  //         onlineMode: Number(o.onlineMode || 0),
+  //         shareAmount: Number(o.shareAmount || 0),
+  //         onlineAmount: Number(o.onlineAmount || 0),
+  //         cashAmount: Number(o.cashAmount || 0),
+  //         tdsPercentage: Number(o.tdsPercentage || 0),
+  //         tdsAmount: Number(o.tdsAmount || 0),
+  //         tdsApplicable: Number(o.tdsApplicable || 0),
+  //         gstHold: isGstHold,
+  //         tdsHold: isTdsHold,
+  //         gstApplicable: Number(o.gstApplicable || 0),
+  //         gstAmount: Number(o.gstAmount || 0),
+  //         gstNumber: o.gstNumber || "",
+  //       };
+  //     };
+
+  //     const extractProofs = (site, siteEntry) => {
+  //       let proofs = [];
+  //       if (siteEntry?.proofOfCampaign?.filePath) {
+  //         proofs.push(siteEntry.proofOfCampaign.filePath);
+  //       } else if (Array.isArray(siteEntry?.proofOfCampaign)) {
+  //         proofs = siteEntry.proofOfCampaign.map((p) => (typeof p === "string" ? p : p.filePath || p.url || p)).filter(Boolean);
+  //       } else if (Array.isArray(siteEntry?.proof_of_campaign)) {
+  //         proofs = siteEntry.proof_of_campaign.filter(Boolean);
+  //       } else if (Array.isArray(site?.proof_of_campaign)) {
+  //         proofs = site.proof_of_campaign.filter(Boolean);
+  //       }
+  //       return proofs;
+  //     };
+
+  //     const getSiteBillMode = (item) => {
+  //       const s = item.media || {};
+  //       const e = item.entry || {};
+  //       const matchedDetail = (s.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
+
+  //       if (Number(e.siteBillMode) === 2 || Number(e.billMode) === 2) return 2;
+  //       if (matchedDetail && (Number(matchedDetail.siteBillMode) === 2 || Number(matchedDetail.billMode) === 2)) return 2;
+  //       if ((s.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2 || Number(d.billMode) === 2)) return 2;
+  //       if (Number(s.siteBillMode) === 2 || Number(s.billMode) === 2) return 2;
+  //       if ((s.landOwners || []).some((o) => Number(o.siteBillMode) === 2 || Number(o.landOwnerBillMode) === 2)) return 2;
+
+  //       return 1;
+  //     };
+
+  //     const getAgreementMode = (item) => {
+  //       const s = item.media || {};
+  //       const e = item.entry || {};
+  //       const matchedDetail = (s.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
+
+  //       if (Number(e.agreementBillMode) === 2) return 2;
+  //       if (matchedDetail && Number(matchedDetail.agreementBillMode) === 2) return 2;
+  //       if ((s.landOwners || []).some((o) => Number(o.agreementBillMode) === 2)) return 2;
+  //       if (Number(s.agreementBillMode) === 2) return 2;
+
+  //       return 1;
+  //     };
+
+  //   const isSingleBill = sitesInGroupData.every((item) => getSiteBillMode(item) === 1);
+  //   const isSingleAgreement = sitesInGroupData.every((item) => getAgreementMode(item) === 1);
+
+  //   const billingType = isSingleBill ? "single_bill" : "separate_bill";
+  //   const agreementType = isSingleAgreement ? "single_agreement" : "separate_agreement";
+
+  //   let data = {};
+
+  //   if (isSingleBill && sitesInGroupData.length === 1) {
+  //     // ── SINGLE SITE SCENARIO ──
+  //     const item = sitesInGroupData[0];
+  //     const site = item.media;
+  //     const siteEntry = item.entry;
+
+  //     const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
+  //     const rp = site.rentalPayment || {};
+  //     const ag = site.agreement || {};
+
+  //     const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
+
+  //     const totalRentalAmountVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
+
+  //     const landownerGstSum = (site.landOwners || [])
+  //       .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
+  //       .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+
+  //     const siteGstSum = Number(rp.gstAmount || siteEntry?.gstAmount || 0);
+  //     const effectiveGst = landownerGstSum > 0 ? landownerGstSum : (isGstApplicable ? siteGstSum : 0);
+
+  //     let gstInvoiceUrlVal = "";
+  //     if (siteEntry?.invoice?.filePath) {
+  //       gstInvoiceUrlVal = siteEntry.invoice.filePath;
+  //     } else if (rp.gstInvoiceUrl) {
+  //       gstInvoiceUrlVal = rp.gstInvoiceUrl;
+  //     }
+
+  //     let gstAmountVal = 0;
+  //     let gstNumberVal = "";
+  //     let gstPercentageVal = Number(rp.gstPercentage || 18);
+
+  //     if (isGstApplicable) {
+  //       gstAmountVal = siteGstSum > 0 ? siteGstSum : landownerGstSum;
+  //       gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
+  //     }
+
+  //     let netPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
+  //     const totalExpectedNet = totalRentalAmountVal + effectiveGst;
+  //     if (netPayableVal <= 0 || netPayableVal < totalExpectedNet) {
+  //       netPayableVal = totalExpectedNet;
+  //     }
+
+  //     const rentalPaymentObj = {
+  //       totalRentalAmount: totalRentalAmountVal,
+  //       gstApplicable: isGstApplicable ? 1 : 0,
+  //       netPayableAmount: netPayableVal,
+  //       gstAmount: gstAmountVal,
+  //       gstNumber: gstNumberVal,
+  //       gstPercentage: gstPercentageVal,
+  //       gstInvoiceUrl: gstInvoiceUrlVal,
+  //     };
+
+  //     rentalPaymentObj.paymentFrequency = Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1);
+  //     rentalPaymentObj.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
+  //     rentalPaymentObj.nextBillingDate = formatYMD(rp.nextBillingDate);
+
+  //     const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
+
+  //     data = {
+  //       billingType: billingType,
+  //       agreementType: agreementType,
+  //       mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
+  //       mediaName: activeDetail.mediaName || site.mediaName || "",
+  //       mediaType: activeDetail.mediaType || site.mediaType || "",
+  //       state: activeDetail.state || site.state || "",
+  //       city: activeDetail.city || site.city || "",
+  //       location: activeDetail.location || site.location || "",
+  //       fullAddress: site.fullAddress || (activeDetail.location ? `${activeDetail.location}, ${activeDetail.city || ""}` : (site.location || "")),
+  //       width: Number(activeDetail.width || site.width || 0),
+  //       height: Number(activeDetail.height || site.height || 0),
+  //       totalSqFt: Number(activeDetail.totalSqFt || site.totalSqFt || 0),
+  //       numberOfLandOwners: landOwnersList.length || Number(site.numberOfLandOwners) || 1,
+  //       status: Number(activeDetail.status || site.status || 1),
+  //       rentalPayment: rentalPaymentObj,
+  //       agreement: buildAgreementPayload(ag),
+  //       appraisal: buildAppraisalPayload(site.appraisal, siteEntry),
+  //       landOwners: landOwnersList,
+  //       proof_of_campaign: extractProofs(site, siteEntry),
+  //     };
+
+  //   } else {
+  //     // ── SEPARATE AGREEMENT OR MULTIPLE SITES SCENARIO ──
+  //     const firstSite = sitesInGroupData[0].media;
+
+  //       // Group parent Media documents for single_bill root totals
+  //       const parentMediaMap = new Map();
+  //       sitesInGroupData.forEach((item) => {
+  //         const mId = String(item.media._id);
+  //         if (!parentMediaMap.has(mId)) {
+  //           parentMediaMap.set(mId, item);
+  //         }
+  //       });
+  //       const uniqueParentMedias = Array.from(parentMediaMap.values());
+
+  //       const ownersMap = new Map();
+  //       const ownerSiteBreakdownMap = new Map();
+
+  //       const itemsForOwners = isSingleBill ? uniqueParentMedias : sitesInGroupData;
+
+  //       itemsForOwners.forEach((item) => {
+  //         const site = item.media;
+  //         const siteEntry = item.entry;
+  //         const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
+  //         const siteCode = activeDetail.mediaCode || site.mediaCode || site.siteCode || "";
+
+  //         (site.landOwners || []).forEach((o) => {
+  //           const key = String(o.landOwnerMasterId || o._id || o.name);
+  //           if (!ownersMap.has(key)) {
+  //             ownersMap.set(key, {
+  //               obj: {
+  //                 ...(o.toObject ? o.toObject() : o),
+  //                 shareAmount: Number(o.shareAmount || 0),
+  //                 onlineAmount: Number(o.onlineAmount || 0),
+  //                 cashAmount: Number(o.cashAmount || 0),
+  //                 tdsAmount: Number(o.tdsAmount || 0),
+  //                 gstAmount: Number(o.gstAmount || 0),
+  //               },
+  //               siteEntry: siteEntry,
+  //             });
+  //           } else if (!isSingleBill) {
+  //             const existingObj = ownersMap.get(key).obj;
+  //             existingObj.shareAmount = Number(existingObj.shareAmount || 0) + Number(o.shareAmount || 0);
+  //             existingObj.onlineAmount = Number(existingObj.onlineAmount || 0) + Number(o.onlineAmount || 0);
+  //             existingObj.cashAmount = Number(existingObj.cashAmount || 0) + Number(o.cashAmount || 0);
+  //             existingObj.tdsAmount = Number(existingObj.tdsAmount || 0) + Number(o.tdsAmount || 0);
+  //             existingObj.gstAmount = Number(existingObj.gstAmount || 0) + Number(o.gstAmount || 0);
+  //           }
+
+  //           if (!ownerSiteBreakdownMap.has(key)) {
+  //             ownerSiteBreakdownMap.set(key, []);
+  //           }
+  //           ownerSiteBreakdownMap.get(key).push({
+  //             mediaCode: siteCode,
+  //             shareAmount: Number(o.shareAmount || 0),
+  //             onlineAmount: Number(o.onlineAmount || 0),
+  //             cashAmount: Number(o.cashAmount || 0),
+  //           });
+  //         });
+  //       });
+
+  //       const rootLandOwners = [];
+  //       ownersMap.forEach((val, key) => {
+  //         const loObj = buildLandOwnerObject(val.obj, val.siteEntry);
+  //         const breakdown = ownerSiteBreakdownMap.get(key) || [];
+  //         if (!isSingleBill && breakdown.length > 1) {
+  //           loObj.siteRentBreakdown = breakdown;
+  //         }
+  //         rootLandOwners.push(loObj);
+  //       });
+
+  //       // Calculate root rental payment totals for single_bill
+  //       const totalRentalSum = uniqueParentMedias.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
+  //       const totalGstSum = uniqueParentMedias.reduce((sum, item) => {
+  //         const rp = item.media.rentalPayment || {};
+  //         const isSiteGstOn = Number(rp.gstApplicable || item.entry?.gstApplicable || 0) === 1;
+  //         const siteGst = Number(rp.gstAmount || item.entry?.gstAmount || 0);
+  //         const ownerGst = (item.media.landOwners || [])
+  //           .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
+  //           .reduce((s, o) => s + Number(o.gstAmount || 0), 0);
+  //         const effectiveGst = ownerGst > 0 ? ownerGst : (isSiteGstOn ? siteGst : 0);
+  //         return sum + effectiveGst;
+  //       }, 0);
+
+  //       const anySiteGstApplicable = uniqueParentMedias.some((item) => Number(item.media.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1);
+
+  //       let rootGstInvoiceUrl = "";
+  //       if (sitesInGroupData[0]?.entry?.invoice?.filePath) {
+  //         rootGstInvoiceUrl = sitesInGroupData[0].entry.invoice.filePath;
+  //       } else if (firstSite.rentalPayment?.gstInvoiceUrl) {
+  //         rootGstInvoiceUrl = firstSite.rentalPayment.gstInvoiceUrl;
+  //       }
+
+  //       const rootNetPayableSum = totalRentalSum + totalGstSum;
+
+  //       const rootRentalPaymentObj = {
+  //         totalRentalAmount: totalRentalSum || Number(firstSite.rentalPayment?.totalRentalAmount || 0),
+  //         gstApplicable: anySiteGstApplicable ? 1 : 0,
+  //         gstAmount: anySiteGstApplicable ? totalGstSum : 0,
+  //         gstNumber: firstSite.rentalPayment?.gstNumber || sitesInGroupData[0]?.entry?.gstNumber || "",
+  //         gstInvoiceUrl: rootGstInvoiceUrl,
+  //         netPayableAmount: rootNetPayableSum || Number(firstSite.rentalPayment?.netPayable || sitesInGroupData[0]?.entry?.netPayable || 0),
+  //         paymentFrequency: Number(sitesInGroupData[0]?.entry?.paymentFrequency || firstSite.rentalPayment?.paymentFrequency || 1),
+  //         lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
+  //         nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
+  //       };
+
+  //       const sitesPayload = sitesInGroupData.map((item, idx) => {
+  //         const site = item.media;
+  //         const siteEntry = item.entry;
+  //         const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
+  //         const rp = site.rentalPayment || {};
+  //         const ag = site.agreement || {};
+
+  //         const siteObj = {
+  //           mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
+  //           mediaName: activeDetail.mediaName || site.mediaName || "",
+  //           location: activeDetail.location || site.location || "",
+  //         };
+
+  //         if (!isSingleBill || !isSingleAgreement) {
+  //           const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
+
+  //           const siteTotalRentalVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
+
+  //           const siteLandownerGstSum = (site.landOwners || [])
+  //             .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
+  //             .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+
+  //           let siteGstAmountVal = 0;
+  //           let siteGstPercentageVal = Number(rp.gstPercentage || 18);
+  //           let siteGstInvoiceUrlVal = "";
+
+  //           if (idx === 0) {
+  //             if (siteEntry?.invoice?.filePath) {
+  //               siteGstInvoiceUrlVal = siteEntry.invoice.filePath;
+  //             } else if (rp.gstInvoiceUrl) {
+  //               siteGstInvoiceUrlVal = rp.gstInvoiceUrl;
+  //             }
+  //           } else if (rp.gstInvoiceUrl) {
+  //             siteGstInvoiceUrlVal = rp.gstInvoiceUrl;
+  //           }
+
+  //           if (isGstApplicable) {
+  //             siteGstAmountVal = Number(rp.gstAmount || siteEntry?.gstAmount || siteLandownerGstSum || 0);
+  //           }
+
+  //           let siteNetPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
+  //           const siteTotalExpectedNet = siteTotalRentalVal + (isGstApplicable ? siteGstAmountVal : siteLandownerGstSum);
+  //           if (siteNetPayableVal <= 0 || siteNetPayableVal < siteTotalExpectedNet) {
+  //             siteNetPayableVal = siteTotalExpectedNet;
+  //           }
+
+  //           const siteRentalPayment = {
+  //             totalRentalAmount: siteTotalRentalVal,
+  //             gstApplicable: isGstApplicable ? 1 : 0,
+  //             netPayableAmount: siteNetPayableVal,
+  //             paymentFrequency: Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1),
+  //             lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+  //             nextBillingDate: formatYMD(rp.nextBillingDate),
+  //           };
+
+  //           if (isGstApplicable) {
+  //             siteRentalPayment.gstAmount = siteGstAmountVal;
+  //             siteRentalPayment.gstPercentage = siteGstPercentageVal;
+  //           }
+  //           if (siteGstInvoiceUrlVal) {
+  //             siteRentalPayment.gstInvoiceUrl = siteGstInvoiceUrlVal;
+  //           }
+
+  //           siteObj.rentalPayment = siteRentalPayment;
+
+  //           if (!isSingleAgreement || !isSingleBill) {
+  //             const agPayload = buildAgreementPayload(ag);
+  //             if (agPayload) {
+  //               siteObj.agreement = agPayload;
+  //             }
+  //           }
+
+  //           const siteAppraisalPayload = buildAppraisalPayload(site.appraisal, siteEntry);
+  //           siteObj.appraisal = (siteAppraisalPayload && Object.keys(siteAppraisalPayload).length > 0) ? siteAppraisalPayload : [];
+  //         }
+
+  //         siteObj.proof_of_campaign = extractProofs(site, siteEntry);
+
+  //         return siteObj;
+  //       });
+
+  //       data = {
+  //         billingType: billingType,
+  //         agreementType: agreementType,
+  //         numberOfLandOwners: rootLandOwners.length || Number(firstSite.numberOfLandOwners) || 1,
+  //       };
+
+  //       if (isSingleBill) {
+  //         if (isSingleAgreement) {
+  //           data.rentalPayment = rootRentalPaymentObj;
+  //           const mainAg = buildAgreementPayload(firstSite.agreement);
+  //           if (mainAg) {
+  //             data.agreement = mainAg;
+  //           }
+  //         }
+  //       } else {
+  //         data.rentalPayment = {
+  //           totalRentalAmount: totalRentalSum || rootLandOwners.reduce((s, o) => s + (o.shareAmount || 0), 0),
+  //           gstApplicable: anySiteGstApplicable ? 1 : 0,
+  //           gstAmount: totalGstSum,
+  //           netPayableAmount: rootNetPayableSum,
+  //         };
+  //         if (isSingleAgreement) {
+  //           const mainAg = buildAgreementPayload(firstSite.agreement);
+  //           if (mainAg) {
+  //             data.agreement = mainAg;
+  //           }
+  //         }
+  //       }
+
+  //       data.landOwners = rootLandOwners;
+  //       data.sites = sitesPayload;
+  //     }
+
+  //     const mailPayload = {
+  //       mailtype: "cmdapproval",
+  //       to: toArray,
+  //       data: data,
+  //     };
+
+  //     if (ccArray.length > 0) {
+  //       mailPayload.cc = ccArray;
+  //     }
+
+  //     console.log(
+  //       "📧 RENTAL DUE MAIL PAYLOAD:",
+  //       JSON.stringify(mailPayload, null, 2)
+  //     );
+
+  //     if (mailMode !== "production") {
+  //       console.log(
+  //         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
+  //       );
+  //       return {
+  //         mailtype: "cmdapproval",
+  //         to: toArray,
+  //         ...(ccArray.length > 0 ? { cc: ccArray } : {}),
+  //         success: true,
+  //         sent: false,
+  //         statusCode: 200,
+  //         message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
+  //         data: mailPayload.data,
+  //       };
+  //     }
+
+  //     const response = await axios.post(
+  //       "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
+  //       mailPayload,
+  //       { headers: { "Content-Type": "application/json" } }
+  //     );
+
+  //     console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
+
+  //     const isMailSuccess =
+  //       response.data &&
+  //       (response.data.success === true ||
+  //         response.data.status === "success" ||
+  //         response.status === 200);
+
+  //     return {
+  //       mailtype: "cmdapproval",
+  //       to: toArray,
+  //       ...(ccArray.length > 0 ? { cc: ccArray } : {}),
+  //       success: !!isMailSuccess,
+  //       sent: !!isMailSuccess,
+  //       statusCode: response.status || (isMailSuccess ? 200 : 500),
+  //       message: isMailSuccess
+  //         ? "Rental due approval mail sent successfully"
+  //         : "Rental due approval mail failed",
+  //       data: mailPayload.data,
+  //     };
+  //   } catch (mailErr) {
+  //     console.error(
+  //       "❌ Rental due approval mail error:",
+  //       mailErr?.message || mailErr
+  //     );
+  //     return {
+  //       mailtype: "cmdapproval",
+  //       to: parseEmailList(process.env.T0_EMail),
+  //       cc: parseEmailList(process.env.CC_EMail),
+  //       success: false,
+  //       sent: false,
+  //       statusCode: 500,
+  //       message: mailErr?.message || "Unknown mail error",
+  //       data: null,
+  //     };
+  //   }
+  // }
 
 
-//     const mailPayload = {
-//       mailtype: "cmdapproval",
-//       to: [toMail],
-//        cc: [ccMail],
-//       data: data,
-//     };
 
-//     console.log(
-//       "📧 RENTAL DUE MAIL PAYLOAD:",
-//       JSON.stringify(mailPayload, null, 2)
-//     );
-
-//     if (mailMode !== "production") {
-//       console.log(
-//         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
-//       );
-//       return {
-//         mailtype: "cmdapproval",
-//         to: [toMail],
-//         cc: [ccMail],
-//         success: true,
-//         sent: false,
-//         statusCode: 200,
-//         message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
-//         data: mailPayload.data,
-//       };
-//     }
-
-//     const response = await axios.post(
-//       "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
-//       mailPayload,
-//       { headers: { "Content-Type": "application/json" } }
-//     );
-
-//     console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
-
-//     const isMailSuccess =
-//       response.data &&
-//       (response.data.success === true ||
-//         response.data.status === "success" ||
-//         response.status === 200);
-
-//     return {
-//       mailtype: "cmdapproval",
-//       to: [toMail],
-//       cc: [ccMail],
-//       success: !!isMailSuccess,
-//       sent: !!isMailSuccess,
-//       statusCode: response.status || (isMailSuccess ? 200 : 500),
-//       message: isMailSuccess
-//         ? "Rental due approval mail sent successfully"
-//         : "Rental due approval mail failed",
-//       data: mailPayload.data,
-//     };
-//   } catch (mailErr) {
-//     console.error(
-//       "❌ Rental due approval mail error:",
-//       mailErr?.message || mailErr
-//     );
-//     return {
-//       mailtype: "cmdapproval",
-//       to: [process.env.T0_EMail],
-//       cc: [process.env.CC_EMail],
-//       success: false,
-//       sent: false,
-//       statusCode: 500,
-//       message: mailErr?.message || "Unknown mail error",
-//       data: null,
-//     };
-//   }
-// }
-  async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
+  
+async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     try {
       const toMail = process.env.T0_EMail;
       const ccMail = process.env.CC_EMail;
@@ -1291,6 +1689,7 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
           reminderBeforeExpiry: Number(ag.reminderBeforeExpiry || 30),
           advanceRent: Number(ag.advanceRent || 0),
           status: mappedStatus,
+          agreementPDF: ag.agreementPDF?.filePath || ag.agreementPDF?.url || "",
         };
       };
 
@@ -1369,8 +1768,8 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
 
     let data = {};
 
-    if (isSingleBill && sitesInGroupData.length === 1) {
-      // ── SINGLE SITE SCENARIO ──
+    // ── CASE 1: FLAT ROOT STRUCTURE (Single Site + Single Bill) ──
+    if (sitesInGroupData.length === 1 && isSingleBill) {
       const item = sitesInGroupData[0];
       const site = item.media;
       const siteEntry = item.entry;
@@ -1380,7 +1779,6 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
       const ag = site.agreement || {};
 
       const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
-
       const totalRentalAmountVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
 
       const landownerGstSum = (site.landOwners || [])
@@ -1412,20 +1810,6 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
         netPayableVal = totalExpectedNet;
       }
 
-      const rentalPaymentObj = {
-        totalRentalAmount: totalRentalAmountVal,
-        gstApplicable: isGstApplicable ? 1 : 0,
-        netPayableAmount: netPayableVal,
-        gstAmount: gstAmountVal,
-        gstNumber: gstNumberVal,
-        gstPercentage: gstPercentageVal,
-        gstInvoiceUrl: gstInvoiceUrlVal,
-      };
-
-      rentalPaymentObj.paymentFrequency = Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1);
-      rentalPaymentObj.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
-      rentalPaymentObj.nextBillingDate = formatYMD(rp.nextBillingDate);
-
       const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
 
       data = {
@@ -1443,7 +1827,18 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
         totalSqFt: Number(activeDetail.totalSqFt || site.totalSqFt || 0),
         numberOfLandOwners: landOwnersList.length || Number(site.numberOfLandOwners) || 1,
         status: Number(activeDetail.status || site.status || 1),
-        rentalPayment: rentalPaymentObj,
+        rentalPayment: {
+          totalRentalAmount: totalRentalAmountVal,
+          gstApplicable: isGstApplicable ? 1 : 0,
+          gstAmount: gstAmountVal,
+          gstNumber: gstNumberVal,
+          gstPercentage: gstPercentageVal,
+          gstInvoiceUrl: gstInvoiceUrlVal,
+          netPayableAmount: netPayableVal,
+          paymentFrequency: Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1),
+          lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+          nextBillingDate: formatYMD(rp.nextBillingDate),
+        },
         agreement: buildAgreementPayload(ag),
         appraisal: buildAppraisalPayload(site.appraisal, siteEntry),
         landOwners: landOwnersList,
@@ -1451,230 +1846,129 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
       };
 
     } else {
-      // ── SEPARATE AGREEMENT OR MULTIPLE SITES SCENARIO ──
+      // ── CASE 2: NESTED SITES STRUCTURE (Multiple Sites OR Separate Bills) ──
       const firstSite = sitesInGroupData[0].media;
+      const uniqueParentMedias = Array.from(new Map(sitesInGroupData.map(item => [String(item.media._id), item])).values());
 
-        // Group parent Media documents for single_bill root totals
-        const parentMediaMap = new Map();
-        sitesInGroupData.forEach((item) => {
-          const mId = String(item.media._id);
-          if (!parentMediaMap.has(mId)) {
-            parentMediaMap.set(mId, item);
+      const ownersMap = new Map();
+      const ownerSiteBreakdownMap = new Map();
+
+      sitesInGroupData.forEach((item) => {
+        const site = item.media;
+        const siteEntry = item.entry;
+        const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
+        const siteCode = activeDetail.mediaCode || site.mediaCode || site.siteCode || "";
+
+        (site.landOwners || []).forEach((o) => {
+          const key = String(o.landOwnerMasterId || o._id || o.name);
+          if (!ownersMap.has(key)) {
+            ownersMap.set(key, { obj: { ...(o.toObject ? o.toObject() : o) }, siteEntry: siteEntry });
+          } else if (!isSingleBill) {
+            const existingObj = ownersMap.get(key).obj;
+            existingObj.shareAmount = (existingObj.shareAmount || 0) + (o.shareAmount || 0);
+            existingObj.onlineAmount = (existingObj.onlineAmount || 0) + (o.onlineAmount || 0);
+            existingObj.cashAmount = (existingObj.cashAmount || 0) + (o.cashAmount || 0);
+            existingObj.tdsAmount = (existingObj.tdsAmount || 0) + (o.tdsAmount || 0);
+            existingObj.gstAmount = (existingObj.gstAmount || 0) + (o.gstAmount || 0);
           }
-        });
-        const uniqueParentMedias = Array.from(parentMediaMap.values());
 
-        const ownersMap = new Map();
-        const ownerSiteBreakdownMap = new Map();
-
-        const itemsForOwners = isSingleBill ? uniqueParentMedias : sitesInGroupData;
-
-        itemsForOwners.forEach((item) => {
-          const site = item.media;
-          const siteEntry = item.entry;
-          const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
-          const siteCode = activeDetail.mediaCode || site.mediaCode || site.siteCode || "";
-
-          (site.landOwners || []).forEach((o) => {
-            const key = String(o.landOwnerMasterId || o._id || o.name);
-            if (!ownersMap.has(key)) {
-              ownersMap.set(key, {
-                obj: {
-                  ...(o.toObject ? o.toObject() : o),
-                  shareAmount: Number(o.shareAmount || 0),
-                  onlineAmount: Number(o.onlineAmount || 0),
-                  cashAmount: Number(o.cashAmount || 0),
-                  tdsAmount: Number(o.tdsAmount || 0),
-                  gstAmount: Number(o.gstAmount || 0),
-                },
-                siteEntry: siteEntry,
-              });
-            } else if (!isSingleBill) {
-              const existingObj = ownersMap.get(key).obj;
-              existingObj.shareAmount = Number(existingObj.shareAmount || 0) + Number(o.shareAmount || 0);
-              existingObj.onlineAmount = Number(existingObj.onlineAmount || 0) + Number(o.onlineAmount || 0);
-              existingObj.cashAmount = Number(existingObj.cashAmount || 0) + Number(o.cashAmount || 0);
-              existingObj.tdsAmount = Number(existingObj.tdsAmount || 0) + Number(o.tdsAmount || 0);
-              existingObj.gstAmount = Number(existingObj.gstAmount || 0) + Number(o.gstAmount || 0);
-            }
-
-            if (!ownerSiteBreakdownMap.has(key)) {
-              ownerSiteBreakdownMap.set(key, []);
-            }
-            ownerSiteBreakdownMap.get(key).push({
-              mediaCode: siteCode,
-              shareAmount: Number(o.shareAmount || 0),
-              onlineAmount: Number(o.onlineAmount || 0),
-              cashAmount: Number(o.cashAmount || 0),
-            });
+          if (!ownerSiteBreakdownMap.has(key)) ownerSiteBreakdownMap.set(key, []);
+          ownerSiteBreakdownMap.get(key).push({
+            mediaCode: siteCode,
+            shareAmount: Number(o.shareAmount || 0),
+            onlineAmount: Number(o.onlineAmount || 0),
+            cashAmount: Number(o.cashAmount || 0),
           });
         });
+      });
 
-        const rootLandOwners = [];
-        ownersMap.forEach((val, key) => {
-          const loObj = buildLandOwnerObject(val.obj, val.siteEntry);
-          const breakdown = ownerSiteBreakdownMap.get(key) || [];
-          if (!isSingleBill && breakdown.length > 1) {
-            loObj.siteRentBreakdown = breakdown;
-          }
-          rootLandOwners.push(loObj);
-        });
+      const rootLandOwners = Array.from(ownersMap.entries()).map(([key, val]) => {
+        const loObj = buildLandOwnerObject(val.obj, val.siteEntry);
+        const breakdown = ownerSiteBreakdownMap.get(key) || [];
+        if (!isSingleBill && breakdown.length > 1) loObj.siteRentBreakdown = breakdown;
+        return loObj;
+      });
 
-        // Calculate root rental payment totals for single_bill
-        const totalRentalSum = uniqueParentMedias.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
-        const totalGstSum = uniqueParentMedias.reduce((sum, item) => {
-          const rp = item.media.rentalPayment || {};
-          const isSiteGstOn = Number(rp.gstApplicable || item.entry?.gstApplicable || 0) === 1;
-          const siteGst = Number(rp.gstAmount || item.entry?.gstAmount || 0);
-          const ownerGst = (item.media.landOwners || [])
-            .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
-            .reduce((s, o) => s + Number(o.gstAmount || 0), 0);
-          const effectiveGst = ownerGst > 0 ? ownerGst : (isSiteGstOn ? siteGst : 0);
-          return sum + effectiveGst;
-        }, 0);
+      const totalRentalSum = uniqueParentMedias.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
+      const totalGstSum = uniqueParentMedias.reduce((sum, item) => {
+        const rp = item.media.rentalPayment || {};
+        const isSiteGstOn = Number(rp.gstApplicable || item.entry?.gstApplicable || 0) === 1;
+        const siteGst = Number(rp.gstAmount || item.entry?.gstAmount || 0);
+        const ownerGst = (item.media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((s, o) => s + Number(o.gstAmount || 0), 0);
+        return sum + (ownerGst > 0 ? ownerGst : (isSiteGstOn ? siteGst : 0));
+      }, 0);
 
-        const anySiteGstApplicable = uniqueParentMedias.some((item) => Number(item.media.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1);
+      const rootNetPayableSum = totalRentalSum + totalGstSum;
 
-        let rootGstInvoiceUrl = "";
-        if (sitesInGroupData[0]?.entry?.invoice?.filePath) {
-          rootGstInvoiceUrl = sitesInGroupData[0].entry.invoice.filePath;
-        } else if (firstSite.rentalPayment?.gstInvoiceUrl) {
-          rootGstInvoiceUrl = firstSite.rentalPayment.gstInvoiceUrl;
-        }
+      data = {
+        billingType,
+        agreementType,
+        numberOfLandOwners: rootLandOwners.length,
+        landOwners: rootLandOwners,
+      };
 
-        const rootNetPayableSum = totalRentalSum + totalGstSum;
-
-        const rootRentalPaymentObj = {
-          totalRentalAmount: totalRentalSum || Number(firstSite.rentalPayment?.totalRentalAmount || 0),
-          gstApplicable: anySiteGstApplicable ? 1 : 0,
-          gstAmount: anySiteGstApplicable ? totalGstSum : 0,
-          gstNumber: firstSite.rentalPayment?.gstNumber || sitesInGroupData[0]?.entry?.gstNumber || "",
-          gstInvoiceUrl: rootGstInvoiceUrl,
-          netPayableAmount: rootNetPayableSum || Number(firstSite.rentalPayment?.netPayable || sitesInGroupData[0]?.entry?.netPayable || 0),
-          paymentFrequency: Number(sitesInGroupData[0]?.entry?.paymentFrequency || firstSite.rentalPayment?.paymentFrequency || 1),
+      // Root level rentalPayment/agreement if both are single
+      if (isSingleBill && isSingleAgreement) {
+        data.rentalPayment = {
+          totalRentalAmount: totalRentalSum,
+          gstApplicable: uniqueParentMedias.some(m => Number(m.media.rentalPayment?.gstApplicable) === 1) ? 1 : 0,
+          gstAmount: totalGstSum,
+          gstNumber: firstSite.rentalPayment?.gstNumber || "",
+          gstInvoiceUrl: sitesInGroupData[0]?.entry?.invoice?.filePath || firstSite.rentalPayment?.gstInvoiceUrl || "",
+          netPayableAmount: rootNetPayableSum,
+          paymentFrequency: Number(firstSite.rentalPayment?.paymentFrequency || 1),
           lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
           nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
         };
-
-        const sitesPayload = sitesInGroupData.map((item, idx) => {
-          const site = item.media;
-          const siteEntry = item.entry;
-          const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
-          const rp = site.rentalPayment || {};
-          const ag = site.agreement || {};
-
-          const siteObj = {
-            mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
-            mediaName: activeDetail.mediaName || site.mediaName || "",
-            location: activeDetail.location || site.location || "",
-          };
-
-          if (!isSingleBill || !isSingleAgreement) {
-            const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
-
-            const siteTotalRentalVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
-
-            const siteLandownerGstSum = (site.landOwners || [])
-              .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
-              .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-
-            let siteGstAmountVal = 0;
-            let siteGstPercentageVal = Number(rp.gstPercentage || 18);
-            let siteGstInvoiceUrlVal = "";
-
-            if (idx === 0) {
-              if (siteEntry?.invoice?.filePath) {
-                siteGstInvoiceUrlVal = siteEntry.invoice.filePath;
-              } else if (rp.gstInvoiceUrl) {
-                siteGstInvoiceUrlVal = rp.gstInvoiceUrl;
-              }
-            } else if (rp.gstInvoiceUrl) {
-              siteGstInvoiceUrlVal = rp.gstInvoiceUrl;
-            }
-
-            if (isGstApplicable) {
-              siteGstAmountVal = Number(rp.gstAmount || siteEntry?.gstAmount || siteLandownerGstSum || 0);
-            }
-
-            let siteNetPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
-            const siteTotalExpectedNet = siteTotalRentalVal + (isGstApplicable ? siteGstAmountVal : siteLandownerGstSum);
-            if (siteNetPayableVal <= 0 || siteNetPayableVal < siteTotalExpectedNet) {
-              siteNetPayableVal = siteTotalExpectedNet;
-            }
-
-            const siteRentalPayment = {
-              totalRentalAmount: siteTotalRentalVal,
-              gstApplicable: isGstApplicable ? 1 : 0,
-              netPayableAmount: siteNetPayableVal,
-              paymentFrequency: Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1),
-              lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
-              nextBillingDate: formatYMD(rp.nextBillingDate),
-            };
-
-            if (isGstApplicable) {
-              siteRentalPayment.gstAmount = siteGstAmountVal;
-              siteRentalPayment.gstPercentage = siteGstPercentageVal;
-            }
-            if (siteGstInvoiceUrlVal) {
-              siteRentalPayment.gstInvoiceUrl = siteGstInvoiceUrlVal;
-            }
-
-            siteObj.rentalPayment = siteRentalPayment;
-
-            if (!isSingleAgreement || !isSingleBill) {
-              const agPayload = buildAgreementPayload(ag);
-              if (agPayload) {
-                siteObj.agreement = agPayload;
-              }
-            }
-
-            const siteAppraisalPayload = buildAppraisalPayload(site.appraisal, siteEntry);
-            siteObj.appraisal = (siteAppraisalPayload && Object.keys(siteAppraisalPayload).length > 0) ? siteAppraisalPayload : [];
-          }
-
-          siteObj.proof_of_campaign = extractProofs(site, siteEntry);
-
-          return siteObj;
-        });
-
-        data = {
-          billingType: billingType,
-          agreementType: agreementType,
-          numberOfLandOwners: rootLandOwners.length || Number(firstSite.numberOfLandOwners) || 1,
-        };
-
-        if (isSingleBill) {
-          if (isSingleAgreement) {
-            data.rentalPayment = rootRentalPaymentObj;
-            const mainAg = buildAgreementPayload(firstSite.agreement);
-            if (mainAg) {
-              data.agreement = mainAg;
-            }
-          }
-        } else {
-          data.rentalPayment = {
-            totalRentalAmount: totalRentalSum || rootLandOwners.reduce((s, o) => s + (o.shareAmount || 0), 0),
-            gstApplicable: anySiteGstApplicable ? 1 : 0,
-            gstAmount: totalGstSum,
-            netPayableAmount: rootNetPayableSum,
-          };
-          if (isSingleAgreement) {
-            const mainAg = buildAgreementPayload(firstSite.agreement);
-            if (mainAg) {
-              data.agreement = mainAg;
-            }
-          }
-        }
-
-        data.landOwners = rootLandOwners;
-        data.sites = sitesPayload;
+        data.agreement = buildAgreementPayload(firstSite.agreement);
+      } else if (!isSingleBill && isSingleAgreement) {
+        // Special case: Multiple Landlords / Single Site / Separate Bills
+        data.agreement = buildAgreementPayload(firstSite.agreement);
       }
 
-      const mailPayload = {
-        mailtype: "cmdapproval",
-        to: toArray,
-        data: data,
-      };
+      data.sites = sitesInGroupData.map((item, idx) => {
+        const site = item.media;
+        const siteEntry = item.entry;
+        const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
+        const rp = site.rentalPayment || {};
+
+        const siteObj = {
+          mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
+          mediaName: activeDetail.mediaName || site.mediaName || "",
+          location: activeDetail.location || site.location || "",
+          proof_of_campaign: extractProofs(site, siteEntry),
+        };
+
+        // Move details to site if separate
+        if (!isSingleBill || !isSingleAgreement) {
+          const siteIsGstOn = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
+          const siteRentVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
+          const siteGstVal = Number(rp.gstAmount || siteEntry?.gstAmount || 0) || (site.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((s, o) => s + Number(o.gstAmount || 0), 0);
+
+          siteObj.rentalPayment = {
+            totalRentalAmount: siteRentVal,
+            gstApplicable: siteIsGstOn ? 1 : 0,
+            gstAmount: siteIsGstOn ? siteGstVal : 0,
+            netPayableAmount: siteRentVal + siteGstVal,
+            paymentFrequency: Number(rp.paymentFrequency || 1),
+            lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+            nextBillingDate: formatYMD(rp.nextBillingDate),
+            gstInvoiceUrl: (idx === 0 && siteEntry?.invoice?.filePath) ? siteEntry.invoice.filePath : (rp.gstInvoiceUrl || ""),
+          };
+
+          if (!isSingleAgreement) siteObj.agreement = buildAgreementPayload(site.agreement);
+          const appraisal = buildAppraisalPayload(site.appraisal, siteEntry);
+          siteObj.appraisal = (appraisal && Object.keys(appraisal).length > 0) ? appraisal : [];
+        }
+        return siteObj;
+      });
+    }
+
+    const mailPayload = {
+      mailtype: "cmdapproval",
+      to: toArray,
+      data: data,
+    };
 
       if (ccArray.length > 0) {
         mailPayload.cc = ccArray;
@@ -1744,7 +2038,6 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
       };
     }
   }
-
 function addGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.gstAddedToBalance) return;
 
