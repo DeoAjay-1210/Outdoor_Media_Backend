@@ -934,907 +934,198 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
 }
 
 
-  // async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
-  //   try {
-  //     const toMail = process.env.T0_EMail;
-  //     const ccMail = process.env.CC_EMail;
-  //     const mailMode = process.env.MAIL_MODE || "development";
-
-  //     const formatYMD = (date) => {
-  //       if (!date) return null;
-  //       const d = new Date(date);
-  //       if (isNaN(d.getTime())) return null;
-  //       return d.toISOString().split("T")[0];
-  //     };
-
-  //     const parseEmailList = (mailStr) => {
-  //       if (!mailStr) return [];
-  //       if (Array.isArray(mailStr)) {
-  //         return mailStr.flatMap((s) => String(s).split(",")).map((e) => e.trim()).filter(Boolean);
-  //       }
-  //       return String(mailStr).split(",").map((e) => e.trim()).filter(Boolean);
-  //     };
-
-  //     const toArray = parseEmailList(toMail);
-  //     const ccArray = parseEmailList(ccMail);
-
-  //     // ── GROUPING LOGIC ──
-  //     let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
-  //       ? batchSites
-  //       : [{ media, entry }];
-
-  //     const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
-  //       if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
-  //         return {};
-  //       }
-
-  //       // Check if appraisal applies to current month / cycle
-  //       const isCurrentMonthAppraisal = () => {
-  //         const entryDate = siteEntry?.dueDate
-  //           ? new Date(siteEntry.dueDate)
-  //           : siteEntry?.cycle
-  //           ? new Date(siteEntry.cycle)
-  //           : nowIST();
-
-  //         const entryYear = !isNaN(entryDate.getTime())
-  //           ? entryDate.getFullYear()
-  //           : new Date().getFullYear();
-  //         const entryMonth = !isNaN(entryDate.getTime())
-  //           ? entryDate.getMonth()
-  //           : new Date().getMonth();
-
-  //         const entryMonthLabel = siteEntry?.dueMonth
-  //           ? String(siteEntry.dueMonth).toLowerCase()
-  //           : "";
-
-  //         const checkDateMatch = (dateInput) => {
-  //           if (!dateInput) return false;
-  //           const d = new Date(dateInput);
-  //           if (isNaN(d.getTime())) return false;
-  //           if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) {
-  //             return true;
-  //           }
-  //           if (entryMonthLabel) {
-  //             const monthName = d.toLocaleString("en-US", { month: "long" }).toLowerCase();
-  //             const shortMonthName = d.toLocaleString("en-US", { month: "short" }).toLowerCase();
-  //             const yearStr = String(d.getFullYear());
-  //             if (
-  //               (entryMonthLabel.includes(monthName) || entryMonthLabel.includes(shortMonthName)) &&
-  //               entryMonthLabel.includes(yearStr)
-  //             ) {
-  //               return true;
-  //             }
-  //           }
-  //           return false;
-  //         };
-
-  //         if (checkDateMatch(siteAppraisal.nextAppraisalDate)) return true;
-  //         if (checkDateMatch(siteAppraisal.lastAppraisalDate)) return true;
-  //         if (checkDateMatch(siteAppraisal.appraisalDate)) return true;
-  //         if (checkDateMatch(siteEntry?.appraisalDate)) return true;
-
-  //         if (!siteAppraisal.nextAppraisalDate && !siteAppraisal.lastAppraisalDate) {
-  //           return true;
-  //         }
-
-  //         return false;
-  //       };
-
-  //       if (!isCurrentMonthAppraisal()) {
-  //         return {};
-  //       }
-
-  //       const appObj = {
-  //         applicable: 1,
-  //         type: Number(siteAppraisal.type || 1),
-  //       };
-
-  //       if (Number(siteAppraisal.type) === 1) {
-  //         if (siteAppraisal.percentage !== undefined && siteAppraisal.percentage !== null) {
-  //           appObj.percentage = Number(siteAppraisal.percentage);
-  //         }
-  //       } else if (Number(siteAppraisal.type) === 2) {
-  //         if (siteAppraisal.fixedAmount !== undefined && siteAppraisal.fixedAmount !== null) {
-  //           appObj.fixedAmount = Number(siteAppraisal.fixedAmount);
-  //         }
-  //       }
-
-  //       appObj.appraisalAmount = Number(siteAppraisal.appraisalAmount || 0);
-  //       if (siteAppraisal.frequency) {
-  //         appObj.frequency = Number(siteAppraisal.frequency);
-  //       }
-  //       if (siteAppraisal.lastAppraisalDate) {
-  //         appObj.lastAppraisalDate = formatYMD(siteAppraisal.lastAppraisalDate);
-  //       }
-  //       if (siteAppraisal.nextAppraisalDate) {
-  //         appObj.nextAppraisalDate = formatYMD(siteAppraisal.nextAppraisalDate);
-  //       }
-  //       appObj.includedInCurrentRent = Number(
-  //         siteAppraisal.includedInCurrentRent !== undefined
-  //           ? siteAppraisal.includedInCurrentRent
-  //           : 1
-  //       );
-
-  //       return appObj;
-  //     };
-
-  //     const buildAgreementPayload = (ag) => {
-  //       if (!ag || (!ag.startDate && !ag.endDate)) return null;
-
-  //       // Agreement Status Mapping for Mail Payload:
-  //       // 3 -> Active (when DB status is 1)
-  //       // 4 -> Expired (when DB status is 3)
-  //       // 5 -> Expired soon (when DB status is 2)
-  //       const rawStatus = Number(ag.status || 1);
-  //       let mappedStatus = 3;
-  //       if (rawStatus === 1) {
-  //         mappedStatus = 3; // 3 -> Active
-  //       } else if (rawStatus === 3) {
-  //         mappedStatus = 4; // 4 -> Expired
-  //       } else if (rawStatus === 2) {
-  //         mappedStatus = 5; // 5 -> Expired soon
-  //       } else {
-  //         mappedStatus = rawStatus;
-  //       }
-
-  //       return {
-  //         startDate: formatYMD(ag.startDate),
-  //         endDate: formatYMD(ag.endDate),
-  //         reminderBeforeExpiry: Number(ag.reminderBeforeExpiry || 30),
-  //         advanceRent: Number(ag.advanceRent || 0),
-  //         status: mappedStatus,
-  //       };
-  //     };
-
-  //     const buildLandOwnerObject = (o, siteEntry) => {
-  //       const isGstHold = Number(siteEntry?.withGst) === 1 || Number(o.gstHold) === 1 ? 1 : 0;
-  //       const isTdsHold = Number(siteEntry?.tdsHold) === 1 || Number(o.tdsHold) === 1 ? 1 : 0;
-  //       return {
-  //         name: o.name || "",
-  //         phone: o.phone || "",
-  //         bankName: o.bankName || "",
-  //         ifsc: o.ifsc || "",
-  //         accountNumber: o.accountNumber || "",
-  //         panNumber: o.panNumber || "",
-  //         paymentCategory: Number(o.paymentCategory || 1),
-  //         onlineMode: Number(o.onlineMode || 0),
-  //         shareAmount: Number(o.shareAmount || 0),
-  //         onlineAmount: Number(o.onlineAmount || 0),
-  //         cashAmount: Number(o.cashAmount || 0),
-  //         tdsPercentage: Number(o.tdsPercentage || 0),
-  //         tdsAmount: Number(o.tdsAmount || 0),
-  //         tdsApplicable: Number(o.tdsApplicable || 0),
-  //         gstHold: isGstHold,
-  //         tdsHold: isTdsHold,
-  //         gstApplicable: Number(o.gstApplicable || 0),
-  //         gstAmount: Number(o.gstAmount || 0),
-  //         gstNumber: o.gstNumber || "",
-  //       };
-  //     };
-
-  //     const extractProofs = (site, siteEntry) => {
-  //       let proofs = [];
-  //       if (siteEntry?.proofOfCampaign?.filePath) {
-  //         proofs.push(siteEntry.proofOfCampaign.filePath);
-  //       } else if (Array.isArray(siteEntry?.proofOfCampaign)) {
-  //         proofs = siteEntry.proofOfCampaign.map((p) => (typeof p === "string" ? p : p.filePath || p.url || p)).filter(Boolean);
-  //       } else if (Array.isArray(siteEntry?.proof_of_campaign)) {
-  //         proofs = siteEntry.proof_of_campaign.filter(Boolean);
-  //       } else if (Array.isArray(site?.proof_of_campaign)) {
-  //         proofs = site.proof_of_campaign.filter(Boolean);
-  //       }
-  //       return proofs;
-  //     };
-
-  //     const getSiteBillMode = (item) => {
-  //       const s = item.media || {};
-  //       const e = item.entry || {};
-  //       const matchedDetail = (s.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
-
-  //       if (Number(e.siteBillMode) === 2 || Number(e.billMode) === 2) return 2;
-  //       if (matchedDetail && (Number(matchedDetail.siteBillMode) === 2 || Number(matchedDetail.billMode) === 2)) return 2;
-  //       if ((s.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2 || Number(d.billMode) === 2)) return 2;
-  //       if (Number(s.siteBillMode) === 2 || Number(s.billMode) === 2) return 2;
-  //       if ((s.landOwners || []).some((o) => Number(o.siteBillMode) === 2 || Number(o.landOwnerBillMode) === 2)) return 2;
-
-  //       return 1;
-  //     };
-
-  //     const getAgreementMode = (item) => {
-  //       const s = item.media || {};
-  //       const e = item.entry || {};
-  //       const matchedDetail = (s.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
-
-  //       if (Number(e.agreementBillMode) === 2) return 2;
-  //       if (matchedDetail && Number(matchedDetail.agreementBillMode) === 2) return 2;
-  //       if ((s.landOwners || []).some((o) => Number(o.agreementBillMode) === 2)) return 2;
-  //       if (Number(s.agreementBillMode) === 2) return 2;
-
-  //       return 1;
-  //     };
-
-  //   const isSingleBill = sitesInGroupData.every((item) => getSiteBillMode(item) === 1);
-  //   const isSingleAgreement = sitesInGroupData.every((item) => getAgreementMode(item) === 1);
-
-  //   const billingType = isSingleBill ? "single_bill" : "separate_bill";
-  //   const agreementType = isSingleAgreement ? "single_agreement" : "separate_agreement";
-
-  //   let data = {};
-
-  //   if (isSingleBill && sitesInGroupData.length === 1) {
-  //     // ── SINGLE SITE SCENARIO ──
-  //     const item = sitesInGroupData[0];
-  //     const site = item.media;
-  //     const siteEntry = item.entry;
-
-  //     const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
-  //     const rp = site.rentalPayment || {};
-  //     const ag = site.agreement || {};
-
-  //     const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
-
-  //     const totalRentalAmountVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
-
-  //     const landownerGstSum = (site.landOwners || [])
-  //       .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
-  //       .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-
-  //     const siteGstSum = Number(rp.gstAmount || siteEntry?.gstAmount || 0);
-  //     const effectiveGst = landownerGstSum > 0 ? landownerGstSum : (isGstApplicable ? siteGstSum : 0);
-
-  //     let gstInvoiceUrlVal = "";
-  //     if (siteEntry?.invoice?.filePath) {
-  //       gstInvoiceUrlVal = siteEntry.invoice.filePath;
-  //     } else if (rp.gstInvoiceUrl) {
-  //       gstInvoiceUrlVal = rp.gstInvoiceUrl;
-  //     }
-
-  //     let gstAmountVal = 0;
-  //     let gstNumberVal = "";
-  //     let gstPercentageVal = Number(rp.gstPercentage || 18);
-
-  //     if (isGstApplicable) {
-  //       gstAmountVal = siteGstSum > 0 ? siteGstSum : landownerGstSum;
-  //       gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
-  //     }
-
-  //     let netPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
-  //     const totalExpectedNet = totalRentalAmountVal + effectiveGst;
-  //     if (netPayableVal <= 0 || netPayableVal < totalExpectedNet) {
-  //       netPayableVal = totalExpectedNet;
-  //     }
-
-  //     const rentalPaymentObj = {
-  //       totalRentalAmount: totalRentalAmountVal,
-  //       gstApplicable: isGstApplicable ? 1 : 0,
-  //       netPayableAmount: netPayableVal,
-  //       gstAmount: gstAmountVal,
-  //       gstNumber: gstNumberVal,
-  //       gstPercentage: gstPercentageVal,
-  //       gstInvoiceUrl: gstInvoiceUrlVal,
-  //     };
-
-  //     rentalPaymentObj.paymentFrequency = Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1);
-  //     rentalPaymentObj.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
-  //     rentalPaymentObj.nextBillingDate = formatYMD(rp.nextBillingDate);
-
-  //     const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
-
-  //     data = {
-  //       billingType: billingType,
-  //       agreementType: agreementType,
-  //       mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
-  //       mediaName: activeDetail.mediaName || site.mediaName || "",
-  //       mediaType: activeDetail.mediaType || site.mediaType || "",
-  //       state: activeDetail.state || site.state || "",
-  //       city: activeDetail.city || site.city || "",
-  //       location: activeDetail.location || site.location || "",
-  //       fullAddress: site.fullAddress || (activeDetail.location ? `${activeDetail.location}, ${activeDetail.city || ""}` : (site.location || "")),
-  //       width: Number(activeDetail.width || site.width || 0),
-  //       height: Number(activeDetail.height || site.height || 0),
-  //       totalSqFt: Number(activeDetail.totalSqFt || site.totalSqFt || 0),
-  //       numberOfLandOwners: landOwnersList.length || Number(site.numberOfLandOwners) || 1,
-  //       status: Number(activeDetail.status || site.status || 1),
-  //       rentalPayment: rentalPaymentObj,
-  //       agreement: buildAgreementPayload(ag),
-  //       appraisal: buildAppraisalPayload(site.appraisal, siteEntry),
-  //       landOwners: landOwnersList,
-  //       proof_of_campaign: extractProofs(site, siteEntry),
-  //     };
-
-  //   } else {
-  //     // ── SEPARATE AGREEMENT OR MULTIPLE SITES SCENARIO ──
-  //     const firstSite = sitesInGroupData[0].media;
-
-  //       // Group parent Media documents for single_bill root totals
-  //       const parentMediaMap = new Map();
-  //       sitesInGroupData.forEach((item) => {
-  //         const mId = String(item.media._id);
-  //         if (!parentMediaMap.has(mId)) {
-  //           parentMediaMap.set(mId, item);
-  //         }
-  //       });
-  //       const uniqueParentMedias = Array.from(parentMediaMap.values());
-
-  //       const ownersMap = new Map();
-  //       const ownerSiteBreakdownMap = new Map();
-
-  //       const itemsForOwners = isSingleBill ? uniqueParentMedias : sitesInGroupData;
-
-  //       itemsForOwners.forEach((item) => {
-  //         const site = item.media;
-  //         const siteEntry = item.entry;
-  //         const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
-  //         const siteCode = activeDetail.mediaCode || site.mediaCode || site.siteCode || "";
-
-  //         (site.landOwners || []).forEach((o) => {
-  //           const key = String(o.landOwnerMasterId || o._id || o.name);
-  //           if (!ownersMap.has(key)) {
-  //             ownersMap.set(key, {
-  //               obj: {
-  //                 ...(o.toObject ? o.toObject() : o),
-  //                 shareAmount: Number(o.shareAmount || 0),
-  //                 onlineAmount: Number(o.onlineAmount || 0),
-  //                 cashAmount: Number(o.cashAmount || 0),
-  //                 tdsAmount: Number(o.tdsAmount || 0),
-  //                 gstAmount: Number(o.gstAmount || 0),
-  //               },
-  //               siteEntry: siteEntry,
-  //             });
-  //           } else if (!isSingleBill) {
-  //             const existingObj = ownersMap.get(key).obj;
-  //             existingObj.shareAmount = Number(existingObj.shareAmount || 0) + Number(o.shareAmount || 0);
-  //             existingObj.onlineAmount = Number(existingObj.onlineAmount || 0) + Number(o.onlineAmount || 0);
-  //             existingObj.cashAmount = Number(existingObj.cashAmount || 0) + Number(o.cashAmount || 0);
-  //             existingObj.tdsAmount = Number(existingObj.tdsAmount || 0) + Number(o.tdsAmount || 0);
-  //             existingObj.gstAmount = Number(existingObj.gstAmount || 0) + Number(o.gstAmount || 0);
-  //           }
-
-  //           if (!ownerSiteBreakdownMap.has(key)) {
-  //             ownerSiteBreakdownMap.set(key, []);
-  //           }
-  //           ownerSiteBreakdownMap.get(key).push({
-  //             mediaCode: siteCode,
-  //             shareAmount: Number(o.shareAmount || 0),
-  //             onlineAmount: Number(o.onlineAmount || 0),
-  //             cashAmount: Number(o.cashAmount || 0),
-  //           });
-  //         });
-  //       });
-
-  //       const rootLandOwners = [];
-  //       ownersMap.forEach((val, key) => {
-  //         const loObj = buildLandOwnerObject(val.obj, val.siteEntry);
-  //         const breakdown = ownerSiteBreakdownMap.get(key) || [];
-  //         if (!isSingleBill && breakdown.length > 1) {
-  //           loObj.siteRentBreakdown = breakdown;
-  //         }
-  //         rootLandOwners.push(loObj);
-  //       });
-
-  //       // Calculate root rental payment totals for single_bill
-  //       const totalRentalSum = uniqueParentMedias.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
-  //       const totalGstSum = uniqueParentMedias.reduce((sum, item) => {
-  //         const rp = item.media.rentalPayment || {};
-  //         const isSiteGstOn = Number(rp.gstApplicable || item.entry?.gstApplicable || 0) === 1;
-  //         const siteGst = Number(rp.gstAmount || item.entry?.gstAmount || 0);
-  //         const ownerGst = (item.media.landOwners || [])
-  //           .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
-  //           .reduce((s, o) => s + Number(o.gstAmount || 0), 0);
-  //         const effectiveGst = ownerGst > 0 ? ownerGst : (isSiteGstOn ? siteGst : 0);
-  //         return sum + effectiveGst;
-  //       }, 0);
-
-  //       const anySiteGstApplicable = uniqueParentMedias.some((item) => Number(item.media.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1);
-
-  //       let rootGstInvoiceUrl = "";
-  //       if (sitesInGroupData[0]?.entry?.invoice?.filePath) {
-  //         rootGstInvoiceUrl = sitesInGroupData[0].entry.invoice.filePath;
-  //       } else if (firstSite.rentalPayment?.gstInvoiceUrl) {
-  //         rootGstInvoiceUrl = firstSite.rentalPayment.gstInvoiceUrl;
-  //       }
-
-  //       const rootNetPayableSum = totalRentalSum + totalGstSum;
-
-  //       const rootRentalPaymentObj = {
-  //         totalRentalAmount: totalRentalSum || Number(firstSite.rentalPayment?.totalRentalAmount || 0),
-  //         gstApplicable: anySiteGstApplicable ? 1 : 0,
-  //         gstAmount: anySiteGstApplicable ? totalGstSum : 0,
-  //         gstNumber: firstSite.rentalPayment?.gstNumber || sitesInGroupData[0]?.entry?.gstNumber || "",
-  //         gstInvoiceUrl: rootGstInvoiceUrl,
-  //         netPayableAmount: rootNetPayableSum || Number(firstSite.rentalPayment?.netPayable || sitesInGroupData[0]?.entry?.netPayable || 0),
-  //         paymentFrequency: Number(sitesInGroupData[0]?.entry?.paymentFrequency || firstSite.rentalPayment?.paymentFrequency || 1),
-  //         lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
-  //         nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
-  //       };
-
-  //       const sitesPayload = sitesInGroupData.map((item, idx) => {
-  //         const site = item.media;
-  //         const siteEntry = item.entry;
-  //         const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
-  //         const rp = site.rentalPayment || {};
-  //         const ag = site.agreement || {};
-
-  //         const siteObj = {
-  //           mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
-  //           mediaName: activeDetail.mediaName || site.mediaName || "",
-  //           location: activeDetail.location || site.location || "",
-  //         };
-
-  //         if (!isSingleBill || !isSingleAgreement) {
-  //           const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
-
-  //           const siteTotalRentalVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
-
-  //           const siteLandownerGstSum = (site.landOwners || [])
-  //             .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
-  //             .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-
-  //           let siteGstAmountVal = 0;
-  //           let siteGstPercentageVal = Number(rp.gstPercentage || 18);
-  //           let siteGstInvoiceUrlVal = "";
-
-  //           if (idx === 0) {
-  //             if (siteEntry?.invoice?.filePath) {
-  //               siteGstInvoiceUrlVal = siteEntry.invoice.filePath;
-  //             } else if (rp.gstInvoiceUrl) {
-  //               siteGstInvoiceUrlVal = rp.gstInvoiceUrl;
-  //             }
-  //           } else if (rp.gstInvoiceUrl) {
-  //             siteGstInvoiceUrlVal = rp.gstInvoiceUrl;
-  //           }
-
-  //           if (isGstApplicable) {
-  //             siteGstAmountVal = Number(rp.gstAmount || siteEntry?.gstAmount || siteLandownerGstSum || 0);
-  //           }
-
-  //           let siteNetPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
-  //           const siteTotalExpectedNet = siteTotalRentalVal + (isGstApplicable ? siteGstAmountVal : siteLandownerGstSum);
-  //           if (siteNetPayableVal <= 0 || siteNetPayableVal < siteTotalExpectedNet) {
-  //             siteNetPayableVal = siteTotalExpectedNet;
-  //           }
-
-  //           const siteRentalPayment = {
-  //             totalRentalAmount: siteTotalRentalVal,
-  //             gstApplicable: isGstApplicable ? 1 : 0,
-  //             netPayableAmount: siteNetPayableVal,
-  //             paymentFrequency: Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1),
-  //             lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
-  //             nextBillingDate: formatYMD(rp.nextBillingDate),
-  //           };
-
-  //           if (isGstApplicable) {
-  //             siteRentalPayment.gstAmount = siteGstAmountVal;
-  //             siteRentalPayment.gstPercentage = siteGstPercentageVal;
-  //           }
-  //           if (siteGstInvoiceUrlVal) {
-  //             siteRentalPayment.gstInvoiceUrl = siteGstInvoiceUrlVal;
-  //           }
-
-  //           siteObj.rentalPayment = siteRentalPayment;
-
-  //           if (!isSingleAgreement || !isSingleBill) {
-  //             const agPayload = buildAgreementPayload(ag);
-  //             if (agPayload) {
-  //               siteObj.agreement = agPayload;
-  //             }
-  //           }
-
-  //           const siteAppraisalPayload = buildAppraisalPayload(site.appraisal, siteEntry);
-  //           siteObj.appraisal = (siteAppraisalPayload && Object.keys(siteAppraisalPayload).length > 0) ? siteAppraisalPayload : [];
-  //         }
-
-  //         siteObj.proof_of_campaign = extractProofs(site, siteEntry);
-
-  //         return siteObj;
-  //       });
-
-  //       data = {
-  //         billingType: billingType,
-  //         agreementType: agreementType,
-  //         numberOfLandOwners: rootLandOwners.length || Number(firstSite.numberOfLandOwners) || 1,
-  //       };
-
-  //       if (isSingleBill) {
-  //         if (isSingleAgreement) {
-  //           data.rentalPayment = rootRentalPaymentObj;
-  //           const mainAg = buildAgreementPayload(firstSite.agreement);
-  //           if (mainAg) {
-  //             data.agreement = mainAg;
-  //           }
-  //         }
-  //       } else {
-  //         data.rentalPayment = {
-  //           totalRentalAmount: totalRentalSum || rootLandOwners.reduce((s, o) => s + (o.shareAmount || 0), 0),
-  //           gstApplicable: anySiteGstApplicable ? 1 : 0,
-  //           gstAmount: totalGstSum,
-  //           netPayableAmount: rootNetPayableSum,
-  //         };
-  //         if (isSingleAgreement) {
-  //           const mainAg = buildAgreementPayload(firstSite.agreement);
-  //           if (mainAg) {
-  //             data.agreement = mainAg;
-  //           }
-  //         }
-  //       }
-
-  //       data.landOwners = rootLandOwners;
-  //       data.sites = sitesPayload;
-  //     }
-
-  //     const mailPayload = {
-  //       mailtype: "cmdapproval",
-  //       to: toArray,
-  //       data: data,
-  //     };
-
-  //     if (ccArray.length > 0) {
-  //       mailPayload.cc = ccArray;
-  //     }
-
-  //     console.log(
-  //       "📧 RENTAL DUE MAIL PAYLOAD:",
-  //       JSON.stringify(mailPayload, null, 2)
-  //     );
-
-  //     if (mailMode !== "production") {
-  //       console.log(
-  //         `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
-  //       );
-  //       return {
-  //         mailtype: "cmdapproval",
-  //         to: toArray,
-  //         ...(ccArray.length > 0 ? { cc: ccArray } : {}),
-  //         success: true,
-  //         sent: false,
-  //         statusCode: 200,
-  //         message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
-  //         data: mailPayload.data,
-  //       };
-  //     }
-
-  //     const response = await axios.post(
-  //       "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
-  //       mailPayload,
-  //       { headers: { "Content-Type": "application/json" } }
-  //     );
-
-  //     console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
-
-  //     const isMailSuccess =
-  //       response.data &&
-  //       (response.data.success === true ||
-  //         response.data.status === "success" ||
-  //         response.status === 200);
-
-  //     return {
-  //       mailtype: "cmdapproval",
-  //       to: toArray,
-  //       ...(ccArray.length > 0 ? { cc: ccArray } : {}),
-  //       success: !!isMailSuccess,
-  //       sent: !!isMailSuccess,
-  //       statusCode: response.status || (isMailSuccess ? 200 : 500),
-  //       message: isMailSuccess
-  //         ? "Rental due approval mail sent successfully"
-  //         : "Rental due approval mail failed",
-  //       data: mailPayload.data,
-  //     };
-  //   } catch (mailErr) {
-  //     console.error(
-  //       "❌ Rental due approval mail error:",
-  //       mailErr?.message || mailErr
-  //     );
-  //     return {
-  //       mailtype: "cmdapproval",
-  //       to: parseEmailList(process.env.T0_EMail),
-  //       cc: parseEmailList(process.env.CC_EMail),
-  //       success: false,
-  //       sent: false,
-  //       statusCode: 500,
-  //       message: mailErr?.message || "Unknown mail error",
-  //       data: null,
-  //     };
-  //   }
-  // }
-
-
-
-  
 async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
-    try {
-      const toMail = process.env.T0_EMail;
-      const ccMail = process.env.CC_EMail;
-      const mailMode = process.env.MAIL_MODE || "development";
+  try {
+    const toMail = process.env.T0_EMail;
+    const ccMail = process.env.CC_EMail;
+    const mailMode = process.env.MAIL_MODE || "development";
 
-      const formatYMD = (date) => {
-        if (!date) return null;
-        const d = new Date(date);
-        if (isNaN(d.getTime())) return null;
-        return d.toISOString().split("T")[0];
+    const formatYMD = (date) => {
+      if (!date) return null;
+      const d = new Date(date);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().split("T")[0];
+    };
+
+    const parseEmailList = (mailStr) => {
+      if (!mailStr) return [];
+      if (Array.isArray(mailStr)) {
+        return mailStr.flatMap((s) => String(s).split(",")).map((e) => e.trim()).filter(Boolean);
+      }
+      return String(mailStr).split(",").map((e) => e.trim()).filter(Boolean);
+    };
+
+    const toArray = parseEmailList(toMail);
+    const ccArray = parseEmailList(ccMail);
+
+    // ── GROUPING LOGIC ──
+    let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
+      ? batchSites
+      : [{ media, entry }];
+
+    const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
+      if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
+        return [];
+      }
+
+      const entryDate = siteEntry?.dueDate ? new Date(siteEntry.dueDate) : nowIST();
+      const entryYear = entryDate.getFullYear();
+      const entryMonth = entryDate.getMonth();
+      const entryMonthLabel = siteEntry?.dueMonth ? String(siteEntry.dueMonth).toLowerCase() : "";
+
+      const checkDateMatch = (dateInput) => {
+        if (!dateInput) return false;
+        const d = new Date(dateInput);
+        if (isNaN(d.getTime())) return false;
+        if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) return true;
+        if (entryMonthLabel) {
+          const mLong = d.toLocaleString("en-US", { month: "long" }).toLowerCase();
+          const mShort = d.toLocaleString("en-US", { month: "short" }).toLowerCase();
+          const yearStr = String(d.getFullYear());
+          if ((entryMonthLabel.includes(mLong) || entryMonthLabel.includes(mShort)) && entryMonthLabel.includes(yearStr)) return true;
+        }
+        return false;
       };
 
-      const parseEmailList = (mailStr) => {
-        if (!mailStr) return [];
-        if (Array.isArray(mailStr)) {
-          return mailStr.flatMap((s) => String(s).split(",")).map((e) => e.trim()).filter(Boolean);
+      if (!checkDateMatch(siteAppraisal.nextAppraisalDate) &&
+          !checkDateMatch(siteAppraisal.lastAppraisalDate) &&
+          !checkDateMatch(siteAppraisal.appraisalDate)) {
+        if (siteAppraisal.nextAppraisalDate || siteAppraisal.lastAppraisalDate) {
+           return [];
         }
-        return String(mailStr).split(",").map((e) => e.trim()).filter(Boolean);
+      }
+
+      const appObj = {
+        applicable: 1,
+        type: Number(siteAppraisal.type || 1),
+        appraisalAmount: Number(siteAppraisal.appraisalAmount || 0),
+        frequency: Number(siteAppraisal.frequency || 0),
+        lastAppraisalDate: formatYMD(siteAppraisal.lastAppraisalDate),
+        nextAppraisalDate: formatYMD(siteAppraisal.nextAppraisalDate),
+        includedInCurrentRent: Number(siteAppraisal.includedInCurrentRent ?? 1),
       };
 
-      const toArray = parseEmailList(toMail);
-      const ccArray = parseEmailList(ccMail);
+      if (appObj.type === 1) appObj.percentage = Number(siteAppraisal.percentage || 0);
+      else if (appObj.type === 2) appObj.fixedAmount = Number(siteAppraisal.fixedAmount || 0);
 
-      // ── GROUPING LOGIC ──
-      let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
-        ? batchSites
-        : [{ media, entry }];
+      return [appObj]; // Strictly return array as per user examples
+    };
 
-      const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
-        if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
-          return [];
-        }
+    const buildAgreementPayload = (ag) => {
+      if (!ag || (!ag.startDate && !ag.endDate)) return null;
+      const rawStatus = Number(ag.status || 1);
+      let mappedStatus = 3;
+      if (rawStatus === 1) mappedStatus = 3;
+      else if (rawStatus === 3) mappedStatus = 4;
+      else if (rawStatus === 2) mappedStatus = 5;
 
-        // Check if appraisal applies to current month / cycle
-        const isCurrentMonthAppraisal = () => {
-          const entryDate = siteEntry?.dueDate
-            ? new Date(siteEntry.dueDate)
-            : siteEntry?.cycle
-            ? new Date(siteEntry.cycle)
-            : nowIST();
-
-          const entryYear = !isNaN(entryDate.getTime())
-            ? entryDate.getFullYear()
-            : new Date().getFullYear();
-          const entryMonth = !isNaN(entryDate.getTime())
-            ? entryDate.getMonth()
-            : new Date().getMonth();
-
-          const entryMonthLabel = siteEntry?.dueMonth
-            ? String(siteEntry.dueMonth).toLowerCase()
-            : "";
-
-          const checkDateMatch = (dateInput) => {
-            if (!dateInput) return false;
-            const d = new Date(dateInput);
-            if (isNaN(d.getTime())) return false;
-            if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) {
-              return true;
-            }
-            if (entryMonthLabel) {
-              const monthName = d.toLocaleString("en-US", { month: "long" }).toLowerCase();
-              const shortMonthName = d.toLocaleString("en-US", { month: "short" }).toLowerCase();
-              const yearStr = String(d.getFullYear());
-              if (
-                (entryMonthLabel.includes(monthName) || entryMonthLabel.includes(shortMonthName)) &&
-                entryMonthLabel.includes(yearStr)
-              ) {
-                return true;
-              }
-            }
-            return false;
-          };
-
-          if (checkDateMatch(siteAppraisal.nextAppraisalDate)) return true;
-          if (checkDateMatch(siteAppraisal.lastAppraisalDate)) return true;
-          if (checkDateMatch(siteAppraisal.appraisalDate)) return true;
-          if (checkDateMatch(siteEntry?.appraisalDate)) return true;
-
-          if (!siteAppraisal.nextAppraisalDate && !siteAppraisal.lastAppraisalDate) {
-            return true;
-          }
-
-          return false;
-        };
-
-        if (!isCurrentMonthAppraisal()) {
-          return [];
-        }
-
-        const appObj = {
-          applicable: 1,
-          type: Number(siteAppraisal.type || 1),
-        };
-
-        if (Number(siteAppraisal.type) === 1) {
-          if (siteAppraisal.percentage !== undefined && siteAppraisal.percentage !== null) {
-            appObj.percentage = Number(siteAppraisal.percentage);
-          }
-        } else if (Number(siteAppraisal.type) === 2) {
-          if (siteAppraisal.fixedAmount !== undefined && siteAppraisal.fixedAmount !== null) {
-            appObj.fixedAmount = Number(siteAppraisal.fixedAmount);
-          }
-        }
-
-        appObj.appraisalAmount = Number(siteAppraisal.appraisalAmount || 0);
-        if (siteAppraisal.frequency) {
-          appObj.frequency = Number(siteAppraisal.frequency);
-        }
-        if (siteAppraisal.lastAppraisalDate) {
-          appObj.lastAppraisalDate = formatYMD(siteAppraisal.lastAppraisalDate);
-        }
-        if (siteAppraisal.nextAppraisalDate) {
-          appObj.nextAppraisalDate = formatYMD(siteAppraisal.nextAppraisalDate);
-        }
-        appObj.includedInCurrentRent = Number(
-          siteAppraisal.includedInCurrentRent !== undefined
-            ? siteAppraisal.includedInCurrentRent
-            : 1
-        );
-
-        return appObj;
+      const payload = {
+        startDate: formatYMD(ag.startDate),
+        endDate: formatYMD(ag.endDate),
+        reminderBeforeExpiry: Number(ag.reminderBeforeExpiry || 30),
+        advanceRent: Number(ag.advanceRent || 0),
+        status: mappedStatus,
       };
+      const pdf = ag.agreementPDF?.filePath || ag.agreementPDF?.url || "";
+      if (pdf) payload.agreementPDF = pdf;
+      return payload;
+    };
 
-      const buildAgreementPayload = (ag) => {
-        if (!ag || (!ag.startDate && !ag.endDate)) return null;
-
-        // Agreement Status Mapping for Mail Payload:
-        // 3 -> Active (when DB status is 1)
-        // 4 -> Expired (when DB status is 3)
-        // 5 -> Expired soon (when DB status is 2)
-        const rawStatus = Number(ag.status || 1);
-        let mappedStatus = 3;
-        if (rawStatus === 1) {
-          mappedStatus = 3; // 3 -> Active
-        } else if (rawStatus === 3) {
-          mappedStatus = 4; // 4 -> Expired
-        } else if (rawStatus === 2) {
-          mappedStatus = 5; // 5 -> Expired soon
-        } else {
-          mappedStatus = rawStatus;
-        }
-
-        const payload = {
-          startDate: formatYMD(ag.startDate),
-          endDate: formatYMD(ag.endDate),
-          status: mappedStatus,
-        };
-
-        if (ag.reminderBeforeExpiry !== undefined) payload.reminderBeforeExpiry = Number(ag.reminderBeforeExpiry || 30);
-        if (ag.advanceRent !== undefined) payload.advanceRent = Number(ag.advanceRent || 0);
-
-        const pdfPath = ag.agreementPDF?.filePath || ag.agreementPDF?.url || "";
-        if (pdfPath) payload.agreementPDF = pdfPath;
-
-        return payload;
+    const buildLandOwnerObject = (o, siteEntry) => {
+      const isGstHold = Number(siteEntry?.withGst) === 1 || Number(o.gstHold) === 1 ? 1 : 0;
+      const isTdsHold = Number(siteEntry?.tdsHold) === 1 || Number(o.tdsHold) === 1 ? 1 : 0;
+      return {
+        name: o.name || "",
+        phone: o.phone || "",
+        bankName: o.bankName || "",
+        ifsc: o.ifsc || "",
+        accountNumber: o.accountNumber || "",
+        panNumber: o.panNumber || "",
+        paymentCategory: Number(o.paymentCategory || 1),
+        onlineMode: Number(o.onlineMode || 0),
+        shareAmount: Number(o.shareAmount || 0),
+        onlineAmount: Number(o.onlineAmount || 0),
+        cashAmount: Number(o.cashAmount || 0),
+        tdsPercentage: Number(o.tdsPercentage || 0),
+        tdsAmount: Number(o.tdsAmount || 0),
+        tdsApplicable: Number(o.tdsApplicable || 0),
+        gstHold: isGstHold,
+        tdsHold: isTdsHold,
+        gstApplicable: Number(o.gstApplicable || 0),
+        gstAmount: Number(o.gstAmount || 0),
+        gstPercentage: Number(o.gstPercentage || 18),
+        gstNumber: o.gstNumber || "",
       };
+    };
 
-      const buildLandOwnerObject = (o, siteEntry) => {
-        const isGstHold = Number(siteEntry?.withGst) === 1 || Number(o.gstHold) === 1 ? 1 : 0;
-        const isTdsHold = Number(siteEntry?.tdsHold) === 1 || Number(o.tdsHold) === 1 ? 1 : 0;
-        return {
-          name: o.name || "",
-          phone: o.phone || "",
-          bankName: o.bankName || "",
-          ifsc: o.ifsc || "",
-          accountNumber: o.accountNumber || "",
-          panNumber: o.panNumber || "",
-          paymentCategory: Number(o.paymentCategory || 1),
-          onlineMode: Number(o.onlineMode || 0),
-          shareAmount: Number(o.shareAmount || 0),
-          onlineAmount: Number(o.onlineAmount || 0),
-          cashAmount: Number(o.cashAmount || 0),
-          tdsPercentage: Number(o.tdsPercentage || 0),
-          tdsApplicable: Number(o.tdsApplicable || 0),
-          gstHold: isGstHold,
-          tdsHold: isTdsHold,
-          gstApplicable: Number(o.gstApplicable || 0),
-          gstAmount: Number(o.gstAmount || 0),
-          gstNumber: o.gstNumber || "",
-        };
-      };
+    const extractProofs = (site, siteEntry) => {
+      let proofs = [];
+      const entryProofs = siteEntry?.proofOfCampaign;
+      if (entryProofs?.filePath) proofs.push(entryProofs.filePath);
+      else if (Array.isArray(entryProofs)) proofs = entryProofs.map(p => typeof p === 'string' ? p : p.filePath || p.url || p).filter(Boolean);
+      else if (Array.isArray(siteEntry?.proof_of_campaign)) proofs = siteEntry.proof_of_campaign.filter(Boolean);
+      else if (Array.isArray(site?.proof_of_campaign)) proofs = site.proof_of_campaign.filter(Boolean);
+      return proofs;
+    };
 
-      const extractProofs = (site, siteEntry) => {
-        let proofs = [];
-        if (siteEntry?.proofOfCampaign?.filePath) {
-          proofs.push(siteEntry.proofOfCampaign.filePath);
-        } else if (Array.isArray(siteEntry?.proofOfCampaign)) {
-          proofs = siteEntry.proofOfCampaign.map((p) => (typeof p === "string" ? p : p.filePath || p.url || p)).filter(Boolean);
-        } else if (Array.isArray(siteEntry?.proof_of_campaign)) {
-          proofs = siteEntry.proof_of_campaign.filter(Boolean);
-        } else if (Array.isArray(site?.proof_of_campaign)) {
-          proofs = site.proof_of_campaign.filter(Boolean);
-        }
-        return proofs;
-      };
+    const getSiteBillMode = (item) => {
+      const s = item.media || {}, e = item.entry || {};
+      const detail = (s.mediaDetails || []).find(d => String(d._id) === String(e.mediaDetailId));
+      if (Number(e.siteBillMode) === 2 || Number(e.billMode) === 2) return 2;
+      if (detail && (Number(detail.siteBillMode) === 2 || Number(detail.billMode) === 2)) return 2;
+      if (Number(s.siteBillMode) === 2 || Number(s.billMode) === 2) return 2;
+      if ((s.landOwners || []).some(o => Number(o.siteBillMode) === 2 || Number(o.landOwnerBillMode) === 2)) return 2;
+      return 1;
+    };
 
-      const getSiteBillMode = (item) => {
-        const s = item.media || {};
-        const e = item.entry || {};
-        const matchedDetail = (s.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
+    const getAgreementMode = (item) => {
+      const s = item.media || {}, e = item.entry || {};
+      const detail = (s.mediaDetails || []).find(d => String(d._id) === String(e.mediaDetailId));
+      if (Number(e.agreementBillMode) === 2 || (detail && Number(detail.agreementBillMode) === 2)) return 2;
+      if ((s.landOwners || []).some(o => Number(o.agreementBillMode) === 2) || Number(s.agreementBillMode) === 2) return 2;
+      return 1;
+    };
 
-        if (Number(e.siteBillMode) === 2 || Number(e.billMode) === 2) return 2;
-        if (matchedDetail && (Number(matchedDetail.siteBillMode) === 2 || Number(matchedDetail.billMode) === 2)) return 2;
-        if ((s.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2 || Number(d.billMode) === 2)) return 2;
-        if (Number(s.siteBillMode) === 2 || Number(s.billMode) === 2) return 2;
-        if ((s.landOwners || []).some((o) => Number(o.siteBillMode) === 2 || Number(o.landOwnerBillMode) === 2)) return 2;
-
-        return 1;
-      };
-
-      const getAgreementMode = (item) => {
-        const s = item.media || {};
-        const e = item.entry || {};
-        const matchedDetail = (s.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
-
-        if (Number(e.agreementBillMode) === 2) return 2;
-        if (matchedDetail && Number(matchedDetail.agreementBillMode) === 2) return 2;
-        if ((s.landOwners || []).some((o) => Number(o.agreementBillMode) === 2)) return 2;
-        if (Number(s.agreementBillMode) === 2) return 2;
-
-        return 1;
-      };
-
-    const isSingleBill = sitesInGroupData.every((item) => getSiteBillMode(item) === 1);
-    const isSingleAgreement = sitesInGroupData.every((item) => getAgreementMode(item) === 1);
+    const isSingleBill = sitesInGroupData.every(item => getSiteBillMode(item) === 1);
+    const isSingleAgreement = sitesInGroupData.every(item => getAgreementMode(item) === 1);
 
     const billingType = isSingleBill ? "single_bill" : "separate_bill";
     const agreementType = isSingleAgreement ? "single_agreement" : "separate_agreement";
 
-    let data = {
-      billingType,
-      agreementType
-    };
+    let data = { billingType, agreementType };
 
-    // ── CASE 1: FLAT ROOT STRUCTURE (Single Site + Single Bill) ──
     if (sitesInGroupData.length === 1 && isSingleBill) {
-      const item = sitesInGroupData[0];
-      const site = item.media;
-      const siteEntry = item.entry;
-
-      const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
-      const rp = site.rentalPayment || {};
-      const ag = site.agreement || {};
-
-      const isGstApplicable = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
-      const totalRentalAmountVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
-
-      const landownerGstSum = (site.landOwners || [])
-        .filter((o) => Number(o.gstApplicable) === 1 || Number(o.gstAmount) > 0)
-        .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-
-      const siteGstSum = Number(rp.gstAmount || siteEntry?.gstAmount || 0);
-      const effectiveGst = landownerGstSum > 0 ? landownerGstSum : (isGstApplicable ? siteGstSum : 0);
-
-      let gstInvoiceUrlVal = "";
-      if (siteEntry?.invoice?.filePath) {
-        gstInvoiceUrlVal = siteEntry.invoice.filePath;
-      } else if (rp.gstInvoiceUrl) {
-        gstInvoiceUrlVal = rp.gstInvoiceUrl;
-      }
-
-      let gstAmountVal = effectiveGst;
-      let gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
-      let gstPercentageVal = Number(rp.gstPercentage || 18);
-
-      let netPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
-      const totalExpectedNet = totalRentalAmountVal + effectiveGst;
-      if (netPayableVal <= 0 || netPayableVal < totalExpectedNet) {
-        netPayableVal = totalExpectedNet;
-      }
-
-      const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
+      // ── CASE 1: FLAT ROOT STRUCTURE ──
+      const { media: site, entry: siteEntry } = sitesInGroupData[0];
+      const detail = (site.mediaDetails || []).find(d => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
+      const rp = site.rentalPayment || {}, ag = site.agreement || {};
+      const isGstOn = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
+      const baseRent = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
+      const ownerGstSum = (site.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+      const effectiveGst = ownerGstSum > 0 ? ownerGstSum : (isGstOn ? Number(rp.gstAmount || siteEntry?.gstAmount || 0) : 0);
+      const landOwnersList = (site.landOwners || []).map(o => buildLandOwnerObject(o, siteEntry));
 
       Object.assign(data, {
-        mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
-        mediaName: activeDetail.mediaName || site.mediaName || "",
-        mediaType: activeDetail.mediaType || site.mediaType || "",
-        state: activeDetail.state || site.state || "",
-        city: activeDetail.city || site.city || "",
-        location: activeDetail.location || site.location || "",
-        fullAddress: site.fullAddress || (activeDetail.location ? `${activeDetail.location}, ${activeDetail.city || ""}` : (site.location || "")),
-        width: Number(activeDetail.width || site.width || 0),
-        height: Number(activeDetail.height || site.height || 0),
-        totalSqFt: Number(activeDetail.totalSqFt || site.totalSqFt || 0),
-        numberOfLandOwners: landOwnersList.length || Number(site.numberOfLandOwners) || 1,
-        status: Number(activeDetail.status || site.status || 1),
+        mediaCode: detail.mediaCode || site.mediaCode || "",
+        mediaName: detail.mediaName || site.mediaName || "",
+        mediaType: detail.mediaType || site.mediaType || "",
+        state: detail.state || site.state || "",
+        city: detail.city || site.city || "",
+        location: detail.location || site.location || "",
+        fullAddress: site.fullAddress || (detail.location ? `${detail.location}, ${detail.city || ""}` : site.location || ""),
+        width: Number(detail.width || 0),
+        height: Number(detail.height || 0),
+        totalSqFt: Number(detail.totalSqFt || 0),
+        numberOfLandOwners: landOwnersList.length,
+        status: Number(detail.status || 1),
         rentalPayment: {
-          totalRentalAmount: totalRentalAmountVal,
-          gstApplicable: isGstApplicable ? 1 : 0,
-          gstAmount: gstAmountVal,
-          gstNumber: gstNumberVal,
-          gstPercentage: gstPercentageVal,
-          gstInvoiceUrl: gstInvoiceUrlVal,
-          netPayableAmount: netPayableVal,
+          totalRentalAmount: baseRent,
+          gstApplicable: isGstOn ? 1 : 0,
+          gstAmount: effectiveGst,
+          gstNumber: rp.gstNumber || siteEntry?.gstNumber || "",
+          gstPercentage: Number(rp.gstPercentage || 18),
+          gstInvoiceUrl: siteEntry?.invoice?.filePath || rp.gstInvoiceUrl || "",
+          netPayableAmount: baseRent + effectiveGst,
           paymentFrequency: Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1),
           lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
           nextBillingDate: formatYMD(rp.nextBillingDate),
@@ -1844,289 +1135,107 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         landOwners: landOwnersList,
         proof_of_campaign: extractProofs(site, siteEntry),
       });
-
     } else {
-      // ── CASE 2: NESTED SITES STRUCTURE (Multiple Sites OR Separate Bills) ──
+      // ── CASE 2: NESTED SITES STRUCTURE ──
       const firstSite = sitesInGroupData[0].media;
-      const uniqueParentMedias = Array.from(new Map(sitesInGroupData.map(item => [String(item.media._id), item])).values());
+      const uniqueParents = Array.from(new Map(sitesInGroupData.map(item => [String(item.media._id), item])).values());
+      const ownersMap = new Map(), breakdownMap = new Map();
 
-      const ownersMap = new Map();
-      const ownerSiteBreakdownMap = new Map();
-
-      sitesInGroupData.forEach((item) => {
-        const site = item.media;
-        const siteEntry = item.entry;
-        const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
-        const siteCode = activeDetail.mediaCode || site.mediaCode || site.siteCode || "";
-
-        (site.landOwners || []).forEach((o) => {
+      sitesInGroupData.forEach(item => {
+        const { media: site, entry: siteEntry } = item;
+        const detail = (site.mediaDetails || []).find(d => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
+        const siteCode = detail.mediaCode || site.mediaCode || "";
+        (site.landOwners || []).forEach(o => {
           const key = String(o.landOwnerMasterId || o._id || o.name);
-          if (!ownersMap.has(key)) {
-            ownersMap.set(key, { obj: { ...(o.toObject ? o.toObject() : o) }, siteEntry: siteEntry });
-          } else if (!isSingleBill) {
-            const existingObj = ownersMap.get(key).obj;
-            existingObj.shareAmount = (existingObj.shareAmount || 0) + (o.shareAmount || 0);
-            existingObj.onlineAmount = (existingObj.onlineAmount || 0) + (o.onlineAmount || 0);
-            existingObj.cashAmount = (existingObj.cashAmount || 0) + (o.cashAmount || 0);
-            existingObj.tdsAmount = (existingObj.tdsAmount || 0) + (o.tdsAmount || 0);
-            existingObj.gstAmount = (existingObj.gstAmount || 0) + (o.gstAmount || 0);
+          if (!ownersMap.has(key)) ownersMap.set(key, { obj: (o.toObject ? o.toObject() : o), siteEntry });
+          else if (!isSingleBill) {
+            const ext = ownersMap.get(key).obj;
+            ['shareAmount', 'onlineAmount', 'cashAmount', 'tdsAmount', 'gstAmount'].forEach(f => ext[f] = (ext[f] || 0) + (o[f] || 0));
           }
-
-          if (!ownerSiteBreakdownMap.has(key)) ownerSiteBreakdownMap.set(key, []);
-          ownerSiteBreakdownMap.get(key).push({
-            mediaCode: siteCode,
-            shareAmount: Number(o.shareAmount || 0),
-            onlineAmount: Number(o.onlineAmount || 0),
-            cashAmount: Number(o.cashAmount || 0),
-          });
+          if (!breakdownMap.has(key)) breakdownMap.set(key, []);
+          breakdownMap.get(key).push({ mediaCode: siteCode, shareAmount: Number(o.shareAmount || 0), onlineAmount: Number(o.onlineAmount || 0), cashAmount: Number(o.cashAmount || 0) });
         });
       });
 
-      const rootLandOwners = Array.from(ownersMap.entries()).map(([key, val]) => {
-        const loObj = buildLandOwnerObject(val.obj, val.siteEntry);
-        const breakdown = ownerSiteBreakdownMap.get(key) || [];
-        if (!isSingleBill && breakdown.length > 1) loObj.siteRentBreakdown = breakdown;
-        return loObj;
+      const rootOwners = Array.from(ownersMap.entries()).map(([key, val]) => {
+        const lo = buildLandOwnerObject(val.obj, val.siteEntry), b = breakdownMap.get(key) || [];
+        if (!isSingleBill && b.length > 1) lo.siteRentBreakdown = b;
+        return lo;
       });
 
-      const totalRentalSum = uniqueParentMedias.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
-      const totalGstSum = uniqueParentMedias.reduce((sum, item) => {
-        const rp = item.media.rentalPayment || {};
-        const isSiteGstOn = Number(rp.gstApplicable || item.entry?.gstApplicable || 0) === 1;
-        const siteGst = Number(rp.gstAmount || item.entry?.gstAmount || 0);
-        const ownerGst = (item.media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((s, o) => s + Number(o.gstAmount || 0), 0);
-        return sum + (ownerGst > 0 ? ownerGst : (isSiteGstOn ? siteGst : 0));
+      const totalRent = uniqueParents.reduce((s, i) => s + Number(i.media.rentalPayment?.totalRentalAmount || i.entry?.baseAmount || 0), 0);
+      const totalGst = uniqueParents.reduce((s, i) => {
+        const isOn = Number(i.media.rentalPayment?.gstApplicable || i.entry?.gstApplicable || 0) === 1;
+        const oGst = (i.media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+        return s + (oGst > 0 ? oGst : (isOn ? Number(i.media.rentalPayment?.gstAmount || i.entry?.gstAmount || 0) : 0));
       }, 0);
 
-      const rootNetPayableSum = totalRentalSum + totalGstSum;
+      data.numberOfLandOwners = rootOwners.length;
+      data.landOwners = rootOwners;
 
-      data.numberOfLandOwners = rootLandOwners.length;
-      data.landOwners = rootLandOwners;
-
-      // Root level rentalPayment/agreement if both are single
       if (isSingleBill && isSingleAgreement) {
         data.rentalPayment = {
-          totalRentalAmount: totalRentalSum,
-          gstApplicable: uniqueParentMedias.some(m => Number(m.media.rentalPayment?.gstApplicable) === 1) ? 1 : 0,
-          gstAmount: totalGstSum,
+          totalRentalAmount: totalRent,
+          gstApplicable: uniqueParents.some(m => Number(m.media.rentalPayment?.gstApplicable) === 1) ? 1 : 0,
+          gstAmount: totalGst,
           gstNumber: firstSite.rentalPayment?.gstNumber || "",
+          gstPercentage: Number(firstSite.rentalPayment?.gstPercentage || 18),
           gstInvoiceUrl: sitesInGroupData[0]?.entry?.invoice?.filePath || firstSite.rentalPayment?.gstInvoiceUrl || "",
-          netPayableAmount: rootNetPayableSum,
+          netPayableAmount: totalRent + totalGst,
           paymentFrequency: Number(firstSite.rentalPayment?.paymentFrequency || 1),
           lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
           nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
         };
         data.agreement = buildAgreementPayload(firstSite.agreement);
       } else {
-         if (isSingleAgreement) data.agreement = buildAgreementPayload(firstSite.agreement);
-         if (isSingleBill) {
-            data.rentalPayment = {
-              totalRentalAmount: totalRentalSum,
-              gstApplicable: uniqueParentMedias.some(m => Number(m.media.rentalPayment?.gstApplicable) === 1) ? 1 : 0,
-              gstAmount: totalGstSum,
-              netPayableAmount: rootNetPayableSum,
-              paymentFrequency: Number(firstSite.rentalPayment?.paymentFrequency || 1),
-              lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
-              nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
-            };
-         }
+        if (isSingleAgreement) data.agreement = buildAgreementPayload(firstSite.agreement);
+        if (isSingleBill) data.rentalPayment = { totalRentalAmount: totalRent, gstApplicable: totalGst > 0 ? 1 : 0, gstAmount: totalGst, gstPercentage: 18, netPayableAmount: totalRent + totalGst, paymentFrequency: Number(firstSite.rentalPayment?.paymentFrequency || 1), lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate), nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate) };
       }
 
       data.sites = sitesInGroupData.map((item, idx) => {
-        const site = item.media;
-        const siteEntry = item.entry;
-        const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
-        const rp = site.rentalPayment || {};
-        const ag = site.agreement || {};
-
-        const siteObj = {
-          mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
-          mediaName: activeDetail.mediaName || site.mediaName || "",
-          location: activeDetail.location || site.location || "",
-          proof_of_campaign: extractProofs(site, siteEntry),
-        };
-
-        // Move details to site if separate
+        const { media: site, entry: siteEntry } = item;
+        const detail = (site.mediaDetails || []).find(d => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
+        const rp = site.rentalPayment || {}, ag = site.agreement || {};
+        const sObj = { mediaCode: detail.mediaCode || site.mediaCode || "", mediaName: detail.mediaName || site.mediaName || "", location: detail.location || site.location || "", proof_of_campaign: extractProofs(site, siteEntry) };
         if (!isSingleBill || !isSingleAgreement) {
-          const siteIsGstOn = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
-          const siteRentVal = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
-          const siteGstVal = Number(rp.gstAmount || siteEntry?.gstAmount || 0) || (site.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((s, o) => s + Number(o.gstAmount || 0), 0);
-
-          siteObj.rentalPayment = {
-            totalRentalAmount: siteRentVal,
-            gstApplicable: siteIsGstOn ? 1 : 0,
-            gstAmount: siteIsGstOn ? siteGstVal : 0,
-            netPayableAmount: siteRentVal + siteGstVal,
-            paymentFrequency: Number(rp.paymentFrequency || 1),
-            lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
-            nextBillingDate: formatYMD(rp.nextBillingDate),
-          };
-
-          if (idx === 0 && siteEntry?.invoice?.filePath) {
-            siteObj.rentalPayment.gstInvoiceUrl = siteEntry.invoice.filePath;
-          } else if (rp.gstInvoiceUrl) {
-            siteObj.rentalPayment.gstInvoiceUrl = rp.gstInvoiceUrl;
-          }
-
-          if (!isSingleAgreement) siteObj.agreement = buildAgreementPayload(ag);
-          const appraisal = buildAppraisalPayload(site.appraisal, siteEntry);
-          siteObj.appraisal = appraisal;
+          const isGst = Number(rp.gstApplicable || siteEntry?.gstApplicable || 0) === 1;
+          const rent = Number(rp.totalRentalAmount || siteEntry?.baseAmount || 0);
+          const oGst = (site.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((s, o) => s + Number(o.gstAmount || 0), 0);
+          const gst = oGst > 0 ? oGst : (isGst ? Number(rp.gstAmount || siteEntry?.gstAmount || 0) : 0);
+          sObj.rentalPayment = { totalRentalAmount: rent, gstApplicable: isGst ? 1 : 0, gstAmount: gst, netPayableAmount: rent + gst, paymentFrequency: Number(rp.paymentFrequency || 1), lastBillPaidDate: formatYMD(rp.lastBillPaidDate), nextBillingDate: formatYMD(rp.nextBillingDate) };
+          if (idx === 0 && siteEntry?.invoice?.filePath) sObj.rentalPayment.gstInvoiceUrl = siteEntry.invoice.filePath;
+          else if (rp.gstInvoiceUrl) sObj.rentalPayment.gstInvoiceUrl = rp.gstInvoiceUrl;
+          if (!isSingleAgreement) sObj.agreement = buildAgreementPayload(ag);
+          sObj.appraisal = buildAppraisalPayload(site.appraisal, siteEntry);
         }
-        return siteObj;
+        return sObj;
       });
     }
 
-    // ✅ ADDED — GST Hold Note requirement
-    const hasAnyGstHold = data.landOwners?.some(o => Number(o.gstHold) === 1);
-    if (hasAnyGstHold) {
+    if (data.landOwners?.some(o => Number(o.gstHold) === 1)) {
       data.gstHoldStatus = "GST on Hold";
       data.notes = "GST is on hold for one or more landowners.";
     }
 
-    const mailPayload = {
-      mailtype: "cmdapproval",
-      to: toArray,
-      data: data,
-    };
+    const mailPayload = { mailtype: "cmdapproval", to: toArray, data };
+    if (ccArray.length > 0) mailPayload.cc = ccArray;
 
-      if (ccArray.length > 0) {
-        mailPayload.cc = ccArray;
-      }
+    console.log("📧 RENTAL DUE MAIL PAYLOAD:", JSON.stringify(mailPayload, null, 2));
 
-      console.log(
-        "📧 RENTAL DUE MAIL PAYLOAD:",
-        JSON.stringify(mailPayload, null, 2)
-      );
-
-      if (mailMode !== "production") {
-        console.log(
-          `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
-        );
-        return {
-          mailtype: "cmdapproval",
-          to: toArray,
-          ...(ccArray.length > 0 ? { cc: ccArray } : {}),
-          success: true,
-          sent: false,
-          statusCode: 200,
-          message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
-          data: mailPayload.data,
-        };
-      }
-
-      const response = await axios.post(
-        "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
-        mailPayload,
-        { headers: { "Content-Type": "application/json" } }
-      );
-
-      console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
-
-      const isMailSuccess =
-        response.data &&
-        (response.data.success === true ||
-          response.data.status === "success" ||
-          response.status === 200);
-
-      return {
-        mailtype: "cmdapproval",
-        to: toArray,
-        ...(ccArray.length > 0 ? { cc: ccArray } : {}),
-        success: !!isMailSuccess,
-        sent: !!isMailSuccess,
-        statusCode: response.status || (isMailSuccess ? 200 : 500),
-        message: isMailSuccess
-          ? "Rental due approval mail sent successfully"
-          : "Rental due approval mail failed",
-        data: mailPayload.data,
-      };
+    if (mailMode !== "production") {
+      return { mailtype: "cmdapproval", to: toArray, ...(ccArray.length > 0 ? { cc: ccArray } : {}), success: true, sent: false, statusCode: 200, message: `Mail skipped (MAIL_MODE=${mailMode})`, data: mailPayload.data };
     }
-     catch (mailErr) {
-      console.error(
-        "❌ Rental due approval mail error:",
-        mailErr?.message || mailErr
-      );
-      return {
-        mailtype: "cmdapproval",
-        to: parseEmailList(process.env.T0_EMail),
-        cc: parseEmailList(process.env.CC_EMail),
-        success: false,
-        sent: false,
-        statusCode: 500,
-        message: mailErr?.message || "Unknown mail error",
-        data: null,
-      };
-    }
+
+    const response = await axios.post("https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php", mailPayload, { headers: { "Content-Type": "application/json" } });
+    const isSuccess = response.data && (response.data.success === true || response.data.status === "success" || response.status === 200);
+
+    return { mailtype: "cmdapproval", to: toArray, ...(ccArray.length > 0 ? { cc: ccArray } : {}), success: !!isSuccess, sent: !!isSuccess, statusCode: response.status || (isSuccess ? 200 : 500), message: isSuccess ? "Mail sent successfully" : "Mail failed", data: mailPayload.data };
+  } catch (err) {
+    console.error("❌ Rental due mail error:", err.message);
+    return { mailtype: "cmdapproval", to: parseEmailList(process.env.T0_EMail), success: false, sent: false, statusCode: 500, message: err.message, data: null };
   }
+}
 
-      if (ccArray.length > 0) {
-        mailPayload.cc = ccArray;
-      }
-
-      console.log(
-        "📧 RENTAL DUE MAIL PAYLOAD:",
-        JSON.stringify(mailPayload, null, 2)
-      );
-
-      if (mailMode !== "production") {
-        console.log(
-          `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
-        );
-        return {
-          mailtype: "cmdapproval",
-          to: toArray,
-          ...(ccArray.length > 0 ? { cc: ccArray } : {}),
-          success: true,
-          sent: false,
-          statusCode: 200,
-          message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
-          data: mailPayload.data,
-        };
-      }
-
-      const response = await axios.post(
-        "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
-        mailPayload,
-        { headers: { "Content-Type": "application/json" } }
-      );
-
-      console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
-
-      const isMailSuccess =
-        response.data &&
-        (response.data.success === true ||
-          response.data.status === "success" ||
-          response.status === 200);
-
-      return {
-        mailtype: "cmdapproval",
-        to: toArray,
-        ...(ccArray.length > 0 ? { cc: ccArray } : {}),
-        success: !!isMailSuccess,
-        sent: !!isMailSuccess,
-        statusCode: response.status || (isMailSuccess ? 200 : 500),
-        message: isMailSuccess
-          ? "Rental due approval mail sent successfully"
-          : "Rental due approval mail failed",
-        data: mailPayload.data,
-      };
-    } catch (mailErr) {
-      console.error(
-        "❌ Rental due approval mail error:",
-        mailErr?.message || mailErr
-      );
-      return {
-        mailtype: "cmdapproval",
-        to: parseEmailList(process.env.T0_EMail),
-        cc: parseEmailList(process.env.CC_EMail),
-        success: false,
-        sent: false,
-        statusCode: 500,
-        message: mailErr?.message || "Unknown mail error",
-        data: null,
-      };
-    }
-  }
 
 
 function addGstToBalanceIfApplicable(media, entry, userName) {
