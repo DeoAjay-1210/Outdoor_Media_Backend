@@ -2888,6 +2888,21 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
 
 
+    const totalFacesAgg = await MediaOnboarding.aggregate([
+      { $unwind: "$mediaDetails" },
+      { $count: "count" },
+    ]);
+    const totalSites = totalFacesAgg[0]?.count || 0;
+
+    const siteCount = await MediaOnboarding.countDocuments({});
+
+    const activeCountAgg = await MediaOnboarding.aggregate([
+      { $unwind: "$mediaDetails" },
+      { $match: { "mediaDetails.status": 1 } },
+      { $count: "count" },
+    ]);
+    const activeCount = activeCountAgg[0]?.count || 0;
+
     const totalCount = entriesForResponse.length;
     const startIdx = (pageNumbers - 1) * pageSize;
     const pagedEntries = entriesForResponse.slice(
@@ -2913,6 +2928,10 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         // ✅ ALWAYS echo back which month was actually applied
         monthFilterApplied,
         entries: pagedEntries,
+        // ✅ NEW: Global Counts
+        totalSites,
+        siteCount,
+        activeCount,
         // ✅ ALWAYS include overall outstanding totals, same shape as the
         // ledger APIs' summary block
         ...overallOutstandingTotals,

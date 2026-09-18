@@ -1571,7 +1571,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
       const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
         if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
-          return {};
+          return [];
         }
 
         // Check if appraisal applies to current month / cycle
@@ -1627,7 +1627,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         };
 
         if (!isCurrentMonthAppraisal()) {
-          return {};
+          return [];
         }
 
         const appObj = {
@@ -1683,14 +1683,19 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
           mappedStatus = rawStatus;
         }
 
-        return {
+        const payload = {
           startDate: formatYMD(ag.startDate),
           endDate: formatYMD(ag.endDate),
-          reminderBeforeExpiry: Number(ag.reminderBeforeExpiry || 30),
-          advanceRent: Number(ag.advanceRent || 0),
           status: mappedStatus,
-          agreementPDF: ag.agreementPDF?.filePath || ag.agreementPDF?.url || "",
         };
+
+        if (ag.reminderBeforeExpiry !== undefined) payload.reminderBeforeExpiry = Number(ag.reminderBeforeExpiry || 30);
+        if (ag.advanceRent !== undefined) payload.advanceRent = Number(ag.advanceRent || 0);
+
+        const pdfPath = ag.agreementPDF?.filePath || ag.agreementPDF?.url || "";
+        if (pdfPath) payload.agreementPDF = pdfPath;
+
+        return payload;
       };
 
       const buildLandOwnerObject = (o, siteEntry) => {
@@ -1709,7 +1714,6 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
           onlineAmount: Number(o.onlineAmount || 0),
           cashAmount: Number(o.cashAmount || 0),
           tdsPercentage: Number(o.tdsPercentage || 0),
-          tdsAmount: Number(o.tdsAmount || 0),
           tdsApplicable: Number(o.tdsApplicable || 0),
           gstHold: isGstHold,
           tdsHold: isTdsHold,
@@ -1766,7 +1770,10 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
     const billingType = isSingleBill ? "single_bill" : "separate_bill";
     const agreementType = isSingleAgreement ? "single_agreement" : "separate_agreement";
 
-    let data = {};
+    let data = {
+      billingType,
+      agreementType
+    };
 
     // ── CASE 1: FLAT ROOT STRUCTURE (Single Site + Single Bill) ──
     if (sitesInGroupData.length === 1 && isSingleBill) {
@@ -1795,14 +1802,9 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         gstInvoiceUrlVal = rp.gstInvoiceUrl;
       }
 
-      let gstAmountVal = 0;
-      let gstNumberVal = "";
+      let gstAmountVal = effectiveGst;
+      let gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
       let gstPercentageVal = Number(rp.gstPercentage || 18);
-
-      if (isGstApplicable) {
-        gstAmountVal = siteGstSum > 0 ? siteGstSum : landownerGstSum;
-        gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
-      }
 
       let netPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
       const totalExpectedNet = totalRentalAmountVal + effectiveGst;
@@ -1812,9 +1814,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
       const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
 
-      data = {
-        billingType: billingType,
-        agreementType: agreementType,
+      Object.assign(data, {
         mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
         mediaName: activeDetail.mediaName || site.mediaName || "",
         mediaType: activeDetail.mediaType || site.mediaType || "",
@@ -1843,7 +1843,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         appraisal: buildAppraisalPayload(site.appraisal, siteEntry),
         landOwners: landOwnersList,
         proof_of_campaign: extractProofs(site, siteEntry),
-      };
+      });
 
     } else {
       // ── CASE 2: NESTED SITES STRUCTURE (Multiple Sites OR Separate Bills) ──
@@ -1900,12 +1900,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
 
       const rootNetPayableSum = totalRentalSum + totalGstSum;
 
-      data = {
-        billingType,
-        agreementType,
-        numberOfLandOwners: rootLandOwners.length,
-        landOwners: rootLandOwners,
-      };
+      data.numberOfLandOwners = rootLandOwners.length;
+      data.landOwners = rootLandOwners;
 
       // Root level rentalPayment/agreement if both are single
       if (isSingleBill && isSingleAgreement) {
@@ -1921,9 +1917,19 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
           nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
         };
         data.agreement = buildAgreementPayload(firstSite.agreement);
-      } else if (!isSingleBill && isSingleAgreement) {
-        // Special case: Multiple Landlords / Single Site / Separate Bills
-        data.agreement = buildAgreementPayload(firstSite.agreement);
+      } else {
+         if (isSingleAgreement) data.agreement = buildAgreementPayload(firstSite.agreement);
+         if (isSingleBill) {
+            data.rentalPayment = {
+              totalRentalAmount: totalRentalSum,
+              gstApplicable: uniqueParentMedias.some(m => Number(m.media.rentalPayment?.gstApplicable) === 1) ? 1 : 0,
+              gstAmount: totalGstSum,
+              netPayableAmount: rootNetPayableSum,
+              paymentFrequency: Number(firstSite.rentalPayment?.paymentFrequency || 1),
+              lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
+              nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
+            };
+         }
       }
 
       data.sites = sitesInGroupData.map((item, idx) => {
@@ -1931,6 +1937,7 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
         const siteEntry = item.entry;
         const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || site.mediaDetails?.[0] || {};
         const rp = site.rentalPayment || {};
+        const ag = site.agreement || {};
 
         const siteObj = {
           mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
@@ -1953,15 +1960,27 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
             paymentFrequency: Number(rp.paymentFrequency || 1),
             lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
             nextBillingDate: formatYMD(rp.nextBillingDate),
-            gstInvoiceUrl: (idx === 0 && siteEntry?.invoice?.filePath) ? siteEntry.invoice.filePath : (rp.gstInvoiceUrl || ""),
           };
 
-          if (!isSingleAgreement) siteObj.agreement = buildAgreementPayload(site.agreement);
+          if (idx === 0 && siteEntry?.invoice?.filePath) {
+            siteObj.rentalPayment.gstInvoiceUrl = siteEntry.invoice.filePath;
+          } else if (rp.gstInvoiceUrl) {
+            siteObj.rentalPayment.gstInvoiceUrl = rp.gstInvoiceUrl;
+          }
+
+          if (!isSingleAgreement) siteObj.agreement = buildAgreementPayload(ag);
           const appraisal = buildAppraisalPayload(site.appraisal, siteEntry);
-          siteObj.appraisal = (appraisal && Object.keys(appraisal).length > 0) ? appraisal : [];
+          siteObj.appraisal = appraisal;
         }
         return siteObj;
       });
+    }
+
+    // ✅ ADDED — GST Hold Note requirement
+    const hasAnyGstHold = data.landOwners?.some(o => Number(o.gstHold) === 1);
+    if (hasAnyGstHold) {
+      data.gstHoldStatus = "GST on Hold";
+      data.notes = "GST is on hold for one or more landowners.";
     }
 
     const mailPayload = {
@@ -1969,6 +1988,76 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       to: toArray,
       data: data,
     };
+
+      if (ccArray.length > 0) {
+        mailPayload.cc = ccArray;
+      }
+
+      console.log(
+        "📧 RENTAL DUE MAIL PAYLOAD:",
+        JSON.stringify(mailPayload, null, 2)
+      );
+
+      if (mailMode !== "production") {
+        console.log(
+          `📭 MAIL_MODE="${mailMode}" — skipping live mail API call. Payload logged above only.`
+        );
+        return {
+          mailtype: "cmdapproval",
+          to: toArray,
+          ...(ccArray.length > 0 ? { cc: ccArray } : {}),
+          success: true,
+          sent: false,
+          statusCode: 200,
+          message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent`,
+          data: mailPayload.data,
+        };
+      }
+
+      const response = await axios.post(
+        "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php",
+        mailPayload,
+        { headers: { "Content-Type": "application/json" } }
+      );
+
+      console.log("📬 RENTAL DUE MAIL PRODUCTION RESPONSE:", response.data);
+
+      const isMailSuccess =
+        response.data &&
+        (response.data.success === true ||
+          response.data.status === "success" ||
+          response.status === 200);
+
+      return {
+        mailtype: "cmdapproval",
+        to: toArray,
+        ...(ccArray.length > 0 ? { cc: ccArray } : {}),
+        success: !!isMailSuccess,
+        sent: !!isMailSuccess,
+        statusCode: response.status || (isMailSuccess ? 200 : 500),
+        message: isMailSuccess
+          ? "Rental due approval mail sent successfully"
+          : "Rental due approval mail failed",
+        data: mailPayload.data,
+      };
+    }
+     catch (mailErr) {
+      console.error(
+        "❌ Rental due approval mail error:",
+        mailErr?.message || mailErr
+      );
+      return {
+        mailtype: "cmdapproval",
+        to: parseEmailList(process.env.T0_EMail),
+        cc: parseEmailList(process.env.CC_EMail),
+        success: false,
+        sent: false,
+        statusCode: 500,
+        message: mailErr?.message || "Unknown mail error",
+        data: null,
+      };
+    }
+  }
 
       if (ccArray.length > 0) {
         mailPayload.cc = ccArray;
@@ -2038,6 +2127,8 @@ async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
       };
     }
   }
+
+
 function addGstToBalanceIfApplicable(media, entry, userName) {
   if (entry.gstAddedToBalance) return;
 
