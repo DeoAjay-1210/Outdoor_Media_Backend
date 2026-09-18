@@ -1255,10 +1255,22 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
       // ── SEPARATE AGREEMENT OR MULTIPLE SITES SCENARIO ──
       const firstSite = sitesInGroupData[0].media;
 
+        // Deduplicate parent Media documents for single_bill root calculations
+        const parentMediaMap = new Map();
+        sitesInGroupData.forEach((item) => {
+          const mId = String(item.media._id);
+          if (!parentMediaMap.has(mId)) {
+            parentMediaMap.set(mId, item);
+          }
+        });
+        const uniqueParentMedias = Array.from(parentMediaMap.values());
+
+        const itemsForTotals = isSingleBill ? uniqueParentMedias : sitesInGroupData;
+
         const ownersMap = new Map();
         const ownerSiteBreakdownMap = new Map();
 
-        sitesInGroupData.forEach((item) => {
+        itemsForTotals.forEach((item) => {
           const site = item.media;
           const siteEntry = item.entry;
           const activeDetail = (site.mediaDetails || []).find((d) => String(d._id) === String(siteEntry?.mediaDetailId)) || (site.mediaDetails || []).find((d) => Number(d.status) === 1) || site.mediaDetails?.[0] || {};
@@ -1309,9 +1321,9 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
           rootLandOwners.push(loObj);
         });
 
-        // Calculate root rental payment totals for single_bill
-        const totalRentalSum = sitesInGroupData.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
-        const totalGstSum = sitesInGroupData.reduce((sum, item) => {
+        // Calculate root rental payment totals for single_bill using itemsForTotals
+        const totalRentalSum = itemsForTotals.reduce((sum, item) => sum + Number(item.media.rentalPayment?.totalRentalAmount || item.entry?.baseAmount || 0), 0);
+        const totalGstSum = itemsForTotals.reduce((sum, item) => {
           const rp = item.media.rentalPayment || {};
           const isSiteGstOn = Number(rp.gstApplicable || item.entry?.gstApplicable || 0) === 1;
           const siteGst = Number(rp.gstAmount || item.entry?.gstAmount || 0);
@@ -1322,11 +1334,11 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
           return sum + effectiveGst;
         }, 0);
 
-        const totalNetPayableSum = sitesInGroupData.reduce((sum, item) => {
+        const totalNetPayableSum = itemsForTotals.reduce((sum, item) => {
           const siteEntry = item.entry || {};
           const rp = item.media?.rentalPayment || {};
           const net = Number(siteEntry.netPayable || rp.netPayable || 0);
-          if (net > 0) return sum + net;
+          if (net > 0 && !isSingleBill) return sum + net;
           const rent = Number(rp.totalRentalAmount || siteEntry.baseAmount || 0);
           const isSiteGstOn = Number(rp.gstApplicable || siteEntry.gstApplicable || 0) === 1;
           const siteGst = Number(rp.gstAmount || siteEntry.gstAmount || 0);
@@ -1337,9 +1349,9 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
           return sum + rent + effectiveGst;
         }, 0);
 
-        const anySiteGstApplicable = sitesInGroupData.some((item) => Number(item.media?.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1);
+        const anySiteGstApplicable = itemsForTotals.some((item) => Number(item.media?.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1);
 
-        const rootGstInvoiceUrl = sitesInGroupData
+        const rootGstInvoiceUrl = itemsForTotals
           .map((item) => item.entry?.invoice?.filePath || item.media?.rentalPayment?.gstInvoiceUrl)
           .find(Boolean) || "";
 
