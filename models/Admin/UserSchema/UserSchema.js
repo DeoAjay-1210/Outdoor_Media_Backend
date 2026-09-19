@@ -10,8 +10,8 @@ const userSchema = new mongoose.Schema(
     userType: {
       type: Number,
       enum: [1, 2, 3],
-      // 1 = Staff
-      // 2 = Team Lead
+      // 1 = Rental Executive
+      // 2 = Rental Manager
       // 3 = CMD
       required: true,
     },
