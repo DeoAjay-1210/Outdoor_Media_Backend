@@ -10,11 +10,15 @@ const userSchema = new mongoose.Schema(
       type: Number,
       enum: [1, 2, 3],
       // 1 = Staff
-      // 2 = Team Head
-      // 3 = Owner
+      // 2 = Team Lead
+      // 3 = CMD
       required: true,
     },
-      registerPassword: {
+    pin: {
+      type: String,
+      select: false,
+    },
+    registerPassword: {
       type: String,
       select: false,
     },
