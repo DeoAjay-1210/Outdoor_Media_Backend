@@ -1,6 +1,8 @@
+const bcrypt = require("bcryptjs");
 const User = require("../../../models/Admin/UserSchema/UserSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const generateToken = require("../../../utils/generateToken");
+const { nowIST } = require("../../../utils/updatedAt");
 
 // ============================================================
 // ENV VARIABLES FOR REGISTER PASSWORDS & FALLBACK LOGIN PINS
@@ -82,13 +84,18 @@ const registerUser = async (req, res) => {
       return errorResponse(res, "This mobile number is already registered. Please log in.", null, 400);
     }
 
+    // Encrypt PIN before storing in DB
+    const hashedPin = await bcrypt.hash(pinStr, 10);
+
     const newUser = new User({
       userName,
       userEmail,
       userPhone: normalizedPhone,
       userType: typeNum,
-      pin: pinStr,
+      pin: hashedPin,
       registerPassword,
+      createdAt: nowIST(),
+      updatedAt: nowIST(),
     });
 
     await newUser.save();
@@ -138,7 +145,12 @@ const loginUser = async (req, res) => {
 
     let isPinValid = false;
     if (user.pin) {
-      isPinValid = (user.pin === inputPin);
+      if (user.pin.startsWith("$2a$") || user.pin.startsWith("$2b$") || user.pin.startsWith("$2y$")) {
+        isPinValid = await bcrypt.compare(inputPin, user.pin);
+      } else {
+        // Plaintext fallback for legacy records
+        isPinValid = (user.pin === inputPin);
+      }
     } else {
       // Fallback for legacy users
       if (typeNum === 1) isPinValid = (inputPin === String(STAFF_LOGIN_PIN).trim());
@@ -150,7 +162,8 @@ const loginUser = async (req, res) => {
       return errorResponse(res, "Invalid 4-digit PIN", null, 400);
     }
 
-    user.lastLogin = new Date();
+    user.lastLogin = nowIST();
+    user.updatedAt = nowIST();
     await user.save();
 
     const token = generateToken(user);
@@ -223,7 +236,7 @@ const forgotPinVerify = async (req, res) => {
 };
 
 // ============================================================
-// FORGOT PIN STEP 2: UPDATE 4-DIGIT PIN IN DB
+// FORGOT PIN STEP 2: UPDATE 4-DIGIT PIN IN DB (ENCRYPTED)
 // ============================================================
 const resetPin = async (req, res) => {
   const { userPhone, userType } = req.body;
@@ -252,7 +265,10 @@ const resetPin = async (req, res) => {
       return errorResponse(res, "User not found", null, 404);
     }
 
-    user.pin = pinStr;
+    // Encrypt new PIN before storing in DB
+    const hashedPin = await bcrypt.hash(pinStr, 10);
+    user.pin = hashedPin;
+    user.updatedAt = nowIST();
     await user.save();
 
     return successResponse(res, "PIN updated successfully. Please log in with your new PIN.", {
