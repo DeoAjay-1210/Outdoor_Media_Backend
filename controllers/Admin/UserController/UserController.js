@@ -17,6 +17,8 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 const STAFF_REGISTER_PASSWORD = process.env.STAFF_REGISTER_PASSWORD;
 const TEAMHEAD_REGISTER_PASSWORD = process.env.TEAMHEAD_REGISTER_PASSWORD;
+const STAFF_LOGIN_PIN = process.env.STAFF_LOGIN_PIN || "1234";
+const TEAMHEAD_LOGIN_PIN = process.env.TEAMHEAD_LOGIN_PIN || "1234";
 // ============================================================
 // USER TYPE LABELS
 // 1 = Staff | 2 = Team Head | 3 = Owner
@@ -64,7 +66,7 @@ function generateAndStoreOtp(key, userData) {
   const otp = Math.floor(1000 + Math.random() * 9000);
   otpStore[key] = {
     otp,
-    expiresAt: Date.now() + 2 * 60 * 1000,
+    expiresAt: Date.now() + 30 * 1000,
     userData,
   };
   return otp;
@@ -147,7 +149,7 @@ const registerSendOtp = async (req, res) => {
       userType: Number(userType),
     });
 
-     const message = `Welcome to ADINN. Your Brand Activation Code is ${otp}. Use it to verify your brand owner account. Valid for 5 minutes.`;
+     const message = `Welcome to ADINN. Your Brand Activation Code is ${otp}. Use it to verify your brand owner account. Valid for 30 seconds.`;
 
     if (IS_PRODUCTION) {
       const smsSent = await sendSms(normalizedPhone, message, NETTYFISH_TEMPLATE_ID_REGISTER);
@@ -232,7 +234,7 @@ const resendRegisterOtp = async (req, res) => {
 
     const newOtp = generateAndStoreOtp(normalizedPhone, storedData.userData);
 
-        const message = `Your new ADINN Campaign Code is ${newOtp}. It is valid for 5 minutes. Please keep it private.`;
+        const message = `Your new ADINN Campaign Code is ${newOtp}. It is valid for 30 seconds. Please keep it private.`;
 
     if (IS_PRODUCTION) {
       const smsSent = await sendSms(normalizedPhone, message, NETTYFISH_TEMPLATE_ID_RESEND);
@@ -249,25 +251,58 @@ const resendRegisterOtp = async (req, res) => {
 
 const loginSendOtp = async (req, res) => {
   const { userPhone, userType } = req.body;
+  const pin = req.body.pin || req.body.loginPin || req.body.password;
 
   try {
     if (!userPhone) return errorResponse(res, "Phone number is required", null, 400);
-   if (!userType) {
-      return errorResponse(res, "User type is required", null, 400);
+    if (!userType || ![1, 2, 3].includes(Number(userType))) {
+      return errorResponse(res, "Valid userType is required: 1 (Staff), 2 (Team Head), 3 (Owner)", null, 400);
     }
     const normalizedPhone = String(userPhone).trim();
+    const typeNum = Number(userType);
 
-    const user = await User.findOne({ userPhone: normalizedPhone, userType: Number(userType), });
+    const user = await User.findOne({ userPhone: normalizedPhone, userType: typeNum });
     if (!user) return errorResponse(res, "User not found", null, 404);
 
+    // If userType is 1 (Staff) or 2 (Team Head): 4-digit PIN based login from .env
+    if (typeNum === 1 || typeNum === 2) {
+      if (!pin) {
+        return errorResponse(res, "PIN is required", null, 400);
+      }
+
+      const expectedPin = typeNum === 1 ? STAFF_LOGIN_PIN : TEAMHEAD_LOGIN_PIN;
+
+      if (String(pin).trim() !== String(expectedPin).trim()) {
+        return errorResponse(res, "Invalid PIN", null, 400);
+      }
+
+      user.lastLogin = new Date();
+      await user.save();
+
+      const token = generateToken(user);
+
+      return successResponse(res, "Login successful", {
+        token,
+        user: {
+          _id: user._id,
+          userName: user.userName,
+          userEmail: user.userEmail,
+          userPhone: user.userPhone,
+          userType: user.userType,
+          userTypeLabel: USER_TYPE_LABELS[user.userType],
+        },
+      });
+    }
+
+    // If userType is 3 (Owner): OTP based login
     const otp = generateAndStoreOtp(normalizedPhone, {
       userId: user._id,
       login: true,
       userPhone: normalizedPhone,
-       userType: user.userType,
+      userType: user.userType,
     });
 
-    const message = `Your ADINN Campaign Code is ${otp}. Use it to access your campaign dashboard. Valid for 5 minutes. Do not share this code.`;
+    const message = `Your ADINN Campaign Code is ${otp}. Use it to access your campaign dashboard. Valid for 30 seconds. Do not share this code.`;
     if (IS_PRODUCTION) {
       const smsSent = await sendSms(normalizedPhone, message, NETTYFISH_TEMPLATE_ID_LOGIN);
       if (!smsSent) return errorResponse(res, "Failed to send login OTP", null, 500);
@@ -342,7 +377,7 @@ const resendLoginOtp = async (req, res) => {
 
     const newOtp = generateAndStoreOtp(normalizedPhone, userData);
 
-   const message = `Your new ADINN Campaign Code is ${newOtp}. It is valid for 5 minutes. Please keep it private.`;
+   const message = `Your new ADINN Campaign Code is ${newOtp}. It is valid for 30 seconds. Please keep it private.`;
 
     if (IS_PRODUCTION) {
       const smsSent = await sendSms(normalizedPhone, message, NETTYFISH_TEMPLATE_ID_RESEND);
