@@ -1241,7 +1241,10 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
         status: Number(activeDetail.status || site.status || 1),
         rentalPayment: rentalPaymentObj,
         agreement: buildAgreementPayload(ag),
-        appraisal: buildAppraisalPayload(site.appraisal, siteEntry),
+        appraisal: (() => {
+          const app = buildAppraisalPayload(site.appraisal, siteEntry);
+          return (app && Object.keys(app).length > 0) ? app : [];
+        })(),
         landOwners: landOwnersList,
         proof_of_campaign: extractProofs(site, siteEntry),
       };
@@ -1344,7 +1347,10 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
           return sum + rent + effectiveGst;
         }, 0);
 
-        const anySiteGstApplicable = itemsForTotals.some((item) => Number(item.media?.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1);
+        const anySiteGstApplicable = itemsForTotals.some((item) =>
+          Number(item.media?.rentalPayment?.gstApplicable || item.entry?.gstApplicable || 0) === 1 ||
+          (item.media?.landOwners || []).some((o) => Number(o.gstApplicable) === 1)
+        );
 
         const rootGstInvoiceUrl = itemsForTotals
           .map((item) => item.entry?.invoice?.filePath || item.media?.rentalPayment?.gstInvoiceUrl)
@@ -1452,7 +1458,7 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
         }
 
         if (isSingleBill) {
-          if (isSingleAgreement) {
+          if (isSingleAgreement || sitesInGroupData.length === 1) {
             data.rentalPayment = rootRentalPaymentObj;
             const mainAg = buildAgreementPayload(firstSite.agreement);
             if (mainAg) {
@@ -1460,7 +1466,7 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
             }
           }
         } else {
-          if (isSingleAgreement) {
+          if (isSingleAgreement || sitesInGroupData.length === 1) {
             const mainAg = buildAgreementPayload(firstSite.agreement);
             if (mainAg) {
               data.agreement = mainAg;
