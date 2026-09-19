@@ -17,11 +17,11 @@ const CMD_LOGIN_PIN = process.env.CMD_LOGIN_PIN || process.env.OWNER_LOGIN_PIN |
 
 // ============================================================
 // USER TYPE LABELS
-// 1 = Staff | 2 = Team Lead | 3 = CMD
+// 1 = Rental Executive | 2 = Rental Manager | 3 = CMD
 // ============================================================
 const USER_TYPE_LABELS = {
-  1: "Staff",
-  2: "Team Lead",
+  1: "Rental Executive",
+  2: "Rental Manager",
   3: "CMD",
 };
 
@@ -36,7 +36,7 @@ const registerUser = async (req, res) => {
     if (!userName) return errorResponse(res, "User name is required", null, 400);
     if (!userPhone) return errorResponse(res, "Mobile number is required", null, 400);
     if (!userType || ![1, 2, 3].includes(Number(userType))) {
-      return errorResponse(res, "Valid userType is required: 1 (Staff), 2 (Team Lead), 3 (CMD)", null, 400);
+      return errorResponse(res, "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD)", null, 400);
     }
 
     const typeNum = Number(userType);
@@ -53,19 +53,19 @@ const registerUser = async (req, res) => {
     // Role-based register password check
     if (typeNum === 1 && STAFF_REGISTER_PASSWORD) {
       if (!registerPassword) {
-        return errorResponse(res, "Staff registration password is required", null, 400);
+        return errorResponse(res, "Rental Executive registration password is required", null, 400);
       }
       if (registerPassword !== STAFF_REGISTER_PASSWORD) {
-        return errorResponse(res, "Invalid staff registration password", null, 400);
+        return errorResponse(res, "Invalid Rental Executive registration password", null, 400);
       }
     }
 
     if (typeNum === 2 && TEAMHEAD_REGISTER_PASSWORD) {
       if (!registerPassword) {
-        return errorResponse(res, "Team Lead registration password is required", null, 400);
+        return errorResponse(res, "Rental Manager registration password is required", null, 400);
       }
       if (registerPassword !== TEAMHEAD_REGISTER_PASSWORD) {
-        return errorResponse(res, "Invalid Team Lead registration password", null, 400);
+        return errorResponse(res, "Invalid Rental Manager registration password", null, 400);
       }
     }
 
@@ -129,7 +129,7 @@ const loginUser = async (req, res) => {
   try {
     if (!userPhone) return errorResponse(res, "Phone number is required", null, 400);
     if (!userType || ![1, 2, 3].includes(Number(userType))) {
-      return errorResponse(res, "Valid userType is required: 1 (Staff), 2 (Team Lead), 3 (CMD)", null, 400);
+      return errorResponse(res, "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD)", null, 400);
     }
     if (!pin) {
       return errorResponse(res, "4-digit PIN is required", null, 400);
@@ -194,7 +194,7 @@ const forgotPinVerify = async (req, res) => {
   try {
     if (!userPhone) return errorResponse(res, "Mobile number is required", null, 400);
     if (!userType || ![1, 2, 3].includes(Number(userType))) {
-      return errorResponse(res, "Valid userType is required: 1 (Staff), 2 (Team Lead), 3 (CMD)", null, 400);
+      return errorResponse(res, "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD)", null, 400);
     }
     if (!registerPassword) {
       return errorResponse(res, "Registration password is required", null, 400);
@@ -205,11 +205,11 @@ const forgotPinVerify = async (req, res) => {
     // Role-based password check
     if (typeNum === 1 && STAFF_REGISTER_PASSWORD) {
       if (registerPassword !== STAFF_REGISTER_PASSWORD) {
-        return errorResponse(res, "Invalid staff registration password", null, 400);
+        return errorResponse(res, "Invalid Rental Executive registration password", null, 400);
       }
     } else if (typeNum === 2 && TEAMHEAD_REGISTER_PASSWORD) {
       if (registerPassword !== TEAMHEAD_REGISTER_PASSWORD) {
-        return errorResponse(res, "Invalid Team Lead registration password", null, 400);
+        return errorResponse(res, "Invalid Rental Manager registration password", null, 400);
       }
     } else if (typeNum === 3 && CMD_REGISTER_PASSWORD) {
       if (registerPassword !== CMD_REGISTER_PASSWORD) {
@@ -220,7 +220,8 @@ const forgotPinVerify = async (req, res) => {
     const normalizedPhone = String(userPhone).trim();
     const user = await User.findOne({ userPhone: normalizedPhone, userType: typeNum });
     if (!user) {
-      return errorResponse(res, "User not found with this mobile number and userType", null, 404);
+      const roleLabel = USER_TYPE_LABELS[typeNum] || "selected role";
+      return errorResponse(res, `User not found with this mobile number for ${roleLabel}`, null, 404);
     }
 
     return successResponse(res, "User details verified successfully. You can now reset your PIN.", {
@@ -245,7 +246,7 @@ const resetPin = async (req, res) => {
   try {
     if (!userPhone) return errorResponse(res, "Mobile number is required", null, 400);
     if (!userType || ![1, 2, 3].includes(Number(userType))) {
-      return errorResponse(res, "Valid userType is required: 1 (Staff), 2 (Team Lead), 3 (CMD)", null, 400);
+      return errorResponse(res, "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD)", null, 400);
     }
 
     if (!newPin) {
@@ -293,5 +294,5 @@ module.exports = {
   resendRegisterOtp: registerUser,
   loginSendOtp: loginUser,
   loginVerifyOtp: loginUser,
-  resendLoginOtp: loginUser,
+  resendLoginOtp: registerUser,
 };
