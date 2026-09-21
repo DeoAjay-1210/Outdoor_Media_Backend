@@ -1,4 +1,7 @@
+const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+const axios = require("axios");
+const jwt = require("jsonwebtoken");
 const User = require("../../../models/Admin/UserSchema/UserSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const generateToken = require("../../../utils/generateToken");
@@ -283,11 +286,220 @@ const resetPin = async (req, res) => {
   }
 };
 
+// ============================================================
+// ============================================================
+// FORGOT PIN (Generates 4-digit PIN & triggers PHP Mail)
+// ============================================================
+const forgotPin = async (req, res) => {
+  const emailInput = req.body.userEmail || req.body.email || req.body.userPhone;
+
+  try {
+    if (!emailInput) {
+      return errorResponse(res, "userEmail or registered mobile number is required", null, 400);
+    }
+
+    const normalizedInput = String(emailInput).trim();
+
+    // Find user by email or phone
+    let user = await User.findOne({
+      $or: [
+        { userEmail: new RegExp("^" + normalizedInput.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + "$", "i") },
+        { userPhone: normalizedInput }
+      ]
+    });
+
+    if (!user) {
+      return errorResponse(res, "User not found", null, 404);
+    }
+
+    const targetEmail = user.userEmail || (normalizedInput.includes("@") ? normalizedInput : null);
+    if (!targetEmail) {
+      return errorResponse(res, "No registered email address found for this user account", null, 400);
+    }
+
+    // Generate random 4-digit PIN (1000 - 9999)
+    const generatedPin = String(Math.floor(1000 + Math.random() * 9000));
+
+    // Encrypt generated PIN with bcrypt before storing
+    const hashedPin = await bcrypt.hash(generatedPin, 10);
+    user.pin = hashedPin;
+    user.updatedAt = nowIST();
+
+    // Save to MongoDB before attempting email dispatch
+    await user.save();
+
+    // Prepare mail payload for PHP Mail API
+    const phpMailUrl = process.env.PHP_MAIL_URL || "https://adinndigital.com/api/outdoormedia/forgotPinMail.php";
+    const mailPayload = {
+      mailtype: "forgotpin",
+      to: [targetEmail],
+      data: {
+        userName: user.userName || "User",
+        email: targetEmail,
+        pin: generatedPin
+      }
+    };
+
+    // Send request to PHP Mail service
+    try {
+      const mailRes = await axios.post(phpMailUrl, mailPayload, {
+        headers: { "Content-Type": "application/json" },
+        timeout: 15000
+      });
+
+      if (mailRes.data && mailRes.data.status === "success") {
+        return successResponse(res, "A temporary PIN has been sent to your registered email", {
+          userEmail: targetEmail,
+          // email: targetEmail
+        }, 200);
+      } else {
+        console.error("PHP Mail API Error:", mailRes.data);
+        return errorResponse(res, mailRes.data?.message || "Failed to send PIN email via PHP mail service", mailRes.data, 500);
+      }
+    } catch (mailErr) {
+      console.error("PHP Mail Request Failed:", mailErr.message);
+      const errorDetails = mailErr.response?.data || mailErr.message || "Unable to reach PHP Mail service endpoint";
+      return errorResponse(res, "Failed to connect to mail service. Email could not be sent.", errorDetails, 500);
+    }
+  } catch (err) {
+    console.error("Forgot PIN Error:", err);
+    return errorResponse(res, "Server error during forgot PIN request", null, 500);
+  }
+};
+
+// ============================================================
+// CHANGE PIN (Supports optional Bearer Token OR userPhone/email/userId in Body)
+// ============================================================
+const changePin = async (req, res) => {
+  const { currentPin, newPin, confirmPin } = req.body;
+  const userPhone = req.body.userPhone || req.body.phone;
+  const userEmail = req.body.userEmail || req.body.email;
+  const userId = req.body.userId;
+
+  try {
+    if (!currentPin) {
+      return errorResponse(res, "Current PIN is required", null, 400);
+    }
+
+    if (!newPin) {
+      return errorResponse(res, "New PIN is required", null, 400);
+    }
+
+    if (!confirmPin) {
+      return errorResponse(res, "Confirm PIN is required", null, 400);
+    }
+
+    const currentPinStr = String(currentPin).trim();
+    const newPinStr = String(newPin).trim();
+    const confirmPinStr = String(confirmPin).trim();
+
+    // Validate 4-digit numeric PIN format
+    if (!/^\d{4}$/.test(newPinStr)) {
+      return errorResponse(res, "New PIN must be a 4-digit number", null, 400);
+    }
+
+    // Validate newPin === confirmPin
+    if (newPinStr !== confirmPinStr) {
+      return errorResponse(res, "New PIN and Confirm PIN do not match", null, 400);
+    }
+
+    // Validate newPin !== currentPin
+    if (newPinStr === currentPinStr) {
+      return errorResponse(res, "New PIN cannot be the same as Current PIN", null, 400);
+    }
+
+    // Attempt to extract user from Authorization Bearer token if present
+    if (!req.user && req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
+      try {
+        const token = req.headers.authorization.split(" ")[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded && decoded.id) {
+          req.user = { userId: decoded.id };
+        }
+      } catch (tokenErr) {
+        // Token invalid or expired - proceed to body identifier fallback
+      }
+    }
+
+    let user = null;
+
+    // 1. Find user by decoded JWT user ID
+    if (req.user && req.user.userId) {
+      user = await User.findById(req.user.userId).select("+pin");
+    }
+
+    // 2. Fallback: Find user by body identifier (mobile phone, email, or userId)
+    if (!user) {
+      const identifier = userPhone || userEmail || userId;
+      if (!identifier) {
+        return errorResponse(
+          res,
+          "User identifier (mobile number, email, or Bearer token) is required",
+          null,
+          400
+        );
+      }
+
+      const normalizedIdentifier = String(identifier).trim();
+
+      if (mongoose.Types.ObjectId.isValid(normalizedIdentifier)) {
+        user = await User.findById(normalizedIdentifier).select("+pin");
+      }
+
+      if (!user) {
+        user = await User.findOne({
+          $or: [
+            { userPhone: normalizedIdentifier },
+            { userEmail: new RegExp("^" + normalizedIdentifier.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + "$", "i") }
+          ]
+        }).select("+pin");
+      }
+    }
+
+    if (!user) {
+      return errorResponse(res, "User not found", null, 404);
+    }
+
+    // Verify current PIN
+    let isCurrentPinValid = false;
+    if (user.pin) {
+      if (user.pin.startsWith("$2a$") || user.pin.startsWith("$2b$") || user.pin.startsWith("$2y$")) {
+        isCurrentPinValid = await bcrypt.compare(currentPinStr, user.pin);
+      } else {
+        isCurrentPinValid = (user.pin === currentPinStr);
+      }
+    } else {
+      // Fallback for legacy users
+      const typeNum = user.userType;
+      if (typeNum === 1) isCurrentPinValid = (currentPinStr === String(STAFF_LOGIN_PIN).trim());
+      else if (typeNum === 2) isCurrentPinValid = (currentPinStr === String(TEAMHEAD_LOGIN_PIN).trim());
+      else if (typeNum === 3) isCurrentPinValid = (currentPinStr === String(CMD_LOGIN_PIN).trim());
+    }
+
+    if (!isCurrentPinValid) {
+      return errorResponse(res, "Current PIN is incorrect", null, 400);
+    }
+
+    // Hash and update new PIN
+    const hashedNewPin = await bcrypt.hash(newPinStr, 10);
+    user.pin = hashedNewPin;
+    user.updatedAt = nowIST();
+    await user.save();
+
+    return successResponse(res, "PIN changed successfully", null, 200);
+  } catch (err) {
+    console.error("Change PIN Error:", err);
+    return errorResponse(res, "Server error during PIN change", null, 500);
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
   forgotPinVerify,
   resetPin,
+  forgotPin,
+  changePin,
   // Backward compatibility exports
   registerSendOtp: registerUser,
   verifyRegisterOtp: registerUser,
