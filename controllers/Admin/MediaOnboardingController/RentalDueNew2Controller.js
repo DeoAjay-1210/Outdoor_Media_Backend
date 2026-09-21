@@ -989,6 +989,9 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
             if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) {
               return true;
             }
+            if (d <= entryDate) {
+              return true;
+            }
             if (entryMonthLabel) {
               const monthName = d.toLocaleString("en-US", { month: "long" }).toLowerCase();
               const shortMonthName = d.toLocaleString("en-US", { month: "short" }).toLowerCase();
@@ -1464,12 +1467,20 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
             if (mainAg) {
               data.agreement = mainAg;
             }
+            const mainAppraisal = buildAppraisalPayload(firstSite.appraisal, firstEntry);
+            if (mainAppraisal && Object.keys(mainAppraisal).length > 0) {
+              data.appraisal = mainAppraisal;
+            }
           }
         } else {
           if (isSingleAgreement || sitesInGroupData.length === 1) {
             const mainAg = buildAgreementPayload(firstSite.agreement);
             if (mainAg) {
               data.agreement = mainAg;
+            }
+            const mainAppraisal = buildAppraisalPayload(firstSite.appraisal, firstEntry);
+            if (mainAppraisal && Object.keys(mainAppraisal).length > 0) {
+              data.appraisal = mainAppraisal;
             }
           }
         }
