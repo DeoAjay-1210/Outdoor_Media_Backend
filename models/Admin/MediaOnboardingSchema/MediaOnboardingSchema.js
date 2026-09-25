@@ -1256,18 +1256,6 @@ MediaSchema.pre("save", function () {
       owner.onlineAmount = resolvedShareAmount;
     }
 
-    // ✅ AUTO-TDS — Automatically force tdsApplicable to 1 if:
-    // 1. The landowner's total shareAmount is 50,000 or ABOVE AND they are Online-only (Category 2).
-    // 2. The landowner's onlineAmount is 50,000 or ABOVE (for Category 3 split payments).
-    // This ensures that for split payments (Category 3), even if the total share is 51,000,
-    // if the online portion is only 11,000, TDS will NOT be applied automatically.
-    if (
-      (paymentCategory === 2 && Number(owner.shareAmount || 0) >= 50000) ||
-      (Number(owner.onlineAmount || 0) >= 50000)
-    ) {
-      owner.tdsApplicable = 1;
-    }
-
     let tdsBaseAmount = 0;
 
     if (paymentCategory === 1) {
