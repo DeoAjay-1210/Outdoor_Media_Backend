@@ -102,7 +102,7 @@ const validateOwnerPaymentCategories = (
         }
 
         const splitTotal = Math.floor((cashAmt + onlineAmt).toFixed(2));
-        if (Math.abs(splitTotal - ownerShare) > 0.01) {
+        if (Math.abs(splitTotal - ownerShare) > 1) {
           return {
             valid: false,
             message: `Owner "${owner.name}": cashAmount (${cashAmt}) + onlineAmount (${onlineAmt}) = ${splitTotal} does not match owner share amount ${ownerShare}.`,
@@ -219,7 +219,7 @@ const validateLandOwnerShares = (
 
   const diff = Math.abs(totalComputedAmount - netPayable);
 
-  if (diff > 1) {
+  if (diff > 2) {
     return {
       valid: false,
       message: `Net payable amount (${netPayable.toFixed(2)}). Difference: ${diff.toFixed(2)}`,
@@ -541,31 +541,55 @@ const cascadeHistory = (
 
 const scaleLandOwnersForRentChange = (landOwners, oldAmount, newAmount) => {
   if (!Array.isArray(landOwners) || !landOwners.length) return;
-  if (!oldAmount || oldAmount <= 0 || !newAmount || newAmount <= 0) return;
+  if (!newAmount || newAmount <= 0) return;
 
-  const ratio = newAmount / oldAmount;
+  const ratio = oldAmount && oldAmount > 0 ? newAmount / oldAmount : 1;
   if (!isFinite(ratio) || ratio <= 0) return;
+
+  let fixedSum = 0;
+  const fixedOwners = [];
+
+  landOwners.forEach((owner) => {
+    if (Number(owner.typeShare) === 1) {
+      const pct = Number(owner.sharePercentage || 0);
+      owner.shareAmount = Math.floor((newAmount * pct) / 100);
+    } else if (Number(owner.typeShare) === 2) {
+      owner.shareAmount = oldAmount > 0
+        ? Math.floor(Number(owner.shareAmount || 0) * ratio)
+        : Number(owner.shareAmount || 0);
+      fixedOwners.push(owner);
+      fixedSum += owner.shareAmount;
+    }
+  });
+
+  if (fixedOwners.length > 0 && fixedOwners.length === landOwners.length) {
+    const fixedDiff = newAmount - fixedSum;
+    if (fixedDiff !== 0 && oldAmount > 0) {
+      fixedOwners[fixedOwners.length - 1].shareAmount += fixedDiff;
+    }
+  }
 
   landOwners.forEach((owner) => {
     const cat = Number(owner.paymentCategory);
 
-    // Scale fixed-amount shares proportionally
-    if (Number(owner.typeShare) === 2) {
-      owner.shareAmount = Math.floor(Number(owner.shareAmount || 0) * ratio);
-    }
-
     if (cat === 1) {
-      // Cash only
-      owner.cashAmount = Math.floor(Number(owner.cashAmount || 0) * ratio);
+      owner.cashAmount = owner.shareAmount;
       owner.onlineAmount = 0;
     } else if (cat === 2) {
-      // Online only
-      owner.onlineAmount = Math.floor(Number(owner.onlineAmount || 0) * ratio);
       owner.cashAmount = 0;
+      owner.onlineAmount = owner.shareAmount;
     } else if (cat === 3) {
-      // Cash + Online split: scale both components
-      owner.cashAmount = Math.floor(Number(owner.cashAmount || 0) * ratio);
-      owner.onlineAmount = Math.floor(Number(owner.onlineAmount || 0) * ratio);
+      owner.cashAmount = oldAmount > 0 ? Math.floor(Number(owner.cashAmount || 0) * ratio) : Number(owner.cashAmount || 0);
+      owner.onlineAmount = oldAmount > 0 ? Math.floor(Number(owner.onlineAmount || 0) * ratio) : Number(owner.onlineAmount || 0);
+
+      const splitDiff = owner.shareAmount - (owner.cashAmount + owner.onlineAmount);
+      if (splitDiff !== 0) {
+        if (owner.onlineAmount > 0) {
+          owner.onlineAmount += splitDiff;
+        } else {
+          owner.cashAmount += splitDiff;
+        }
+      }
     }
   });
 };
@@ -1772,6 +1796,12 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       }
     }
 
+    if (!mediaData.agreement && existingMediaForValidation?.agreement && mediaData.rentalPayment) {
+      mediaData.agreement = JSON.parse(
+        JSON.stringify(existingMediaForValidation.agreement),
+      );
+    }
+
     if (mediaData.agreement) {
       if (mediaData.agreement.startDate) {
         mediaData.agreement.startDate = toDateOnly(
@@ -1781,12 +1811,16 @@ if (Array.isArray(mediaData.rentalPayment?.gstOutstandingHistory)) {
       if (mediaData.agreement.endDate) {
         mediaData.agreement.endDate = toDateOnly(mediaData.agreement.endDate);
       }
-      if (mediaData.agreement.reminderBeforeExpiry)
+      if (mediaData.reminderBeforeExpiry)
         mediaData.agreement.reminderBeforeExpiry = Number(
           mediaData.agreement.reminderBeforeExpiry,
         );
       if (mediaData.rentalPayment) {
+        if (!mediaData.agreement.rentalPayment) {
+          mediaData.agreement.rentalPayment = {};
+        }
         mediaData.agreement.rentalPayment = {
+          ...mediaData.agreement.rentalPayment,
           totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
           paymentFrequency: mediaData.rentalPayment.paymentFrequency || 1,
           customPaymentFrequency:
@@ -2347,12 +2381,20 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         rentActuallyChanged,
       );
 
-      if (mediaData.appraisal) {
-        recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
-      }
+      applyAppraisalRentIfDuent(
+        mediaData,
+        media,
+        userName,
+        rentActuallyChanged,
+      );
 
-      // Step 4: handle agreement history with updatedBy/updatedAt on rentalPayment.
-      // applyAppraisalRentIfDuent(mediaData, media, userName, rentActuallyChanged); // ✅ MOVED to Model Pre-Save
+      const effectiveBaseRent = Number(
+        mediaData.rentalPayment?.totalRentalAmount ?? currentBaseRent,
+      );
+
+      if (mediaData.appraisal) {
+        recomputeAppraisalSummary(mediaData.appraisal, effectiveBaseRent);
+      }
 
       applyOwnerApprovalBillingShift(mediaData, media, userName);
       if (mediaData.rentalPayment && mediaData.agreement) {
@@ -2576,16 +2618,20 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         rentActuallyChanged,
       );
 
-      if (Number(mediaData.appraisal?.applicable) === 1) {
-        recomputeAppraisalSummary(mediaData.appraisal, currentBaseRent);
-      }
+      applyAppraisalRentIfDuent(
+        mediaData,
+        null,
+        userName,
+        rentActuallyChanged,
+      );
 
-      // applyAppraisalRentIfDuent(
-      //   mediaData,
-      //   null,
-      //   userName,
-      //   rentActuallyChanged,
-      // ); // ✅ MOVED to Model Pre-Save
+      const effectiveBaseRent = Number(
+        mediaData.rentalPayment?.totalRentalAmount ?? currentBaseRent,
+      );
+
+      if (Number(mediaData.appraisal?.applicable) === 1) {
+        recomputeAppraisalSummary(mediaData.appraisal, effectiveBaseRent);
+      }
 
       mediaData.gstApplicableFlag = detectInitialGstApplicableFlag(mediaData);
       // Step 4: push first agreement history snapshot.
@@ -3119,6 +3165,19 @@ const updateAgreement = async (req, res) => {
       );
 
       if (activeTotalRentalAmount !== existingTopLevelAmount) {
+        if (
+          existingTopLevelAmount > 0 &&
+          Array.isArray(media.landOwners) &&
+          media.landOwners.length > 0
+        ) {
+          scaleLandOwnersForRentChange(
+            media.landOwners,
+            existingTopLevelAmount,
+            activeTotalRentalAmount,
+          );
+          media.markModified("landOwners");
+        }
+
         const rentalAmountHistory = (
           media.rentalPayment.rentalAmountHistory || []
         ).map((h) => (h.toObject ? h.toObject() : { ...h }));
