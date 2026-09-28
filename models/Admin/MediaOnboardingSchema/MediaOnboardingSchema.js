@@ -1163,50 +1163,55 @@ MediaSchema.pre("save", function () {
       const appraisedRent = Number(latestDue.newRent || 0);
 
       if (appraisedRent > 0 && appraisedRent !== rp.totalRentalAmount) {
-        const oldRent = rp.totalRentalAmount;
-        rp.totalRentalAmount = appraisedRent;
+        if (this.isModified("rentalPayment.totalRentalAmount")) {
+          // Total rent was explicitly updated manually on this document — rebase latestDue.newRent
+          latestDue.newRent = rp.totalRentalAmount;
+        } else {
+          const oldRent = rp.totalRentalAmount;
+          rp.totalRentalAmount = appraisedRent;
 
-        // ✅ Proportional scaling for fixed-amount owners and cash/online splits
-        if (oldRent > 0 && Array.isArray(this.landOwners)) {
-          const ratio = appraisedRent / oldRent;
-          this.landOwners.forEach((owner) => {
-            // Scale fixed-amount shares proportionally
-            if (Number(owner.typeShare) === 2) {
-              owner.shareAmount = Math.floor(
-                Number(owner.shareAmount || 0) * ratio,
-              );
-            }
+          // ✅ Proportional scaling for fixed-amount owners and cash/online splits
+          if (oldRent > 0 && Array.isArray(this.landOwners)) {
+            const ratio = appraisedRent / oldRent;
+            this.landOwners.forEach((owner) => {
+              // Scale fixed-amount shares proportionally
+              if (Number(owner.typeShare) === 2) {
+                owner.shareAmount = Math.floor(
+                  Number(owner.shareAmount || 0) * ratio,
+                );
+              }
 
-            const cat = Number(owner.paymentCategory);
-            if (cat === 1) {
-              owner.cashAmount = Math.floor(
-                Number(owner.cashAmount || 0) * ratio,
-              );
-              owner.onlineAmount = 0;
-            } else if (cat === 2) {
-              owner.onlineAmount = Math.floor(
-                Number(owner.onlineAmount || 0) * ratio,
-              );
-              owner.cashAmount = 0;
-            } else if (cat === 3) {
-              owner.cashAmount = Math.floor(
-                Number(owner.cashAmount || 0) * ratio,
-              );
-              owner.onlineAmount = Math.floor(
-                Number(owner.onlineAmount || 0) * ratio,
-              );
-            }
+              const cat = Number(owner.paymentCategory);
+              if (cat === 1) {
+                owner.cashAmount = Math.floor(
+                  Number(owner.cashAmount || 0) * ratio,
+                );
+                owner.onlineAmount = 0;
+              } else if (cat === 2) {
+                owner.onlineAmount = Math.floor(
+                  Number(owner.onlineAmount || 0) * ratio,
+                );
+                owner.cashAmount = 0;
+              } else if (cat === 3) {
+                owner.cashAmount = Math.floor(
+                  Number(owner.cashAmount || 0) * ratio,
+                );
+                owner.onlineAmount = Math.floor(
+                  Number(owner.onlineAmount || 0) * ratio,
+                );
+              }
+            });
+          }
+
+          // Record in rentalAmountHistory
+          if (!rp.rentalAmountHistory) rp.rentalAmountHistory = [];
+          rp.rentalAmountHistory.push({
+            amount: appraisedRent,
+            updatedBy: `System (Appraisal applied - ${toDateOnly(latestDue.appraisalDate).toISOString().split("T")[0]})`,
+            updatedAt: nowIST(),
           });
+          rp.rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
         }
-
-        // Record in rentalAmountHistory
-        if (!rp.rentalAmountHistory) rp.rentalAmountHistory = [];
-        rp.rentalAmountHistory.push({
-          amount: appraisedRent,
-          updatedBy: `System (Appraisal applied - ${toDateOnly(latestDue.appraisalDate).toISOString().split("T")[0]})`,
-          updatedAt: nowIST(),
-        });
-        rp.rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
       }
     }
   }

@@ -498,44 +498,102 @@ const cascadeHistory = (
   netPayable,
   rentActuallyChanged = false,
 ) => {
-  const today = todayKey();
   const currentMonth = thisMonthKey();
-  const sorted = history
+  const sorted = (history || [])
     .filter((h) => h.appraisalDate)
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
 
+  if (!sorted.length) return sorted;
+
   let prev = Number(baseRent || 0);
-  let manualRebaseDone = false;
 
-  for (const entry of sorted) {
-    const entryDateKey = dayKey(entry.appraisalDate);
-    const entryMonthKey = monthKey(entry.appraisalDate);
-
-    // ✅ Re-baseline from today onwards if the rent was manually changed.
-    // This ensures that if a user updates rent to 60,000, future appraisals
-    // start from 60,000 rather than the old schedule's base.
-    if (rentActuallyChanged && !manualRebaseDone && entryMonthKey >= currentMonth) {
-      prev = Number(netPayable ?? prev);
-      manualRebaseDone = true;
+  // Find the latest due entry index (month <= currentMonth)
+  let latestDueIdx = -1;
+  for (let i = 0; i < sorted.length; i++) {
+    if (monthKey(sorted[i].appraisalDate) <= currentMonth) {
+      latestDueIdx = i;
     }
-
-    entry.previousRent = prev;
-
-    // ✅ FIXED — Only apply bump if it's a current/future entry and NOT a PAST anchor.
-    // "Yesterday don't apply, today it will apply"
-    // (We now allow current-month anchors to have a bump computed so the
-    // appraisalAmount shows up in the summary even after a date update)
-    const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
-
-    if (isPastAnchor || entryMonthKey < currentMonth) {
-      entry.appraisalAmount = 0;
-    } else {
-      entry.appraisalAmount = computeAppraisalAmount(entry, prev);
-    }
-
-    entry.newRent = Math.floor(prev + entry.appraisalAmount);
-    prev = entry.newRent;
   }
+
+  if (rentActuallyChanged) {
+    const targetAmount = Number(netPayable ?? prev);
+
+    if (latestDueIdx !== -1) {
+      // Process past entries prior to latestDueIdx
+      for (let i = 0; i < latestDueIdx; i++) {
+        const entry = sorted[i];
+        const entryMonthKey = monthKey(entry.appraisalDate);
+        entry.previousRent = prev;
+        const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
+        if (isPastAnchor || entryMonthKey < currentMonth) {
+          entry.appraisalAmount = 0;
+        } else {
+          entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+        }
+        entry.newRent = Math.floor(prev + entry.appraisalAmount);
+        prev = entry.newRent;
+      }
+
+      // Re-baseline the current active checkpoint (latest due entry) to the new manual rent
+      const latestDueEntry = sorted[latestDueIdx];
+      latestDueEntry.newRent = targetAmount;
+      prev = targetAmount;
+
+      // Cascade all future entries starting from targetAmount
+      for (let i = latestDueIdx + 1; i < sorted.length; i++) {
+        const entry = sorted[i];
+        entry.previousRent = prev;
+        entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+        entry.newRent = Math.floor(prev + entry.appraisalAmount);
+        prev = entry.newRent;
+      }
+    } else {
+      // All entries are in the future
+      prev = targetAmount;
+      for (let i = 0; i < sorted.length; i++) {
+        const entry = sorted[i];
+        entry.previousRent = prev;
+        entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+        entry.newRent = Math.floor(prev + entry.appraisalAmount);
+        prev = entry.newRent;
+      }
+    }
+  } else {
+    // Rent was NOT changed in this request (e.g. user edited an unrelated field)
+    if (latestDueIdx !== -1) {
+      // Preserve the current active rent checkpoint
+      const latestDueEntry = sorted[latestDueIdx];
+      const activeRent = Number(latestDueEntry.newRent || netPayable || prev);
+      latestDueEntry.newRent = activeRent;
+      prev = activeRent;
+
+      // Cascade all future entries starting from activeRent
+      for (let i = latestDueIdx + 1; i < sorted.length; i++) {
+        const entry = sorted[i];
+        entry.previousRent = prev;
+        entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+        entry.newRent = Math.floor(prev + entry.appraisalAmount);
+        prev = entry.newRent;
+      }
+    } else {
+      // Normal cascade when all entries are in the future
+      for (const entry of sorted) {
+        const entryMonthKey = monthKey(entry.appraisalDate);
+        entry.previousRent = prev;
+        const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
+
+        if (isPastAnchor || entryMonthKey < currentMonth) {
+          entry.appraisalAmount = 0;
+        } else {
+          entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+        }
+
+        entry.newRent = Math.floor(prev + entry.appraisalAmount);
+        prev = entry.newRent;
+      }
+    }
+  }
+
   return sorted;
 };
 
@@ -886,7 +944,7 @@ const handleAppraisalLogic = async (
       Number(existingMedia.appraisal?.fixedAmount || 0);
 
   const manualLastAppraisalDateUpdate =
-    incomingLastAppraisalDate && (anchorDateChanged || configChanged)
+    incomingLastAppraisalDate && anchorDateChanged
       ? incomingLastAppraisalDate
       : null;
 
@@ -917,7 +975,26 @@ const handleAppraisalLogic = async (
     });
 
     history = [...preserved, ...newSchedule];
-  } else if (nextDate) {
+  } else {
+    // ✅ Update future entries with new appraisal config parameters if configuration changed
+    if (configChanged) {
+      const currentMonth = thisMonthKey();
+      history.forEach((entry) => {
+        if (monthKey(entry.appraisalDate) > currentMonth) {
+          entry.type = appraisal.type;
+          entry.percentage = appraisal.percentage || 0;
+          entry.fixedAmount = Number(appraisal.fixedAmount || 0);
+          entry.frequency = Number(appraisal.frequency);
+          entry.customFrequencyMonths = Number(
+            appraisal.customFrequencyMonths || 0,
+          );
+          entry.updatedBy = userName;
+          entry.updatedAt = nowIST();
+        }
+      });
+    }
+
+    if (nextDate) {
     const nextDay = dayKey(nextDate);
     const existingIdx = history.findIndex(
       (h) => dayKey(h.appraisalDate) === nextDay,
@@ -1048,6 +1125,7 @@ const handleAppraisalLogic = async (
       if (!hasLaterEntry) {
         history = autoScheduleFutureAppraisalEntries(history, userName);
       }
+    }
     }
   }
 
@@ -1352,6 +1430,9 @@ const applyAppraisalRentIfDuent = (
   if (!Array.isArray(appraisal.history) || !appraisal.history.length)
     return false;
 
+  // If rent was manually changed in this request, do not let appraisal overwrite it.
+  if (rentActuallyChanged) return false;
+
   const currentMonth = thisMonthKey();
 
   // Latest entry whose month has actually arrived (current or past month).
@@ -1462,10 +1543,21 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
 
   const isNew = !existingMedia;
 
-  // Detect whether totalRentalAmount inside agreement.rentalPayment changed.
+  // Sync totalRentalAmount between top-level rentalPayment and agreement.rentalPayment
   const incomingRentAmt = Number(
-    incoming.rentalPayment?.totalRentalAmount ?? 0,
+    incoming.rentalPayment?.totalRentalAmount ??
+      mediaData.rentalPayment?.totalRentalAmount ??
+      existing?.rentalPayment?.totalRentalAmount ??
+      0,
   );
+
+  if (!incoming.rentalPayment) incoming.rentalPayment = {};
+  incoming.rentalPayment.totalRentalAmount = incomingRentAmt;
+
+  if (mediaData.rentalPayment) {
+    mediaData.rentalPayment.totalRentalAmount = incomingRentAmt;
+  }
+
   const existingRentAmt = Number(
     existing?.rentalPayment?.totalRentalAmount ?? 0,
   );
@@ -1473,19 +1565,17 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
 
   // Step 4: stamp updatedAt/updatedBy on agreement.rentalPayment when amount changes.
   if (agreementRentChanged) {
-    if (!incoming.rentalPayment) incoming.rentalPayment = {};
     incoming.rentalPayment.updatedBy = userName;
     incoming.rentalPayment.updatedAt = nowIST();
   } else if (existing?.rentalPayment?.updatedAt) {
     // Carry forward the existing stamp if nothing changed.
-    if (!incoming.rentalPayment) incoming.rentalPayment = {};
     incoming.rentalPayment.updatedBy =
       incoming.rentalPayment.updatedBy ?? existing.rentalPayment.updatedBy;
     incoming.rentalPayment.updatedAt =
       incoming.rentalPayment.updatedAt ?? existing.rentalPayment.updatedAt;
   }
 
-  // Decide whether to push an agreement history snapshot.
+  // Decide whether to push or update an agreement history snapshot.
   const startChanged =
     isNew ||
     !existing?.startDate ||
@@ -1495,38 +1585,80 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
     !existing?.endDate ||
     dayKey(incoming.endDate) !== dayKey(existing.endDate);
 
-  if (!isNew && !startChanged && !endChanged) return;
+  // Get existing agreementHistory array
+  let existingHistory = (
+    mediaData.agreementHistory ||
+    existingMedia?.agreementHistory ||
+    []
+  ).map((h) => (h.toObject ? h.toObject() : { ...h }));
 
-  const snapshot = {
-    startDate: incoming.startDate,
-    endDate: incoming.endDate,
-    reminderBeforeExpiry: incoming.reminderBeforeExpiry,
-    advanceRent: incoming.advanceRent ?? 0,
-    status: incoming.status ?? 1,
-    agreementPDF: incoming.agreementPDF,
-    reason: incoming.reason,
-    rentalPayment: {
-      totalRentalAmount: incomingRentAmt,
-      paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
-      customPaymentFrequency:
-        Number(incoming.rentalPayment?.paymentFrequency) === 6
-          ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
-          : null,
-      // Step 4: include who changed the rental amount in the history snapshot too.
-      updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
-      updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
-    },
-    updatedBy: userName,
-    uploadedAt: nowIST(),
-  };
-
-  if (!mediaData.agreementHistory) {
-    mediaData.agreementHistory = existingMedia?.agreementHistory
-      ? JSON.parse(JSON.stringify(existingMedia.agreementHistory))
-      : [];
+  // Find if an entry in agreementHistory matches the incoming agreement dates
+  let matchingIdx = -1;
+  if (incoming.startDate && incoming.endDate) {
+    matchingIdx = existingHistory.findIndex(
+      (h) =>
+        h.startDate &&
+        h.endDate &&
+        dayKey(h.startDate) === dayKey(incoming.startDate) &&
+        dayKey(h.endDate) === dayKey(incoming.endDate),
+    );
   }
 
-  mediaData.agreementHistory.push(snapshot);
+  if (matchingIdx !== -1) {
+    // Update the existing agreementHistory entry with new rent amount and details
+    existingHistory[matchingIdx] = {
+      ...existingHistory[matchingIdx],
+      startDate: incoming.startDate,
+      endDate: incoming.endDate,
+      reminderBeforeExpiry:
+        incoming.reminderBeforeExpiry ??
+        existingHistory[matchingIdx].reminderBeforeExpiry,
+      advanceRent:
+        incoming.advanceRent ?? existingHistory[matchingIdx].advanceRent ?? 0,
+      status: incoming.status ?? existingHistory[matchingIdx].status ?? 1,
+      agreementPDF:
+        incoming.agreementPDF ?? existingHistory[matchingIdx].agreementPDF,
+      reason: incoming.reason ?? existingHistory[matchingIdx].reason,
+      rentalPayment: {
+        totalRentalAmount: incomingRentAmt,
+        paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
+        customPaymentFrequency:
+          Number(incoming.rentalPayment?.paymentFrequency) === 6
+            ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
+            : null,
+        updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
+        updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
+      },
+      updatedBy: userName,
+      uploadedAt: nowIST(),
+    };
+  } else if (isNew || startChanged || endChanged || agreementRentChanged) {
+    // Push new snapshot if no matching entry exists and something changed
+    const snapshot = {
+      startDate: incoming.startDate,
+      endDate: incoming.endDate,
+      reminderBeforeExpiry: incoming.reminderBeforeExpiry,
+      advanceRent: incoming.advanceRent ?? 0,
+      status: incoming.status ?? 1,
+      agreementPDF: incoming.agreementPDF,
+      reason: incoming.reason,
+      rentalPayment: {
+        totalRentalAmount: incomingRentAmt,
+        paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
+        customPaymentFrequency:
+          Number(incoming.rentalPayment?.paymentFrequency) === 6
+            ? (incoming.rentalPayment?.customPaymentFrequency ?? null)
+            : null,
+        updatedBy: incoming.rentalPayment?.updatedBy ?? userName,
+        updatedAt: incoming.rentalPayment?.updatedAt ?? nowIST(),
+      },
+      updatedBy: userName,
+      uploadedAt: nowIST(),
+    };
+    existingHistory.push(snapshot);
+  }
+
+  mediaData.agreementHistory = existingHistory;
 };
 
 const computeAgreementStatus = (startDate, endDate, reminderDays) => {
@@ -1578,8 +1710,9 @@ Object.keys(mediaData).forEach((key) => {
       "landOwners",
       "rentalPayment",
       "agreement",
+      "agreementHistory",
       "appraisal",
-       "gstOutstandingHistory", 
+      "gstOutstandingHistory",
     ];
     jsonFields.forEach((field) => {
       if (mediaData[field] && typeof mediaData[field] === "string") {
@@ -2789,18 +2922,37 @@ const updateAgreement = async (req, res) => {
     // ─────────────────────────────────────────────
     // Build new agreement object with rentalPayment
     // ─────────────────────────────────────────────
+    const extractRentAmount = () => {
+      if (incoming.totalRentalAmount !== undefined && incoming.totalRentalAmount !== null)
+        return Number(incoming.totalRentalAmount);
+      if (incoming.rentalPayment?.totalRentalAmount !== undefined && incoming.rentalPayment?.totalRentalAmount !== null)
+        return Number(incoming.rentalPayment.totalRentalAmount);
+      if (req.body?.rentalPayment?.totalRentalAmount !== undefined && req.body?.rentalPayment?.totalRentalAmount !== null)
+        return Number(req.body.rentalPayment.totalRentalAmount);
+      if (req.body?.totalRentalAmount !== undefined && req.body?.totalRentalAmount !== null)
+        return Number(req.body.totalRentalAmount);
+      return Number(media.agreement?.rentalPayment?.totalRentalAmount ?? media.rentalPayment?.totalRentalAmount ?? 0);
+    };
+
+    const incomingTotalRentalAmount = extractRentAmount();
+
     const paymentFrequencyValue =
-      incoming.paymentFrequency !== undefined
+      incoming.paymentFrequency !== undefined && incoming.paymentFrequency !== null
         ? Number(incoming.paymentFrequency)
-        : media.agreement?.rentalPayment?.paymentFrequency || 1;
+        : incoming.rentalPayment?.paymentFrequency !== undefined && incoming.rentalPayment?.paymentFrequency !== null
+          ? Number(incoming.rentalPayment.paymentFrequency)
+          : req.body?.rentalPayment?.paymentFrequency !== undefined && req.body?.rentalPayment?.paymentFrequency !== null
+            ? Number(req.body.rentalPayment.paymentFrequency)
+            : media.agreement?.rentalPayment?.paymentFrequency || 1;
+
     const customPaymentFrequencyValue =
-      incoming.customPaymentFrequency !== undefined
+      incoming.customPaymentFrequency !== undefined && incoming.customPaymentFrequency !== null
         ? Number(incoming.customPaymentFrequency)
-        : media.agreement?.rentalPayment?.customPaymentFrequency || undefined;
-    const incomingTotalRentalAmount =
-      incoming.totalRentalAmount !== undefined
-        ? Number(incoming.totalRentalAmount)
-        : media.agreement?.rentalPayment?.totalRentalAmount || 0;
+        : incoming.rentalPayment?.customPaymentFrequency !== undefined && incoming.rentalPayment?.customPaymentFrequency !== null
+          ? Number(incoming.rentalPayment.customPaymentFrequency)
+          : req.body?.rentalPayment?.customPaymentFrequency !== undefined && req.body?.rentalPayment?.customPaymentFrequency !== null
+            ? Number(req.body.rentalPayment.customPaymentFrequency)
+            : media.agreement?.rentalPayment?.customPaymentFrequency || undefined;
 
     // ── Detect if totalRentalAmount changed so we can stamp updatedAt/updatedBy ──
     const existingTotalRentalAmount = Number(
