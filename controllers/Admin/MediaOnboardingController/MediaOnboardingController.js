@@ -559,13 +559,41 @@ const cascadeHistory = (
       }
     }
   } else {
-    // Rent was NOT changed in this request (e.g. user edited an unrelated field)
+    // Rent was NOT changed in this request (e.g. user edited an unrelated field or appraisal date)
     if (latestDueIdx !== -1) {
-      // Preserve the current active rent checkpoint
+      // Process past entries prior to latestDueIdx
+      for (let i = 0; i < latestDueIdx; i++) {
+        const entry = sorted[i];
+        const entryMonthKey = monthKey(entry.appraisalDate);
+        entry.previousRent = prev;
+        const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
+        if (isPastAnchor || entryMonthKey < currentMonth) {
+          entry.appraisalAmount = 0;
+        } else {
+          entry.appraisalAmount = computeAppraisalAmount(entry, prev);
+        }
+        entry.newRent = Math.floor(prev + entry.appraisalAmount);
+        prev = entry.newRent;
+      }
+
       const latestDueEntry = sorted[latestDueIdx];
-      const activeRent = Number(latestDueEntry.newRent || netPayable || prev);
-      latestDueEntry.newRent = activeRent;
-      prev = activeRent;
+      const entryMonthKey = monthKey(latestDueEntry.appraisalDate);
+
+      if (entryMonthKey === currentMonth) {
+        latestDueEntry.previousRent = prev;
+        latestDueEntry.appraisalAmount = computeAppraisalAmount(
+          latestDueEntry,
+          prev,
+        );
+        latestDueEntry.newRent = Math.floor(
+          prev + latestDueEntry.appraisalAmount,
+        );
+        prev = latestDueEntry.newRent;
+      } else {
+        const activeRent = Number(netPayable || latestDueEntry.newRent || prev);
+        latestDueEntry.newRent = activeRent;
+        prev = activeRent;
+      }
 
       // Cascade all future entries starting from activeRent
       for (let i = latestDueIdx + 1; i < sorted.length; i++) {
@@ -663,6 +691,22 @@ const buildAppraisalScheduleFromAnchor = ({
   userName,
 }) => {
   const base = Number(baseRent || 0);
+  const currentMonth = thisMonthKey();
+  const anchorMonth = monthKey(anchorDate);
+
+  // If anchor date falls in the current month/year, apply appraisal amount immediately.
+  const isCurrentMonth = anchorMonth === currentMonth;
+
+  const entryForCalc = {
+    type,
+    percentage: percentage || 0,
+    fixedAmount: Number(fixedAmount || 0),
+  };
+
+  const appraisalAmt = isCurrentMonth
+    ? computeAppraisalAmount(entryForCalc, base)
+    : 0;
+  const newRentVal = base + appraisalAmt;
 
   const seedEntry = {
     appraisalDate: toDateOnly(anchorDate),
@@ -672,9 +716,9 @@ const buildAppraisalScheduleFromAnchor = ({
     frequency: Number(frequency),
     customFrequencyMonths: Number(customFrequencyMonths || 0),
     previousRent: base,
-    appraisalAmount: 0,
-    newRent: base,
-    isAnchorEntry: true, // ✅ marks this as a checkpoint entry — stays flat
+    appraisalAmount: appraisalAmt,
+    newRent: newRentVal,
+    isAnchorEntry: !isCurrentMonth,
     updatedBy: userName,
     updatedAt: nowIST(),
   };
@@ -687,9 +731,9 @@ const buildAppraisalScheduleFromAnchor = ({
     dayKey(history[0].appraisalDate) === dayKey(seedEntry.appraisalDate)
   ) {
     history[0].previousRent = base;
-    history[0].appraisalAmount = 0;
-    history[0].newRent = base;
-    history[0].isAnchorEntry = true;
+    history[0].appraisalAmount = appraisalAmt;
+    history[0].newRent = newRentVal;
+    history[0].isAnchorEntry = !isCurrentMonth;
   }
 
   return history;
@@ -957,11 +1001,40 @@ const handleAppraisalLogic = async (
       (h) => monthKey(h.appraisalDate) < anchorMonth,
     );
 
-    // If we have preserved entries, the base rent for the new anchor is the last preserved newRent.
-    const newBaseRentForAnchor =
-      preserved.length > 0
+    const getLatestEffectiveRent = () => {
+      if (netPayable > 0) return netPayable;
+      const amountHistory =
+        mediaData.rentalPayment?.rentalAmountHistory ||
+        existingMedia?.rentalPayment?.rentalAmountHistory ||
+        [];
+      if (Array.isArray(amountHistory) && amountHistory.length > 0) {
+        const valid = amountHistory.find((h) => Number(h.amount) > 0);
+        if (valid) return Number(valid.amount);
+      }
+      return Number(existingMedia?.rentalPayment?.totalRentalAmount || 0);
+    };
+
+    const effectiveRent = getLatestEffectiveRent();
+
+    // If rent was manually changed in this update, use the new manual rent as base for the new anchor.
+    // Otherwise, use the last preserved newRent or effectiveRent.
+    const newBaseRentForAnchor = rentActuallyChanged
+      ? netPayable
+      : preserved.length > 0
         ? Number(preserved[preserved.length - 1].newRent || 0)
-        : seedBaseRent;
+        : effectiveRent;
+
+    console.log("[Appraisal Recalculation Trace]", {
+      initialBaseRent: seedBaseRent,
+      latestRentalHistoryAmount:
+        mediaData.rentalPayment?.rentalAmountHistory?.[0]?.amount,
+      latestManualRentAmount: netPayable,
+      appraisalCurrentRent: oldAppraisal?.currentRent,
+      appraisalPreviousRent: history[0]?.previousRent,
+      lastAppraisalDate: manualLastAppraisalDateUpdate,
+      nextAppraisalDate: appraisal.nextAppraisalDate,
+      effectiveRentUsed: newBaseRentForAnchor,
+    });
 
     const newSchedule = buildAppraisalScheduleFromAnchor({
       anchorDate: manualLastAppraisalDateUpdate,
