@@ -508,6 +508,16 @@ const cascadeHistory = (
 
   let prev = Number(baseRent || 0);
 
+  // ✅ FIXED — a PAST appraisal that was actually applied (e.g. Sep 2026:
+  // 52000 + 2000 = 54000) is history and must keep its recorded values.
+  // Previously every past entry was recalculated from the FIRST rent (50k)
+  // with appraisalAmount forced to 0, so it showed 50000 + 0 = 50000.
+  const isAppliedPastEntry = (entry) =>
+    monthKey(entry.appraisalDate) < currentMonth &&
+    !entry.isAnchorEntry &&
+    Number(entry.appraisalAmount || 0) > 0 &&
+    Number(entry.newRent || 0) > 0;
+
   // Find the latest due entry index (month <= currentMonth)
   let latestDueIdx = -1;
   for (let i = 0; i < sorted.length; i++) {
@@ -523,6 +533,10 @@ const cascadeHistory = (
       // Process past entries prior to latestDueIdx
       for (let i = 0; i < latestDueIdx; i++) {
         const entry = sorted[i];
+        if (isAppliedPastEntry(entry)) {
+          prev = Number(entry.newRent);
+          continue;
+        }
         const entryMonthKey = monthKey(entry.appraisalDate);
         entry.previousRent = prev;
         const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
@@ -545,9 +559,14 @@ const cascadeHistory = (
         // ✅ FIXED — this month's appraisal was ALREADY added to the old rent
         // (e.g. 50k -> 52k). A manual edit now (52k -> 54k) is the FINAL rent;
         // don't add the appraisal amount on top again (was giving 56k).
-        latestDueEntry.appraisalAmount = appliedCurrentMonthAmount;
+        // Fixed type: record the entry's (possibly just edited) fixedAmount.
+        const recordedAmount =
+          Number(latestDueEntry.type) === 2
+            ? computeAppraisalAmount(latestDueEntry, 0)
+            : appliedCurrentMonthAmount;
+        latestDueEntry.appraisalAmount = recordedAmount;
         latestDueEntry.previousRent = Math.max(
-          targetAmount - appliedCurrentMonthAmount,
+          targetAmount - recordedAmount,
           0,
         );
         latestDueEntry.newRent = targetAmount;
@@ -593,6 +612,10 @@ const cascadeHistory = (
       // Process past entries prior to latestDueIdx
       for (let i = 0; i < latestDueIdx; i++) {
         const entry = sorted[i];
+        if (isAppliedPastEntry(entry)) {
+          prev = Number(entry.newRent);
+          continue;
+        }
         const entryMonthKey = monthKey(entry.appraisalDate);
         entry.previousRent = prev;
         const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
@@ -607,9 +630,12 @@ const cascadeHistory = (
 
       const latestDueEntry = sorted[latestDueIdx];
       const entryMonthKey = monthKey(latestDueEntry.appraisalDate);
+      const configEdited = !!latestDueEntry._configEdited;
+      delete latestDueEntry._configEdited;
 
       if (
         entryMonthKey === currentMonth &&
+        !configEdited &&
         Number(netPayable || 0) > 0 &&
         Number(latestDueEntry.newRent || 0) === Number(netPayable) &&
         Number(latestDueEntry.appraisalAmount || 0) > 0
@@ -667,6 +693,7 @@ const cascadeHistory = (
     }
   }
 
+  sorted.forEach((entry) => delete entry._configEdited);
   return sorted;
 };
 
@@ -1084,10 +1111,18 @@ const handleAppraisalLogic = async (
     // (e.g. rent 50k -> 52k this month), rebuilding from the current rent would
     // add the same 2k again (52k -> 54k). Rebuild from that entry's
     // previousRent (the rent before the bump) instead.
+    //
+    // This only applies when the form RE-SENDS a date that is already in the
+    // history (stale form after the dates moved forward). When the user picks
+    // a genuinely NEW date (e.g. 14.09 -> 18.09), it is a new appraisal: it is
+    // added on top of the CURRENT rent (55k + 5k = 60k).
     const existingRent = Number(
       existingMedia?.rentalPayment?.totalRentalAmount ?? 0,
     );
-    const alreadyAppliedEntry = history.find(
+    const anchorDateAlreadyInHistory = history.some(
+      (h) => dayKey(h.appraisalDate) === dayKey(manualLastAppraisalDateUpdate),
+    );
+    const alreadyAppliedEntry = anchorDateAlreadyInHistory && history.find(
       (h) =>
         monthKey(h.appraisalDate) >= anchorMonth &&
         monthKey(h.appraisalDate) <= currentMonth &&
@@ -1097,14 +1132,17 @@ const handleAppraisalLogic = async (
     );
 
     // If rent was manually changed in this update, use the new manual rent as base for the new anchor.
-    // Otherwise, use the pre-appraisal rent, the last preserved newRent or effectiveRent.
+    // Stale re-send of an existing date → the pre-appraisal rent (no double add).
+    // New date → the current rent (new appraisal is added on top of it).
     const newBaseRentForAnchor = rentActuallyChanged
       ? netPayable
       : alreadyAppliedEntry && Number(alreadyAppliedEntry.previousRent || 0) > 0
         ? Number(alreadyAppliedEntry.previousRent)
-        : preserved.length > 0
-          ? Number(preserved[preserved.length - 1].newRent || 0)
-          : effectiveRent;
+        : !anchorDateAlreadyInHistory && effectiveRent > 0
+          ? effectiveRent
+          : preserved.length > 0
+            ? Number(preserved[preserved.length - 1].newRent || 0)
+            : effectiveRent;
 
     console.log("[Appraisal Recalculation Trace]", {
       initialBaseRent: seedBaseRent,
@@ -1135,7 +1173,15 @@ const handleAppraisalLogic = async (
     if (configChanged) {
       const currentMonth = thisMonthKey();
       history.forEach((entry) => {
-        if (monthKey(entry.appraisalDate) > currentMonth) {
+        // ✅ FIXED — the CURRENT month's appraisal also takes the new config,
+        // so changing the amount (e.g. 2k -> 3k) REPLACES this cycle's amount
+        // on the same base (51k + 3k = 54k) instead of leaving the old 2k in
+        // the rent and only stacking 3k on the next cycle (53k + 3k = 56k).
+        const entryMonth = monthKey(entry.appraisalDate);
+        if (
+          entryMonth > currentMonth ||
+          (entryMonth === currentMonth && !entry.isAnchorEntry)
+        ) {
           entry.type = appraisal.type;
           entry.percentage = appraisal.percentage || 0;
           entry.fixedAmount = Number(appraisal.fixedAmount || 0);
@@ -1145,6 +1191,9 @@ const handleAppraisalLogic = async (
           );
           entry.updatedBy = userName;
           entry.updatedAt = nowIST();
+          // transient flag — tells cascadeHistory to recompute this month's
+          // amount instead of keeping the already-applied one
+          if (entryMonth === currentMonth) entry._configEdited = true;
         }
       });
     }
