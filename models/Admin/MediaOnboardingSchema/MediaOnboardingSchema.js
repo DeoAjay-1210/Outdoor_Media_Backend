@@ -129,6 +129,7 @@ const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    isAnchorEntry: { type: Boolean, default: false },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
   },
@@ -1162,51 +1163,77 @@ MediaSchema.pre("save", function () {
       const latestDue = dueEntries[0];
       const appraisedRent = Number(latestDue.newRent || 0);
 
+      // ✅ FIXED — a CURRENT-month appraisal whose bump has not been added to
+      // totalRentalAmount yet (rent still equals the pre-bump previousRent)
+      // must be APPLIED, not treated as a manual rent change. Previously the
+      // isModified branch below rebased newRent back to the old rent, which
+      // wiped out this month's appraisal amount.
+      const isUnappliedCurrentMonthBump =
+        monthKey(latestDue.appraisalDate) === currentMonth &&
+        !latestDue.isAnchorEntry &&
+        Number(latestDue.appraisalAmount || 0) > 0 &&
+        Number(rp.totalRentalAmount || 0) ===
+          Number(latestDue.previousRent || 0);
+
       if (appraisedRent > 0 && appraisedRent !== rp.totalRentalAmount) {
-        const oldRent = rp.totalRentalAmount;
-        rp.totalRentalAmount = appraisedRent;
+        if (
+          this.isModified("rentalPayment.totalRentalAmount") &&
+          !isUnappliedCurrentMonthBump
+        ) {
+          // Total rent was explicitly updated manually on this document — rebase latestDue.newRent
+          latestDue.newRent = rp.totalRentalAmount;
+        } else {
+          const oldRent = rp.totalRentalAmount;
+          rp.totalRentalAmount = appraisedRent;
 
-        // ✅ Proportional scaling for fixed-amount owners and cash/online splits
-        if (oldRent > 0 && Array.isArray(this.landOwners)) {
-          const ratio = appraisedRent / oldRent;
-          this.landOwners.forEach((owner) => {
-            // Scale fixed-amount shares proportionally
-            if (Number(owner.typeShare) === 2) {
-              owner.shareAmount = Math.floor(
-                Number(owner.shareAmount || 0) * ratio,
-              );
-            }
+          // ✅ Proportional scaling for fixed-amount owners and cash/online splits
+          if (oldRent > 0 && Array.isArray(this.landOwners)) {
+            const ratio = appraisedRent / oldRent;
+            this.landOwners.forEach((owner) => {
+              // Scale fixed-amount shares proportionally
+              if (Number(owner.typeShare) === 2) {
+                owner.shareAmount = Math.floor(
+                  Number(owner.shareAmount || 0) * ratio,
+                );
+              }
 
-            const cat = Number(owner.paymentCategory);
-            if (cat === 1) {
-              owner.cashAmount = Math.floor(
-                Number(owner.cashAmount || 0) * ratio,
-              );
-              owner.onlineAmount = 0;
-            } else if (cat === 2) {
-              owner.onlineAmount = Math.floor(
-                Number(owner.onlineAmount || 0) * ratio,
-              );
-              owner.cashAmount = 0;
-            } else if (cat === 3) {
-              owner.cashAmount = Math.floor(
-                Number(owner.cashAmount || 0) * ratio,
-              );
-              owner.onlineAmount = Math.floor(
-                Number(owner.onlineAmount || 0) * ratio,
-              );
-            }
+              const cat = Number(owner.paymentCategory);
+              if (cat === 1) {
+                owner.cashAmount = Math.floor(
+                  Number(owner.cashAmount || 0) * ratio,
+                );
+                owner.onlineAmount = 0;
+              } else if (cat === 2) {
+                owner.onlineAmount = Math.floor(
+                  Number(owner.onlineAmount || 0) * ratio,
+                );
+                owner.cashAmount = 0;
+              } else if (cat === 3) {
+                owner.cashAmount = Math.floor(
+                  Number(owner.cashAmount || 0) * ratio,
+                );
+                owner.onlineAmount = Math.floor(
+                  Number(owner.onlineAmount || 0) * ratio,
+                );
+              }
+            });
+          }
+
+          // Record in rentalAmountHistory
+          if (!rp.rentalAmountHistory) rp.rentalAmountHistory = [];
+          rp.rentalAmountHistory.push({
+            amount: appraisedRent,
+            updatedBy: `System (Appraisal applied - ${toDateOnly(latestDue.appraisalDate).toISOString().split("T")[0]})`,
+            updatedAt: nowIST(),
           });
-        }
+          rp.rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
 
-        // Record in rentalAmountHistory
-        if (!rp.rentalAmountHistory) rp.rentalAmountHistory = [];
-        rp.rentalAmountHistory.push({
-          amount: appraisedRent,
-          updatedBy: `System (Appraisal applied - ${toDateOnly(latestDue.appraisalDate).toISOString().split("T")[0]})`,
-          updatedAt: nowIST(),
-        });
-        rp.rentalAmountHistory.sort((a, b) => b.updatedAt - a.updatedAt);
+          // Keep the appraisal summary in sync with the applied rent
+          appraisal.currentRent = appraisedRent;
+          appraisal.appraisalAmount = Number(latestDue.appraisalAmount || 0);
+          appraisal.totalAppraisalAmount = appraisedRent;
+          appraisal.lastAppraisalDate = latestDue.appraisalDate;
+        }
       }
     }
   }
@@ -1524,7 +1551,7 @@ MediaSchema.statics.syncBillingCycles = async function (asOfDate = new Date()) {
   const activeSites = await this.find({
     status: 1,
     "rentalPayment.billingStartDate": { $ne: null },
-  }).select("rentalPayment mediaName landOwners updatedAt");
+  }).select("rentalPayment mediaName landOwners appraisal updatedAt");
 
   let updatedCount = 0;
   const debugLog = [];
