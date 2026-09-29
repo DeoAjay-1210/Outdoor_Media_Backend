@@ -40,7 +40,7 @@ const { applyDueAppraisals } = require("./controllers/Admin/MediaOnboardingContr
 const runApplyDueAppraisals = async () => {
   try {
     const result = await applyDueAppraisals();
-    console.log(`[applyDueAppraisals] checked=${result.checked} applied=${result.applied} failed=${result.failed}`);
+    // console.log(`[applyDueAppraisals] checked=${result.checked} applied=${result.applied} failed=${result.failed}`);
     if (result.failed) console.error("[applyDueAppraisals] errors:", result.details.filter((d) => d.error));
   } catch (err) {
     console.error("[applyDueAppraisals] failed:", err.message);
