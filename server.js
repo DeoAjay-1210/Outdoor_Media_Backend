@@ -34,6 +34,20 @@ cron.schedule("5 0 * * *", async () => {
     console.error("[syncBillingCycles] failed:", err.message);
   }
 });
+
+// Auto-apply current-month appraisals to totalRentalAmount (startup + daily 00:10)
+const { applyDueAppraisals } = require("./controllers/Admin/MediaOnboardingController/MediaOnboardingController");
+const runApplyDueAppraisals = async () => {
+  try {
+    const result = await applyDueAppraisals();
+    console.log(`[applyDueAppraisals] checked=${result.checked} applied=${result.applied} failed=${result.failed}`);
+    if (result.failed) console.error("[applyDueAppraisals] errors:", result.details.filter((d) => d.error));
+  } catch (err) {
+    console.error("[applyDueAppraisals] failed:", err.message);
+  }
+};
+runApplyDueAppraisals();
+cron.schedule("10 0 * * *", runApplyDueAppraisals);
 const app = express();
 
 app.use(cors());

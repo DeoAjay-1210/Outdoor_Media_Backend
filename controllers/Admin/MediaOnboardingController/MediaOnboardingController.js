@@ -4346,6 +4346,117 @@ const uploadExcel = async (req, res) => {
 //     return res.status(500).json({ success: false, message: err.message });
 //   }
 // };
+// ─────────────────────────────────────────────────────────────
+// AUTO-APPLY DUE APPRAISALS (daily cron + server startup)
+// Adds a CURRENT-month appraisal to totalRentalAmount automatically,
+// without anyone opening/saving the record (e.g. appraisal on
+// 05.10.2026 → applied on 01.10.2026). Reuses the same helpers as the
+// update API, and only touches records whose current-month appraisal is
+// scheduled but NOT yet added to the rent — so it can never add twice.
+// ─────────────────────────────────────────────────────────────
+const applyDueAppraisals = async () => {
+  const SYSTEM_USER = "System";
+  const currentMonth = thisMonthKey();
+  const result = { checked: 0, applied: 0, failed: 0, details: [] };
+
+  const candidates = await MediaOnboarding.find({
+    "appraisal.applicable": 1,
+    "appraisal.history.0": { $exists: true },
+  });
+
+  for (const media of candidates) {
+    result.checked++;
+    try {
+      if (Number(media.appraisal?.appraisalHold) === 1) continue;
+
+      const rent = Number(media.rentalPayment?.totalRentalAmount || 0);
+      const latestDue = (media.appraisal.history || [])
+        .filter(
+          (h) => h.appraisalDate && monthKey(h.appraisalDate) <= currentMonth,
+        )
+        .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
+
+      // Only a current-month appraisal that is still pending: the rent is
+      // exactly the pre-appraisal rent the entry was scheduled on.
+      const isPendingCurrentMonthAppraisal =
+        latestDue &&
+        monthKey(latestDue.appraisalDate) === currentMonth &&
+        !latestDue.isAnchorEntry &&
+        Number(latestDue.appraisalAmount || 0) > 0 &&
+        Number(latestDue.newRent || 0) !== rent &&
+        Number(latestDue.previousRent || 0) === rent;
+
+      if (!isPendingCurrentMonthAppraisal) continue;
+
+      const existing = media.toObject();
+      const mediaData = media.toObject();
+
+      // Same steps as the update API (Step 3 onwards)
+      applyAppraisalRentIfDuent(mediaData, existing, SYSTEM_USER, false);
+      mediaData.appraisal.history = autoScheduleFutureAppraisalEntries(
+        mediaData.appraisal.history,
+        SYSTEM_USER,
+      );
+      recomputeAppraisalSummary(
+        mediaData.appraisal,
+        Number(mediaData.rentalPayment.totalRentalAmount),
+      );
+
+      if (mediaData.agreement) {
+        const pf = mediaData.rentalPayment.paymentFrequency || 1;
+        mediaData.agreement.rentalPayment = {
+          totalRentalAmount: mediaData.rentalPayment.totalRentalAmount || 0,
+          paymentFrequency: pf,
+          ...(pf === 6 && mediaData.rentalPayment.customPaymentFrequency
+            ? {
+                customPaymentFrequency: Number(
+                  mediaData.rentalPayment.customPaymentFrequency,
+                ),
+              }
+            : {}),
+        };
+      }
+      handleAgreementHistory(mediaData, existing, SYSTEM_USER);
+
+      media.rentalPayment = mediaData.rentalPayment;
+      media.landOwners = mediaData.landOwners;
+      media.appraisal = mediaData.appraisal;
+      media.agreement = mediaData.agreement;
+      media.agreementHistory = mediaData.agreementHistory;
+      media.updatedAt = nowIST();
+      await media.save({ timestamps: false });
+      await generateMissedEntriesForMedia(media, SYSTEM_USER);
+
+      const saved = (await MediaOnboarding.findById(media._id)).toObject({
+        virtuals: true,
+      });
+      for (const savedOwner of saved.landOwners || []) {
+        if (savedOwner.landOwnerMasterId) {
+          await correctLinkedSiteAmounts(
+            savedOwner.landOwnerMasterId,
+            saved._id,
+            savedOwner,
+            null,
+          );
+        }
+      }
+
+      result.applied++;
+      result.details.push({
+        mediaId: media._id,
+        appraisalDate: dateString(latestDue.appraisalDate),
+        oldRent: rent,
+        newRent: Number(saved.rentalPayment?.totalRentalAmount || 0),
+      });
+    } catch (err) {
+      result.failed++;
+      result.details.push({ mediaId: media._id, error: err.message });
+    }
+  }
+
+  return result;
+};
+
 const syncBillingCyclesNow = async (req, res) => {
   try {
     const result = await MediaOnboarding.syncBillingCycles();
@@ -4360,5 +4471,6 @@ module.exports = {
   uploadExcel,
   updateAgreement,
   getMediaById,
-  syncBillingCyclesNow
+  syncBillingCyclesNow,
+  applyDueAppraisals,
 };
