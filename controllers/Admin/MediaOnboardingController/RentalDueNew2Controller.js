@@ -19,6 +19,7 @@ const {
   getMonthLabel,
 } = require("../../../utils/Datehelpers");
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
+const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
@@ -241,7 +242,7 @@ async function generateMissedEntriesForMedia(media, userName) {
         // ✅ SYNC PENDING ENTRY AMOUNTS — if configuration (GST/rent) changed while pending
         if (existingEntryForMonth.approvalStatus === 1) {
           const inferredWithGst = Number(existingEntryForMonth.withGst || 0);
-          const currentGstSplit = computeGstSplit(media, inferredWithGst, faceId);
+          const currentGstSplit = computeGstSplit(media, inferredWithGst, faceId, existingEntryForMonth.dueDate);
 
           if (
             Number(existingEntryForMonth.netPayable) !== Number(currentGstSplit.netPayable) ||
@@ -287,7 +288,7 @@ async function generateMissedEntriesForMedia(media, userName) {
       ];
 
       const inferredWithGst = 0;
-      const gstSplit = computeGstSplit(media, inferredWithGst, faceId);
+      const gstSplit = computeGstSplit(media, inferredWithGst, faceId, candidateDate);
 
       const newEntry = {
         dueMonth: candidateMonthLabel,
@@ -884,8 +885,11 @@ function advanceRentalPaymentOnOwnerApproval(media) {
   resetLiveAgreementFlags(media);
 }
 
-function computeGstSplit(media, withGst, targetFaceId = null) {
-  let baseRent = Number(media.rentalPayment?.totalRentalAmount || 0);
+function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
+  // ✅ FIXED — use the rent in force for the entry's due month, so a cycle
+  // before an appraisal (e.g. Sep when appraisal starts Oct) keeps the old rent.
+  let baseRent = getRentForDueDate(media, dueDate);
+  const rentRatio = getRentRatioForDueDate(media, dueDate);
 
   // ✅ FIXED — resolve the FULL GST from the best available source (Site or Sum of Owners)
   let gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
@@ -894,6 +898,7 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
       .filter((o) => Number(o.gstApplicable) === 1)
       .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
   }
+  if (rentRatio !== 1) gstAmountFull = Math.floor(gstAmountFull * rentRatio);
 
   const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
   const details = media.mediaDetails || [];
@@ -957,6 +962,14 @@ function computeGstSplit(media, withGst, targetFaceId = null) {
       let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
         ? batchSites
         : [{ media, entry }];
+
+      // ✅ FIXED — price each site as of its due entry's month, so a cycle
+      // before an appraisal (e.g. Sep when appraisal starts Oct) mails the
+      // old rent/owner amounts instead of the current post-appraisal ones.
+      sitesInGroupData = sitesInGroupData.map((item) => ({
+        ...item,
+        media: mediaAsOfDate(item.media, item.entry?.dueDate),
+      }));
 
       const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
         if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
@@ -1584,7 +1597,7 @@ function addGstToBalanceIfApplicable(media, entry, userName) {
 
   if (entry?.withGst === 1) {
     // Resolve the full site GST if entry amount is split
-    const split = computeGstSplit(media, entry.withGst, null); // passing null faceId gets full site total
+    const split = computeGstSplit(media, entry.withGst, null, entry.dueDate); // passing null faceId gets full site total
     const fullGst = split.gstAmount;
 
     if (fullGst > 0) {
@@ -1947,7 +1960,7 @@ async function processSingleRentalDueInternal({
         entry.gstApplicableFlag = newWithGst;
         media.gstApplicableFlag = newWithGst;
       }
-      const recomputedSplit = computeGstSplit(media, newWithGst, entry.mediaDetailId);
+      const recomputedSplit = computeGstSplit(media, newWithGst, entry.mediaDetailId, entry.dueDate);
       entry.gstAmount = Number(recomputedSplit.gstAmount) || 0;
       entry.baseAmount = Number(recomputedSplit.baseAmount) || 0;
       entry.netPayable = Number(recomputedSplit.netPayable) || 0;
@@ -2181,7 +2194,7 @@ async function processSingleRentalDue({
   const nextPendingStep = steps.find((s) => s.status === 1);
   const allApproved = !nextPendingStep;
   const resolvedWithGst = [0, 1, 2].includes(Number(withGst)) ? Number(withGst) : 0;
-  const gstSplit = computeGstSplit(media, resolvedWithGst);
+  const gstSplit = computeGstSplit(media, resolvedWithGst, null, dueDateObj);
 
   const newEntry = {
     dueMonth: getDueMonthLabel(dueDateObj),

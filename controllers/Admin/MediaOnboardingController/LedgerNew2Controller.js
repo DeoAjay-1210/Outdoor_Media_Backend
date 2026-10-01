@@ -2,6 +2,48 @@ const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+const {
+  getRentForDueDate,
+  ownerAsOfDate,
+  landOwnersAsOfDate,
+  mediaAsOfDate,
+} = require("../../../utils/appraisalRent");
+
+// "September 2026" -> Date(2026-09-01 UTC), used to price a row by its month
+function dueMonthLabelToDate(label) {
+  const parts = String(label || "").trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  const monthIdx = MONTH_NAMES.findIndex(
+    (m) => m.toLowerCase() === parts[0].toLowerCase(),
+  );
+  const year = Number(parts[1]);
+  if (monthIdx === -1 || Number.isNaN(year)) return null;
+  return new Date(Date.UTC(year, monthIdx, 1));
+}
+
+// Stored pendingMonths are only rebuilt on ledger save, so they can carry
+// post-appraisal owner amounts for earlier months. Re-price on read.
+function repricePendingMonths(media, pendingMonths) {
+  return (pendingMonths || []).map((pm) => {
+    const owners = landOwnersAsOfDate(media, pm.cycle || dueMonthLabelToDate(pm.month));
+    return {
+      ...pm,
+      owners: (pm.owners || []).map((o) => {
+        const live = owners.find((lo) => String(lo._id) === String(o.landOwnerId));
+        if (!live) return o;
+        const pc = Number(live.paymentCategory || o.paymentCategory || 1);
+        const repriced = { ...o };
+        if (o.cashAmount !== undefined) {
+          repriced.cashAmount = Number(pc === 3 ? live.cashAmount || 0 : live.shareAmount || 0);
+        }
+        if (o.onlineAmount !== undefined) {
+          repriced.onlineAmount = Number(pc === 3 ? live.onlineAmount || 0 : live.shareAmount || 0);
+        }
+        return repriced;
+      }),
+    };
+  });
+}
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -196,7 +238,8 @@ function recomputePendingMonths(media) {
 
     const owners = [];
 
-    (mediaObj.landOwners || []).forEach((owner) => {
+    // ✅ FIXED — owner amounts as of this month (pre-appraisal months keep old rent)
+    landOwnersAsOfDate(mediaObj, pendingCycleDate).forEach((owner) => {
       const paymentCategory = Number(owner.paymentCategory || 1);
       const ownerEntries = gst2Entries.filter(
         (e) => String(e.landOwnerId) === String(owner._id),
@@ -460,7 +503,7 @@ function sumUnpaidPastCycleRent(media, requestedMonthYear) {
   const [liveYr, liveMonthIdx] = liveKey.split("-").map(Number);
 
   const pendingMonths = Array.isArray(media.pendingMonths)
-    ? media.pendingMonths
+    ? repricePendingMonths(media, media.pendingMonths)
     : [];
 
   return pendingMonths.reduce((sum, pm) => {
@@ -788,10 +831,13 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
   cycles.forEach((cycleDate) => {
     const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
     const isLiveCycle = cycleKey === liveCycleKey;
+    // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+    const cycleMedia = mediaAsOfDate(media, cycleDate);
+    const cycleOwners = cycleMedia.landOwners || [];
 
     let cycleUnpaid = 0;
     if (owners.length === 0) {
-      cycleUnpaid = isLiveCycle ? Number(media.rentalPayment?.totalRentalAmount || 0) : 0;
+      cycleUnpaid = isLiveCycle ? Number(cycleMedia.rentalPayment?.totalRentalAmount || 0) : 0;
     } else {
       const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
       // ✅ FIXED — pick best match (Approved wins) to avoid miscounting duplicates
@@ -805,10 +851,10 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
           return new Date(b.updatedAt) - new Date(a.updatedAt);
         })[0];
 
-      const effectiveWithGst = matchedDue?.withGst ?? (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
+      const effectiveWithGst = matchedDue?.withGst ?? (resolveExpectedGstForCycle(cycleMedia) > 0 ? 1 : 0);
       const isDirectGst = Number(effectiveWithGst) === 2;
 
-      owners.forEach((owner) => {
+      cycleOwners.forEach((owner) => {
         const paymentCategory = Number(owner.paymentCategory || 1);
         getRequiredModesShared(paymentCategory).forEach((mode) => {
           const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
@@ -830,7 +876,7 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
               else if (siteGst) gstFlag = 1;
             }
             let ownerGst = 0;
-            const expectedGstPerCycle = resolveExpectedGstForCycle(media);
+            const expectedGstPerCycle = resolveExpectedGstForCycle(cycleMedia);
             if (gstFlag === 1) {
               ownerGst = expectedGstPerCycle / (owners.length || 1);
             } else {
@@ -919,7 +965,6 @@ function getGstDueForCycles(media, requestedMonthYear) {
     return { currentGSTDue: 0, previousGSTDue: 0 };
   }
   const liveCycleKey = `${cycles[cycles.length - 1].getUTCFullYear()}-${cycles[cycles.length - 1].getUTCMonth()}`;
-  const expectedGstPerCycle = resolveExpectedGstForCycle(media);
 
   // ✅ Deduped history for accurate outstanding matching
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
@@ -928,6 +973,8 @@ function getGstDueForCycles(media, requestedMonthYear) {
   let previousGSTDue = 0;
 
   cycles.forEach((cycleDate) => {
+    // ✅ FIXED — expected GST as of this cycle (appraisal-aware)
+    const expectedGstPerCycle = resolveExpectedGstForCycle(mediaAsOfDate(media, cycleDate));
     const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
     const isLiveCycle = cycleKey === liveCycleKey;
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
@@ -984,20 +1031,22 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
   if (cycles.length === 0) return [];
 
   const liveCycleKey = `${cycles[cycles.length - 1].getUTCFullYear()}-${cycles[cycles.length - 1].getUTCMonth()}`;
-  const expectedGstPerCycle = resolveExpectedGstForCycle(media);
-  const owners = media.landOwners || [];
 
   return cycles.map((cycleDate) => {
     const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
     const isLiveCycle = cycleKey === liveCycleKey;
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+    // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+    const cycleMedia = mediaAsOfDate(media, cycleDate);
+    const expectedGstPerCycle = resolveExpectedGstForCycle(cycleMedia);
+    const owners = cycleMedia.landOwners || [];
 
     let cycleUnpaidRent = 0;
     let cashAmount = 0;
     let onlineAmount = 0;
 
     if (owners.length === 0) {
-      cycleUnpaidRent = isLiveCycle ? Number(media.rentalPayment?.totalRentalAmount || 0) : 0;
+      cycleUnpaidRent = isLiveCycle ? Number(cycleMedia.rentalPayment?.totalRentalAmount || 0) : 0;
     } else {
       owners.forEach((owner) => {
         const paymentCategory = Number(owner.paymentCategory || 1);
@@ -1040,9 +1089,10 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
     const effectiveWithGst = matchedRealDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
     const isDirectGst = Number(effectiveWithGst) === 2;
 
-    let cycleNetPayable = Number(media.rentalPayment?.totalRentalAmount || 0);
+    // ✅ FIXED — rent in force for this cycle (pre-appraisal cycles keep old rent)
+    let cycleNetPayable = getRentForDueDate(media, cycleDate);
     if (isDirectGst) {
-        cycleNetPayable += resolveExpectedGstForCycle(media);
+        cycleNetPayable += expectedGstPerCycle;
     }
 
     let cycleGstAmount = 0;
@@ -2073,14 +2123,16 @@ async function ensureRentalDueForCycles(media, requestedMonthYear, updatedBy) {
     );
     if (alreadyExistsLocally) continue;
 
+    const cycleGst = resolveExpectedGstForCycle(mediaAsOfDate(media, cycleDate));
     const newEntry = {
       dueMonth: cycleMonthLabel,
       dueDate: cycleDate,
-      netPayable: Number(media.rentalPayment?.totalRentalAmount || 0),
+      // ✅ FIXED — rent in force for this cycle (pre-appraisal cycles keep old rent)
+      netPayable: getRentForDueDate(media, cycleDate),
       // Default to 0 (Pending) initially
       withGst: expectedGstPerCycle > 0 ? 0 : null,
-      gstAmount: expectedGstPerCycle,
-      baseAmount: Number(media.rentalPayment?.totalRentalAmount || 0),
+      gstAmount: cycleGst,
+      baseAmount: getRentForDueDate(media, cycleDate),
       paymentFrequency: media.rentalPayment?.paymentFrequency,
       status: 1,
       createdAt: nowIST(),
@@ -2783,19 +2835,19 @@ exports.listMediaByLedger = async (req, res) => {
       needsFullFetch
         ? Media.find(filter)
             .select(
-              "mediaDetails gstApplicableFlag rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
+              "mediaDetails gstApplicableFlag rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths appraisal createdAt updatedAt",
             )
             .sort({ updatedAt: -1, _id: -1 })
         : Media.find(filter)
             .select(
-              "mediaDetails gstApplicableFlag rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths createdAt updatedAt",
+              "mediaDetails gstApplicableFlag rentalStatus rentalPayment gstBalanceHistory tdsBalanceHistory landOwners ledger withGst1Ledger ledgerHistory rentalDue pendingMonths appraisal createdAt updatedAt",
             )
             .sort({ updatedAt: -1, _id: -1 })
             .skip(skip)
             .limit(pageSize),
       Media.countDocuments(filter),
       Media.find(baseFilterForOverallCounts).select(
-        "gstApplicableFlag rentalPayment ledgerHistory landOwners rentalDue gstBalanceHistory tdsBalanceHistory ledger mediaDetails",
+        "gstApplicableFlag rentalPayment ledgerHistory landOwners rentalDue gstBalanceHistory tdsBalanceHistory ledger mediaDetails appraisal",
       ),
     ]);
     const ownerMasterIdsInResults = [
@@ -2974,7 +3026,7 @@ for (const media of results) {
       }
 
       let pendingMonths = Array.isArray(mediaObj.pendingMonths)
-        ? mediaObj.pendingMonths
+        ? repricePendingMonths(mediaObj, mediaObj.pendingMonths)
         : [];
 
       if (pendingMonths.length === 0 && allPendingMonthKeys.length > 0) {
@@ -2999,7 +3051,8 @@ for (const media of results) {
 
           const owners = [];
 
-          (mediaObj.landOwners || []).forEach((owner) => {
+          // ✅ FIXED — owner amounts as of this month (appraisal-aware)
+          landOwnersAsOfDate(mediaObj, pendingCycleDate).forEach((owner) => {
             const paymentCategory = Number(owner.paymentCategory || 1);
             const ownerEntries = gst2Entries.filter(
               (e) => String(e.landOwnerId) === String(owner._id),
@@ -3254,7 +3307,12 @@ for (const media of results) {
         // ledger rows too, sourced the same way as the virtual placeholder
         // rows below: rentalDue.cashAmount/onlineAmount first, falling
         // back to the landOwner's configured cashAmount/onlineAmount.
-        const matchedOwnerForAmt = (mediaObj.landOwners || []).find(
+        // ✅ FIXED — price the row by its own month (appraisal-aware)
+        const entryAmtMedia = mediaAsOfDate(
+          mediaObj,
+          entry.cycle || dueMonthLabelToDate(entry.dueMonth || entry.month),
+        );
+        const matchedOwnerForAmt = (entryAmtMedia.landOwners || []).find(
           (o) => String(o._id) === String(entry.landOwnerId),
         );
         const paymentCategory = Number(
@@ -3302,12 +3360,12 @@ for (const media of results) {
                else if (siteGst) gstFlag = 1;
            }
 
-           if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+           if (gstFlag === 1 || (gstFlag === 2 && Number(entryAmtMedia.rentalPayment?.gstAmount || 0) > 0)) {
                // ✅ UPDATED — fallback to site-level share if owner amount is missing
                const ownerCount = (mediaObj.landOwners || []).length || 1;
-               resolvedGstAmount = Number(mediaObj.rentalPayment?.gstAmount || 0) / ownerCount;
+               resolvedGstAmount = Number(entryAmtMedia.rentalPayment?.gstAmount || 0) / ownerCount;
            } else {
-               resolvedGstAmount = (mediaObj.landOwners || []).filter(o => String(o._id) === String(entry.landOwnerId)).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
+               resolvedGstAmount = (entryAmtMedia.landOwners || []).filter(o => String(o._id) === String(entry.landOwnerId)).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
            }
         }
 
@@ -3367,8 +3425,10 @@ for (const media of results) {
         const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
         const targetType = cycleKey === liveCycleKey ? "current" : "pastCycle";
         const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+        // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+        const cycleMedia = mediaAsOfDate(mediaObj, cycleDate);
 
-        (mediaObj.landOwners || []).forEach((owner) => {
+        (cycleMedia.landOwners || []).forEach((owner) => {
           const paymentCategory = Number(owner.paymentCategory || 1);
           const requiredModes = getRequiredModesForOwner(paymentCategory);
 
@@ -3459,10 +3519,10 @@ for (const media of results) {
                 else if (siteGst) gstFlag = 1;
             }
 
-            if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
+            if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
               // ✅ UPDATED — fallback to site-level share if owner amount is missing
               const ownerCount = (mediaObj.landOwners || []).length || 1;
-              ownerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / ownerCount;
+              ownerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / ownerCount;
             } else if (Number(owner.gstApplicable) === 1) {
               ownerGst = Number(owner.gstAmount || 0);
             }
@@ -3567,6 +3627,8 @@ latestLedger = latestLedger.sort((a, b) => {
         rentalDueWithApproval = sortedDue
           .filter((due) => due.ownerApprovalDate)
           .map((due) => {
+            // ✅ FIXED — owner/GST amounts as of this due's month (appraisal-aware)
+            const dueMedia = mediaAsOfDate(mediaObj, due.dueDate);
             // ✅ NEW — cashAmount/onlineAmount live on the landOwner subdocument,
             // not on rentalDue itself. Match by due.landOwnerId if it exists on
             // your rentalDue schema; otherwise fall back to summing across every
@@ -3576,7 +3638,7 @@ latestLedger = latestLedger.sort((a, b) => {
             let onlineAmount = 0;
 
             if (due.landOwnerId) {
-              const matchedOwner = (mediaObj.landOwners || []).find(
+              const matchedOwner = (dueMedia.landOwners || []).find(
                 (o) => String(o._id) === String(due.landOwnerId),
               );
               if (matchedOwner) {
@@ -3584,11 +3646,11 @@ latestLedger = latestLedger.sort((a, b) => {
                 onlineAmount = Number(matchedOwner.onlineAmount || 0);
               }
             } else {
-              cashAmount = (mediaObj.landOwners || []).reduce(
+              cashAmount = (dueMedia.landOwners || []).reduce(
                 (sum, o) => sum + Number(o.cashAmount || 0),
                 0,
               );
-              onlineAmount = (mediaObj.landOwners || []).reduce(
+              onlineAmount = (dueMedia.landOwners || []).reduce(
                 (sum, o) => sum + Number(o.onlineAmount || 0),
                 0,
               );
@@ -3611,12 +3673,12 @@ latestLedger = latestLedger.sort((a, b) => {
               if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
                 // site-level GST is authoritative OR owner-level but site-level amount is present
                 if (Number(mediaObj.rentalPayment?.gstApplicable || 0) === 1) {
-                  gstAmount = Number(mediaObj.rentalPayment?.gstAmount || 0);
+                  gstAmount = Number(dueMedia.rentalPayment?.gstAmount || 0);
                 }
               } else {
                 // gstFlag === 2, or 0/unset — use owner-level GST
                 if (due.landOwnerId) {
-                  const matchedOwner = (mediaObj.landOwners || []).find(
+                  const matchedOwner = (dueMedia.landOwners || []).find(
                     (o) => String(o._id) === String(due.landOwnerId),
                   );
                   if (
@@ -3626,7 +3688,7 @@ latestLedger = latestLedger.sort((a, b) => {
                     gstAmount = Number(matchedOwner.gstAmount || 0);
                   }
                 } else {
-                  gstAmount = (mediaObj.landOwners || [])
+                  gstAmount = (dueMedia.landOwners || [])
                     .filter((o) => Number(o.gstApplicable || 0) === 1)
                     .reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
                 }
@@ -3707,7 +3769,10 @@ latestLedger = latestLedger.sort((a, b) => {
       if (expectedGstPerCycleTotal > 0) {
         autoDueCycles.forEach((cycleDate) => {
           const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
-          (mediaObj.landOwners || []).forEach((owner) => {
+          // ✅ FIXED — owner/GST amounts as of this cycle (appraisal-aware)
+          const cycleMedia = mediaAsOfDate(mediaObj, cycleDate);
+          const cycleExpectedGst = resolveExpectedGstForCycle(cycleMedia);
+          (cycleMedia.landOwners || []).forEach((owner) => {
             if (!isGstApplicableForOwner(owner)) return;
 
             const existingGstForOwnerMonth = fullGstBalanceHistory
@@ -3735,15 +3800,15 @@ latestLedger = latestLedger.sort((a, b) => {
             }
             if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
               expectedOwnerGst = 0;
-            } else if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
-              expectedOwnerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
+            } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
+              expectedOwnerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
-            if (expectedOwnerGst <= 0 && expectedGstPerCycleTotal > 0 && gstFlag !== 2) {
+            if (expectedOwnerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
-              expectedOwnerGst = expectedGstPerCycleTotal / ownerCount;
+              expectedOwnerGst = cycleExpectedGst / ownerCount;
             }
 
             const missingGst = Math.max(0, expectedOwnerGst - existingGstForOwnerMonth);
@@ -3867,7 +3932,8 @@ latestLedger = latestLedger.sort((a, b) => {
       uniqueDueMonths.forEach((cycleDate, dueMonth) => {
         const monthName = dueMonth.split(" ")[0];
 
-        (mediaObj.landOwners || []).forEach((owner) => {
+        // ✅ FIXED — TDS as of this month (appraisal-aware)
+        landOwnersAsOfDate(mediaObj, cycleDate || dueMonthLabelToDate(dueMonth)).forEach((owner) => {
           const isApplicable =
             owner.tdsApplicable === 1 ||
             owner.tdsApplicable === "1" ||
@@ -4210,7 +4276,10 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
         const autoDueCycles = getAllDueCycles(mediaObj, requestedMonthYearParsed);
         autoDueCycles.forEach((cycleDate) => {
           const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
-          (mediaObj.landOwners || []).forEach((owner) => {
+          // ✅ FIXED — owner/GST amounts as of this cycle (appraisal-aware)
+          const cycleMedia = mediaAsOfDate(mediaObj, cycleDate);
+          const cycleExpectedGst = resolveExpectedGstForCycle(cycleMedia);
+          (cycleMedia.landOwners || []).forEach((owner) => {
             if (!isGstApplicableForOwner(owner)) return;
 
             const existingGstForOwnerMonth = fullGstBalanceHistory
@@ -4238,15 +4307,15 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
             }
             if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
               expectedOwnerGst = 0;
-            } else if (gstFlag === 1 || (gstFlag === 2 && Number(mediaObj.rentalPayment?.gstAmount || 0) > 0)) {
-              expectedOwnerGst = Number(mediaObj.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
+            } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
+              expectedOwnerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
-            if (expectedOwnerGst <= 0 && expectedGstPerCycleTotal > 0 && gstFlag !== 2) {
+            if (expectedOwnerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
-              expectedOwnerGst = expectedGstPerCycleTotal / ownerCount;
+              expectedOwnerGst = cycleExpectedGst / ownerCount;
             }
 
             const missingGst = Math.max(0, expectedOwnerGst - existingGstForOwnerMonth);
@@ -4325,7 +4394,8 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
 
       const virtualTdsEntries = [];
       uniqueDueMonths.forEach((cycleDate, dueMonth) => {
-        (obj.landOwners || []).forEach((owner) => {
+        // ✅ FIXED — TDS as of this month (appraisal-aware)
+        landOwnersAsOfDate(obj, cycleDate || dueMonthLabelToDate(dueMonth)).forEach((owner) => {
           const isApplicable =
             owner.tdsApplicable === 1 ||
             owner.tdsApplicable === "1" ||
@@ -4594,7 +4664,7 @@ exports.getLedgerHistory = async (req, res) => {
 
     const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, "mediaDetails.status": 1 })
       .select(
-        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger",
+        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger appraisal",
       )
       .lean();
 
@@ -5036,7 +5106,11 @@ const details = (media.mediaDetails || []).map((d) => ({
   if (expectedGstPerCycleTotal > 0) {
     allTimeCycles.forEach((cycleDate) => {
       const cycleMonthLabel = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
-      matchingLandOwners.forEach((owner) => {
+      // ✅ FIXED — owner/GST amounts as of this cycle (appraisal-aware)
+      const cycleMedia = mediaAsOfDate(media, cycleDate);
+      const cycleExpectedGst = resolveExpectedGstForCycle(cycleMedia);
+      matchingLandOwners.forEach((rawOwner) => {
+        const owner = ownerAsOfDate(media, rawOwner, cycleDate);
         if (!isGstApplicableForOwner(owner)) return;
 
         const hasEntry = fullGstBalanceHistoryUnfiltered.some(
@@ -5057,16 +5131,16 @@ const details = (media.mediaDetails || []).map((d) => ({
 
           if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
             ownerGst = 0;
-          } else if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
+          } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
             const ownerCount = (media.landOwners || []).length || 1;
-            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+            ownerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / ownerCount;
           } else {
             ownerGst = Number(owner.gstAmount || 0);
           }
 
-          if (ownerGst <= 0 && expectedGstPerCycleTotal > 0 && gstFlag !== 2) {
+          if (ownerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
             const ownerCount = (media.landOwners || []).length || 1;
-            ownerGst = expectedGstPerCycleTotal / ownerCount;
+            ownerGst = cycleExpectedGst / ownerCount;
           }
 
           if (ownerGst > 0) {
@@ -5140,9 +5214,12 @@ let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistor
     let cycleUnpaid = 0;
     let cycleTds = 0;
     let maxPaymentDate = null;
+    // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+    const cycleMedia = mediaAsOfDate(media, cycleDate);
 const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
-const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
-    matchingLandOwners.forEach((owner) => {
+const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(cycleMedia) > 0 ? 1 : 0);
+    matchingLandOwners.forEach((rawOwner) => {
+      const owner = ownerAsOfDate(media, rawOwner, cycleDate);
       const paymentCategory = Number(owner.paymentCategory || 1);
       cycleTds += Number(owner.tdsAmount || 0);
 
@@ -5165,7 +5242,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
             }
             let ownerGst = 0;
             if (gstFlag === 1) {
-                ownerGst = Number(media.rentalPayment?.gstAmount || 0) / (media.landOwners?.length || 1);
+                ownerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (media.landOwners?.length || 1);
             } else {
                 ownerGst = Number(owner.gstAmount || 0);
             }
@@ -5377,7 +5454,10 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
     );
 
     const virtualForMonth = [];
-    matchingLandOwners.forEach((owner) => {
+    // ✅ FIXED — TDS as of this month (appraisal-aware)
+    const tdsMonthDate = cycleDate || dueMonthLabelToDate(`${monthName} ${yearFromEntry || ""}`);
+    matchingLandOwners.forEach((rawOwner) => {
+      const owner = ownerAsOfDate(media, rawOwner, tdsMonthDate);
       const isApplicable =
         owner.tdsApplicable === 1 ||
         owner.tdsApplicable === "1" ||
@@ -5406,7 +5486,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
   };
 
   const storedPendingMonthsUnfiltered = Array.isArray(media.pendingMonths)
-    ? media.pendingMonths
+    ? repricePendingMonths(media, media.pendingMonths)
     : [];
   const getPendingLedgerHistoryForMonth = (monthName, yearValue) => {
     const monthLabel = `${monthName} ${yearValue}`;
@@ -5433,7 +5513,8 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
     return ["Cash"];
   };
 
-const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, paymentCategory) => {
+// cycleMedia — media priced as of the row's cycle (appraisal-aware); defaults to current
+const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, paymentCategory, cycleMedia = media) => {
   let baseAmount;
   if (Number(paymentCategory) === 3) {
     baseAmount =
@@ -5461,7 +5542,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
   let ownerGst = 0;
   if (gstFlag === 1 || (gstFlag === 2 && Number(owner.gstAmount || 0) <= 0)) {
     const ownerCount = matchingLandOwners.length || 1;
-    ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+    ownerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / ownerCount;
   } else {
     ownerGst = Number(owner.gstAmount || 0);
   }
@@ -5475,8 +5556,11 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
   ) => {
     const result = [];
     const fullMonthLabel = `${monthLabel} ${cycleDate.getUTCFullYear()}`;
+    // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+    const cycleMedia = mediaAsOfDate(media, cycleDate);
 
-    matchingLandOwners.forEach((owner) => {
+    matchingLandOwners.forEach((rawOwner) => {
+      const owner = ownerAsOfDate(media, rawOwner, cycleDate);
       const paymentCategory = Number(owner.paymentCategory || 1);
       const requiredModes = getRequiredModesForOwner(paymentCategory);
 
@@ -5554,12 +5638,12 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             }
 
             if (
-              gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
+              gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)
             ) {
               // ✅ UPDATED — fallback to site-level share if owner amount is missing
               const ownerCount = matchingLandOwners.length || 1;
               realGstAmount =
-                Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+                Number(cycleMedia.rentalPayment?.gstAmount || 0) / ownerCount;
             } else if (Number(owner.gstApplicable) === 1) {
               realGstAmount = Number(owner.gstAmount || 0);
             }
@@ -5579,6 +5663,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
                   matchedDue,
                   realWithGst,
                   paymentCategory,
+                  cycleMedia,
                 );
           const isSplitCategory = Number(paymentCategory) === 3;
           const resolvedCashAmount =
@@ -5638,11 +5723,11 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             }
 
             if (
-              gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
+              gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)
             ) {
               const ownerCount = matchingLandOwners.length || 1;
               directGstAmount =
-                Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+                Number(cycleMedia.rentalPayment?.gstAmount || 0) / ownerCount;
             } else if (Number(owner.gstApplicable) === 1) {
               directGstAmount = Number(owner.gstAmount || 0);
             }
@@ -5675,6 +5760,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             matchedDue,
             0,
             paymentCategory,
+            cycleMedia,
           );
 
           let resolvedVirtualAmount = baseAmountVirtual;
@@ -5860,7 +5946,10 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 
           return isGstApplicableForOwner(owner);
         })
-        .map((owner) => {
+        .map((rawOwner) => {
+          // ✅ FIXED — GST as of this month (appraisal-aware)
+          const rowMedia = mediaAsOfDate(media, cycleDateForMonth);
+          const owner = ownerAsOfDate(media, rawOwner, cycleDateForMonth);
           let ownerGst = 0;
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
@@ -5875,10 +5964,10 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
             ownerGst = 0;
           } else if (
-            gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)
+            gstFlag === 1 || (gstFlag === 2 && Number(rowMedia.rentalPayment?.gstAmount || 0) > 0)
           ) {
             const ownerCount = matchingLandOwners.length || 1;
-            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+            ownerGst = Number(rowMedia.rentalPayment?.gstAmount || 0) / ownerCount;
           } else if (Number(owner.gstApplicable) === 1) {
             ownerGst = Number(owner.gstAmount || 0);
           }
@@ -6000,7 +6089,10 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
         if (isDirectGst) return false;
         return isGstApplicableForOwner(owner);
       })
-      .map((owner) => {
+      .map((rawOwner) => {
+        // ✅ FIXED — GST as of this cycle (appraisal-aware)
+        const rowMedia = mediaAsOfDate(media, cycleDate);
+        const owner = ownerAsOfDate(media, rawOwner, cycleDate);
         let ownerGst = 0;
         let gstFlag = Number(media.gstApplicableFlag || 0);
         if (gstFlag === 0) {
@@ -6011,9 +6103,9 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           if (ownerGstArr) gstFlag = 2;
           else if (siteGst) gstFlag = 1;
         }
-        if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
+        if (gstFlag === 1 || (gstFlag === 2 && Number(rowMedia.rentalPayment?.gstAmount || 0) > 0)) {
           const ownerCount = matchingLandOwners.length || 1;
-          ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+          ownerGst = Number(rowMedia.rentalPayment?.gstAmount || 0) / ownerCount;
         } else if (Number(owner.gstApplicable) === 1) {
           ownerGst = Number(owner.gstAmount || 0);
         }
@@ -6099,7 +6191,10 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           if (isDirectGst) return false;
           return isGstApplicableForOwner(owner);
         })
-        .map((owner) => {
+        .map((rawOwner) => {
+          // ✅ FIXED — GST as of this cycle (appraisal-aware)
+          const rowMedia = mediaAsOfDate(media, cycleDate);
+          const owner = ownerAsOfDate(media, rawOwner, cycleDate);
           let ownerGst = 0;
           let gstFlag = Number(media.gstApplicableFlag || 0);
           if (gstFlag === 0) {
@@ -6110,9 +6205,9 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             if (ownerGstArr) gstFlag = 2;
             else if (siteGst) gstFlag = 1;
           }
-          if (gstFlag === 1 || (gstFlag === 2 && Number(media.rentalPayment?.gstAmount || 0) > 0)) {
+          if (gstFlag === 1 || (gstFlag === 2 && Number(rowMedia.rentalPayment?.gstAmount || 0) > 0)) {
             const ownerCount = matchingLandOwners.length || 1;
-            ownerGst = Number(media.rentalPayment?.gstAmount || 0) / ownerCount;
+            ownerGst = Number(rowMedia.rentalPayment?.gstAmount || 0) / ownerCount;
           } else if (Number(owner.gstApplicable) === 1) {
             ownerGst = Number(owner.gstAmount || 0);
           }
@@ -6343,13 +6438,16 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
   if (cycles.length === 0) return result;
 
   const liveCycleKey = `${cycles[cycles.length - 1].getUTCFullYear()}-${cycles[cycles.length - 1].getUTCMonth()}`;
-  const expectedGstPerCycle = resolveExpectedGstForCycle(media);
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
 
   cycles.forEach((cycleDate) => {
     const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
     const isLiveCycle = cycleKey === liveCycleKey;
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+    // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+    const cycleMedia = mediaAsOfDate(media, cycleDate);
+    const cycleOwners = cycleMedia.landOwners || [];
+    const expectedGstPerCycle = resolveExpectedGstForCycle(cycleMedia);
 
     // ── best-match rentalDue for this cycle (Approved wins) ──
     const matchedDue = (media.rentalDue || [])
@@ -6366,7 +6464,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     const isDirectGst = Number(effectiveWithGst) === 2;
 
     // ── RENT — identical rule to getUnpaidRentForCycle(), per owner ──
-    owners.forEach((owner) => {
+    cycleOwners.forEach((owner) => {
       const ownerId = String(owner._id);
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
@@ -6395,7 +6493,6 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
             else if (siteGst) gstFlag = 1;
           }
           let ownerGst = 0;
-          const expectedGstPerCycle = resolveExpectedGstForCycle(media);
           if (gstFlag === 1) {
             ownerGst = expectedGstPerCycle / (owners.length || 1);
           } else {
@@ -6431,7 +6528,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     });
 
     // 2) Pending = Expected - Paid
-    owners.forEach(owner => {
+    cycleOwners.forEach(owner => {
       const ownerId = String(owner._id);
       let expectedOwnerGst = 0;
       let gstFlag = Number(media.gstApplicableFlag || 0);
@@ -6503,7 +6600,6 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
   if (!media.mediaDetails?.some(d => d.status === 1) || cycles.length === 0) return result;
 
-  const expectedGstPerCycle = resolveExpectedGstForCycle(media);
   const dedupedHistory = dedupeGstBalanceHistory(media.gstBalanceHistory || []);
 
   const targetKey = requestedMonthYear
@@ -6514,6 +6610,10 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     const cycleKey = `${cycleDate.getUTCFullYear()}-${cycleDate.getUTCMonth()}`;
     const isCurrentCycle = targetKey ? (cycleKey === targetKey) : false;
     const cycleMonthLabel = `${MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+    // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
+    const cycleMedia = mediaAsOfDate(media, cycleDate);
+    const cycleOwners = cycleMedia.landOwners || [];
+    const expectedGstPerCycle = resolveExpectedGstForCycle(cycleMedia);
 
     // ── best-match rentalDue for this cycle ──
     const matchedDue = (media.rentalDue || [])
@@ -6529,7 +6629,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     const effectiveWithGst = matchedDue?.withGst ?? (expectedGstPerCycle > 0 ? 1 : 0);
     const isDirectGst = Number(effectiveWithGst) === 2;
 
-    owners.forEach((owner) => {
+    cycleOwners.forEach((owner) => {
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         let rentAmount = (mode === "Cash"
@@ -6546,7 +6646,6 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
             else if (siteGst) gstFlag = 1;
           }
           let ownerGst = 0;
-          const expectedGstPerCycle = resolveExpectedGstForCycle(media);
           if (gstFlag === 1) {
             ownerGst = expectedGstPerCycle / (owners.length || 1);
           } else {
