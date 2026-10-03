@@ -8,6 +8,7 @@ const {
   getRequiredModesShared,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
 const { successResponse, errorResponse } = require("../../../utils/response");
+const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const mongoose = require("mongoose");
 
 const IST_OFFSET_MS = 330 * 60000; // 5h 30m
@@ -145,147 +146,11 @@ const getAdminDashboard = async (req, res) => {
       }
     }
 
-    // Run exact aggregation pipeline from RentalDueNew2Controller
-    const summaryStatsAgg = await MediaOnboarding.aggregate([
-      { $match: { "mediaDetails.status": 1 } },
-      { $unwind: "$rentalDue" },
-      { $match: { "rentalDue.dueDate": { $lte: monthEnd } } },
-      {
-        $addFields: {
-          billMode: { $ifNull: [{ $first: "$landOwners.agreementBillMode" }, 1] },
-          faceCount: { $size: { $ifNull: ["$mediaDetails", [1]] } }
-        }
-      },
-      {
-        $addFields: {
-          effectiveNetPayable: {
-            $let: {
-              vars: {
-                siteBase: { $ifNull: ["$rentalPayment.totalRentalAmount", 0] },
-                siteGst: {
-                  $let: {
-                    vars: {
-                      rpGst: { $ifNull: ["$rentalPayment.gstAmount", 0] },
-                      loGst: {
-                        $sum: {
-                          $map: {
-                            input: { $ifNull: ["$landOwners", []] },
-                            as: "o",
-                            in: {
-                              $cond: [
-                                { $eq: [{ $toInt: { $ifNull: ["$$o.gstApplicable", 0] } }, 1] },
-                                { $ifNull: ["$$o.gstAmount", 0] },
-                                0
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    },
-                    in: { $cond: [{ $gt: ["$$rpGst", 0] }, "$$rpGst", "$$loGst"] }
-                  }
-                },
-                faceCount: { $cond: [{ $gt: ["$faceCount", 0] }, "$faceCount", 1] },
-                billMode: "$billMode"
-              },
-              in: {
-                $let: {
-                  vars: {
-                    rawBase: { $ifNull: ["$rentalDue.netPayable", "$rentalDue.baseAmount"] },
-                    rawGst: { $ifNull: ["$rentalDue.gstAmount", 0] },
-                    withGst: { $ifNull: ["$rentalDue.withGst", 0] }
-                  },
-                  in: {
-                    $let: {
-                      vars: {
-                        faceBase: {
-                          $cond: [
-                            { $eq: ["$$billMode", 1] },
-                            { $divide: ["$$siteBase", "$$faceCount"] },
-                            "$$rawBase"
-                          ]
-                        },
-                        faceGst: {
-                          $cond: [
-                            { $eq: ["$$billMode", 1] },
-                            { $divide: ["$$siteGst", "$$faceCount"] },
-                            { $cond: [{ $gt: ["$$rawGst", 0] }, "$$rawGst", "$$siteGst"] }
-                          ]
-                        }
-                      },
-                      in: {
-                        $cond: [
-                          { $eq: ["$$withGst", 2] },
-                          {
-                            $cond: [
-                              { $eq: ["$$billMode", 1] },
-                              { $divide: [{ $add: ["$$siteBase", "$$siteGst"] }, "$$faceCount"] },
-                              "$$rawBase"
-                            ]
-                          },
-                          { $add: ["$$faceBase", "$$faceGst"] }
-                        ]
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          isCurrentMonth: { $and: [{ $gte: ["$rentalDue.dueDate", monthStart] }, { $lte: ["$rentalDue.dueDate", monthEnd] }] },
-          isApprovedByRole: { $eq: ["$rentalDue.approvalStatus", 3] },
-          isOverdueGlobally: {
-            $or: [
-              { $eq: ["$rentalPayment.status", 3] },
-              {
-                $and: [
-                  { $lt: ["$rentalDue.dueDate", today] },
-                  { $ne: ["$rentalDue.approvalStatus", 3] },
-                ],
-              },
-            ],
-          },
-          isPendingByRole: { $ne: ["$rentalDue.approvalStatus", 3] }
-        }
-      },
-      {
-        $group: {
-          _id: { mediaId: "$_id", faceId: "$rentalDue.mediaDetailId" },
-          faceIsApprovedCurrent: { $max: { $cond: ["$isCurrentMonth", "$isApprovedByRole", false] } },
-          faceIsOverdue: { $max: "$isOverdueGlobally" },
-          faceIsPendingCurrent: { $max: { $cond: ["$isCurrentMonth", "$isPendingByRole", false] } },
-          amtApprovedCurrent: { $sum: { $cond: [{ $and: ["$isCurrentMonth", "$isApprovedByRole"] }, "$effectiveNetPayable", 0] } },
-          amtOverdueTotal: { $sum: { $cond: ["$isOverdueGlobally", "$effectiveNetPayable", 0] } },
-          amtPendingCurrent: { $sum: { $cond: [{ $and: ["$isCurrentMonth", "$isPendingByRole"] }, "$effectiveNetPayable", 0] } },
-          isDueThisMonth: { $max: "$isCurrentMonth" },
-          amtDueThisMonth: { $sum: { $cond: ["$isCurrentMonth", "$effectiveNetPayable", 0] } },
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          dueThisMonthCount: { $sum: { $cond: ["$isDueThisMonth", 1, 0] } },
-          dueThisMonthAmount: { $sum: "$amtDueThisMonth" },
-          approvedCount: { $sum: { $cond: ["$faceIsApprovedCurrent", 1, 0] } },
-          approvedAmountTotal: { $sum: "$amtApprovedCurrent" },
-          overdueCount: { $sum: { $cond: ["$faceIsOverdue", 1, 0] } },
-          overdueAmountTotal: { $sum: "$amtOverdueTotal" },
-          pendingCount: { $sum: { $cond: ["$faceIsPendingCurrent", 1, 0] } },
-          pendingAmountTotal: { $sum: "$amtPendingCurrent" }
-        }
-      }
-    ]);
-
-    const stats = summaryStatsAgg[0] || {
-      dueThisMonthCount: 0,
-      dueThisMonthAmount: 0,
-      approvedCount: 0,
-      approvedAmountTotal: 0,
-      overdueCount: 0,
-      overdueAmountTotal: 0,
-      pendingCount: 0,
-      pendingAmountTotal: 0
-    };
+    // ✅ FIXED — shared Rental Due stats (same rule as admin/rental-due-list and
+    // landowner/site-filter): ledger cycle amounts, appraisal-aware; overdue =
+    // not approved after its due date (current + past months), 1 day after (IST).
+    const statsDocs = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
+    const stats = computeRentalDueStats(statsDocs, { year: yearNum, month: monthNum });
 
     const rentalObj = {
       totalDueThisMonth: {

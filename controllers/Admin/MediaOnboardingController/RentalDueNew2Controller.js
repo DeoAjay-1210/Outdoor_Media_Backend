@@ -20,6 +20,7 @@ const {
 } = require("../../../utils/Datehelpers");
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
+const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
@@ -4693,102 +4694,15 @@ for (const siteDoc of activeSitesForSweep) {
     // every raw rentalDue row as totalRentalAmount / faceCount, which also
     // counted stale/duplicate rows and sites whose cycle isn't due this month.
     // rentalDue rows are now used ONLY to decide each face's approval status.
+    // ✅ FIXED — shared Rental Due stats (same rule as Dashboard and
+    // landowner/site-filter). Overdue = not approved after its due date for the
+    // current AND past months (approved-but-unpaid is no longer overdue),
+    // 1 day after in IST; appraisal is loaded so pre-appraisal months use old rent.
     const statsDocs = await Media.find(
       { "mediaDetails.status": 1 },
-      "status gstApplicableFlag mediaDetails rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue",
+      "status gstApplicableFlag mediaDetails rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue appraisal",
     ).lean();
-
-    const statsMonthYear = { year: yr, month: mo };
-    const isApprovedDue = (e) => Number(e.approvalStatus) === 3;
-    const statsAcc = {
-      dueThisMonthCount: 0,
-      dueThisMonthAmount: 0,
-      dueAmountOpen: 0,
-      approvedCount: 0,
-      approvedAmountTotal: 0,
-      overdueCount: 0,
-      overdueAmountTotal: 0,
-      pendingCount: 0,
-      pendingAmountTotal: 0,
-    };
-
-    for (const media of statsDocs) {
-      const activeFacesList = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
-      if (activeFacesList.length === 0) continue;
-      const faceCount = activeFacesList.length;
-
-      const cycleSummary = getOverallSummaryForCycle(media, statsMonthYear);
-      const currentSiteAmount =
-        Number(cycleSummary.currentMonthRentalAmount || 0) +
-        Number(cycleSummary.currentMonthGstAmount || 0);
-      const pastSiteAmount =
-        Number(cycleSummary.pastRentPending || 0) +
-        Number(cycleSummary.pastGstPending || 0);
-
-      const overdueFaces = new Set();
-
-      // ── 1) Current month ──
-      if (currentSiteAmount > 0) {
-        const faceAmount = currentSiteAmount / faceCount;
-        const currentMonthEntries = (media.rentalDue || []).filter((e) => {
-          if (!e.dueDate) return false;
-          const d = new Date(e.dueDate);
-          return d >= monthStart && d <= monthEnd;
-        });
-
-        for (const face of activeFacesList) {
-          const faceId = String(face._id);
-          statsAcc.dueThisMonthCount += 1;
-          statsAcc.dueThisMonthAmount += faceAmount;
-
-          // best-match row for this face: approved first, then latest updated;
-          // site-level rows (no mediaDetailId) apply to every face
-          const entry = currentMonthEntries
-            .filter((e) => !e.mediaDetailId || String(e.mediaDetailId) === faceId)
-            .sort((a, b) => {
-              if (isApprovedDue(a) !== isApprovedDue(b)) return isApprovedDue(a) ? -1 : 1;
-              return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
-            })[0];
-
-          const isApprovedOverall = entry ? isApprovedDue(entry) : false;
-          const roleStep = (entry?.approvalSteps || []).find((s) => s.role === targetRole);
-          const hasRoleApproved = roleStep && roleStep.status === 2;
-          const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
-          const isApprovedByRole = targetRole === null ? isApprovedOverall : hasRoleApproved;
-
-          if (isApprovedByRole) {
-            statsAcc.approvedCount += 1;
-            statsAcc.approvedAmountTotal += faceAmount;
-            continue;
-          }
-
-          const isPendingByRole = targetRole === null ? !isApprovedOverall : (!isApprovedOverall && !hasRoleActed);
-          if (!isPendingByRole) continue;
-
-          // pending = every open current-month due;
-          // overdue = the subset already past its due date
-          statsAcc.pendingCount += 1;
-          statsAcc.pendingAmountTotal += faceAmount;
-
-          const isOverdueGlobally = Number(media.rentalPayment?.status) === 3 ||
-                                    (entry?.dueDate && new Date(entry.dueDate) < today);
-          if (isOverdueGlobally) {
-            overdueFaces.add(faceId);
-            statsAcc.overdueAmountTotal += faceAmount;
-            statsAcc.dueAmountOpen += faceAmount;
-          }
-        }
-      }
-
-      // ── 2) Past months — unpaid earlier cycles are overdue ──
-      if (pastSiteAmount > 0) {
-        activeFacesList.forEach((face) => overdueFaces.add(String(face._id)));
-        statsAcc.overdueAmountTotal += pastSiteAmount;
-      }
-
-      statsAcc.overdueCount += overdueFaces.size;
-    }
-
+    const statsAcc = computeRentalDueStats(statsDocs, { year: yr, month: mo, targetRole });
     const summaryStatsAgg = [statsAcc];
 
     const stats = summaryStatsAgg[0] || {
