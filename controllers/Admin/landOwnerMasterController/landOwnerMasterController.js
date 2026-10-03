@@ -1,6 +1,7 @@
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
+const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const mongoose = require("mongoose");
 const {
   computeOutstandingSummary,
@@ -2794,7 +2795,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // the "180000" and other header data mentioned in your prompt stays consistent.
     const summaryDocs = await MediaOnboarding.find(
       { "mediaDetails.status": 1 },
-      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries",
+      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal",
     ).lean();
 
     for (const media of summaryDocs) {
@@ -2824,131 +2825,22 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       },
     );
 
-    // ✅ NEW: Calculate Rental Due Stats (Role-based)
-    let approvedCount = 0;
-    let approvedAmountTotal = 0;
-    let pendingCount = 0;
-    let pendingAmountTotal = 0;
-    let overdueSiteCount = 0;
-    let overdueAmountTotal = 0;
-
-    // ✅ FIXED — amounts now come from the SAME cycle-walking summary that
-    // feeds overAllCurrentRentalAmount / overAllCurrentMonthGstAmount
-    // (getOverallSummaryForCycle), so approved + pending + overdue reconciles
-    // with the header totals. Previously each raw rentalDue row was re-priced
-    // as totalRentalAmount / faceCount, which also counted stale/duplicate rows
-    // and sites whose cycle is not due this month.
-    // rentalDue rows are now used ONLY to decide each face's approval status.
-    const statsMonthYear = parsedMonthFilter ? outstandingMonthYear : null;
-    const isApprovedDue = (e) => Number(e.approvalStatus) === 3;
-
-    for (const media of summaryDocs) {
-      const activeFacesList = (media.mediaDetails || []).filter(d => Number(d.status) === 1);
-      if (activeFacesList.length === 0) continue;
-      const faceCount = activeFacesList.length;
-
-      const approvedFaces = new Set();
-      const overdueFaces = new Set();
-      const pendingFaces = new Set();
-
-      const cycleSummary = getOverallSummaryForCycle(media, statsMonthYear);
-      const currentSiteAmount =
-        Number(cycleSummary.currentMonthRentalAmount || 0) +
-        Number(cycleSummary.currentMonthGstAmount || 0);
-
-      // ── 1) Current Month Logic ──
-      if (currentSiteAmount > 0) {
-        const faceAmount = currentSiteAmount / faceCount;
-        const currentMonthEntries = (media.rentalDue || []).filter((e) => {
-          if (!e.dueDate) return false;
-          const d = new Date(e.dueDate);
-          return d >= statsMonthStart && d <= statsMonthEnd;
-        });
-
-        for (const face of activeFacesList) {
-          const faceId = String(face._id);
-          // best-match row for this face: approved first, then latest updated;
-          // site-level rows (no mediaDetailId) apply to every face
-          const entry = currentMonthEntries
-            .filter((e) => !e.mediaDetailId || String(e.mediaDetailId) === faceId)
-            .sort((a, b) => {
-              if (isApprovedDue(a) !== isApprovedDue(b)) return isApprovedDue(a) ? -1 : 1;
-              return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
-            })[0];
-
-          const isApprovedOverall = entry ? isApprovedDue(entry) : false;
-          const roleStep = (entry?.approvalSteps || []).find((s) => s.role === targetRole);
-          const hasRoleApproved = roleStep && roleStep.status === 2;
-          const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
-          const isApprovedByRole = targetRole === null ? isApprovedOverall : hasRoleApproved;
-
-          if (isApprovedByRole) {
-            approvedFaces.add(faceId);
-            approvedAmountTotal += faceAmount;
-            continue;
-          }
-
-          const shouldCountAsOpen = targetRole === null ? !isApprovedOverall : (!isApprovedOverall && !hasRoleActed);
-          if (!shouldCountAsOpen) continue;
-
-          // pending = every open (unapproved) current-month due;
-          // overdue = the subset of those already past their due date
-          pendingFaces.add(faceId);
-          pendingAmountTotal += faceAmount;
-
-          const isOverdueGlobally = Number(media.rentalPayment?.status) === 3 ||
-                                    (entry?.dueDate && new Date(entry.dueDate) < today);
-          if (isOverdueGlobally) {
-            overdueFaces.add(faceId);
-            overdueAmountTotal += faceAmount;
-          }
-        }
-      }
-
-      // ── 2) Past Pending Logic ──
-      const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
-      const siteGst = Number(media.rentalPayment?.gstAmount || 0);
-      const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-      const rpTotal = Number(media.rentalPayment?.totalRentalAmount || 0);
-
-      const pastEntries = (media.rentalDue || []).filter((e) => {
-        if (!e.dueDate) return false;
-        return new Date(e.dueDate) < statsMonthStart;
-      });
-
-      for (const pastEntry of pastEntries) {
-        const faceId = String(pastEntry.mediaDetailId || "site");
-        const isApprovedOverall = pastEntry.approvalStatus === 3;
-        const roleStep = (pastEntry.approvalSteps || []).find((s) => s.role === targetRole);
-        const hasRoleActed = roleStep && (roleStep.status === 2 || roleStep.status === 3);
-
-        const isPendingByRole = targetRole === null ? !isApprovedOverall : (!isApprovedOverall && !hasRoleActed);
-
-        if (isPendingByRole) {
-          const rawBase = Number(pastEntry.netPayable || pastEntry.baseAmount || 0);
-          const rawGst = Number(pastEntry.gstAmount || 0);
-          const withGstFlag = Number(pastEntry.withGst || 0);
-
-          const resolvedBase = billMode === 1 ? (rpTotal / faceCount) : rawBase;
-          const resolvedGst = rawGst > 0
-            ? (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : rawGst)
-            : (billMode === 1 ? ((siteGst > 0 ? siteGst : ownerGst) / faceCount) : (siteGst > 0 ? siteGst : ownerGst));
-
-          const siteTotal = rpTotal + (siteGst > 0 ? siteGst : ownerGst);
-          const effectiveAmount = withGstFlag === 2
-            ? (billMode === 1 ? (siteTotal / faceCount) : rawBase)
-            : resolvedBase + resolvedGst;
-          // ✅ FIXED — Only add to overdue stats, not pending totals (as requested)
-          overdueFaces.add(faceId);
-          overdueAmountTotal += effectiveAmount;
-        }
-      }
-      approvedCount += approvedFaces.size;
-      overdueSiteCount += overdueFaces.size;
-      pendingCount += pendingFaces.size;
-    }
-
-
+    // ✅ FIXED — shared Rental Due stats (same rule as Dashboard and
+    // admin/rental-due-list). Past months are now cycle-based from the ledger
+    // summary, so stale rows of removed faces / per-face rows holding the full
+    // site rent no longer inflate overDue; an approved month is never overdue;
+    // overdue starts 1 day after the due date (IST).
+    const rentalDueStats = computeRentalDueStats(summaryDocs, {
+      year: statsYear,
+      month: statsMonth,
+      targetRole,
+    });
+    const approvedCount = rentalDueStats.approvedCount;
+    const approvedAmountTotal = rentalDueStats.approvedAmountTotal;
+    const pendingCount = rentalDueStats.pendingCount;
+    const pendingAmountTotal = rentalDueStats.pendingAmountTotal;
+    const overdueSiteCount = rentalDueStats.overdueCount;
+    const overdueAmountTotal = rentalDueStats.overdueAmountTotal;
 
 
     const totalFacesAgg = await MediaOnboarding.aggregate([
