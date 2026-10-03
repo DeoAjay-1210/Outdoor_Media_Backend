@@ -15,6 +15,7 @@ const RentalOOHExcelRoutes = require("./routes/Admin/MediaOnboardingRoutes/Renta
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
 const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
 const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
+const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
 (async () => {
@@ -61,6 +62,7 @@ app.use("/admin", RentalDue);
 app.use("/admin", RentalOOHExcelRoutes);
 app.use("/admin", LandownerMasterRoutes);
 app.use("/admin", dashboardRoutes);
+app.use("/admin", cmdNotificationRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
