@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const CmdNotification = require("../../../models/Admin/NotificationSchema/CmdNotificationSchema");
+const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { nowIST } = require("../../../utils/updatedAt");
 
@@ -18,6 +19,39 @@ const unreadFilterFor = (userObjectId) => ({
   targetRole: USER_ROLE.CMD,
   "readBy.userId": { $ne: userObjectId },
 });
+
+// notificationType filters (rows created before the flag existed have no
+// notificationType → treated as "normalApproval")
+const NOTIFICATION_TYPE = { NORMAL_APPROVAL: "normalApproval", REMINDER: "reminder" };
+const normalApprovalFilter = { notificationType: { $ne: NOTIFICATION_TYPE.REMINDER } };
+const reminderFilter = { notificationType: NOTIFICATION_TYPE.REMINDER };
+
+// unread counts for THIS CMD user: overall + split by who approved
+// (each site has one Executive row and one Manager row, counted separately)
+// + split by notification type (normal approval vs reminder)
+const getUnreadCounts = async (userObjectId) => {
+  const unread = unreadFilterFor(userObjectId);
+  const [
+    overallCount,
+    rentalExecutiveApprovalCount,
+    rentalManagerApprovalCount,
+    normalApprovalCount,
+    reminderCount,
+  ] = await Promise.all([
+    CmdNotification.countDocuments(unread),
+    CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter, approvedByRole: USER_ROLE.RENTAL_EXECUTIVE }),
+    CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter, approvedByRole: USER_ROLE.RENTAL_MANAGER }),
+    CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter }),
+    CmdNotification.countDocuments({ ...unread, ...reminderFilter }),
+  ]);
+  return {
+    overallCount,
+    rentalExecutiveApprovalCount,
+    rentalManagerApprovalCount,
+    normalApprovalCount,
+    reminderCount,
+  };
+};
 
 const ensureCmd = (req, res) => {
   if (Number(req.user?.userType) !== USER_ROLE.CMD) {
@@ -41,68 +75,80 @@ async function createRentalApprovalNotification({ media, entry, userType, userId
     if (!step) return null; // this role did not approve — nothing to notify
     const approvedAt = step.approvedAt ? new Date(step.approvedAt) : nowIST();
 
-    // site-wise: the face this rental due belongs to, else the site's active faces
-    const details = media.mediaDetails || [];
-    const face = entry.mediaDetailId
-      ? details.find((d) => String(d._id) === String(entry.mediaDetailId))
-      : null;
-    const faces = face ? [face] : details.filter((d) => Number(d.status) === 1);
-    const siteName = faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "";
-    const siteCode = faces.map((d) => d.mediaCode).filter(Boolean).join(" / ") || media.mediaCode || "";
-
     const owners = media.landOwners || [];
     const landOwnerName = owners.map((o) => o.name).filter(Boolean).join(", ");
     const landOwnerMasterIds = owners.map((o) => toObjectId(o.landOwnerMasterId)).filter(Boolean);
 
     const roleLabel = APPROVER_ROLE_LABEL[role];
-    const message = `${roleLabel} ${userName || ""} approved rental due${entry.dueMonth ? ` for ${entry.dueMonth}` : ""} — ${siteName} (${siteCode})`
+    const dueMonth = entry.dueMonth || "";
+    const message = `${roleLabel} ${userName || ""} approved rental due${dueMonth ? ` for ${dueMonth}` : ""}`
       .replace(/\s+/g, " ")
       .trim();
 
-    // ONE notification per site-wise rental due: the Manager's approval
-    // updates the Executive's notification instead of adding a second one.
-    const dedupeKey = `rentalDue:${String(entry._id)}`;
-    const approvalItem = {
-      role,
-      userId: toObjectId(userId),
-      userName: userName || "",
-      approvedAt,
+    // site-wise (mediaId): faces covered by this notification. A site-level
+    // rental due (no mediaDetailId) covers every active face of the site.
+    const details = media.mediaDetails || [];
+    const activeFaceIds = details.filter((d) => Number(d.status) === 1).map((d) => String(d._id));
+    const entryFaceIds = entry.mediaDetailId ? [String(entry.mediaDetailId)] : activeFaceIds;
+    const buildSiteLabels = (faceIdList) => {
+      const faces = details.filter((d) => faceIdList.includes(String(d._id)));
+      return {
+        mediaDetailIds: faceIdList.map(toObjectId).filter(Boolean),
+        siteName: faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "",
+        siteCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / ") || media.mediaCode || "",
+      };
     };
+
+    // ONE notification per site (mediaId) per month PER ROLE: the Rental
+    // Executive's and the Rental Manager's approvals are two separate rows;
+    // every face of the site merges into its role's row, never duplicates.
+    const dedupeKey = `media:${String(media._id)}:${dueMonth}:role:${role}`;
     const latestFields = {
       mediaId: media._id,
       mediaDetailId: toObjectId(entry.mediaDetailId),
-      dueMonth: entry.dueMonth || "",
+      rentalDueId: entry._id,
+      dueMonth,
       landOwnerName,
       landOwnerMasterIds,
-      siteName,
-      siteCode,
       message,
       approvedByRole: role,
-      approvedByUserId: approvalItem.userId,
-      approvedByName: approvalItem.userName,
+      approvedByUserId: toObjectId(userId),
+      approvedByName: userName || "",
       approvedAt,
     };
 
-    const existing = await CmdNotification.findOne({ rentalDueId: entry._id })
+    const existing = await CmdNotification.findOne({ mediaId: media._id, dueMonth, approvedByRole: role })
       .sort({ updatedAt: -1, createdAt: -1 })
       .lean();
 
     if (existing) {
-      // same approval processed again → already notified, keep read status
-      const alreadyNotified = (existing.approvals || []).some(
-        (a) => a.role === role && new Date(a.approvedAt).getTime() === approvedAt.getTime(),
-      );
-      if (alreadyNotified) return existing.dedupeKey;
+      const knownFaceIds = (existing.mediaDetailIds || []).map(String);
+      if (knownFaceIds.length === 0 && existing.mediaDetailId) knownFaceIds.push(String(existing.mediaDetailId));
+      const hasNewFace = entryFaceIds.some((id) => !knownFaceIds.includes(id));
+      const isNewerApproval =
+        !existing.approvedAt || approvedAt.getTime() > new Date(existing.approvedAt).getTime();
 
-      // keep one record per site: drop any older duplicates first
-      await CmdNotification.deleteMany({ rentalDueId: entry._id, _id: { $ne: existing._id } });
+      // same (or an older) approval for a face already covered → already
+      // notified, keep read status
+      if (!isNewerApproval && !hasNewFace) return existing.dedupeKey;
 
+      // keep one record per site/month/role: drop any older duplicates first
+      await CmdNotification.deleteMany({
+        mediaId: media._id,
+        dueMonth,
+        approvedByRole: role,
+        _id: { $ne: existing._id },
+      });
+
+      const mergedFaceIds = [...new Set([...knownFaceIds, ...entryFaceIds])];
       await CmdNotification.updateOne(
         { _id: existing._id },
         {
           $set: {
-            ...latestFields,
-            approvals: [...(existing.approvals || []).filter((a) => a.role !== role), approvalItem],
+            // a newer approval becomes the latest; an older one for a new face
+            // only adds that face to the site
+            ...(isNewerApproval ? latestFields : {}),
+            ...buildSiteLabels(mergedFaceIds),
             readBy: [], // new approval on this site → unread again for CMD
             dedupeKey,
             updatedAt: nowIST(),
@@ -118,9 +164,9 @@ async function createRentalApprovalNotification({ media, entry, userType, userId
       {
         $setOnInsert: {
           targetRole: USER_ROLE.CMD,
-          rentalDueId: entry._id,
+          notificationType: NOTIFICATION_TYPE.NORMAL_APPROVAL,
           ...latestFields,
-          approvals: [approvalItem],
+          ...buildSiteLabels(entryFaceIds),
           readBy: [],
           dedupeKey,
           createdAt: now,
@@ -141,23 +187,32 @@ async function createRentalApprovalNotification({ media, entry, userType, userId
 
 const formatNotification = (n, userObjectId) => ({
   notificationId: n._id,
+  notificationType: n.notificationType || NOTIFICATION_TYPE.NORMAL_APPROVAL,
+  // reminder rows only
+  ...(n.notificationType === NOTIFICATION_TYPE.REMINDER
+    ? {
+        reminderCount: n.reminderCount || 0,
+        remarks: n.remarks || "",
+        lastRemindedBy: n.lastRemindedBy || "",
+        lastRemindedByRole: n.lastRemindedByRole ?? null,
+        lastRemindedAt: n.lastRemindedAt || null,
+      }
+    : {}),
+  landOwnerMasterId: (n.landOwnerMasterIds || [])[0] || null, // first / single landowner
+  landOwnerMasterIds: n.landOwnerMasterIds || [], // all landowners of the site
   landOwnerName: n.landOwnerName,
   siteName: n.siteName,
   siteCode: n.siteCode,
   message: n.message,
   dueMonth: n.dueMonth,
-  approvedByRole: n.approvedByRole,
-  approvedByName: n.approvedByName,
-  approvedAt: n.approvedAt,
+  // approval rows only (not applicable to reminders)
+  ...(n.notificationType !== NOTIFICATION_TYPE.REMINDER
+    ? { approvedByRole: n.approvedByRole, approvedByName: n.approvedByName, approvedAt: n.approvedAt }
+    : {}),
   mediaId: n.mediaId,
   mediaDetailId: n.mediaDetailId,
+  mediaDetailIds: n.mediaDetailIds && n.mediaDetailIds.length ? n.mediaDetailIds : (n.mediaDetailId ? [n.mediaDetailId] : []),
   rentalDueId: n.rentalDueId,
-  approvals: (n.approvals || []).map((a) => ({
-    role: a.role,
-    roleName: APPROVER_ROLE_LABEL[a.role] || "",
-    userName: a.userName,
-    approvedAt: a.approvedAt,
-  })),
   isRead: (n.readBy || []).some((r) => String(r.userId) === String(userObjectId)),
   createdAt: n.createdAt,
   updatedAt: n.updatedAt || n.createdAt,
@@ -165,7 +220,8 @@ const formatNotification = (n, userObjectId) => ({
 
 // ─────────────────────────────────────────────────────────────
 // POST/GET /admin/cmd-notifications
-// body/query: pageNumber, count, isRead (true/false — optional filter)
+// body/query: pageNumber, count, isRead (true/false — optional filter),
+//             notificationType ("normalApproval" | "reminder" — optional filter)
 // ─────────────────────────────────────────────────────────────
 const getCmdNotifications = async (req, res) => {
   try {
@@ -182,10 +238,16 @@ const getCmdNotifications = async (req, res) => {
     } else if (params.isRead === false || params.isRead === "false") {
       filter["readBy.userId"] = { $ne: userObjectId };
     }
+    // optional: "normalApproval" | "reminder"
+    if (params.notificationType === NOTIFICATION_TYPE.REMINDER) {
+      Object.assign(filter, reminderFilter);
+    } else if (params.notificationType === NOTIFICATION_TYPE.NORMAL_APPROVAL) {
+      Object.assign(filter, normalApprovalFilter);
+    }
 
-    const [totalCount, overallCount, rows] = await Promise.all([
+    const [totalCount, counts, rows] = await Promise.all([
       CmdNotification.countDocuments(filter),
-      CmdNotification.countDocuments(unreadFilterFor(userObjectId)),
+      getUnreadCounts(userObjectId),
       CmdNotification.find(filter)
         .sort({ updatedAt: -1, createdAt: -1 })
         .skip((pageNumber - 1) * count)
@@ -194,7 +256,7 @@ const getCmdNotifications = async (req, res) => {
     ]);
 
     return successResponse(res, "CMD notifications fetched successfully", {
-      overallCount,
+      ...counts,
       pagination: {
         pageNumber,
         count,
@@ -214,10 +276,8 @@ const getCmdNotifications = async (req, res) => {
 const getCmdNotificationCount = async (req, res) => {
   try {
     if (!ensureCmd(req, res)) return;
-    const overallCount = await CmdNotification.countDocuments(
-      unreadFilterFor(toObjectId(req.user.userId)),
-    );
-    return successResponse(res, "CMD notification count fetched successfully", { overallCount });
+    const counts = await getUnreadCounts(toObjectId(req.user.userId));
+    return successResponse(res, "CMD notification count fetched successfully", counts);
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
   }
@@ -243,11 +303,11 @@ const markCmdNotificationRead = async (req, res) => {
       { _id: { $in: ids }, ...unreadFilterFor(userObjectId) },
       { $push: { readBy: { userId: userObjectId, readAt: nowIST() } } },
     );
-    const overallCount = await CmdNotification.countDocuments(unreadFilterFor(userObjectId));
+    const counts = await getUnreadCounts(userObjectId);
 
     return successResponse(res, "Notification(s) marked as read", {
       updatedCount: result.modifiedCount || 0,
-      overallCount,
+      ...counts,
     });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
@@ -268,7 +328,132 @@ const markAllCmdNotificationsRead = async (req, res) => {
     return successResponse(res, "All notifications marked as read", {
       updatedCount: result.modifiedCount || 0,
       overallCount: 0,
+      rentalExecutiveApprovalCount: 0,
+      rentalManagerApprovalCount: 0,
+      normalApprovalCount: 0,
+      reminderCount: 0,
     });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// POST /admin/cmd-notifications/reminder
+// Rental Executive / Rental Manager reminds CMD to approve a site.
+// body: { mediaId, dueMonth? (e.g. "October 2026"), remarks? }
+// Only rental dues WAITING ON CMD can be reminded. One reminder row per
+// site per month: each new reminder increments reminderCount and makes it
+// unread again for CMD.
+// ─────────────────────────────────────────────────────────────
+const sendCmdReminder = async (req, res) => {
+  try {
+    const role = Number(req.user?.userType);
+    if (!APPROVER_ROLE_LABEL[role]) {
+      return errorResponse(res, "Only Rental Executive / Rental Manager can send reminders", null, 403);
+    }
+
+    const { mediaId, dueMonth, remarks } = req.body || {};
+    const mediaObjectId = toObjectId(typeof mediaId === "string" ? mediaId.trim() : mediaId);
+    if (!mediaObjectId) {
+      return errorResponse(res, "A valid mediaId is required", null, 400);
+    }
+
+    const media = await MediaOnboarding.findById(mediaObjectId).lean();
+    if (!media) {
+      return errorResponse(res, "Media not found", null, 404);
+    }
+
+    const requestedMonth = typeof dueMonth === "string" ? dueMonth.trim().toLowerCase() : "";
+    const waitingOnCmd = (media.rentalDue || []).filter(
+      (d) =>
+        Number(d.approvalStatus) !== 3 &&
+        Number(d.currentPendingRole) === USER_ROLE.CMD &&
+        (!requestedMonth || String(d.dueMonth || "").trim().toLowerCase() === requestedMonth),
+    );
+    if (waitingOnCmd.length === 0) {
+      return errorResponse(res, "No rental due waiting for CMD approval for this site", null, 400);
+    }
+
+    // site-wise labels for the faces involved (site-level due → all active faces)
+    const details = media.mediaDetails || [];
+    const activeFaceIds = details.filter((d) => Number(d.status) === 1).map((d) => String(d._id));
+    const owners = media.landOwners || [];
+    const landOwnerName = owners.map((o) => o.name).filter(Boolean).join(", ");
+    const landOwnerMasterIds = owners.map((o) => toObjectId(o.landOwnerMasterId)).filter(Boolean);
+
+    const userName = req.user?.userName || "";
+    const roleLabel = APPROVER_ROLE_LABEL[role];
+    const remarksText = typeof remarks === "string" ? remarks.trim() : "";
+
+    // one reminder row per month waiting on CMD
+    const byMonth = new Map();
+    waitingOnCmd.forEach((d) => {
+      const month = d.dueMonth || "";
+      if (!byMonth.has(month)) byMonth.set(month, []);
+      byMonth.get(month).push(d);
+    });
+
+    const reminders = [];
+    for (const [month, dues] of byMonth) {
+      const faceIds = [
+        ...new Set(dues.flatMap((d) => (d.mediaDetailId ? [String(d.mediaDetailId)] : activeFaceIds))),
+      ];
+      const faces = details.filter((d) => faceIds.includes(String(d._id)));
+      const now = nowIST();
+      const dedupeKey = `reminder:media:${String(media._id)}:${month}`;
+
+      const doc = await CmdNotification.findOneAndUpdate(
+        { dedupeKey },
+        {
+          $set: {
+            mediaDetailId: toObjectId(dues[dues.length - 1].mediaDetailId),
+            mediaDetailIds: faceIds.map(toObjectId).filter(Boolean),
+            rentalDueId: dues[dues.length - 1]._id,
+            landOwnerName,
+            landOwnerMasterIds,
+            siteName: faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "",
+            siteCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / ") || media.mediaCode || "",
+            message: `Reminder: ${roleLabel} ${userName} requested approval${month ? ` for ${month}` : ""}`
+              .replace(/\s+/g, " ")
+              .trim(),
+            ...(remarksText ? { remarks: remarksText } : {}), // keep the previous note when none is sent
+            lastRemindedBy: userName,
+            lastRemindedByRole: role,
+            lastRemindedByUserId: toObjectId(req.user?.userId),
+            lastRemindedAt: now,
+            readBy: [], // new reminder → unread again for CMD
+            updatedAt: now,
+          },
+          $inc: { reminderCount: 1 },
+          $setOnInsert: {
+            targetRole: USER_ROLE.CMD,
+            notificationType: NOTIFICATION_TYPE.REMINDER,
+            mediaId: media._id,
+            dueMonth: month,
+            dedupeKey,
+            createdAt: now,
+          },
+        },
+        { upsert: true, returnDocument: "after" },
+      ).lean();
+
+      reminders.push({
+        notificationId: doc._id,
+        notificationType: doc.notificationType,
+        mediaId: doc.mediaId,
+        siteCode: doc.siteCode,
+        dueMonth: doc.dueMonth,
+        reminderCount: doc.reminderCount,
+        lastRemindedBy: doc.lastRemindedBy,
+        lastRemindedByRole: doc.lastRemindedByRole,
+        lastRemindedAt: doc.lastRemindedAt,
+      });
+    }
+
+    // latest month first; full list in reminders[] when several months were reminded
+    reminders.sort((a, b) => new Date(`1 ${b.dueMonth}`) - new Date(`1 ${a.dueMonth}`));
+    return successResponse(res, "Reminder sent to CMD", { ...reminders[0], reminders });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
   }
@@ -276,6 +461,7 @@ const markAllCmdNotificationsRead = async (req, res) => {
 
 module.exports = {
   createRentalApprovalNotification,
+  sendCmdReminder,
   getCmdNotifications,
   getCmdNotificationCount,
   markCmdNotificationRead,

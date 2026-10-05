@@ -5,6 +5,7 @@ const {
   getCmdNotificationCount,
   markCmdNotificationRead,
   markAllCmdNotificationsRead,
+  sendCmdReminder,
 } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
 const protect = require("../../../middleware/authMiddleware");
 
@@ -15,5 +16,8 @@ router.get("/cmd-notifications", protect, getCmdNotifications);
 router.get("/cmd-notifications/count", protect, getCmdNotificationCount);
 router.post("/cmd-notifications/read", protect, markCmdNotificationRead);
 router.post("/cmd-notifications/read-all", protect, markAllCmdNotificationsRead);
+
+// Rental Executive (1) / Rental Manager (2) — remind CMD to approve a site
+router.post("/cmd-notifications/reminder", protect, sendCmdReminder);
 
 module.exports = router;
