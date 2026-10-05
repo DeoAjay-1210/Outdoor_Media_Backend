@@ -340,7 +340,8 @@ const markAllCmdNotificationsRead = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 // One site: create / bump the CMD reminder row(s) for every month of this
-// site that is WAITING ON CMD (or only `dueMonth` when given).
+// site already approved by the Rental Executive (now waiting on Rental Manager)
+// or by the Manager (now waiting on CMD), not yet fully approved (or only `dueMonth` when given).
 // Returns a per-site result object (never throws for a business failure).
 // ─────────────────────────────────────────────────────────────
 async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userName, userId }) {
@@ -356,10 +357,11 @@ async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userN
   }
 
   const requestedMonth = typeof dueMonth === "string" ? dueMonth.trim().toLowerCase() : "";
-  const waitingOnCmd = (media.rentalDue || []).filter(
+  const remindableDues = (media.rentalDue || []).filter(
     (d) =>
       Number(d.approvalStatus) !== 3 &&
-      Number(d.currentPendingRole) === USER_ROLE.CMD &&
+      // ✅ Executive approved → waiting on Manager (2), or Manager approved → waiting on CMD (3)
+      [USER_ROLE.RENTAL_MANAGER, USER_ROLE.CMD].includes(Number(d.currentPendingRole)) &&
       (!requestedMonth || String(d.dueMonth || "").trim().toLowerCase() === requestedMonth),
   );
 
@@ -368,12 +370,12 @@ async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userN
   const activeFaces = details.filter((d) => Number(d.status) === 1);
   const activeFaceIds = activeFaces.map((d) => String(d._id));
 
-  if (waitingOnCmd.length === 0) {
+  if (remindableDues.length === 0) {
     return {
       mediaId: media._id,
       siteCode: activeFaces.map((d) => d.mediaCode).filter(Boolean).join(" / "),
       success: false,
-      message: "No rental due waiting for CMD approval for this site",
+      message: "No rental due approved by Rental Executive / Manager and pending approval for this site",
     };
   }
 
@@ -384,7 +386,7 @@ async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userN
 
   // one reminder row per month waiting on CMD
   const byMonth = new Map();
-  waitingOnCmd.forEach((d) => {
+  remindableDues.forEach((d) => {
     const month = d.dueMonth || "";
     if (!byMonth.has(month)) byMonth.set(month, []);
     byMonth.get(month).push(d);
@@ -457,7 +459,7 @@ async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userN
 // Rental Executive / Rental Manager reminds CMD to approve site(s).
 // body: { mediaId: [ids] (a single id string is also accepted),
 //         dueMonth? (e.g. "October 2026"), remarks? }
-// Only rental dues WAITING ON CMD can be reminded. One reminder row per
+// Only rental dues approved by the Executive (waiting on Manager) or the Manager (waiting on CMD), not yet fully approved, can be reminded. One reminder row per
 // site per month: each new reminder increments reminderCount and makes it
 // unread again for CMD. Each site is processed independently.
 // ─────────────────────────────────────────────────────────────
@@ -502,7 +504,7 @@ const sendCmdReminder = async (req, res) => {
     if (successCount === 0) {
       return errorResponse(
         res,
-        "No reminder sent — none of the sites has a rental due waiting for CMD approval",
+        "No reminder sent — none of the sites has a rental due approved by Rental Executive / Manager and pending approval",
         summary,
         400,
       );
