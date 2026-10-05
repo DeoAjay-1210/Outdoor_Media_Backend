@@ -339,12 +339,127 @@ const markAllCmdNotificationsRead = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// One site: create / bump the CMD reminder row(s) for every month of this
+// site that is WAITING ON CMD (or only `dueMonth` when given).
+// Returns a per-site result object (never throws for a business failure).
+// ─────────────────────────────────────────────────────────────
+async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userName, userId }) {
+  const mediaIdStr = typeof rawMediaId === "string" ? rawMediaId.trim() : String(rawMediaId || "");
+  const mediaObjectId = toObjectId(mediaIdStr);
+  if (!mediaObjectId) {
+    return { mediaId: mediaIdStr, success: false, message: "A valid mediaId is required" };
+  }
+
+  const media = await MediaOnboarding.findById(mediaObjectId).lean();
+  if (!media) {
+    return { mediaId: mediaIdStr, success: false, message: "Media not found" };
+  }
+
+  const requestedMonth = typeof dueMonth === "string" ? dueMonth.trim().toLowerCase() : "";
+  const waitingOnCmd = (media.rentalDue || []).filter(
+    (d) =>
+      Number(d.approvalStatus) !== 3 &&
+      Number(d.currentPendingRole) === USER_ROLE.CMD &&
+      (!requestedMonth || String(d.dueMonth || "").trim().toLowerCase() === requestedMonth),
+  );
+
+  // site-wise labels for the faces involved (site-level due → all active faces)
+  const details = media.mediaDetails || [];
+  const activeFaces = details.filter((d) => Number(d.status) === 1);
+  const activeFaceIds = activeFaces.map((d) => String(d._id));
+
+  if (waitingOnCmd.length === 0) {
+    return {
+      mediaId: media._id,
+      siteCode: activeFaces.map((d) => d.mediaCode).filter(Boolean).join(" / "),
+      success: false,
+      message: "No rental due waiting for CMD approval for this site",
+    };
+  }
+
+  const owners = media.landOwners || [];
+  const landOwnerName = owners.map((o) => o.name).filter(Boolean).join(", ");
+  const landOwnerMasterIds = owners.map((o) => toObjectId(o.landOwnerMasterId)).filter(Boolean);
+  const roleLabel = APPROVER_ROLE_LABEL[role];
+
+  // one reminder row per month waiting on CMD
+  const byMonth = new Map();
+  waitingOnCmd.forEach((d) => {
+    const month = d.dueMonth || "";
+    if (!byMonth.has(month)) byMonth.set(month, []);
+    byMonth.get(month).push(d);
+  });
+
+  const reminders = [];
+  for (const [month, dues] of byMonth) {
+    const faceIds = [
+      ...new Set(dues.flatMap((d) => (d.mediaDetailId ? [String(d.mediaDetailId)] : activeFaceIds))),
+    ];
+    const faces = details.filter((d) => faceIds.includes(String(d._id)));
+    const now = nowIST();
+    const dedupeKey = `reminder:media:${String(media._id)}:${month}`;
+
+    const doc = await CmdNotification.findOneAndUpdate(
+      { dedupeKey },
+      {
+        $set: {
+          mediaDetailId: toObjectId(dues[dues.length - 1].mediaDetailId),
+          mediaDetailIds: faceIds.map(toObjectId).filter(Boolean),
+          rentalDueId: dues[dues.length - 1]._id,
+          landOwnerName,
+          landOwnerMasterIds,
+          siteName: faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "",
+          siteCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / ") || media.mediaCode || "",
+          message: `Reminder: ${roleLabel} ${userName} requested approval${month ? ` for ${month}` : ""}`
+            .replace(/\s+/g, " ")
+            .trim(),
+          ...(remarksText ? { remarks: remarksText } : {}), // keep the previous note when none is sent
+          lastRemindedBy: userName,
+          lastRemindedByRole: role,
+          lastRemindedByUserId: toObjectId(userId),
+          lastRemindedAt: now,
+          readBy: [], // new reminder → unread again for CMD
+          updatedAt: now,
+        },
+        $inc: { reminderCount: 1 },
+        $setOnInsert: {
+          targetRole: USER_ROLE.CMD,
+          notificationType: NOTIFICATION_TYPE.REMINDER,
+          mediaId: media._id,
+          dueMonth: month,
+          dedupeKey,
+          createdAt: now,
+        },
+      },
+      { upsert: true, returnDocument: "after" },
+    ).lean();
+
+    reminders.push({
+      notificationId: doc._id,
+      notificationType: doc.notificationType,
+      mediaId: doc.mediaId,
+      siteCode: doc.siteCode,
+      dueMonth: doc.dueMonth,
+      reminderCount: doc.reminderCount,
+      lastRemindedBy: doc.lastRemindedBy,
+      lastRemindedByRole: doc.lastRemindedByRole,
+      lastRemindedAt: doc.lastRemindedAt,
+    });
+  }
+
+  // latest month first; full list in reminders[] when several months were reminded
+  reminders.sort((a, b) => new Date(`1 ${b.dueMonth}`) - new Date(`1 ${a.dueMonth}`));
+  return { success: true, message: "Reminder sent to CMD", ...reminders[0], reminders };
+}
+
+// ─────────────────────────────────────────────────────────────
 // POST /admin/cmd-notifications/reminder
-// Rental Executive / Rental Manager reminds CMD to approve a site.
-// body: { mediaId, dueMonth? (e.g. "October 2026"), remarks? }
+// Rental Executive / Rental Manager reminds CMD to approve site(s).
+// body: { mediaId: [ids] (a single id string is also accepted),
+//         dueMonth? (e.g. "October 2026"), remarks? }
 // Only rental dues WAITING ON CMD can be reminded. One reminder row per
 // site per month: each new reminder increments reminderCount and makes it
-// unread again for CMD.
+// unread again for CMD. Each site is processed independently.
 // ─────────────────────────────────────────────────────────────
 const sendCmdReminder = async (req, res) => {
   try {
@@ -354,106 +469,45 @@ const sendCmdReminder = async (req, res) => {
     }
 
     const { mediaId, dueMonth, remarks } = req.body || {};
-    const mediaObjectId = toObjectId(typeof mediaId === "string" ? mediaId.trim() : mediaId);
-    if (!mediaObjectId) {
-      return errorResponse(res, "A valid mediaId is required", null, 400);
+    const rawIds = Array.isArray(mediaId) ? mediaId : mediaId ? [mediaId] : [];
+    // de-duplicate, keep request order
+    const mediaIds = [
+      ...new Set(rawIds.map((id) => (typeof id === "string" ? id.trim() : String(id || ""))).filter(Boolean)),
+    ];
+    if (mediaIds.length === 0) {
+      return errorResponse(res, "mediaId must be a non-empty array of valid ids", null, 400);
     }
 
-    const media = await MediaOnboarding.findById(mediaObjectId).lean();
-    if (!media) {
-      return errorResponse(res, "Media not found", null, 404);
+    const options = {
+      dueMonth,
+      remarksText: typeof remarks === "string" ? remarks.trim() : "",
+      role,
+      userName: req.user?.userName || "",
+      userId: req.user?.userId,
+    };
+
+    const results = [];
+    for (const id of mediaIds) {
+      results.push(await remindCmdForSite(id, options));
     }
 
-    const requestedMonth = typeof dueMonth === "string" ? dueMonth.trim().toLowerCase() : "";
-    const waitingOnCmd = (media.rentalDue || []).filter(
-      (d) =>
-        Number(d.approvalStatus) !== 3 &&
-        Number(d.currentPendingRole) === USER_ROLE.CMD &&
-        (!requestedMonth || String(d.dueMonth || "").trim().toLowerCase() === requestedMonth),
-    );
-    if (waitingOnCmd.length === 0) {
-      return errorResponse(res, "No rental due waiting for CMD approval for this site", null, 400);
+    const successCount = results.filter((r) => r.success).length;
+    const summary = {
+      totalSites: results.length,
+      successCount,
+      failedCount: results.length - successCount,
+      results,
+    };
+
+    if (successCount === 0) {
+      return errorResponse(
+        res,
+        "No reminder sent — none of the sites has a rental due waiting for CMD approval",
+        summary,
+        400,
+      );
     }
-
-    // site-wise labels for the faces involved (site-level due → all active faces)
-    const details = media.mediaDetails || [];
-    const activeFaceIds = details.filter((d) => Number(d.status) === 1).map((d) => String(d._id));
-    const owners = media.landOwners || [];
-    const landOwnerName = owners.map((o) => o.name).filter(Boolean).join(", ");
-    const landOwnerMasterIds = owners.map((o) => toObjectId(o.landOwnerMasterId)).filter(Boolean);
-
-    const userName = req.user?.userName || "";
-    const roleLabel = APPROVER_ROLE_LABEL[role];
-    const remarksText = typeof remarks === "string" ? remarks.trim() : "";
-
-    // one reminder row per month waiting on CMD
-    const byMonth = new Map();
-    waitingOnCmd.forEach((d) => {
-      const month = d.dueMonth || "";
-      if (!byMonth.has(month)) byMonth.set(month, []);
-      byMonth.get(month).push(d);
-    });
-
-    const reminders = [];
-    for (const [month, dues] of byMonth) {
-      const faceIds = [
-        ...new Set(dues.flatMap((d) => (d.mediaDetailId ? [String(d.mediaDetailId)] : activeFaceIds))),
-      ];
-      const faces = details.filter((d) => faceIds.includes(String(d._id)));
-      const now = nowIST();
-      const dedupeKey = `reminder:media:${String(media._id)}:${month}`;
-
-      const doc = await CmdNotification.findOneAndUpdate(
-        { dedupeKey },
-        {
-          $set: {
-            mediaDetailId: toObjectId(dues[dues.length - 1].mediaDetailId),
-            mediaDetailIds: faceIds.map(toObjectId).filter(Boolean),
-            rentalDueId: dues[dues.length - 1]._id,
-            landOwnerName,
-            landOwnerMasterIds,
-            siteName: faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "",
-            siteCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / ") || media.mediaCode || "",
-            message: `Reminder: ${roleLabel} ${userName} requested approval${month ? ` for ${month}` : ""}`
-              .replace(/\s+/g, " ")
-              .trim(),
-            ...(remarksText ? { remarks: remarksText } : {}), // keep the previous note when none is sent
-            lastRemindedBy: userName,
-            lastRemindedByRole: role,
-            lastRemindedByUserId: toObjectId(req.user?.userId),
-            lastRemindedAt: now,
-            readBy: [], // new reminder → unread again for CMD
-            updatedAt: now,
-          },
-          $inc: { reminderCount: 1 },
-          $setOnInsert: {
-            targetRole: USER_ROLE.CMD,
-            notificationType: NOTIFICATION_TYPE.REMINDER,
-            mediaId: media._id,
-            dueMonth: month,
-            dedupeKey,
-            createdAt: now,
-          },
-        },
-        { upsert: true, returnDocument: "after" },
-      ).lean();
-
-      reminders.push({
-        notificationId: doc._id,
-        notificationType: doc.notificationType,
-        mediaId: doc.mediaId,
-        siteCode: doc.siteCode,
-        dueMonth: doc.dueMonth,
-        reminderCount: doc.reminderCount,
-        lastRemindedBy: doc.lastRemindedBy,
-        lastRemindedByRole: doc.lastRemindedByRole,
-        lastRemindedAt: doc.lastRemindedAt,
-      });
-    }
-
-    // latest month first; full list in reminders[] when several months were reminded
-    reminders.sort((a, b) => new Date(`1 ${b.dueMonth}`) - new Date(`1 ${a.dueMonth}`));
-    return successResponse(res, "Reminder sent to CMD", { ...reminders[0], reminders });
+    return successResponse(res, `Reminder sent to CMD for ${successCount} of ${results.length} site(s)`, summary);
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
   }
