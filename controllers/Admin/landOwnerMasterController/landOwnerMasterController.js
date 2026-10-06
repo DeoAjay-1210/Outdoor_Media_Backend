@@ -961,15 +961,14 @@ function parseSiteFilterDueMonthLabel(label) {
   if (monthIdx === -1 || Number.isNaN(year)) return null;
   return { monthIdx, year };
 }
-// ✅ NEW — "CMD Approval" filter covers BOTH:
-//  • waiting on CMD — approved by Rental Executive / Manager, CMD (role 3) pending
-//  • approved by CMD — fully approved with the CMD step approved (status 2)
-const isDueAwaitingCmdApproval = (due) =>
-  Number(due?.approvalStatus) !== 3 && Number(due?.currentPendingRole) === 3;
+// ✅ NEW — "CMD Approval" filter: ONLY dues the CMD has approved (fully
+// approved with the CMD step approved, status 2). Dues still waiting on CMD
+// are NOT included. Combined with isCmdDueFullySettled below, the filter
+// shows CMD-approved months whose ledger / GST entry is not done yet.
 const isDueApprovedByCmd = (due) =>
   Number(due?.approvalStatus) === 3 &&
   (due?.approvalSteps || []).some((s) => Number(s.role) === 3 && Number(s.status) === 2);
-const isDueInCmdApproval = (due) => isDueAwaitingCmdApproval(due) || isDueApprovedByCmd(due);
+const isDueInCmdApproval = (due) => isDueApprovedByCmd(due);
 
 // ✅ NEW — a CMD-approval month drops out of the filter / counts once it is
 // fully settled: every owner's required rent mode(s) entered in the ledger
