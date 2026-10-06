@@ -2476,6 +2476,52 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
     const additionalImagesFile = findOtherFile("additionalImages");
     if (additionalImagesFile)
       mediaData.additionalImages = req.processFile(additionalImagesFile);
+
+    // ✅ NEW — per-face front view image. File field "mediaDetails[i][frontView]",
+    // or a URL string inside the mediaDetails JSON to keep a saved image.
+    // Not sent on update → the face keeps its saved image; "" or null removes it.
+    if (Array.isArray(mediaData.mediaDetails)) {
+      files.forEach((f) => {
+        const match = f.fieldname.match(/^mediaDetails\[(\d+)\]\[frontView\]$/);
+        if (match && mediaData.mediaDetails[Number(match[1])]) {
+          mediaData.mediaDetails[Number(match[1])].frontView = req.processFile(f);
+        }
+      });
+
+      mediaData.mediaDetails.forEach((detail) => {
+        if (detail.frontView === "" || detail.frontView === null) {
+          delete detail.frontView;
+          return;
+        }
+        if (typeof detail.frontView === "string") {
+          const urlValue = detail.frontView.trim();
+          if (urlValue.startsWith("http")) {
+            detail.frontView = {
+              originalName: urlValue.split("/").pop(),
+              fileName: urlValue.split("/").pop(),
+              filePath: urlValue,
+              mimeType: null,
+              size: null,
+              fileType: "image",
+              uploadedAt: nowIST(),
+            };
+          } else {
+            delete detail.frontView;
+            return;
+          }
+        }
+        if (detail.frontView === undefined && existingMediaForValidation) {
+          const existingDetail = existingMediaForValidation.mediaDetails?.find(
+            (ex) =>
+              (detail.mediaCode && ex.mediaCode && String(ex.mediaCode) === String(detail.mediaCode)) ||
+              (detail._id && String(ex._id) === String(detail._id)),
+          );
+          if (existingDetail?.frontView?.filePath) {
+            detail.frontView = existingDetail.toObject().frontView;
+          }
+        }
+      });
+    }
     // const FILE_OBJECT_FIELDS = [
     //   "frontView",
     //   "sideView",
