@@ -455,6 +455,16 @@ const MediaSchema = new mongoose.Schema(
           enum: [1, 2], // 1 = single, 2 = seperate
           default: null,
         },
+        // ✅ NEW — front view image of this face
+        frontView: {
+          originalName: { type: String },
+          fileName: { type: String },
+          filePath: { type: String },
+          mimeType: { type: String },
+          size: { type: Number },
+          fileType: { type: String, enum: ["image"], default: "image" },
+          uploadedAt: { type: Date, default: null },
+        },
       },
     ],
     numberOfLandOwners: {

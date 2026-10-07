@@ -21,6 +21,17 @@ const {
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
+const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
+
+// ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
+// Manager (TEAM_LEAD) save only counts as an approval when that role's own
+// step moves to status 2 in THIS request (a save while it is not their turn
+// only updates fields and must not notify).
+const isRentalApproverRole = (userType) => userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
+const isRoleStepApproved = (entry, role) =>
+  !!(entry?.approvalSteps || []).find((s) => s.role === role && s.status === 2);
+const findRentalDueEntryById = (media, rentalDueId) =>
+  (media?.rentalDue || []).find((d) => String(d._id) === String(rentalDueId));
 
 const IST_OFFSET_MS = 330 * 60000; // 5h30m
 
@@ -2121,6 +2132,9 @@ async function processSingleRentalDue({
   await generateMissedEntriesForMedia(media, userName);
 
   if (rentalDueId) {
+    // ✅ NEW — snapshot before processing, to detect an approval made in this request
+    const roleStepWasApproved = isRoleStepApproved(findRentalDueEntryById(media, rentalDueId), userType);
+
     const result = await processSingleRentalDueInternal({
       media,
       rentalDueId,
@@ -2143,6 +2157,10 @@ async function processSingleRentalDue({
         const mailRes = await sendRentalDueApprovalMail(media, result.entryDoc);
         result.entryDoc.mailSent = !!mailRes.sent;
         await media.save({ timestamps: false });
+      }
+      // ✅ NEW — CMD notification after a saved Rental Executive / Manager approval
+      if (isRentalApproverRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+        await createRentalApprovalNotification({ media, entry: result.entryDoc, userType, userId, userName });
       }
     }
     return result;
@@ -2255,6 +2273,12 @@ async function processSingleRentalDue({
     monthBucket.entries.push({ rentalDueId: savedEntry._id, siteName: media.mediaName, campaignName, reason, dueDate: dueDateObj, netPayable: Number(newEntry.netPayable) || 0, approvalStatus: newEntry.approvalStatus, savedBy: userName, savedByRole: userType, updatedAt: nowIST(), updatedBy: userName });
 
     await media.save({ timestamps: false });
+
+    // ✅ NEW — CMD notification: a Rental Executive / Manager creating the entry
+    // approves their own step at creation
+    if (isRentalApproverRole(userType)) {
+      await createRentalApprovalNotification({ media, entry: savedEntry, userType, userId, userName });
+    }
 
     if (!skipMail && isOwnerOverride && savedEntry.approvalStatus === 3) {
       const mailResult = await sendRentalDueApprovalMail(media, savedEntry);
@@ -2391,6 +2415,9 @@ exports.saveRentalDue = async (req, res) => {
         // Before processing, run catch-up sweep
         await generateMissedEntriesForMedia(media, userName);
 
+        // ✅ NEW — approvals made in this request, notified only after the save below
+        const groupCmdApprovals = [];
+
         for (const item of group) {
           const index = item.originalIndex;
           let entryProofOfCampaign = null;
@@ -2402,6 +2429,9 @@ exports.saveRentalDue = async (req, res) => {
           if (entryInvoiceFileMap[index]) {
             entryInvoice = req.processFile(entryInvoiceFileMap[index]);
           }
+
+          // ✅ NEW — snapshot before processing, to detect an approval made in this request
+          const roleStepWasApproved = isRoleStepApproved(findRentalDueEntryById(media, item.rentalDueId), userType);
 
           // Directly process on the loaded document instance
           const processResult = await processSingleRentalDueInternal({
@@ -2424,10 +2454,23 @@ exports.saveRentalDue = async (req, res) => {
           if (processResult.success && processResult.approvalStatus === 3) {
             batchApprovedSites.push({ media, entry: processResult.entryDoc });
           }
+          if (
+            processResult.success &&
+            isRentalApproverRole(userType) &&
+            !roleStepWasApproved &&
+            isRoleStepApproved(processResult.entryDoc, userType)
+          ) {
+            groupCmdApprovals.push(processResult.entryDoc);
+          }
         }
 
         // Save the document ONCE after all updates for its faces/cycles are done
         await media.save({ timestamps: false });
+
+        // ✅ NEW — CMD notifications (site-wise) only after a successful save
+        for (const approvedEntry of groupCmdApprovals) {
+          await createRentalApprovalNotification({ media, entry: approvedEntry, userType, userId, userName });
+        }
       }
 
       // Re-sort results to match incoming order
