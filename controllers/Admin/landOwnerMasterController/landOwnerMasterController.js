@@ -1,7 +1,7 @@
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
-const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
+const { computeRentalDueStats, getFaceRoleStatus, roleStatus } = require("../../../utils/rentalDueStats");
 const mongoose = require("mongoose");
 const {
   computeOutstandingSummary,
@@ -898,11 +898,14 @@ const landOwnerList = async (req, res) => {
 
       const uniqueMediaCount = new Set(liveFaces.map((f) => String(f.mediaId))).size;
 
+      // ✅ FIXED — site totals always come from the live sites. An owner with
+      // no live site (e.g. its site was deleted) has 0, instead of the stale
+      // totals still cached on the LandOwnerMaster record.
       return {
         ...owner,
-        totalShareAmount: ownerMediaDocs.length > 0 ? liveTotalShareAmount : (owner.totalShareAmount || 0),
-        totalGstAmount: ownerMediaDocs.length > 0 ? liveTotalGstAmount : (owner.totalGstAmount || 0),
-        totalNetPayableToOwner: ownerMediaDocs.length > 0 ? liveTotalNetPayableToOwner : (owner.totalNetPayableToOwner || 0),
+        totalShareAmount: liveTotalShareAmount,
+        totalGstAmount: liveTotalGstAmount,
+        totalNetPayableToOwner: liveTotalNetPayableToOwner,
         linkedMediaCount: uniqueMediaCount,
         linkedSites: liveFaces, // Update the cache-based field in the response
         sites: liveFaces, // Provide the alias for the frontend
@@ -1002,6 +1005,8 @@ const landOwnerSiteFilter = async (req, res) => {
         search,
         pageNumber = 1,
         count = 10,
+        city: cityParam,
+        cityFilter: cityFilterParam, // ✅ NEW — alias of `city` (same name as the response list)
         // ✅ ADDED — new request params
         monthFilter,
         currentMonthLedgerEntries: wantCurrentMonthLedger,
@@ -1013,6 +1018,7 @@ const landOwnerSiteFilter = async (req, res) => {
         pendingSite: wantPendingSite,
         overDue: wantOverDue,
         cmdApproval: wantCmdApproval, // ✅ NEW — waiting on CMD (current + past months)
+        dueThisMonth: wantDueThisMonth, // ✅ NEW — filter for current month dues
         // ✅ NEW: Pending Payment Filters
       currentPendingRent: wantCurrentPendingRent,
       pastRentalPending: wantPastRentalPending,
@@ -1035,6 +1041,13 @@ const landOwnerSiteFilter = async (req, res) => {
       roleType, // ✅ NEW
     } = req.body || {};
 
+    // ✅ FIXED — city filter: accepts `city` or `cityFilter`, as a string,
+    // an array, or a comma-separated string ("Chennai,Gaya"). Empty → no filter.
+    const cityRaw = cityParam ?? cityFilterParam;
+    const cityList = (Array.isArray(cityRaw) ? cityRaw : cityRaw ? String(cityRaw).split(",") : [])
+      .map((c) => String(c).trim())
+      .filter(Boolean);
+    const city = cityList.length ? cityList : null;
 
     const today = nowIST();
     today.setUTCHours(0, 0, 0, 0);
@@ -1063,6 +1076,7 @@ const landOwnerSiteFilter = async (req, res) => {
       // const includePastPending = Number(wantPastPending) === 1; // Removed per user request
       const includeOverDue = Number(wantOverDue) === 1;
       const includeCmdApproval = Number(wantCmdApproval) === 1; // ✅ NEW
+      const includeDueThisMonth = Number(wantDueThisMonth) === 1; // ✅ NEW
 
     const includeCurrentPendingRent = Number(wantCurrentPendingRent) === 1;
     const includePastRentalPending = Number(wantPastRentalPending) === 1;
@@ -1109,7 +1123,8 @@ const landOwnerSiteFilter = async (req, res) => {
       includeApprovalSite ||
       includePendingSites ||
       includeOverDue ||
-      includeCmdApproval;
+      includeCmdApproval ||
+      includeDueThisMonth;
     const isAnyFilterActive = needsLedgerFields || needsRentalStatusFields;
 
     // let ownerFilter = {};
@@ -1188,28 +1203,41 @@ const landOwnerSiteFilter = async (req, res) => {
     const mediaProjection =
       "gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory agreementDocVerification";
 
-    let relatedMediaDocs = await MediaOnboarding.find(
-      {
-        "landOwners.landOwnerMasterId": { $in: requestedOwnerIds },
-        // ✅ CHANGED — uses effectiveMediaSearchRegex so a plain
-        // `search` term (matched to media name/code) also narrows
-        // which sites show up under the resolved owner(s), not just
-        // an explicit `mediaSearch` param.
-        ...(effectiveMediaSearchRegex
-          ? {
-              $or: [
-                { "mediaDetails.mediaName": effectiveMediaSearchRegex },
-                { "mediaDetails.mediaCode": effectiveMediaSearchRegex },
-                { "landOwners.name": effectiveMediaSearchRegex },
+   let mediaQuery = {
+      "landOwners.landOwnerMasterId": { $in: requestedOwnerIds },
+      // ✅ CHANGED — uses effectiveMediaSearchRegex so a plain
+      // `search` term (matched to media name/code) also narrows
+      // which sites show up under the resolved owner(s), not just
+      // an explicit `mediaSearch` param.
+      ...(effectiveMediaSearchRegex
+        ? {
+            $or: [
+              { "mediaDetails.mediaName": effectiveMediaSearchRegex },
+              { "mediaDetails.mediaCode": effectiveMediaSearchRegex },
+              { "landOwners.name": effectiveMediaSearchRegex },
 
-              ],
-            }
-          : {}),
-      },
+            ],
+          }
+        : {}),
+    };
+
+    if (city) {
+      if (Array.isArray(city)) {
+        mediaQuery["mediaDetails.city"] = {
+          $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")),
+        };
+      } else {
+        mediaQuery["mediaDetails.city"] = new RegExp(`^${escapeRegex(String(city).trim())}$`, "i");
+      }
+    }
+
+    let relatedMediaDocs = await MediaOnboarding.find(
+      mediaQuery,
       mediaProjection,
     ).lean();
 
-    // roleType filter does NOT reduce landowners or sites; it only recalculates header summary totals.
+    // roleType does NOT reduce landowners or sites by itself; it changes the header
+    // summary totals AND the approvalSite / pendingSite / overDue filters (role rule).
 
     // ✅ Ensure all site cycles are processed for the requested month
     for (const media of relatedMediaDocs) {
@@ -2041,10 +2069,27 @@ const landOwnerSiteFilter = async (req, res) => {
           }
         });
       }
-      const details = (mediaDoc.mediaDetails || []).filter(d => Number(d.status) === 1);
+      const details = (mediaDoc.mediaDetails || []).filter((d) => {
+  if (Number(d.status) !== 1) return false;
+  if (city) {
+    const cities = Array.isArray(city)
+      ? city.map((c) => String(c).trim().toLowerCase())
+      : [String(city).trim().toLowerCase()];
+    const faceCity = (d.city || "").trim().toLowerCase();
+    const matchesCity = cities.includes(faceCity);
+    if (!matchesCity) return false;
+  }
+  return true;
+});
+      // ✅ NEW — with roleType, approved / pending / overDue per face follow the
+      // same role rule as the header counts (waiting on that role)
+      const roleFaceFlags = targetRole
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole })
+        : null;
       details.forEach((face) => {
         const faceId = String(face._id);
         const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
+        const roleFlags = roleFaceFlags ? roleFaceFlags.get(faceId) : null;
 
         // ✅ NEW — this face has a due (current or any past month) waiting on CMD or approved by CMD
         const hasCmdApprovalSite = rentalDue.some((due) => {
@@ -2055,6 +2100,16 @@ const landOwnerSiteFilter = async (req, res) => {
             (parsed.year < referenceYear ||
               (parsed.year === referenceYear && parsed.monthIdx <= referenceMonthIdx));
           return isUpToReference && isDueInCmdApproval(due) && !isCmdDueFullySettled(mediaDoc, mediaDoc.landOwners, due); // ✅ paid months drop out
+        });
+
+        const hasDueThisMonthSite = rentalDue.some((due) => {
+          if (due.mediaDetailId && String(due.mediaDetailId) !== faceId) return false;
+          const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
+          return (
+            parsed &&
+            parsed.year === referenceYear &&
+            parsed.monthIdx === referenceMonthIdx
+          );
         });
 
         // ✅ Resolve final GST applicability (1=Hold, 2=Direct)
@@ -2079,10 +2134,11 @@ const landOwnerSiteFilter = async (req, res) => {
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
           rentalStatus: {
-            hasApprovedSite,
-            hasPendingSite,
-            isOverDueSite,
+            hasApprovedSite: roleFaceFlags ? !!roleFlags?.approved : hasApprovedSite,
+            hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
+            isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
             hasCmdApprovalSite, // ✅ NEW
+            hasDueThisMonthSite, // ✅ NEW
           },
           ownersDetail: ownersOnThisSite.map((o) => {
             const pc = Number(o.paymentCategory || 1);
@@ -2132,10 +2188,38 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     });
 
     const toSiteResponseShape = (site, targetOwnerId = null) => {
-      // ✅ Filter rentalDue entries based on the requested filters.
-      // If a "Past Pending" filter is active, we exclude the current month
-      // cycle from the display array to focus only on the trouble spots.
+      // ✅ Filter rentalDue entries based on requested filters (supporting multiple select)
       const duesMap = new Map();
+
+      const hasRentalStatusFilter =
+        includeApprovalSite ||
+        includePendingSites ||
+        includeOverDue ||
+        includeCmdApproval;
+
+      const hasLedgerCategoryFilter =
+        includePastRentPendingSites ||
+        includePastRentalPending ||
+        includePastGstPendingSites ||
+        includeCurrentMonthRentPendingSites ||
+        includeCurrentMonthGstPendingSites ||
+        includeCurrentMonthRentPaidSites ||
+        includeCurrentMonthGstPaidSites ||
+        includeCurrentPendingRent ||
+        includeCurrentLedger ||
+        includeCurrentGst ||
+        includeCurrentGstPending ||
+        includePastLedger ||
+        includePastGst ||
+        includePastGstPending ||
+        includeTotalLedgerAmount ||
+        includeTotalLedgerGstAmount ||
+        includeTotalLedgerPendingAmount ||
+        includeTotalGstPendingAmount ||
+        includeCurrentMonthOverallDueAmountSites ||
+        includeTotalOutstandingSites;
+
+      const hasOtherFilters = hasRentalStatusFilter || hasLedgerCategoryFilter;
 
       (site.rentalDue || []).forEach((due) => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
@@ -2180,39 +2264,61 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         const isPending = !isPaidForRent;
 
+        let matchesApproved = due.approvalStatus === 3;
+        let matchesPending = due.approvalStatus === 1 || due.approvalStatus === 2;
+        const matchesOverDue =
+          due.approvalStatus === 4 ||
+          (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) ||
+          (isPast && isPending);
+        // ✅ NEW — with roleType, approved / pending dues follow the role rule
+        // (approved = role step approved; pending = not yet approved by that role).
+        // overDue stays role independent.
+        if (targetRole) {
+          const { isApproved: roleApproved, isOpen: roleOpen } = roleStatus(due, targetRole);
+          matchesApproved = roleApproved;
+          matchesPending = roleOpen;
+        }
+        const matchesCmdApproval =
+          (!due.mediaDetailId || String(due.mediaDetailId) === String(site.mediaDetailId)) &&
+          isDueInCmdApproval(due) &&
+          !isCmdDueFullySettled(site, site.ownersDetail, due);
+
+        let matchesOtherFilters = false;
+
+        if (includePastRentPendingSites && isPast && isPending) matchesOtherFilters = true;
+        if (includePastRentalPending && isPast && isPending) matchesOtherFilters = true;
+        if (includePastGstPendingSites && isPast && !isPaidForGst) matchesOtherFilters = true;
+
+        if (includeCurrentMonthRentPendingSites && isCurrent && isPending) matchesOtherFilters = true;
+        if (includeCurrentMonthGstPendingSites && isCurrent && !isPaidForGst) matchesOtherFilters = true;
+        if (includeCurrentMonthRentPaidSites && isCurrent && isPaidForRent) matchesOtherFilters = true;
+        if (includeCurrentMonthGstPaidSites && isCurrent && isPaidForGst) matchesOtherFilters = true;
+
+        if (includeApprovalSite && isCurrent && matchesApproved) matchesOtherFilters = true;
+        if (includePendingSites && isCurrent && matchesPending) matchesOtherFilters = true;
+        if (includeOverDue && matchesOverDue) matchesOtherFilters = true;
+        if (includeCmdApproval && matchesCmdApproval) matchesOtherFilters = true;
+
+        if ((includeCurrentMonthOverallDueAmountSites || includeTotalOutstandingSites) && (isCurrent || (isPast && isPending))) {
+          matchesOtherFilters = true;
+        }
+
         let shouldInclude = false;
-        if (!isAnyFilterActive) {
+        if (includeDueThisMonth) {
+          if (isCurrent) {
+            if (hasOtherFilters) {
+              shouldInclude = matchesOtherFilters;
+            } else {
+              shouldInclude = true;
+            }
+          } else {
+            shouldInclude = false;
+          }
+        } else if (hasOtherFilters) {
+          shouldInclude = matchesOtherFilters;
+        } else {
           // Default: Current Month + Past Pending
           shouldInclude = isCurrent || (isPast && isPending);
-        } else {
-          // If filtering specifically for past pending, exclude current month
-          if (includePastRentPendingSites && isPast && isPending) shouldInclude = true;
-          if (includePastRentalPending && isPast && isPending) shouldInclude = true;
-          if (includePastGstPendingSites && isPast && !isPaidForGst) shouldInclude = true;
-
-          // If filtering for current month, only include current month
-          if (includeCurrentMonthRentPendingSites && isCurrent && isPending) shouldInclude = true;
-          if (includeCurrentMonthGstPendingSites && isCurrent && !isPaidForGst) shouldInclude = true;
-          if (includeCurrentMonthRentPaidSites && isCurrent && isPaidForRent) shouldInclude = true;
-          if (includeCurrentMonthGstPaidSites && isCurrent && isPaidForGst) shouldInclude = true;
-
-          // ✅ ADDED — respect Rental Status filters
-          if (includeApprovalSite && isCurrent && due.approvalStatus === 3) shouldInclude = true;
-          if (includePendingSites && isCurrent && (due.approvalStatus === 1 || due.approvalStatus === 2)) shouldInclude = true;
-          if (includeOverDue && (due.approvalStatus === 4 || (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) || (isPast && isPending))) shouldInclude = true;
-          // ✅ NEW — CMD Approval: this face's current/past months waiting on CMD or approved by CMD
-          if (
-            includeCmdApproval &&
-            (isCurrent || isPast) &&
-            (!due.mediaDetailId || String(due.mediaDetailId) === String(site.mediaDetailId)) &&
-            isDueInCmdApproval(due) &&
-            !isCmdDueFullySettled(site, site.ownersDetail, due) // ✅ paid months drop out
-          ) shouldInclude = true;
-
-          // Fallback for general filters (Overall Due / Total Outstanding)
-          if ((includeCurrentMonthOverallDueAmountSites || includeTotalOutstandingSites) && (isCurrent || (isPast && isPending))) {
-            shouldInclude = true;
-          }
         }
 
         if (shouldInclude) {
@@ -2373,6 +2479,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         hasPending: false,
         isOverDue: false,
         hasCmdApproval: false, // ✅ NEW
+        hasDueThisMonth: false, // ✅ NEW
       };
 
       const processedDocIds = new Set();
@@ -2412,6 +2519,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           rentalStatusMatch.hasPending = true;
         if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
         if (site.rentalStatus.hasCmdApprovalSite) rentalStatusMatch.hasCmdApproval = true; // ✅ NEW
+        if (site.rentalStatus.hasDueThisMonthSite) rentalStatusMatch.hasDueThisMonth = true; // ✅ NEW
 
         if (site._overallSummary && isFirstVisit) {
           if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
@@ -2551,10 +2659,17 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           ? (includeApprovalSite && rentalStatusMatch.hasApproved) ||
             (includePendingSites && rentalStatusMatch.hasPending) ||
             (includeOverDue && rentalStatusMatch.isOverDue) || // ✅ isOverDue now includes past pending
-            (includeCmdApproval && rentalStatusMatch.hasCmdApproval) // ✅ NEW
+            (includeCmdApproval && rentalStatusMatch.hasCmdApproval) || // ✅ NEW
+            (includeDueThisMonth && rentalStatusMatch.hasDueThisMonth)
           : false;
 
         if (!ledgerMatch && !rentalMatch) return; // skip this owner — nothing to show for the requested flag(s)
+
+        // Filter out sites that have no matching rental due entries under the active filter(s)
+        entryPayload.sites = entryPayload.sites.filter(
+          (s) => s.rentalDueEntries && s.rentalDueEntries.length > 0,
+        );
+        if (entryPayload.sites.length === 0 && !needsLedgerFields) return;
       }
 
       entries.push(entryPayload);
@@ -2662,6 +2777,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         hasPending: false,
         isOverDue: false,
         hasCmdApproval: false, // ✅ NEW
+        hasDueThisMonth: false, // ✅ NEW
       };
 
       // if (needsLedgerFields || needsRentalStatusFields) {
@@ -2675,6 +2791,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           if (site.rentalStatus.isOverDueSite)
             rentalStatusMatch.isOverDue = true;
           if (site.rentalStatus.hasCmdApprovalSite) rentalStatusMatch.hasCmdApproval = true; // ✅ NEW
+          if (site.rentalStatus.hasDueThisMonthSite) rentalStatusMatch.hasDueThisMonth = true; // ✅ NEW
 
           if (site._overallSummary && !processedDocIds.has(docIdStr)) {
             if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
@@ -2809,10 +2926,17 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           ? (includeApprovalSite && rentalStatusMatch.hasApproved) ||
             (includePendingSites && rentalStatusMatch.hasPending) ||
             (includeOverDue && rentalStatusMatch.isOverDue) || // ✅ isOverDue now includes past pending
-            (includeCmdApproval && rentalStatusMatch.hasCmdApproval) // ✅ NEW
+            (includeCmdApproval && rentalStatusMatch.hasCmdApproval) || // ✅ NEW
+            (includeDueThisMonth && rentalStatusMatch.hasDueThisMonth)
           : false;
 
         if (!ledgerMatch && !rentalMatch) return;
+
+        // Filter out sites that have no matching rental due entries under the active filter(s)
+        entryPayload.sites = entryPayload.sites.filter(
+          (s) => s.rentalDueEntries && s.rentalDueEntries.length > 0,
+        );
+        if (entryPayload.sites.length === 0 && !needsLedgerFields) return;
       }
 
       entries.push(entryPayload);
@@ -2856,8 +2980,19 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // now ALWAYS reflect the global system-wide totals for all active sites,
     // regardless of search filters or whether owners were found. This ensures
     // the "180000" and other header data mentioned in your prompt stays consistent.
+  let summaryQuery = { "mediaDetails.status": 1 };
+    if (city) {
+      if (Array.isArray(city)) {
+        summaryQuery["mediaDetails.city"] = {
+          $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")),
+        };
+      } else {
+        summaryQuery["mediaDetails.city"] = new RegExp(`^${escapeRegex(String(city).trim())}$`, "i");
+      }
+    }
+
     const summaryDocs = await MediaOnboarding.find(
-      { "mediaDetails.status": 1 },
+      summaryQuery,
       "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal",
     ).lean();
 
@@ -2906,20 +3041,42 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     const overdueAmountTotal = rentalDueStats.overdueAmountTotal;
 
 
+const cityMatchQuery = city
+      ? {
+          "mediaDetails.city": Array.isArray(city)
+            ? { $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")) }
+            : new RegExp(`^${escapeRegex(String(city).trim())}$`, "i"),
+        }
+      : {};
+
     const totalFacesAgg = await MediaOnboarding.aggregate([
+      ...(city ? [{ $match: cityMatchQuery }] : []),
       { $unwind: "$mediaDetails" },
+      { $match: { ...(city ? { "mediaDetails.city": Array.isArray(city) ? { $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")) } : new RegExp(`^${escapeRegex(String(city).trim())}$`, "i") } : {}) } },
       { $count: "count" },
     ]);
     const totalSites = totalFacesAgg[0]?.count || 0;
 
-    const siteCount = await MediaOnboarding.countDocuments({});
+    const siteCount = await MediaOnboarding.countDocuments(cityMatchQuery);
 
     const activeCountAgg = await MediaOnboarding.aggregate([
       { $unwind: "$mediaDetails" },
-      { $match: { "mediaDetails.status": 1 } },
+      { $match: { "mediaDetails.status": 1, ...(city ? { "mediaDetails.city": Array.isArray(city) ? { $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")) } : new RegExp(`^${escapeRegex(String(city).trim())}$`, "i") } : {}) } },
       { $count: "count" },
     ]);
     const activeCount = activeCountAgg[0]?.count || 0;
+
+    const allMediaForCityFilter = await MediaOnboarding.find(
+      {},
+      "mediaDetails.city",
+    ).lean();
+    const cityFilter = [
+      ...new Set(
+        allMediaForCityFilter.flatMap((item) =>
+          (item.mediaDetails || []).map((d) => d.city),
+        ),
+      ),
+    ].filter(Boolean).sort();
 
     const totalCount = entriesForResponse.length;
     const startIdx = (pageNumbers - 1) * pageSize;
@@ -2976,6 +3133,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           totalCount,
           totalPages: Math.ceil(totalCount / pageSize),
         },
+        cityFilter,
         // ✅ ALWAYS echo back which month was actually applied
         monthFilterApplied,
         entries: pagedEntries,
@@ -2988,6 +3146,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         ...overallOutstandingTotals,
         overallLedgerSummary,
         // ✅ NEW: Rental Due Stats
+        dueThisMonth: { siteCount: rentalDueStats.dueThisMonthCount, amount: Math.round(rentalDueStats.dueThisMonthAmount) },
         overDue: { siteCount: overdueSiteCount, amount: Math.round(overdueAmountTotal) },
         approvedCount: approvedCount,
         approvedAmountTotal: Math.round(approvedAmountTotal),
