@@ -66,7 +66,7 @@ app.use("/admin", cmdNotificationRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
-  res.send("API Running");
+  res.send("API Running #1");
 });
 
 const PORT = process.env.PORT || 5000;
