@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
   getRentForDueDate,
   ownerAsOfDate,
@@ -2557,6 +2558,7 @@ exports.listMediaByLedger = async (req, res) => {
       isTdsPending,
       landOwnerMasterId, // ✅ NEW
       mediaId, // ✅ NEW
+      city,
       totalLedgerAmount, // ✅ NEW
       totalLedgerGstAmount, // ✅ NEW
       totalLedgerPendingAmount, // ✅ NEW
@@ -2577,7 +2579,15 @@ exports.listMediaByLedger = async (req, res) => {
         { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
       ];
     }
-
+if (city) {
+      if (Array.isArray(city)) {
+        filter["mediaDetails.city"] = {
+          $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")),
+        };
+      } else {
+        filter["mediaDetails.city"] = new RegExp(`^${escapeRegex(String(city).trim())}$`, "i");
+      }
+    }
     // ✅ NEW — mediaId[] filter
     if (Array.isArray(mediaId) && mediaId.length > 0) {
       const validMediaIds = mediaId.filter((id) =>
@@ -4520,7 +4530,17 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
       globalMediaDocs,
       requestedMonthYearParsed,
     );
-
+const allMediaForCityFilter = await Media.find(
+  {},
+  "mediaDetails.city",
+).lean();
+const cityFilter = [
+  ...new Set(
+    allMediaForCityFilter.flatMap((item) =>
+      (item.mediaDetails || []).map((d) => d.city),
+    ),
+  ),
+].filter(Boolean).sort();
     return successResponse(
       res,
       "Media list fetched successfully",
@@ -4529,6 +4549,7 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
         count: pageSize,
         totalCount: effectiveTotalCount,
         totalPages: Math.ceil(effectiveTotalCount / pageSize),
+        cityFilter,
         overallGstPendingAmount,
         overallTdsPendingAmount,
         overallPastMonthPendingCount,
@@ -6957,3 +6978,4 @@ exports.isOwnerModePaidForCycle = isOwnerModePaidForCycle; // ✅ NEW
 exports.isGstPaidForCycle = isGstPaidForCycle; // ✅ NEW
 exports.getRequiredModesShared = getRequiredModesShared;
 exports.getAllDueCycles = getAllDueCycles;
+exports.resolveExpectedGstForCycle = resolveExpectedGstForCycle; // ✅ NEW — used by Rental OOH Excel (unpaid rows)

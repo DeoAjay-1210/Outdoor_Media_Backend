@@ -3920,7 +3920,52 @@ exports.GstAmountPaid = async (req, res) => {
 };
 
 // ── revertAgreementDocVerification — one site ──────────────────
-async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
+// ✅ FIXED — every verify PUSHES a progress snapshot, so a cycle can have
+// several rows and readers use the latest one. Deleting only the first row
+// left the newest one (e.g. ownerVerified: true) in place, and the old
+// .pop() fallback could delete another cycle's progress. Now: drop ALL rows
+// of this cycle, then save one fresh row recalculated from the verifications
+// that remain (same rules as the verify flow).
+function rebuildVerificationProgress(media, cycle, userType, rentalDueId) {
+  if (!Array.isArray(media.verificationProgressHistory) || !cycle) return;
+
+  media.verificationProgressHistory = media.verificationProgressHistory.filter(
+    (h) => !isSameCycle(h.cycle, cycle),
+  );
+
+  const remaining = (media.agreementDocVerification || []).filter(
+    (h) => h.isVerified && isSameCycle(h.cycle, cycle),
+  );
+  if (remaining.length) {
+    const staffVerified = remaining.some((h) => h.verifiedByRole === ROLE.STAFF);
+    const teamLeadVerified = remaining.some((h) => h.verifiedByRole === ROLE.TEAM_LEAD);
+    const ownerVerified = remaining.some((h) => h.verifiedByRole === ROLE.OWNER);
+    const verifiedCount = [staffVerified, teamLeadVerified, ownerVerified].filter(Boolean).length;
+    saveVerificationProgressSnapshot(
+      media,
+      cycle,
+      {
+        staffVerified,
+        teamLeadVerified,
+        ownerVerified,
+        verifiedCount,
+        isComplete: verifiedCount >= 2,
+        highestVerifiedRole: ownerVerified
+          ? ROLE.OWNER
+          : teamLeadVerified
+            ? ROLE.TEAM_LEAD
+            : staffVerified
+              ? ROLE.STAFF
+              : null,
+      },
+      `${ROLE_LABEL[userType]} verification reverted`,
+      rentalDueId || null,
+    );
+  }
+  media.markModified("verificationProgressHistory");
+}
+
+async function processSingleRevertVerification({ mediaId, rentalDueId, role, strictRentalDueId = false }) {
   const userType = Number(role);
 
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
@@ -3956,6 +4001,16 @@ async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
 
   const targetCycle = targetEntry?.dueDate ? getCurrentCycle(targetEntry.dueDate) : null;
 
+  // ✅ NEW — entries[] batch: the given rentalDueId must belong to this site
+  if (strictRentalDueId && (!rentalDueId || !targetEntry)) {
+    return {
+      success: false,
+      mediaId,
+      mediaName: media.mediaName,
+      message: rentalDueId ? "rentalDueId not found on this site" : "rentalDueId is required for each entry",
+    };
+  }
+
   const match = media.agreementDocVerification
     .map((rec, i) => ({ rec, i }))
     .filter(({ rec }) => {
@@ -3970,11 +4025,44 @@ async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
     .sort((a, b) => new Date(b.rec.verifiedAt) - new Date(a.rec.verifiedAt))[0];
 
   if (!match) {
+    // ✅ NEW — the role's record is already gone, but the cycle's progress row
+    // still says that role verified (stale row left by the old revert logic).
+    // Rebuild the progress from the records that remain, so the revert succeeds.
+    const PROGRESS_FLAG = { [ROLE.STAFF]: "staffVerified", [ROLE.TEAM_LEAD]: "teamLeadVerified", [ROLE.OWNER]: "ownerVerified" };
+    // a rentalDueId that is not on this site never repairs another cycle's row
+    const staleRows = rentalDueId && !targetCycle
+      ? []
+      : (media.verificationProgressHistory || []).filter(
+          (h) => h[PROGRESS_FLAG[userType]] === true && (!targetCycle || isSameCycle(h.cycle, targetCycle)),
+        );
+    const staleCycle = staleRows.length
+      ? staleRows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0].cycle
+      : null;
+    const stillVerifiedHigher = staleCycle && media.agreementDocVerification.some(
+      (h) => h.isVerified && isSameCycle(h.cycle, staleCycle) && ROLE_RANK[h.verifiedByRole] > ROLE_RANK[userType],
+    );
+
+    if (!staleCycle || stillVerifiedHigher) {
+      return {
+        success: false,
+        mediaId,
+        mediaName: media.mediaName,
+        message: `No verification record found for ${ROLE_LABEL[userType]} to revert`,
+      };
+    }
+
+    rebuildVerificationProgress(media, staleCycle, userType, rentalDueId);
+    await media.save({ timestamps: false });
     return {
-      success: false,
-      mediaId,
+      success: true,
+      mediaId: media._id,
       mediaName: media.mediaName,
-      message: `No verification record found for ${ROLE_LABEL[userType]} to revert`,
+      role: userType,
+      roleLabel: ROLE_LABEL[userType],
+      agreementDocVerified: media.agreementDocVerified,
+      agreementDocVerification: media.agreementDocVerification,
+      verificationProgressHistory: media.verificationProgressHistory,
+      agreementDocVerificationHistory: media.agreementDocVerificationHistory,
     };
   }
 
@@ -3999,17 +4087,7 @@ async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
   media.agreementDocVerification.splice(match.i, 1);
   media.markModified("agreementDocVerification");
 
-  if (Array.isArray(media.verificationProgressHistory) && media.verificationProgressHistory.length) {
-    const histIdx = media.verificationProgressHistory.findIndex(
-      (h) => (rentalDueId && String(h.rentalDueId || "") === String(rentalDueId)) || (cycle && isSameCycle(h.cycle, cycle))
-    );
-    if (histIdx !== -1) {
-      media.verificationProgressHistory.splice(histIdx, 1);
-    } else {
-      media.verificationProgressHistory.pop();
-    }
-    media.markModified("verificationProgressHistory");
-  }
+  rebuildVerificationProgress(media, cycle, userType, rentalDueId);
 
   const flagKey = ROLE_FLAG_KEY[userType];
   if (flagKey && media.agreementDocVerified) {
@@ -4054,7 +4132,31 @@ async function processSingleRevertVerification({ mediaId, rentalDueId, role }) {
 // ═════════════════════════════════════════════════════════════
 exports.revertAgreementDocVerification = async (req, res) => {
   try {
-    const { mediaId, rentalDueId, mediaIds, role } = req.body;
+    const { mediaId, rentalDueId, mediaIds, entries, role } = req.body;
+
+    // ✅ NEW — batch mode with per-site targeting (same format as verify-agreement):
+    // entries: [ { mediaId, rentalDueId, role? }, ... ] — item.role overrides the top-level role
+    if (Array.isArray(entries) && entries.length > 0) {
+      const results = [];
+      for (const item of entries) {
+        const result = await processSingleRevertVerification({
+          mediaId: item?.mediaId,
+          rentalDueId: item?.rentalDueId,
+          role: item?.role ?? role,
+          strictRentalDueId: true,
+        });
+        results.push({ ...result, rentalDueId: item?.rentalDueId || null });
+      }
+
+      const successCount = results.filter((r) => r.success).length;
+      const failedCount = results.length - successCount;
+
+      return res.status(200).json({
+        success: true,
+        message: `Verification reverted for ${successCount} of ${results.length} entr${results.length === 1 ? "y" : "ies"}`,
+        data: { results, totalEntries: results.length, successCount, failedCount },
+      });
+    }
 
     // ── NEW — batch mode ──
     if (Array.isArray(mediaIds) && mediaIds.length > 0) {
@@ -4103,7 +4205,7 @@ exports.revertAgreementDocVerification = async (req, res) => {
 };
 
 // ── revertRentalApproval — one site ─────────────────────────────
-async function processSingleRevertApproval({ mediaId, rentalDueId, role }) {
+async function processSingleRevertApproval({ mediaId, rentalDueId, role, strictRentalDueId = false }) {
   const userType = Number(role);
 
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
@@ -4138,6 +4240,17 @@ async function processSingleRevertApproval({ mediaId, rentalDueId, role }) {
   if (rentalDueId) {
     const found = entries.find((e) => String(e._id) === String(rentalDueId));
     if (found) entry = found;
+    // ✅ NEW — entries[] batch: never fall back to another entry
+    else if (strictRentalDueId) {
+      return {
+        success: false,
+        mediaId,
+        mediaName: media.mediaName,
+        message: "rentalDueId not found on this site",
+      };
+    }
+  } else if (strictRentalDueId) {
+    return { success: false, mediaId, mediaName: media.mediaName, message: "rentalDueId is required for each entry" };
   }
 
   ensureApprovalStepsPopulated(entry);
@@ -4313,7 +4426,32 @@ async function processSingleRevertApproval({ mediaId, rentalDueId, role }) {
 // ═════════════════════════════════════════════════════════════
 exports.revertRentalApproval = async (req, res) => {
   try {
-    const { mediaId, rentalDueId, mediaIds, role } = req.body;
+    const { mediaId, rentalDueId, mediaIds, entries, role } = req.body;
+
+    // ✅ NEW — batch mode with per-site targeting:
+    // entries: [ { mediaId, rentalDueId, role? }, ... ] — item.role overrides the top-level role.
+    // Approvals are per rental due entry, so send one item per face for separate-bill sites.
+    if (Array.isArray(entries) && entries.length > 0) {
+      const results = [];
+      for (const item of entries) {
+        const result = await processSingleRevertApproval({
+          mediaId: item?.mediaId,
+          rentalDueId: item?.rentalDueId,
+          role: item?.role ?? role,
+          strictRentalDueId: true,
+        });
+        results.push({ ...result, rentalDueId: item?.rentalDueId || null });
+      }
+
+      const successCount = results.filter((r) => r.success).length;
+      const failedCount = results.length - successCount;
+
+      return res.status(200).json({
+        success: true,
+        message: `Approval reverted for ${successCount} of ${results.length} entr${results.length === 1 ? "y" : "ies"}`,
+        data: { results, totalEntries: results.length, successCount, failedCount },
+      });
+    }
 
     // ── NEW — batch mode ──
     if (Array.isArray(mediaIds) && mediaIds.length > 0) {

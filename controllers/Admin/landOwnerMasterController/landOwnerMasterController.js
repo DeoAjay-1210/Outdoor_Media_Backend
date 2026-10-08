@@ -1,7 +1,7 @@
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
-const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
+const { computeRentalDueStats, getFaceRoleStatus, roleStatus } = require("../../../utils/rentalDueStats");
 const mongoose = require("mongoose");
 const {
   computeOutstandingSummary,
@@ -1002,6 +1002,7 @@ const landOwnerSiteFilter = async (req, res) => {
         search,
         pageNumber = 1,
         count = 10,
+        city,
         // ✅ ADDED — new request params
         monthFilter,
         currentMonthLedgerEntries: wantCurrentMonthLedger,
@@ -1191,28 +1192,41 @@ const landOwnerSiteFilter = async (req, res) => {
     const mediaProjection =
       "gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.gstApplicable landOwners.shareAmount landOwners.gstAmount landOwners.netPayableToOwner landOwners.onlineAmount landOwners.cashAmount landOwners.tdsAmount rentalDue rentalDueEntries ledger ledgerHistory gstBalanceHistory agreementDocVerification";
 
-    let relatedMediaDocs = await MediaOnboarding.find(
-      {
-        "landOwners.landOwnerMasterId": { $in: requestedOwnerIds },
-        // ✅ CHANGED — uses effectiveMediaSearchRegex so a plain
-        // `search` term (matched to media name/code) also narrows
-        // which sites show up under the resolved owner(s), not just
-        // an explicit `mediaSearch` param.
-        ...(effectiveMediaSearchRegex
-          ? {
-              $or: [
-                { "mediaDetails.mediaName": effectiveMediaSearchRegex },
-                { "mediaDetails.mediaCode": effectiveMediaSearchRegex },
-                { "landOwners.name": effectiveMediaSearchRegex },
+   let mediaQuery = {
+      "landOwners.landOwnerMasterId": { $in: requestedOwnerIds },
+      // ✅ CHANGED — uses effectiveMediaSearchRegex so a plain
+      // `search` term (matched to media name/code) also narrows
+      // which sites show up under the resolved owner(s), not just
+      // an explicit `mediaSearch` param.
+      ...(effectiveMediaSearchRegex
+        ? {
+            $or: [
+              { "mediaDetails.mediaName": effectiveMediaSearchRegex },
+              { "mediaDetails.mediaCode": effectiveMediaSearchRegex },
+              { "landOwners.name": effectiveMediaSearchRegex },
 
-              ],
-            }
-          : {}),
-      },
+            ],
+          }
+        : {}),
+    };
+
+    if (city) {
+      if (Array.isArray(city)) {
+        mediaQuery["mediaDetails.city"] = {
+          $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")),
+        };
+      } else {
+        mediaQuery["mediaDetails.city"] = new RegExp(`^${escapeRegex(String(city).trim())}$`, "i");
+      }
+    }
+
+    let relatedMediaDocs = await MediaOnboarding.find(
+      mediaQuery,
       mediaProjection,
     ).lean();
 
-    // roleType filter does NOT reduce landowners or sites; it only recalculates header summary totals.
+    // roleType does NOT reduce landowners or sites by itself; it changes the header
+    // summary totals AND the approvalSite / pendingSite / overDue filters (role rule).
 
     // ✅ Ensure all site cycles are processed for the requested month
     for (const media of relatedMediaDocs) {
@@ -2044,10 +2058,27 @@ const landOwnerSiteFilter = async (req, res) => {
           }
         });
       }
-      const details = (mediaDoc.mediaDetails || []).filter(d => Number(d.status) === 1);
+      const details = (mediaDoc.mediaDetails || []).filter((d) => {
+  if (Number(d.status) !== 1) return false;
+  if (city) {
+    const cities = Array.isArray(city)
+      ? city.map((c) => String(c).trim().toLowerCase())
+      : [String(city).trim().toLowerCase()];
+    const faceCity = (d.city || "").trim().toLowerCase();
+    const matchesCity = cities.includes(faceCity);
+    if (!matchesCity) return false;
+  }
+  return true;
+});
+      // ✅ NEW — with roleType, approved / pending / overDue per face follow the
+      // same role rule as the header counts (waiting on that role)
+      const roleFaceFlags = targetRole
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole })
+        : null;
       details.forEach((face) => {
         const faceId = String(face._id);
         const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
+        const roleFlags = roleFaceFlags ? roleFaceFlags.get(faceId) : null;
 
         // ✅ NEW — this face has a due (current or any past month) waiting on CMD or approved by CMD
         const hasCmdApprovalSite = rentalDue.some((due) => {
@@ -2092,9 +2123,9 @@ const landOwnerSiteFilter = async (req, res) => {
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
           rentalStatus: {
-            hasApprovedSite,
-            hasPendingSite,
-            isOverDueSite,
+            hasApprovedSite: roleFaceFlags ? !!roleFlags?.approved : hasApprovedSite,
+            hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
+            isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
             hasCmdApprovalSite, // ✅ NEW
             hasDueThisMonthSite, // ✅ NEW
           },
@@ -2222,12 +2253,20 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         const isPending = !isPaidForRent;
 
-        const matchesApproved = due.approvalStatus === 3;
-        const matchesPending = due.approvalStatus === 1 || due.approvalStatus === 2;
+        let matchesApproved = due.approvalStatus === 3;
+        let matchesPending = due.approvalStatus === 1 || due.approvalStatus === 2;
         const matchesOverDue =
           due.approvalStatus === 4 ||
           (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) ||
           (isPast && isPending);
+        // ✅ NEW — with roleType, approved / pending dues follow the role rule
+        // (approved = role step approved; pending = not yet approved by that role).
+        // overDue stays role independent.
+        if (targetRole) {
+          const { isApproved: roleApproved, isOpen: roleOpen } = roleStatus(due, targetRole);
+          matchesApproved = roleApproved;
+          matchesPending = roleOpen;
+        }
         const matchesCmdApproval =
           (!due.mediaDetailId || String(due.mediaDetailId) === String(site.mediaDetailId)) &&
           isDueInCmdApproval(due) &&
@@ -2930,8 +2969,19 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // now ALWAYS reflect the global system-wide totals for all active sites,
     // regardless of search filters or whether owners were found. This ensures
     // the "180000" and other header data mentioned in your prompt stays consistent.
+  let summaryQuery = { "mediaDetails.status": 1 };
+    if (city) {
+      if (Array.isArray(city)) {
+        summaryQuery["mediaDetails.city"] = {
+          $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")),
+        };
+      } else {
+        summaryQuery["mediaDetails.city"] = new RegExp(`^${escapeRegex(String(city).trim())}$`, "i");
+      }
+    }
+
     const summaryDocs = await MediaOnboarding.find(
-      { "mediaDetails.status": 1 },
+      summaryQuery,
       "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal",
     ).lean();
 
@@ -2980,20 +3030,42 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     const overdueAmountTotal = rentalDueStats.overdueAmountTotal;
 
 
+const cityMatchQuery = city
+      ? {
+          "mediaDetails.city": Array.isArray(city)
+            ? { $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")) }
+            : new RegExp(`^${escapeRegex(String(city).trim())}$`, "i"),
+        }
+      : {};
+
     const totalFacesAgg = await MediaOnboarding.aggregate([
+      ...(city ? [{ $match: cityMatchQuery }] : []),
       { $unwind: "$mediaDetails" },
+      { $match: { ...(city ? { "mediaDetails.city": Array.isArray(city) ? { $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")) } : new RegExp(`^${escapeRegex(String(city).trim())}$`, "i") } : {}) } },
       { $count: "count" },
     ]);
     const totalSites = totalFacesAgg[0]?.count || 0;
 
-    const siteCount = await MediaOnboarding.countDocuments({});
+    const siteCount = await MediaOnboarding.countDocuments(cityMatchQuery);
 
     const activeCountAgg = await MediaOnboarding.aggregate([
       { $unwind: "$mediaDetails" },
-      { $match: { "mediaDetails.status": 1 } },
+      { $match: { "mediaDetails.status": 1, ...(city ? { "mediaDetails.city": Array.isArray(city) ? { $in: city.map((c) => new RegExp(`^${escapeRegex(String(c).trim())}$`, "i")) } : new RegExp(`^${escapeRegex(String(city).trim())}$`, "i") } : {}) } },
       { $count: "count" },
     ]);
     const activeCount = activeCountAgg[0]?.count || 0;
+
+    const allMediaForCityFilter = await MediaOnboarding.find(
+      {},
+      "mediaDetails.city",
+    ).lean();
+    const cityFilter = [
+      ...new Set(
+        allMediaForCityFilter.flatMap((item) =>
+          (item.mediaDetails || []).map((d) => d.city),
+        ),
+      ),
+    ].filter(Boolean).sort();
 
     const totalCount = entriesForResponse.length;
     const startIdx = (pageNumbers - 1) * pageSize;
@@ -3050,6 +3122,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           totalCount,
           totalPages: Math.ceil(totalCount / pageSize),
         },
+        cityFilter,
         // ✅ ALWAYS echo back which month was actually applied
         monthFilterApplied,
         entries: pagedEntries,
