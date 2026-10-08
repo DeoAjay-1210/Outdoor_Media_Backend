@@ -65,11 +65,57 @@ function roleStatus(entry, targetRole) {
   return { isApproved: hasRoleApproved, isOpen: !isApprovedOverall && !hasRoleActed };
 }
 
+// ✅ NEW — landowner breakdown for one bucket (dueThisMonth / approved / pending /
+// overdue). A face's amount is split between the site's landowners by their
+// shareAmount (equal split when no shares), so the owners' amounts add up to
+// the bucket amount.
+function addFaceToOwnerBucket(bucket, media, faceId, amount) {
+  const owners = media.landOwners || [];
+  if (!owners.length) return;
+  const totalShare = owners.reduce((s, o) => s + (Number(o.shareAmount) || 0), 0);
+  owners.forEach((o) => {
+    const key = String(o.landOwnerMasterId || o._id || o.name || "");
+    if (!key) return;
+    const ratio = totalShare > 0 ? (Number(o.shareAmount) || 0) / totalShare : 1 / owners.length;
+    if (!bucket.has(key)) {
+      bucket.set(key, {
+        landOwnerMasterId: o.landOwnerMasterId || null,
+        name: o.name || "",
+        phone: o.phone || "",
+        faces: new Set(),
+        amount: 0,
+      });
+    }
+    const item = bucket.get(key);
+    item.faces.add(`${String(media._id)}_${faceId}`);
+    item.amount += amount * ratio;
+  });
+}
+
+const finalizeOwnerBucket = (bucket) =>
+  Array.from(bucket.values())
+    .map((o) => ({
+      landOwnerMasterId: o.landOwnerMasterId,
+      name: o.name,
+      phone: o.phone,
+      siteCount: o.faces.size,
+      amount: Math.round(o.amount),
+    }))
+    .sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name));
+
 /**
  * @param {Array} mediaDocs  active media docs (lean or mongoose)
- * @param {{year:number, month:number, targetRole?:number|null}} opts  month is 1-12
+ * @param {{year:number, month:number, targetRole?:number|null, trackLandOwners?:boolean}} opts  month is 1-12
+ *   trackLandOwners (opt-in) → also returns stats.landOwners { dueThisMonth, approved, pending, overdue }
  */
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false }) {
+  const ownerBuckets = trackLandOwners
+    ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
+    : null;
+  const trackOwner = (bucketName, media, faceId, amount) => {
+    if (ownerBuckets) addFaceToOwnerBucket(ownerBuckets[bucketName], media, faceId, amount);
+  };
+
   const stats = {
     dueThisMonthCount: 0,
     dueThisMonthAmount: 0,
@@ -112,6 +158,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null }) {
         const faceId = String(face._id);
         stats.dueThisMonthCount += 1;
         stats.dueThisMonthAmount += faceAmount;
+        trackOwner("dueThisMonth", media, faceId, faceAmount);
 
         const entry = pickFaceEntry(currentMonthEntries, faceId);
         const { isApproved, isOpen } = roleStatus(entry, targetRole);
@@ -121,10 +168,12 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null }) {
         if (isApproved) {
           stats.approvedCount += 1;
           stats.approvedAmountTotal += faceAmount;
+          trackOwner("approved", media, faceId, faceAmount);
         } else if (isOpen) {
           // pending = every open current-month due (for the role, when given)
           stats.pendingCount += 1;
           stats.pendingAmountTotal += faceAmount;
+          trackOwner("pending", media, faceId, faceAmount);
         }
         if (!isOpenOverall) continue;
 
@@ -136,6 +185,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null }) {
           overdueFaces.add(faceId);
           stats.overdueAmountTotal += faceAmount;
           stats.dueAmountOpen += faceAmount;
+          trackOwner("overdue", media, faceId, faceAmount);
         }
       }
     }
@@ -164,10 +214,20 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null }) {
         if (!isOpen) continue;
         overdueFaces.add(faceId);
         stats.overdueAmountTotal += pastFaceAmount;
+        trackOwner("overdue", media, faceId, pastFaceAmount);
       }
     }
 
     stats.overdueCount += overdueFaces.size;
+  }
+
+  if (ownerBuckets) {
+    stats.landOwners = {
+      dueThisMonth: finalizeOwnerBucket(ownerBuckets.dueThisMonth),
+      approved: finalizeOwnerBucket(ownerBuckets.approved),
+      pending: finalizeOwnerBucket(ownerBuckets.pending),
+      overdue: finalizeOwnerBucket(ownerBuckets.overdue),
+    };
   }
 
   return stats;

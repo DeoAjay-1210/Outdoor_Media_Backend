@@ -1830,6 +1830,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       agreementPDF:
         incoming.agreementPDF ?? existingHistory[matchingIdx].agreementPDF,
       reason: incoming.reason ?? existingHistory[matchingIdx].reason,
+      agreementStatus: incoming.agreementStatus ?? existingHistory[matchingIdx].agreementStatus, // ✅ NEW
       rentalPayment: {
         totalRentalAmount: incomingRentAmt,
         paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
@@ -1853,6 +1854,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       status: incoming.status ?? 1,
       agreementPDF: incoming.agreementPDF,
       reason: incoming.reason,
+      agreementStatus: incoming.agreementStatus, // ✅ NEW — 1=Original 2=Draft
       rentalPayment: {
         totalRentalAmount: incomingRentAmt,
         paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
@@ -3241,6 +3243,11 @@ const updateAgreement = async (req, res) => {
           : media.agreement?.advanceRent || 0,
       agreementPDF: incoming.agreementPDF,
       reason: incoming.reason?.trim() || media.agreement?.reason || "",
+      // ✅ NEW — 1=Original 2=Draft; keep the current value when not sent
+      agreementStatus:
+        incoming.agreementStatus !== undefined && incoming.agreementStatus !== null && incoming.agreementStatus !== ""
+          ? Number(incoming.agreementStatus)
+          : media.agreement?.agreementStatus,
       rentalPayment: {
         totalRentalAmount: incomingTotalRentalAmount,
         paymentFrequency: paymentFrequencyValue,
@@ -3344,6 +3351,7 @@ const updateAgreement = async (req, res) => {
           reminderBeforeExpiry: currentAgreement.reminderBeforeExpiry || 30,
           advanceRent: currentAgreement.advanceRent || 0,
           reason: currentAgreement.reason || "",
+          agreementStatus: currentAgreement.agreementStatus, // ✅ NEW
           status: computeAgreementStatus(
             currentAgreement.startDate,
             currentAgreement.endDate,
@@ -3421,6 +3429,13 @@ const updateAgreement = async (req, res) => {
       reminderBeforeExpiry: newAgreement.reminderBeforeExpiry,
       advanceRent: newAgreement.advanceRent || 0,
       reason: newAgreement.reason || "",
+      // ✅ NEW — sent value wins; otherwise this history entry keeps its own status
+      agreementStatus:
+        incoming.agreementStatus !== undefined && incoming.agreementStatus !== null && incoming.agreementStatus !== ""
+          ? Number(incoming.agreementStatus)
+          : entryIndex !== -1 && existingHistory[entryIndex]?.agreementStatus !== undefined
+            ? existingHistory[entryIndex].agreementStatus
+            : newAgreement.agreementStatus,
       status: computeAgreementStatus(
         newAgreement.startDate,
         newAgreement.endDate,
@@ -3512,6 +3527,7 @@ const updateAgreement = async (req, res) => {
         reminderBeforeExpiry: activeAgreement.reminderBeforeExpiry,
         advanceRent: activeAgreement.advanceRent || 0,
         reason: activeAgreement.reason || "",
+        agreementStatus: activeAgreement.agreementStatus, // ✅ NEW
         updatedBy: userName,
         status: computeAgreementStatus(
           activeAgreement.startDate,

@@ -3032,7 +3032,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       year: statsYear,
       month: statsMonth,
       targetRole,
+      trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
     });
+    const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
     const approvedAmountTotal = rentalDueStats.approvedAmountTotal;
     const pendingCount = rentalDueStats.pendingCount;
@@ -3146,12 +3148,23 @@ const cityMatchQuery = city
         ...overallOutstandingTotals,
         overallLedgerSummary,
         // ✅ NEW: Rental Due Stats
-        dueThisMonth: { siteCount: rentalDueStats.dueThisMonthCount, amount: Math.round(rentalDueStats.dueThisMonthAmount) },
-        overDue: { siteCount: overdueSiteCount, amount: Math.round(overdueAmountTotal) },
+        dueThisMonth: {
+          siteCount: rentalDueStats.dueThisMonthCount,
+          amount: Math.round(rentalDueStats.dueThisMonthAmount),
+          landOwnerCount: ownerStats.dueThisMonth.length, // ✅ NEW
+        },
+        overDue: {
+          siteCount: overdueSiteCount,
+          amount: Math.round(overdueAmountTotal),
+          landOwnerCount: ownerStats.overdue.length, // ✅ NEW
+        },
         approvedCount: approvedCount,
         approvedAmountTotal: Math.round(approvedAmountTotal),
         pendingCount: pendingCount,
         pendingAmountTotal: Math.round(pendingAmountTotal),
+        // ✅ NEW — landowner counts behind approvedAmountTotal / pendingAmountTotal
+        approvedLandOwnerCount: ownerStats.approved.length,
+        pendingLandOwnerCount: ownerStats.pending.length,
       },
       200,
     );
