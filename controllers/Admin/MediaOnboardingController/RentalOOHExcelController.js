@@ -295,13 +295,23 @@ const downloadRentalOOHExcel = async (req, res) => {
       return errorResponse(res, "fromMonth and toMonth are required (format: MM-YYYY)");
     }
 
+    // ✅ NEW — optional single-city filter (?city=Chennai), case / space insensitive
+    const cityRaw = Array.isArray(req.query.city) ? req.query.city[0] : req.query.city;
+    const cityName = cityRaw ? String(cityRaw).trim() : "";
+    const cityKey = cityName.toLowerCase();
+    const faceMatchesCity = (face) =>
+      !cityKey || String(face?.city || "").trim().toLowerCase() === cityKey;
+
     const monthList = generateMonthList(fromMonth, toMonth);
     const monthLabels = monthList.map(m => m.label);
     const targetMonthNormalizedList = monthLabels.map(normalizeMonth);
 
     // Fetch all media documents
     const mediaDocs = await Media.find({
-      "mediaDetails.status": 1 // Only active media
+      "mediaDetails.status": 1, // Only active media
+      ...(cityKey
+        ? { "mediaDetails.city": new RegExp(`^\\s*${cityName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "i") }
+        : {}),
     }).lean();
 
     // Column layout (13 columns) — same for the Paid and Unpaid sheets
@@ -315,7 +325,8 @@ const downloadRentalOOHExcel = async (req, res) => {
 
     const startMonth = monthLabels[0];
     const endMonth = monthLabels[monthLabels.length - 1];
-    const periodText = monthLabels.length > 1 ? `${startMonth} to ${endMonth}` : startMonth;
+    const periodText = (monthLabels.length > 1 ? `${startMonth} to ${endMonth}` : startMonth) +
+      (cityName ? ` | City: ${cityName}` : "");
 
     // One entry per month: { label, rows } — Paid rows go to the "Paid" sheet,
     // Unpaid rows to the "Unpaid" sheet.
@@ -587,23 +598,30 @@ const downloadRentalOOHExcel = async (req, res) => {
         const siteRent = Math.round(getRentForDueDate(media, monthList[i].date));
         const faceCount = mediaDetails.length || 1;
 
-        const rawCode = mediaDetails.length > 0
-          ? mediaDetails.map(m => m.mediaCode).filter(Boolean).join(", ")
+        // ✅ NEW — city filter: only the faces of the selected city are shown;
+        // a combined site with faces in other cities gets that share of its amount
+        const cityFaces = mediaDetails.filter(faceMatchesCity);
+        if (cityKey && cityFaces.length === 0) continue;
+        const shownFaces = cityKey ? cityFaces : mediaDetails;
+        const cityShare = cityKey ? cityFaces.length / faceCount : 1;
+
+        const rawCode = shownFaces.length > 0
+          ? shownFaces.map(m => m.mediaCode).filter(Boolean).join(", ")
           : (media.mediaCode || "");
         const combinedCode = String(rawCode).split(" / ").join(", ").split(" + ").join(", ");
 
-        const rawName = mediaDetails.length > 0
-          ? mediaDetails.map(m => m.mediaName).filter(Boolean).join(", ")
+        const rawName = shownFaces.length > 0
+          ? shownFaces.map(m => m.mediaName).filter(Boolean).join(", ")
           : (media.mediaName || "");
         const combinedName = String(rawName).split(" + ").join(", ").split(" / ").join(", ");
 
-        const rawType = mediaDetails.length > 0
-          ? mediaDetails.map(m => m.mediaType).filter(Boolean).join(", ")
+        const rawType = shownFaces.length > 0
+          ? shownFaces.map(m => m.mediaType).filter(Boolean).join(", ")
           : (media.mediaType || "");
         const combinedMediaType = String(rawType).split(" / ").join(", ").split(" + ").join(", ");
 
-        const combinedState = joinUnique(mediaDetails.map(m => m.state)) || media.state || "";
-        const combinedCity = joinUnique(mediaDetails.map(m => m.city)) || media.city || "";
+        const combinedState = joinUnique(shownFaces.map(m => m.state)) || media.state || "";
+        const combinedCity = joinUnique(shownFaces.map(m => m.city)) || media.city || "";
         const allOwnerNames = owners.map(o => o.name).filter(Boolean).join(", ");
 
         // Entry based: what is due this month minus what the paid entries already cover
@@ -644,10 +662,11 @@ const downloadRentalOOHExcel = async (req, res) => {
 
              monthDataRows.push(buildRow(
                 combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedOwnerNames,
-                siteRent, totalGst
+                Math.round(siteRent * cityShare), Math.round(totalGst * cityShare)
              ));
            } else {
              mediaDetails.forEach(mDetail => {
+               if (!faceMatchesCity(mDetail)) return; // ✅ NEW — city filter
                const mId = String(mDetail._id);
                const dGst = gstByFace.get(mId) || (siteWideGst / mediaDetails.length);
                let dNames = Array.from(namesByFace.get(mId) || siteWideNames).filter(Boolean).join(", ");
@@ -670,10 +689,11 @@ const downloadRentalOOHExcel = async (req, res) => {
           if (isCombined) {
             unpaidDataRows.push(buildRow(
               combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, allOwnerNames,
-              siteRent, unpaidGst
+              Math.round(siteRent * cityShare), Math.round(unpaidGst * cityShare)
             ));
           } else {
             mediaDetails.forEach(mDetail => {
+              if (!faceMatchesCity(mDetail)) return; // ✅ NEW — city filter
               unpaidDataRows.push(buildRow(
                 mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", allOwnerNames,
                 siteRent / faceCount, unpaidGst / faceCount
@@ -849,7 +869,8 @@ const downloadRentalOOHExcel = async (req, res) => {
     const buffer = freezeHeaderInXlsxBuffer(rawBuffer, FREEZE_ROWS);
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename=Rental_OOH_Report_${fromMonth}_to_${toMonth}.xlsx`);
+    const fileCity = cityName ? `_${cityName.replace(/[^a-zA-Z0-9-]+/g, "_")}` : "";
+    res.setHeader("Content-Disposition", `attachment; filename=Rental_OOH_Report_${fromMonth}_to_${toMonth}${fileCity}.xlsx`);
     res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
     return res.send(buffer);
 

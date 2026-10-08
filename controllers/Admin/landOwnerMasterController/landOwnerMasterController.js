@@ -898,11 +898,14 @@ const landOwnerList = async (req, res) => {
 
       const uniqueMediaCount = new Set(liveFaces.map((f) => String(f.mediaId))).size;
 
+      // ✅ FIXED — site totals always come from the live sites. An owner with
+      // no live site (e.g. its site was deleted) has 0, instead of the stale
+      // totals still cached on the LandOwnerMaster record.
       return {
         ...owner,
-        totalShareAmount: ownerMediaDocs.length > 0 ? liveTotalShareAmount : (owner.totalShareAmount || 0),
-        totalGstAmount: ownerMediaDocs.length > 0 ? liveTotalGstAmount : (owner.totalGstAmount || 0),
-        totalNetPayableToOwner: ownerMediaDocs.length > 0 ? liveTotalNetPayableToOwner : (owner.totalNetPayableToOwner || 0),
+        totalShareAmount: liveTotalShareAmount,
+        totalGstAmount: liveTotalGstAmount,
+        totalNetPayableToOwner: liveTotalNetPayableToOwner,
         linkedMediaCount: uniqueMediaCount,
         linkedSites: liveFaces, // Update the cache-based field in the response
         sites: liveFaces, // Provide the alias for the frontend
@@ -1002,7 +1005,8 @@ const landOwnerSiteFilter = async (req, res) => {
         search,
         pageNumber = 1,
         count = 10,
-        city,
+        city: cityParam,
+        cityFilter: cityFilterParam, // ✅ NEW — alias of `city` (same name as the response list)
         // ✅ ADDED — new request params
         monthFilter,
         currentMonthLedgerEntries: wantCurrentMonthLedger,
@@ -1037,6 +1041,13 @@ const landOwnerSiteFilter = async (req, res) => {
       roleType, // ✅ NEW
     } = req.body || {};
 
+    // ✅ FIXED — city filter: accepts `city` or `cityFilter`, as a string,
+    // an array, or a comma-separated string ("Chennai,Gaya"). Empty → no filter.
+    const cityRaw = cityParam ?? cityFilterParam;
+    const cityList = (Array.isArray(cityRaw) ? cityRaw : cityRaw ? String(cityRaw).split(",") : [])
+      .map((c) => String(c).trim())
+      .filter(Boolean);
+    const city = cityList.length ? cityList : null;
 
     const today = nowIST();
     today.setUTCHours(0, 0, 0, 0);
