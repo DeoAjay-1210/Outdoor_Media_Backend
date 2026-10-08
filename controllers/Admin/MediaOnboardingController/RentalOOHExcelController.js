@@ -315,12 +315,12 @@ const downloadRentalOOHExcel = async (req, res) => {
     }).lean();
 
     // Column layout (13 columns) — same for the Paid and Unpaid sheets
-    const LAST_COL = 12;
-    const COL_OWNERS = 6;
-    const COL_GST_APPLY = 8;
-    const COL_TDS_APPLY = 9;
-    const COL_FIRST_AMOUNT = 10; // Total Rental, GST, Total
-    const COL_RENTAL = 10, COL_GST = 11;
+    const LAST_COL = 13;
+    const COL_OWNERS = 7;
+    const COL_GST_APPLY = 9;
+    const COL_TDS_APPLY = 10;
+    const COL_FIRST_AMOUNT = 11; // Total Rental, GST, Total
+    const COL_RENTAL = 11, COL_GST = 12;
     const blankRow = (first) => [first, ...Array(LAST_COL).fill("")];
 
     const startMonth = monthLabels[0];
@@ -622,6 +622,7 @@ const downloadRentalOOHExcel = async (req, res) => {
 
         const combinedState = joinUnique(shownFaces.map(m => m.state)) || media.state || "";
         const combinedCity = joinUnique(shownFaces.map(m => m.city)) || media.city || "";
+        const combinedDistrict = joinUnique(shownFaces.map(m => m.district)); // ✅ NEW
         const allOwnerNames = owners.map(o => o.name).filter(Boolean).join(", ");
 
         // Entry based: what is due this month minus what the paid entries already cover
@@ -640,10 +641,10 @@ const downloadRentalOOHExcel = async (req, res) => {
           outstandingGstOnly: !!unpaid?.outstandingGstOnly,
         };
 
-        // [serial, code, name, type, state, city, owners, ownerNames, gstApply, tdsApply, totalRental, gst, total]
-        const buildRow = (code, name, type, state, city, ownerNames, rental, gst) => {
+        // [serial, code, name, type, state, city, district, owners, ownerNames, gstApply, tdsApply, totalRental, gst, total]
+        const buildRow = (code, name, type, state, city, district, ownerNames, rental, gst) => {
           const row = [
-            0, code, name, type, state, city, owners.length, ownerNames, gstApplyText, tdsApplyText,
+            0, code, name, type, state, city, district || "-", owners.length, ownerNames, gstApplyText, tdsApplyText,
             rental, gst, rental + gst
           ];
           row.status = status; // not a cell — read by buildSheet for the colours
@@ -661,7 +662,7 @@ const downloadRentalOOHExcel = async (req, res) => {
              }
 
              monthDataRows.push(buildRow(
-                combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedOwnerNames,
+                combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedDistrict, combinedOwnerNames,
                 Math.round(siteRent * cityShare), Math.round(totalGst * cityShare)
              ));
            } else {
@@ -675,7 +676,7 @@ const downloadRentalOOHExcel = async (req, res) => {
                }
 
                monthDataRows.push(buildRow(
-                  mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", dNames,
+                  mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", mDetail.district || "", dNames,
                   siteRent / faceCount, dGst
                ));
              });
@@ -688,14 +689,14 @@ const downloadRentalOOHExcel = async (req, res) => {
 
           if (isCombined) {
             unpaidDataRows.push(buildRow(
-              combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, allOwnerNames,
+              combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedDistrict, allOwnerNames,
               Math.round(siteRent * cityShare), Math.round(unpaidGst * cityShare)
             ));
           } else {
             mediaDetails.forEach(mDetail => {
               if (!faceMatchesCity(mDetail)) return; // ✅ NEW — city filter
               unpaidDataRows.push(buildRow(
-                mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", allOwnerNames,
+                mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", mDetail.district || "", allOwnerNames,
                 siteRent / faceCount, unpaidGst / faceCount
               ));
             });
@@ -710,7 +711,7 @@ const downloadRentalOOHExcel = async (req, res) => {
     const periodLabel = monthLabels.length > 1 ? `${startMonth} - ${endMonth}` : startMonth;
 
     const colHeaders = [
-      "📅 Month", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City",
+      "📅 Month", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City", "🧭 District / Town",
       "👥 Total Landowners", "👤 Landowner Name", "📌 GST Applicable", "🧮 TDS Applicable",
       "🏠 Total Rental Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
     ];
@@ -771,8 +772,8 @@ const downloadRentalOOHExcel = async (req, res) => {
         aoa.push(...rows);
 
         const totalRowIdx = aoa.length;
-        aoa.push([`🏷️ ${label.toUpperCase()} TOTAL`, "", "", "", "", "", monthOwnerTotal, "", "", "", monthRentalTotal, monthGstTotal, monthRentalTotal + monthGstTotal]);
-        merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 5 } });
+        aoa.push([`🏷️ ${label.toUpperCase()} TOTAL`, "", "", "", "", "", "", monthOwnerTotal, "", "", "", monthRentalTotal, monthGstTotal, monthRentalTotal + monthGstTotal]);
+        merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 6 } });
         aoa.push([]);
 
         grandOwnerTotal += monthOwnerTotal;
@@ -781,8 +782,8 @@ const downloadRentalOOHExcel = async (req, res) => {
       });
 
       const grandTotalIdx = aoa.length;
-      aoa.push([`📊 GRAND TOTAL (${periodLabel})`, "", "", "", "", "", grandOwnerTotal, "", "", "", grandRentalTotal, grandGstTotal, grandRentalTotal + grandGstTotal]);
-      merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 5 } });
+      aoa.push([`📊 GRAND TOTAL (${periodLabel})`, "", "", "", "", "", "", grandOwnerTotal, "", "", "", grandRentalTotal, grandGstTotal, grandRentalTotal + grandGstTotal]);
+      merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 6 } });
 
       const ws = XLSX.utils.aoa_to_sheet(aoa);
 
@@ -850,13 +851,14 @@ const downloadRentalOOHExcel = async (req, res) => {
         { wch: 20 }, // D: Media Type
         { wch: 18 }, // E: State
         { wch: 18 }, // F: City
-        { wch: 20 }, // G: Total Landowners
-        { wch: 35 }, // H: Landowner Name
-        { wch: 18 }, // I: GST Applicable
-        { wch: 18 }, // J: TDS Applicable
-        { wch: 22 }, // K: Total Rental Amount
-        { wch: 20 }, // L: GST Amount
-        { wch: 20 }  // M: Total Amount
+        { wch: 18 }, // G: District
+        { wch: 20 }, // H: Total Landowners
+        { wch: 35 }, // I: Landowner Name
+        { wch: 18 }, // J: GST Applicable
+        { wch: 18 }, // K: TDS Applicable
+        { wch: 22 }, // L: Total Rental Amount
+        { wch: 20 }, // M: GST Amount
+        { wch: 20 }  // N: Total Amount
       ];
       ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 22 }, { hpt: 35 }];
       return ws;

@@ -140,6 +140,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
             joinUnique(faces.map((d) => d.mediaType)),
             joinUnique(faces.map((d) => d.state)),
             joinUnique(faces.map((d) => d.city)),
+            joinUnique(faces.map((d) => d.district)) || "-", // ✅ NEW — District after City ("-" when not set)
             joinUnique(faces.map((d) => d.location)),
             sizes.join(", "),
             ownerNames,
@@ -271,15 +272,15 @@ const downloadApprovedSitesExcel = async (req, res) => {
 
     // ── Build sheet (same design as the Rental OOH report) ──
     const colHeaders = [
-      "📅 Month", "✅ Approval Date", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City",
+      "📅 Month", "✅ Approval Date", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City", "🧭 District / Town",
       "📍 Location", "📐 Size", "👤 Landowner Name", "📞 Landowner Phone", "💳 Payment Category",
       "🏦 Bank / IFSC / Account", "🪪 PAN", "📌 GST Applicable", "🧮 TDS Applicable",
       "🏠 Total Rental Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)",
       "👤 Rental Executive", "👔 Rental Manager", "🏛️ CMD", "📋 Overall Approval Status",
     ];
     const LAST_COL = colHeaders.length - 1;
-    const COL_RENTAL = 16, COL_GST = 17, COL_TOTAL = 18;
-    const CENTER_COLS = new Set([0, 1, 14, 15, COL_RENTAL, COL_GST, COL_TOTAL, 22]);
+    const COL_RENTAL = 17, COL_GST = 18, COL_TOTAL = 19;
+    const CENTER_COLS = new Set([0, 1, 15, 16, COL_RENTAL, COL_GST, COL_TOTAL, 23]);
     const blankRow = (first) => [first, ...Array(LAST_COL).fill("")];
     const headerRowIdx = 2;
     const FREEZE_ROWS = 3;
@@ -371,7 +372,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
           };
           if (isAmount) ws[addr].z = numFormat;
           // Approval columns: approved in green
-          if (c >= 19 && c <= 21 && String(aoa[r][c]).startsWith("Approved")) {
+          if (c >= 20 && c <= 22 && String(aoa[r][c]).startsWith("Approved")) {
             ws[addr].s.font = { bold: true, color: { rgb: "38761D" } };
           }
         }
@@ -395,6 +396,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
       { wch: 20 }, // Media Type
       { wch: 18 }, // State
       { wch: 18 }, // City
+      { wch: 18 }, // District
       { wch: 30 }, // Location
       { wch: 24 }, // Size
       { wch: 28 }, // Landowner Name

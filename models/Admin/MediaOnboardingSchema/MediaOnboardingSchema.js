@@ -427,6 +427,11 @@ const MediaSchema = new mongoose.Schema(
           required: true,
           trim: true,
         },
+        // ✅ NEW — optional district of the face (shown after City everywhere)
+        district: {
+          type: String,
+          trim: true,
+        },
         location: {
           type: String,
           required: true,

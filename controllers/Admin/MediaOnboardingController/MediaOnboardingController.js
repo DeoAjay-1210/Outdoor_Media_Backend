@@ -3802,6 +3802,7 @@ if (landOwnerMasterId) {
         item.totalSqFt = item.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
         item.mediaType = item.mediaDetails[0]?.mediaType;
         item.city = item.mediaDetails[0]?.city;
+        item.district = item.mediaDetails[0]?.district; // ✅ NEW
         item.state = item.mediaDetails[0]?.state;
         item.location = item.mediaDetails[0]?.location;
         item.siteBillMode = item.mediaDetails[0]?.siteBillMode;
@@ -3958,6 +3959,7 @@ mediaData.mediaId = parentMediaId;
       mediaData.totalSqFt = mediaData.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
       mediaData.mediaType = mediaData.mediaDetails[0]?.mediaType;
       mediaData.city = mediaData.mediaDetails[0]?.city;
+      mediaData.district = mediaData.mediaDetails[0]?.district; // ✅ NEW
       mediaData.state = mediaData.mediaDetails[0]?.state;
       mediaData.location = mediaData.mediaDetails[0]?.location;
       mediaData.siteBillMode = mediaData.mediaDetails[0]?.siteBillMode;
@@ -4015,6 +4017,7 @@ mediaData.mediaId = parentMediaId;
 const COLUMN_MAP = {
   state: "state",
   city: "city",
+  district: "district", // ✅ NEW — optional
   "media name": "mediaName",
   "media code": "mediaCode",
   "media type": "mediaType",
@@ -4090,6 +4093,7 @@ const uploadExcel = async (req, res) => {
         mediaType: mapped.mediaType,
         state: mapped.state,
         city: mapped.city,
+        district: mapped.district ? String(mapped.district).trim() : "", // ✅ NEW — optional
         location: mapped.location || "",
         width: Math.floor(Number(mapped.width) || 0),
         height: Math.floor(Number(mapped.height) || 0),
