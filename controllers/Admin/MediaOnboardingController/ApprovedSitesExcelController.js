@@ -2,6 +2,8 @@ const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardi
 const XLSX = require("xlsx-js-style");
 const { errorResponse } = require("../../../utils/response");
 const { freezeHeaderInXlsxBuffer } = require("./RentalOOHExcelController");
+const { getRentForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
+const { resolveExpectedGstForCycle } = require("./LedgerNew2Controller");
 
 // approvalSteps[].role → name used in the report
 const ROLE_NAMES = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
@@ -118,27 +120,21 @@ const downloadApprovedSitesExcel = async (req, res) => {
         .join("; ");
       const ownerPans = joinUnique(owners.map((o) => o.panNumber));
 
-      for (const due of media.rentalDue || []) {
-        const steps = due.approvalSteps || [];
-        const roleStep = steps.find(isRoleApprovedInRange);
-        if (!roleStep) continue;
+      // ✅ NEW — single (combined) bill site → ONE row per site + month with the
+      // site rent; separate bill site → one row per face, as before
+      const isCombined =
+        Number(media.siteBillMode) === 1 ||
+        (mediaDetails.length > 0 && Number(mediaDetails[0].siteBillMode) === 1);
+      const activeFaceIds = mediaDetails.filter((d) => Number(d.status) === 1).map((d) => String(d._id));
 
-        // Separate bill → the face of this entry; single bill → all faces
-        const faces = due.mediaDetailId
-          ? mediaDetails.filter((d) => String(d._id) === String(due.mediaDetailId))
-          : mediaDetails;
+      const pushRecord = ({ dueMonth, dueDate, approvedAts, faces, rentalAmount, gstAmount, stepTexts, overallStatus }) => {
         const sizes = faces.map((d) => `${d.width || 0} × ${d.height || 0} (${d.totalSqFt || 0} Sq Ft)`);
-
-        // Existing calculated values on the rental due entry
-        const rentalAmount = Number(due.baseAmount || due.netPayable || 0);
-        const gstAmount = Number(due.gstAmount || 0);
-
         records.push({
-          dueDate: due.dueDate ? new Date(due.dueDate) : null,
-          approvedAt: new Date(roleStep.approvedAt),
+          dueDate: dueDate ? new Date(dueDate) : null,
+          approvedAt: new Date(Math.max(...approvedAts.map((a) => new Date(a).getTime()))),
           row: [
-            due.dueMonth || "",
-            formatDate(roleStep.approvedAt),
+            dueMonth || "",
+            joinUnique(approvedAts.map(formatDate)),
             joinUnique(faces.map((d) => d.mediaCode)),
             joinUnique(faces.map((d) => d.mediaName)),
             joinUnique(faces.map((d) => d.mediaType)),
@@ -156,11 +152,103 @@ const downloadApprovedSitesExcel = async (req, res) => {
             rentalAmount,
             gstAmount,
             rentalAmount + gstAmount,
-            stepText(steps.find((s) => Number(s.role) === 1)),
-            stepText(steps.find((s) => Number(s.role) === 2)),
-            stepText(steps.find((s) => Number(s.role) === 3)),
-            APPROVAL_STATUS_LABEL[Number(due.approvalStatus)] || "-",
+            ...stepTexts,
+            overallStatus,
           ],
+        });
+      };
+
+      const combinedByMonth = new Map(); // dueMonth → entries of that month (combined sites)
+
+      for (const due of media.rentalDue || []) {
+        const steps = due.approvalSteps || [];
+        const roleStep = steps.find(isRoleApprovedInRange);
+        if (!roleStep) continue;
+
+        // Separate bill → the face of this entry; single bill → all faces
+        const faces = due.mediaDetailId
+          ? mediaDetails.filter((d) => String(d._id) === String(due.mediaDetailId))
+          : mediaDetails;
+
+        // Existing calculated values on the rental due entry
+        const storedAmount = Number(due.baseAmount || due.netPayable || 0);
+        const gstAmount = Number(due.gstAmount || 0);
+        // ✅ FIXED — withGst 2 (Direct GST): the stored base/net amount already
+        // INCLUDES the GST (e.g. 50,000 rent + 9,000 GST = 59,000), so take the
+        // GST out of Total Rental instead of adding it a second time.
+        const rentalAmount =
+          Number(due.withGst) === 2 && gstAmount > 0 && storedAmount >= gstAmount
+            ? storedAmount - gstAmount
+            : storedAmount;
+
+        const item = {
+          due,
+          faces,
+          rentalAmount,
+          gstAmount,
+          approvedAt: roleStep.approvedAt,
+          stepTexts: [1, 2, 3].map((r) => stepText(steps.find((s) => Number(s.role) === r))),
+          overallStatus: APPROVAL_STATUS_LABEL[Number(due.approvalStatus)] || "-",
+        };
+
+        if (isCombined) {
+          const key = due.dueMonth || "-";
+          if (!combinedByMonth.has(key)) combinedByMonth.set(key, []);
+          combinedByMonth.get(key).push(item);
+          continue;
+        }
+
+        pushRecord({
+          dueMonth: due.dueMonth,
+          dueDate: due.dueDate,
+          approvedAts: [item.approvedAt],
+          faces,
+          rentalAmount,
+          gstAmount,
+          stepTexts: item.stepTexts,
+          overallStatus: item.overallStatus,
+        });
+      }
+
+      // Combined site: merge the month's face entries into one row
+      for (const [dueMonth, items] of combinedByMonth) {
+        const faceIds = new Set();
+        let coversAllFaces = false;
+        items.forEach((it) => {
+          if (!it.due.mediaDetailId) coversAllFaces = true;
+          it.faces.forEach((f) => faceIds.add(String(f._id)));
+        });
+        if (activeFaceIds.length && activeFaceIds.every((id) => faceIds.has(id))) coversAllFaces = true;
+
+        const faces = mediaDetails.filter((d) => faceIds.has(String(d._id)));
+        const sumRental = items.reduce((s, it) => s + it.rentalAmount, 0);
+        const sumGst = items.reduce((s, it) => s + it.gstAmount, 0);
+        const dueDate = items[0].due.dueDate;
+        // All faces in the report → the SITE's amounts for that month (the per-face
+        // split entries leave rounding / stale amounts, e.g. 54,999 vs 55,000):
+        //   rent = site rent of the month (appraisal-aware)
+        //   GST  = expected GST of the month (same ledger rule), when GST is charged
+        // Only some faces → sum of those faces' entries.
+        let rentalAmount = sumRental;
+        let gstAmount = Math.round(sumGst);
+        if (coversAllFaces) {
+          const siteRent = Math.round(Number(getRentForDueDate(media, dueDate) || 0));
+          if (siteRent > 0) rentalAmount = siteRent;
+          if (sumGst > 0) {
+            const expectedGst = Math.round(Number(resolveExpectedGstForCycle(mediaAsOfDate(media, dueDate)) || 0));
+            if (expectedGst > 0) gstAmount = expectedGst;
+          }
+        }
+
+        pushRecord({
+          dueMonth,
+          dueDate,
+          approvedAts: items.map((it) => it.approvedAt),
+          faces: faces.length ? faces : mediaDetails,
+          rentalAmount,
+          gstAmount,
+          stepTexts: [0, 1, 2].map((i) => joinUnique(items.map((it) => it.stepTexts[i]))),
+          overallStatus: joinUnique(items.map((it) => it.overallStatus)),
         });
       }
     }
@@ -185,7 +273,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
     const colHeaders = [
       "📅 Month", "✅ Approval Date", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City",
       "📍 Location", "📐 Size", "👤 Landowner Name", "📞 Landowner Phone", "💳 Payment Category",
-      "🏦 Bank / IFSC / Account / UPI", "🪪 PAN", "📌 GST Applicable", "🧮 TDS Applicable",
+      "🏦 Bank / IFSC / Account", "🪪 PAN", "📌 GST Applicable", "🧮 TDS Applicable",
       "🏠 Total Rental Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)",
       "👤 Rental Executive", "👔 Rental Manager", "🏛️ CMD", "📋 Overall Approval Status",
     ];

@@ -91,10 +91,10 @@ const registerUser = async (req, res) => {
     // ✅ NEW — userType 4 (Other)
     if (typeNum === 4 && OTHER_REGISTER_PASSWORD) {
       if (!registerPassword) {
-        return errorResponse(res, "Other registration password is required", null, 400);
+        return errorResponse(res, "Other Role registration password is required", null, 400);
       }
       if (registerPassword !== OTHER_REGISTER_PASSWORD) {
-        return errorResponse(res, "Invalid Other registration password", null, 400);
+        return errorResponse(res, "Invalid Other Role registration password", null, 400);
       }
     }
 
