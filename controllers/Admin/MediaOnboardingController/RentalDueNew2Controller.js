@@ -5297,6 +5297,36 @@ if (Number(isPastPending) === 1) {
         return d >= monthStart && d <= monthEnd;
       });
 
+      // ✅ FIXED — month-wise billing dates. When the selected month has a billing
+      // cycle (its rentalDue entry, or the site's own cycle date in that month),
+      // the dates come from THAT cycle instead of the site's latest cycle.
+      // No cycle in the selected month → the site-level values, as before.
+      const billFreq = Number(item.rentalPayment?.paymentFrequency || 1);
+      const billCycleMonths =
+        billFreq === 6
+          ? Number(item.rentalPayment?.customPaymentFrequency || 1)
+          : ({ 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 }[billFreq] || 1);
+      // lastBillPaidDate = the previous cycle (the last bill before this one)
+      const cycleBillDates = (cycleDate) => ({
+        lastBillPaidDate: addMonthsUTC(cycleDate, -billCycleMonths),
+        nextBillingDate: addMonthsUTC(cycleDate, billCycleMonths),
+        previousBillGenerateDate: formatDate(addMonthsUTC(cycleDate, -billCycleMonths)),
+        currentBillDate: formatDate(cycleDate),
+      });
+      const isInSelectedMonth = (dt) => {
+        if (!dt) return false;
+        const d = new Date(dt);
+        return d >= monthStart && d <= monthEnd;
+      };
+      const selectedCycleDate = currentMonthEntry?.dueDate
+        ? new Date(currentMonthEntry.dueDate)
+        : isInSelectedMonth(item.rentalPayment?.nextBillingDate)
+          ? new Date(item.rentalPayment.nextBillingDate)
+          : isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
+            ? new Date(item.rentalPayment.lastBillPaidDate)
+            : null;
+      const selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+
       const isOverdue =
         item.rentalPayment?.status === 3 ||
         (currentMonthEntry &&
@@ -5455,6 +5485,8 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
             totalSqFt: face.totalSqFt,
+            // ✅ NEW — this entry's own cycle dates (from its dueDate)
+            ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),
           });
         });
       });
@@ -5491,9 +5523,14 @@ const details = (item.mediaDetails || []).map((d) => ({
         customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
         paymentFrequencyLabel:
           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
-        nextBillingDate: item.rentalPayment?.nextBillingDate,
-        lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+        nextBillingDate: selectedCycleBillDates
+          ? selectedCycleBillDates.nextBillingDate
+          : item.rentalPayment?.nextBillingDate,
+        lastBillPaidDate: selectedCycleBillDates
+          ? selectedCycleBillDates.lastBillPaidDate
+          : item.rentalPayment?.lastBillPaidDate,
         previousBillGenerateDate: (() => {
+          if (selectedCycleBillDates) return selectedCycleBillDates.previousBillGenerateDate;
           const lp = item.rentalPayment?.lastBillPaidDate;
           const pbgd = item.rentalPayment?.previousBillGenerateDate;
 
@@ -5525,6 +5562,8 @@ const details = (item.mediaDetails || []).map((d) => ({
         // ✅ FIXED — currentBillDate should only show if a cycle falls in the target month.
         currentBillDate: (() => {
           if (currentMonthEntry) return formatDate(currentMonthEntry.dueDate);
+          // ✅ FIXED — same month-wise cycle as the dates above (e.g. a future month's cycle)
+          if (selectedCycleBillDates) return selectedCycleBillDates.currentBillDate;
 
           const nb = item.rentalPayment?.nextBillingDate;
           if (nb) {

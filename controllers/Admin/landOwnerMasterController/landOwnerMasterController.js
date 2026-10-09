@@ -3173,10 +3173,77 @@ const cityMatchQuery = city
     return errorResponse(res, error.message, null, 400);
   }
 };
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — DELETE LANDOWNER (by landOwnerMasterId)
+// Removes the landowner from every site's landOwners (+ landOwnerMasterIds,
+// numberOfLandOwners), then permanently deletes the LandOwnerMaster record.
+// Sites are updated with $pull only — no save hooks / recalculation run.
+// ─────────────────────────────────────────────────────────────
+const landOwnerDelete = async (req, res) => {
+  try {
+    const id = req.body?.landOwnerMasterId || req.body?.id || req.params?.id;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return errorResponse(res, "A valid landOwnerMasterId is required", null, 400);
+    }
+
+    const owner = await LandOwnerMaster.findById(id).select("name phone").lean();
+    if (!owner) {
+      return errorResponse(res, "LandOwner not found with this ID", null, 404);
+    }
+
+    // 1) Remove the landowner from every site that has them
+    const sites = await MediaOnboarding.find(
+      { "landOwners.landOwnerMasterId": owner._id },
+      "mediaDetails.mediaCode landOwners.landOwnerMasterId",
+    ).lean();
+
+    const sitesUpdated = [];
+    for (const site of sites) {
+      const remainingOwners = (site.landOwners || []).filter(
+        (o) => String(o.landOwnerMasterId) !== String(owner._id),
+      ).length;
+
+      await MediaOnboarding.updateOne(
+        { _id: site._id },
+        {
+          $pull: {
+            landOwners: { landOwnerMasterId: owner._id },
+            landOwnerMasterIds: owner._id,
+          },
+          ...(remainingOwners > 0
+            ? { $set: { numberOfLandOwners: remainingOwners } }
+            : { $unset: { numberOfLandOwners: "" } }),
+        },
+        { timestamps: false },
+      );
+
+      sitesUpdated.push({
+        mediaId: site._id,
+        mediaCode: (site.mediaDetails || []).map((d) => d.mediaCode).join(" / "),
+        remainingLandOwners: remainingOwners,
+      });
+    }
+
+    // 2) The landowner itself
+    await LandOwnerMaster.deleteOne({ _id: owner._id });
+
+    return successResponse(res, "LandOwner deleted successfully", {
+      landOwnerMasterId: owner._id,
+      name: owner.name,
+      sitesUpdated,
+      // sites left without any landowner — owners must be added again in Media Onboarding
+      sitesWithoutLandOwner: sitesUpdated.filter((s) => s.remainingLandOwners === 0),
+    }, 200);
+  } catch (error) {
+    return errorResponse(res, error.message, null, 400);
+  }
+};
+
 module.exports = {
   landOwnerSave,
   landOwnerList,
   landOwnerSiteFilter,
+  landOwnerDelete, // ✅ NEW
   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
   removeLinkedSiteFromMaster, // used by mediaOnboardingController.js

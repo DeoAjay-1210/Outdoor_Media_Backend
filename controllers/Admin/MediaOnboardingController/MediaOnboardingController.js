@@ -4531,6 +4531,60 @@ const syncBillingCyclesNow = async (req, res) => {
     return errorResponse(res, "Failed to sync billing cycles", { error: error.message }, 500);
   }
 };
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — DELETE MEDIA (by mediaId)
+// Permanently deletes the media and cleans every record that points to it:
+//   • LandOwnerMaster.linkedSites (site totals recalculated)
+//   • OverDueHistory + CmdNotification of this media
+// The links are cleaned first and the media is deleted last.
+// ─────────────────────────────────────────────────────────────
+const deleteMedia = async (req, res) => {
+  try {
+    const mediaId = req.body?.mediaId || req.params?.mediaId;
+    if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+      return errorResponse(res, "A valid mediaId is required", null, 400);
+    }
+
+    const media = await MediaOnboarding.findById(mediaId)
+      .select("mediaDetails.mediaCode mediaDetails.mediaName landOwners.landOwnerMasterId landOwners.name")
+      .lean();
+    if (!media) {
+      return errorResponse(res, "Media not found with this ID", null, 404);
+    }
+
+    // 1) Landowner masters linked to this media (from the media AND from any
+    //    master whose linkedSites still point to it)
+    const masterIds = new Set(
+      (media.landOwners || []).map((o) => o.landOwnerMasterId).filter(Boolean).map(String),
+    );
+    const mastersWithLink = await LandOwnerMaster.find({ "linkedSites.mediaId": media._id }).select("_id").lean();
+    mastersWithLink.forEach((m) => masterIds.add(String(m._id)));
+    for (const masterId of masterIds) {
+      await removeLinkedSiteFromMaster(masterId, media._id);
+    }
+
+    // 2) Records of this media in other collections
+    const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+    const CmdNotification = require("../../../models/Admin/NotificationSchema/CmdNotificationSchema");
+    const overDueResult = await OverDueHistory.deleteMany({ mediaId: media._id });
+    const notificationResult = await CmdNotification.deleteMany({ mediaId: media._id });
+
+    // 3) The media itself
+    await MediaOnboarding.deleteOne({ _id: media._id });
+
+    return successResponse(res, "Media deleted successfully", {
+      mediaId: media._id,
+      mediaCode: (media.mediaDetails || []).map((d) => d.mediaCode).join(" / "),
+      mediaName: (media.mediaDetails || []).map((d) => d.mediaName).join(", "),
+      landOwnersUnlinked: masterIds.size,
+      overDueHistoryDeleted: overDueResult.deletedCount || 0,
+      notificationsDeleted: notificationResult.deletedCount || 0,
+    }, 200);
+  } catch (error) {
+    return errorResponse(res, error.message, null, 400);
+  }
+};
+
 module.exports = {
   mediaOnboarding,
   mediaList,
@@ -4539,4 +4593,5 @@ module.exports = {
   getMediaById,
   syncBillingCyclesNow,
   applyDueAppraisals,
+  deleteMedia, // ✅ NEW
 };
