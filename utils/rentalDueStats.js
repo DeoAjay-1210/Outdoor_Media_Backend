@@ -108,7 +108,7 @@ const finalizeOwnerBucket = (bucket) =>
  * @param {{year:number, month:number, targetRole?:number|null, trackLandOwners?:boolean}} opts  month is 1-12
  *   trackLandOwners (opt-in) → also returns stats.landOwners { dueThisMonth, approved, pending, overdue }
  */
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null }) {
   const ownerBuckets = trackLandOwners
     ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
     : null;
@@ -156,11 +156,14 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
 
       for (const face of activeFacesList) {
         const faceId = String(face._id);
+        const entry = pickFaceEntry(currentMonthEntries, faceId);
+        // optional caller filter (e.g. login role) — default: no filtering
+        if (faceFilter && !faceFilter(entry, media, face)) continue;
         stats.dueThisMonthCount += 1;
         stats.dueThisMonthAmount += faceAmount;
         trackOwner("dueThisMonth", media, faceId, faceAmount);
 
-        const entry = pickFaceEntry(currentMonthEntries, faceId);
+        // const entry = pickFaceEntry(currentMonthEntries, faceId);
         const { isApproved, isOpen } = roleStatus(entry, targetRole);
         // overdue is role independent → always the overall approval status
         const isOpenOverall = roleStatus(entry, null).isOpen;
@@ -168,8 +171,16 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         if (isApproved) {
           stats.approvedCount += 1;
           stats.approvedAmountTotal += faceAmount;
-          trackOwner("approved", media, faceId, faceAmount);
-        } else if (isOpen) {
+           trackOwner("approved", media, faceId, faceAmount);
+          if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "approved", cycle: cycleSummary });
+          continue;
+        }
+        if (!isOpen) {
+          if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "closed", cycle: cycleSummary });
+          continue;
+        }
+         
+         else if (isOpen) {
           // pending = every open current-month due (for the role, when given)
           stats.pendingCount += 1;
           stats.pendingAmountTotal += faceAmount;
@@ -187,6 +198,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           stats.dueAmountOpen += faceAmount;
           trackOwner("overdue", media, faceId, faceAmount);
         }
+        if (onFace) onFace({ media, face, entry, amount: faceAmount, state: isOverdue ? "overdue" : "pending", cycle: cycleSummary });
       }
     }
 
@@ -210,6 +222,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
       for (const face of activeFacesList) {
         const faceId = String(face._id);
         const entry = pickFaceEntry(pastCycleEntries, faceId);
+        if (faceFilter && !faceFilter(entry, media, face)) continue;
         const { isOpen } = roleStatus(entry, null); // overdue is role independent
         if (!isOpen) continue;
         overdueFaces.add(faceId);

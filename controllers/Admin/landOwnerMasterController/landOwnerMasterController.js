@@ -1142,9 +1142,14 @@ const landOwnerSiteFilter = async (req, res) => {
     const [statsMonth, statsYear] = monthFilterApplied.split("-").map(Number);
     const statsMonthStart = new Date(statsYear, statsMonth - 1, 1);
     const statsMonthEnd = new Date(statsYear, statsMonth, 0, 23, 59, 59);
-
+const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds : []).filter((id) => mongoose.Types.ObjectId.isValid(id));
     let ownerFilter = {};
-    if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
+    if (restrictMediaIds.length > 0) {
+      const restrictDocs = await MediaOnboarding.find({ _id: { $in: restrictMediaIds } }, "landOwners.landOwnerMasterId").lean();
+      const restrictOwners = new Set();
+      restrictDocs.forEach((m) => (m.landOwners || []).forEach((o) => o.landOwnerMasterId && restrictOwners.add(String(o.landOwnerMasterId))));
+      ownerFilter._id = { $in: Array.from(restrictOwners) };
+    } else if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
       ownerFilter._id = { $in: landOwnerMasterIds };
     } else if (genericSearchRegex) {
       // ✅ ADDED — first, find owner ids matching mediaName/mediaCode
