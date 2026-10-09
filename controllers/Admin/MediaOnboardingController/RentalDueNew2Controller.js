@@ -5327,6 +5327,31 @@ if (Number(isPastPending) === 1) {
             : null;
       const selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
 
+      // ✅ NEW — month-wise amounts of each rentalDueEntries item (its own dueMonth),
+      // from the existing ledger cycle summary (appraisal-aware rent + GST).
+      // One summary per month per site.
+      const monthSummaryCache = new Map();
+      const monthWiseAmountFor = (entry) => {
+        if (!entry?.dueDate) return null;
+        const d = new Date(entry.dueDate);
+        const year = d.getUTCFullYear();
+        const month = d.getUTCMonth() + 1;
+        const key = `${year}-${month}`;
+        if (!monthSummaryCache.has(key)) {
+          monthSummaryCache.set(key, getOverallSummaryForCycle(item, { year, month }));
+        }
+        const s = monthSummaryCache.get(key) || {};
+        const totalRentalAmount = Math.round(Number(s.currentMonthRentalAmount || 0));
+        const gstAmount = Math.round(Number(s.currentMonthGstAmount || 0));
+
+        return {
+          dueMonth: entry.dueMonth,
+          totalRentalAmount,
+          gstAmount,
+          totalAmount: totalRentalAmount + gstAmount,
+        };
+      };
+
       const isOverdue =
         item.rentalPayment?.status === 3 ||
         (currentMonthEntry &&
@@ -5487,6 +5512,8 @@ const details = (item.mediaDetails || []).map((d) => ({
             totalSqFt: face.totalSqFt,
             // ✅ NEW — this entry's own cycle dates (from its dueDate)
             ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),
+            // ✅ NEW — this entry's month-wise amounts (new object)
+            monthWiseAmount: monthWiseAmountFor(entry),
           });
         });
       });
