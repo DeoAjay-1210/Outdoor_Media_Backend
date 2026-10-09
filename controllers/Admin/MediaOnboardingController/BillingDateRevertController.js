@@ -132,7 +132,7 @@ const formatRequest = (r) => ({
   appliedDates: r.appliedDates || null,
   removedBills: r.removedBills || [],
   remark: r.remark,
-  image: r.image || null,
+  image: r.image?.filePath ? r.image : null,
   status: r.status,
   statusLabel: REVERT_STATUS_LABEL[r.status] || "",
   requestedBy: r.requestedBy || null,
@@ -190,7 +190,7 @@ function validateRequestedDates(media, requestedLastBill, requestedNextBill) {
 // POST /admin/billing-date-revert/request   (multipart/form-data)
 // Roles: Rental Executive (1), Rental Manager (2)
 // body: mediaId, lastBillDate, nextBillDate (optional — computed from the
-//       billing frequency when omitted), remark; file field: image
+//       billing frequency when omitted), remark; file field: image (optional)
 // Saves a PENDING request and notifies CMD. Site billing dates are NOT changed.
 // ─────────────────────────────────────────────────────────────
 exports.createBillingDateRevertRequest = async (req, res) => {
@@ -214,8 +214,8 @@ exports.createBillingDateRevertRequest = async (req, res) => {
     const remarkText = typeof remark === "string" ? remark.trim() : "";
     if (!remarkText) return fail("remark is required");
 
-    if (!req.file) return fail("image is required");
-    if (!String(req.file.mimetype || "").startsWith("image/")) {
+    // image is optional; when sent it must be an image file
+    if (req.file && !String(req.file.mimetype || "").startsWith("image/")) {
       return fail("image must be an image file");
     }
 
@@ -282,7 +282,7 @@ exports.createBillingDateRevertRequest = async (req, res) => {
           nextBillingDate: validation.nextBillingDate,
         },
         remark: remarkText,
-        image: req.processFile(req.file),
+        ...(req.file ? { image: req.processFile(req.file) } : {}),
         status: REVERT_STATUS.PENDING,
         requestedBy: actorFromReq(req, remarkText),
         createdAt: now,
@@ -724,13 +724,15 @@ async function purgeOldBillingDateRevertRequests() {
     .lean();
   if (oldRequests.length === 0) return { deleted: 0 };
 
-  for (const r of oldRequests) await deleteRequestImage(r.image);
-
+  // delete the DB records FIRST, files last — if the process stops midway a
+  // request never points to an image that is already gone
   const ids = oldRequests.map((r) => r._id);
   await CmdNotification.deleteMany({
     dedupeKey: { $in: ids.map((id) => `billingDateRevert:${String(id)}`) },
   });
   const result = await BillingDateRevertRequest.deleteMany({ _id: { $in: ids } });
+
+  for (const r of oldRequests) await deleteRequestImage(r.image);
   return { deleted: result.deletedCount || 0 };
 }
 

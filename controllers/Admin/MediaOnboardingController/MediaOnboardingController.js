@@ -3864,13 +3864,12 @@ if (landOwnerMasterId) {
     ]);
     const activeCount = activeCountAgg[0]?.count || 0;
 
-    // Get agreement expired face count
-    const agreementExpiredCountAgg = await MediaOnboarding.aggregate([
-      { $match: { "agreement.status": 3 } },
-      { $unwind: "$mediaDetails" },
-      { $count: "count" },
-    ]);
-    const agreementExpiredCount = agreementExpiredCountAgg[0]?.count || 0;
+    // ✅ CHANGED — expired agreement SITE count from the real end date
+    // (agreement.endDate before now), not the stored agreement.status (only
+    // refreshed on save) and not per face.
+    const agreementExpiredCount = await MediaOnboarding.countDocuments({
+      "agreement.endDate": { $lt: new Date() },
+    });
 
     // Get total rental amounts from all documents
     const rentalAggregation = await MediaOnboarding.aggregate([
