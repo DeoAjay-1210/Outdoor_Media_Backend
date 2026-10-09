@@ -4829,9 +4829,15 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // nextBillingDate/lastBillPaidDate (Rule 1). This guarantees the
     // list always reflects up-to-date pending/overdue bills even for
     // sites nobody has opened saveRentalDue for recently.
-  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 });
+  // ✅ FIXED — load only ids up front and re-read each site right before
+  // processing it. Saving a copy loaded at the start of the sweep wrote
+  // stale rentalPayment back over changes made meanwhile (e.g. a CMD
+  // billing date revert approval or a manual media edit).
+  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 }).select("_id").lean();
 // const sweepDebugLog = [];
-for (const siteDoc of activeSitesForSweep) {
+for (const { _id: sweepSiteId } of activeSitesForSweep) {
+  const siteDoc = await Media.findById(sweepSiteId);
+  if (!siteDoc) continue;
   const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
   const result = await generateMissedEntriesForMedia(siteDoc, "");
   const generatedCount = result?.generatedEntries?.length || 0;
@@ -5318,14 +5324,35 @@ if (Number(isPastPending) === 1) {
         const d = new Date(dt);
         return d >= monthStart && d <= monthEnd;
       };
+      // ✅ FIXED — a lastBillPaidDate in a FUTURE month (billing date moved
+      // forward by an approved billing date revert) is not a generated bill,
+      // so it must not show as that month's billing cycle.
+      const lastBillPaid = item.rentalPayment?.lastBillPaidDate
+        ? new Date(item.rentalPayment.lastBillPaidDate)
+        : null;
+      const lastBillPaidIsFutureMonth =
+        !!lastBillPaid &&
+        lastBillPaid.getUTCFullYear() * 12 + lastBillPaid.getUTCMonth() >
+          today.getUTCFullYear() * 12 + today.getUTCMonth();
       const selectedCycleDate = currentMonthEntry?.dueDate
         ? new Date(currentMonthEntry.dueDate)
         : isInSelectedMonth(item.rentalPayment?.nextBillingDate)
           ? new Date(item.rentalPayment.nextBillingDate)
-          : isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
+          : !lastBillPaidIsFutureMonth && isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
             ? new Date(item.rentalPayment.lastBillPaidDate)
             : null;
       const selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+      // ✅ FIXED — after a forward move, the cycle right after this one may
+      // fall on/before the future lastBillPaidDate and will never be billed;
+      // the real next bill is the site's nextBillingDate.
+      if (
+        selectedCycleBillDates &&
+        lastBillPaidIsFutureMonth &&
+        item.rentalPayment?.nextBillingDate &&
+        new Date(selectedCycleBillDates.nextBillingDate) <= lastBillPaid
+      ) {
+        selectedCycleBillDates.nextBillingDate = new Date(item.rentalPayment.nextBillingDate);
+      }
 
       // ✅ NEW — month-wise amounts of each rentalDueEntries item (its own dueMonth),
       // from the existing ledger cycle summary (appraisal-aware rent + GST).

@@ -22,9 +22,16 @@ const unreadFilterFor = (userObjectId) => ({
 
 // notificationType filters (rows created before the flag existed have no
 // notificationType → treated as "normalApproval")
-const NOTIFICATION_TYPE = { NORMAL_APPROVAL: "normalApproval", REMINDER: "reminder" };
-const normalApprovalFilter = { notificationType: { $ne: NOTIFICATION_TYPE.REMINDER } };
+const NOTIFICATION_TYPE = {
+  NORMAL_APPROVAL: "normalApproval",
+  REMINDER: "reminder",
+  BILLING_DATE_REVERT: "billingDateRevert",
+};
+const normalApprovalFilter = {
+  notificationType: { $nin: [NOTIFICATION_TYPE.REMINDER, NOTIFICATION_TYPE.BILLING_DATE_REVERT] },
+};
 const reminderFilter = { notificationType: NOTIFICATION_TYPE.REMINDER };
+const billingDateRevertFilter = { notificationType: NOTIFICATION_TYPE.BILLING_DATE_REVERT };
 
 // unread counts for THIS CMD user: overall + split by who approved
 // (each site has one Executive row and one Manager row, counted separately)
@@ -37,12 +44,14 @@ const getUnreadCounts = async (userObjectId) => {
     rentalManagerApprovalCount,
     normalApprovalCount,
     reminderCount,
+    billingDateRevertCount,
   ] = await Promise.all([
     CmdNotification.countDocuments(unread),
     CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter, approvedByRole: USER_ROLE.RENTAL_EXECUTIVE }),
     CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter, approvedByRole: USER_ROLE.RENTAL_MANAGER }),
     CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter }),
     CmdNotification.countDocuments({ ...unread, ...reminderFilter }),
+    CmdNotification.countDocuments({ ...unread, ...billingDateRevertFilter }),
   ]);
   return {
     overallCount,
@@ -50,6 +59,7 @@ const getUnreadCounts = async (userObjectId) => {
     rentalManagerApprovalCount,
     normalApprovalCount,
     reminderCount,
+    billingDateRevertCount,
   };
 };
 
@@ -185,6 +195,78 @@ async function createRentalApprovalNotification({ media, entry, userType, userId
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// INTERNAL — called from BillingDateRevertController after a revert
+// request is saved. ONE row per request (dedupeKey). Never throws: a
+// notification failure must not affect the saved request.
+// ─────────────────────────────────────────────────────────────
+async function createBillingDateRevertNotification({ request }) {
+  try {
+    if (!request?._id) return null;
+    const role = Number(request.requestedBy?.role);
+    const roleLabel = APPROVER_ROLE_LABEL[role] || "";
+    const fmt = (d) => (d ? new Date(d).toISOString().slice(0, 10) : "-");
+    const message =
+      `${roleLabel} ${request.requestedBy?.userName || ""} requested billing date revert` +
+      ` (${fmt(request.originalDates?.lastBillPaidDate)} → ${fmt(request.requestedDates?.lastBillPaidDate)})`;
+    const now = nowIST();
+    const dedupeKey = `billingDateRevert:${String(request._id)}`;
+
+    const doc = await CmdNotification.findOneAndUpdate(
+      { dedupeKey },
+      {
+        $setOnInsert: {
+          targetRole: USER_ROLE.CMD,
+          notificationType: NOTIFICATION_TYPE.BILLING_DATE_REVERT,
+          mediaId: request.mediaId,
+          mediaDetailIds: (request.siteDetails || []).map((f) => toObjectId(f.mediaDetailId)).filter(Boolean),
+          dueMonth: "",
+          landOwnerName: request.landOwnerName || "",
+          siteName: request.siteName || "",
+          siteCode: request.siteCode || "",
+          message: message.replace(/\s+/g, " ").trim(),
+          remarks: request.remark || "",
+          billingDateRevertRequestId: request._id,
+          revertStatus: request.status,
+          currentLastBillPaidDate: request.originalDates?.lastBillPaidDate || null,
+          currentNextBillingDate: request.originalDates?.nextBillingDate || null,
+          requestedLastBillPaidDate: request.requestedDates?.lastBillPaidDate || null,
+          requestedNextBillingDate: request.requestedDates?.nextBillingDate || null,
+          requestedBy: request.requestedBy?.userName || "",
+          requestedByRole: APPROVER_ROLE_LABEL[role] ? role : null,
+          requestedByUserId: toObjectId(request.requestedBy?.userId),
+          requestedAt: request.createdAt || now,
+          imagePath: request.image?.filePath || "",
+          readBy: [],
+          dedupeKey,
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+      { upsert: true, returnDocument: "after" },
+    ).lean();
+    return doc?._id || null;
+  } catch (err) {
+    if (err?.code !== 11000) {
+      console.error("[CmdNotification] billing date revert create failed:", err.message);
+    }
+    return null;
+  }
+}
+
+// Keeps the notification row's revertStatus in sync with the request.
+// Never throws.
+async function updateBillingDateRevertNotificationStatus(requestId, revertStatus) {
+  try {
+    await CmdNotification.updateOne(
+      { dedupeKey: `billingDateRevert:${String(requestId)}` },
+      { $set: { revertStatus, updatedAt: nowIST() } },
+    );
+  } catch (err) {
+    console.error("[CmdNotification] billing date revert status update failed:", err.message);
+  }
+}
+
 const formatNotification = (n, userObjectId) => ({
   notificationId: n._id,
   notificationType: n.notificationType || NOTIFICATION_TYPE.NORMAL_APPROVAL,
@@ -205,9 +287,26 @@ const formatNotification = (n, userObjectId) => ({
   siteCode: n.siteCode,
   message: n.message,
   dueMonth: n.dueMonth,
-  // approval rows only (not applicable to reminders)
-  ...(n.notificationType !== NOTIFICATION_TYPE.REMINDER
+  // approval rows only (not applicable to reminders / billing date reverts)
+  ...(n.notificationType !== NOTIFICATION_TYPE.REMINDER &&
+  n.notificationType !== NOTIFICATION_TYPE.BILLING_DATE_REVERT
     ? { approvedByRole: n.approvedByRole, approvedByName: n.approvedByName, approvedAt: n.approvedAt }
+    : {}),
+  // billing date revert rows only
+  ...(n.notificationType === NOTIFICATION_TYPE.BILLING_DATE_REVERT
+    ? {
+        billingDateRevertRequestId: n.billingDateRevertRequestId,
+        revertStatus: n.revertStatus,
+        currentLastBillPaidDate: n.currentLastBillPaidDate,
+        currentNextBillingDate: n.currentNextBillingDate,
+        requestedLastBillPaidDate: n.requestedLastBillPaidDate,
+        requestedNextBillingDate: n.requestedNextBillingDate,
+        remarks: n.remarks || "",
+        imagePath: n.imagePath || "",
+        requestedBy: n.requestedBy || "",
+        requestedByRole: n.requestedByRole ?? null,
+        requestedAt: n.requestedAt || null,
+      }
     : {}),
   mediaId: n.mediaId,
   mediaDetailId: n.mediaDetailId,
@@ -238,11 +337,13 @@ const getCmdNotifications = async (req, res) => {
     } else if (params.isRead === false || params.isRead === "false") {
       filter["readBy.userId"] = { $ne: userObjectId };
     }
-    // optional: "normalApproval" | "reminder"
+    // optional: "normalApproval" | "reminder" | "billingDateRevert"
     if (params.notificationType === NOTIFICATION_TYPE.REMINDER) {
       Object.assign(filter, reminderFilter);
     } else if (params.notificationType === NOTIFICATION_TYPE.NORMAL_APPROVAL) {
       Object.assign(filter, normalApprovalFilter);
+    } else if (params.notificationType === NOTIFICATION_TYPE.BILLING_DATE_REVERT) {
+      Object.assign(filter, billingDateRevertFilter);
     }
 
     const [totalCount, counts, rows] = await Promise.all([
@@ -332,6 +433,7 @@ const markAllCmdNotificationsRead = async (req, res) => {
       rentalManagerApprovalCount: 0,
       normalApprovalCount: 0,
       reminderCount: 0,
+      billingDateRevertCount: 0,
     });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
@@ -517,6 +619,8 @@ const sendCmdReminder = async (req, res) => {
 
 module.exports = {
   createRentalApprovalNotification,
+  createBillingDateRevertNotification,
+  updateBillingDateRevertNotificationStatus,
   sendCmdReminder,
   getCmdNotifications,
   getCmdNotificationCount,
