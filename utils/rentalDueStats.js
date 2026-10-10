@@ -227,6 +227,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         if (!isOpen) continue;
         overdueFaces.add(faceId);
         stats.overdueAmountTotal += pastFaceAmount;
+        if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true });
         trackOwner("overdue", media, faceId, pastFaceAmount);
       }
     }
