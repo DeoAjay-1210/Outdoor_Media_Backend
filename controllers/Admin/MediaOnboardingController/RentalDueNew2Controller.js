@@ -2002,6 +2002,25 @@ async function processSingleRentalDueInternal({
     entry.savedBy = { userId, userName, role: userType, savedAt: nowIST() };
   }
 
+  // ✅ NEW — a Rental Executive / Manager saving again AFTER their own approval
+  // (not their turn, e.g. Executive re-saves after the Manager approved) and
+  // before CMD's final approval: refresh their own step's approvedAt to this
+  // save. Only that step's time / user change — status, turn and the other
+  // roles' steps stay as they are.
+  if (
+    isStaffOrTeamLead &&
+    !isTeamLeadOverride &&
+    userType !== entry.currentPendingRole &&
+    Number(entry.approvalStatus) !== 3
+  ) {
+    const ownApprovedStep = (entry.approvalSteps || []).find((s) => s.role === userType && s.status === 2);
+    if (ownApprovedStep) {
+      ownApprovedStep.approvedAt = nowIST();
+      ownApprovedStep.userId = userId;
+      ownApprovedStep.userName = userName;
+    }
+  }
+
   if (isOwnerOverride || isTeamLeadOverride || userType === entry.currentPendingRole) {
     if (isOwnerOverride) {
       entry.approvalSteps.forEach((step) => {

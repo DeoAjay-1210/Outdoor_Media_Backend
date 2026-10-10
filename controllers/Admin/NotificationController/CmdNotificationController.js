@@ -18,6 +18,7 @@ const toObjectId = (id) =>
 const unreadFilterFor = (userObjectId) => ({
   targetRole: USER_ROLE.CMD,
   "readBy.userId": { $ne: userObjectId },
+  notificationType: { $ne: NOTIFICATION_TYPE.BILLING_DATE_REVERT },
 });
 
 // notificationType filters (rows created before the flag existed have no
@@ -44,14 +45,14 @@ const getUnreadCounts = async (userObjectId) => {
     rentalManagerApprovalCount,
     normalApprovalCount,
     reminderCount,
-    billingDateRevertCount,
+    // billingDateRevertCount,
   ] = await Promise.all([
     CmdNotification.countDocuments(unread),
     CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter, approvedByRole: USER_ROLE.RENTAL_EXECUTIVE }),
     CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter, approvedByRole: USER_ROLE.RENTAL_MANAGER }),
     CmdNotification.countDocuments({ ...unread, ...normalApprovalFilter }),
     CmdNotification.countDocuments({ ...unread, ...reminderFilter }),
-    CmdNotification.countDocuments({ ...unread, ...billingDateRevertFilter }),
+    // CmdNotification.countDocuments({ ...unread, ...billingDateRevertFilter }),
   ]);
   return {
     overallCount,
@@ -59,7 +60,7 @@ const getUnreadCounts = async (userObjectId) => {
     rentalManagerApprovalCount,
     normalApprovalCount,
     reminderCount,
-    billingDateRevertCount,
+    // billingDateRevertCount,
   };
 };
 
@@ -331,7 +332,10 @@ const getCmdNotifications = async (req, res) => {
     const pageNumber = Math.max(parseInt(params.pageNumber) || 1, 1);
     const count = Math.max(parseInt(params.count) || 10, 1);
 
-    const filter = { targetRole: USER_ROLE.CMD };
+   const filter = {
+  targetRole: USER_ROLE.CMD,
+  notificationType: { $ne: NOTIFICATION_TYPE.BILLING_DATE_REVERT },
+};
     if (params.isRead === true || params.isRead === "true") {
       filter["readBy.userId"] = userObjectId;
     } else if (params.isRead === false || params.isRead === "false") {
@@ -342,9 +346,10 @@ const getCmdNotifications = async (req, res) => {
       Object.assign(filter, reminderFilter);
     } else if (params.notificationType === NOTIFICATION_TYPE.NORMAL_APPROVAL) {
       Object.assign(filter, normalApprovalFilter);
-    } else if (params.notificationType === NOTIFICATION_TYPE.BILLING_DATE_REVERT) {
-      Object.assign(filter, billingDateRevertFilter);
-    }
+    } 
+    // else if (params.notificationType === NOTIFICATION_TYPE.BILLING_DATE_REVERT) {
+    //   Object.assign(filter, billingDateRevertFilter);
+    // }
 
     const [totalCount, counts, rows] = await Promise.all([
       CmdNotification.countDocuments(filter),
@@ -433,7 +438,7 @@ const markAllCmdNotificationsRead = async (req, res) => {
       rentalManagerApprovalCount: 0,
       normalApprovalCount: 0,
       reminderCount: 0,
-      billingDateRevertCount: 0,
+      // billingDateRevertCount: 0,
     });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
