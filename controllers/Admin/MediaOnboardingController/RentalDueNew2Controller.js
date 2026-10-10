@@ -22,6 +22,7 @@ const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
+const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -2180,6 +2181,10 @@ async function processSingleRentalDue({
       if (isRentalApproverRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
         await createRentalApprovalNotification({ media, entry: result.entryDoc, userType, userId, userName });
       }
+      // ✅ NEW — Google Chat message for an approval made in this request (any role)
+      if (!roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+        notifyRentalDueChat({ media, entry: result.entryDoc, userType, userName, action: "approved" });
+      }
     }
     return result;
   }
@@ -2296,6 +2301,10 @@ async function processSingleRentalDue({
     // approves their own step at creation
     if (isRentalApproverRole(userType)) {
       await createRentalApprovalNotification({ media, entry: savedEntry, userType, userId, userName });
+    }
+    // ✅ NEW — Google Chat message: the creator's own step is approved at creation
+    if (isRoleStepApproved(savedEntry, userType)) {
+      notifyRentalDueChat({ media, entry: savedEntry, userType, userName, action: "approved" });
     }
 
     if (!skipMail && isOwnerOverride && savedEntry.approvalStatus === 3) {
@@ -2435,6 +2444,7 @@ exports.saveRentalDue = async (req, res) => {
 
         // ✅ NEW — approvals made in this request, notified only after the save below
         const groupCmdApprovals = [];
+        const groupChatApprovals = []; // any role — Google Chat
 
         for (const item of group) {
           const index = item.originalIndex;
@@ -2480,6 +2490,13 @@ exports.saveRentalDue = async (req, res) => {
           ) {
             groupCmdApprovals.push(processResult.entryDoc);
           }
+          if (
+            processResult.success &&
+            !roleStepWasApproved &&
+            isRoleStepApproved(processResult.entryDoc, userType)
+          ) {
+            groupChatApprovals.push(processResult.entryDoc);
+          }
         }
 
         // Save the document ONCE after all updates for its faces/cycles are done
@@ -2488,6 +2505,9 @@ exports.saveRentalDue = async (req, res) => {
         // ✅ NEW — CMD notifications (site-wise) only after a successful save
         for (const approvedEntry of groupCmdApprovals) {
           await createRentalApprovalNotification({ media, entry: approvedEntry, userType, userId, userName });
+        }
+        for (const approvedEntry of groupChatApprovals) {
+          notifyRentalDueChat({ media, entry: approvedEntry, userType, userName, action: "approved" });
         }
       }
 
@@ -3713,6 +3733,17 @@ exports.overDueRemark = async (req, res) => {
         remarks: trimmedRemarks,
         addedBy: userName,
         addedAt: newRemark.addedAt,
+      });
+
+      // ✅ NEW — Google Chat message after the remark is saved
+      notifyOverdueRemarkChat({
+        media,
+        mediaDetailId: newRemark.mediaDetailId,
+        landOwnerId: newRemark.landOwnerId,
+        dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
+        remark: trimmedRemarks,
+        userType: Number(req.user?.userType),
+        userName,
       });
     }
 

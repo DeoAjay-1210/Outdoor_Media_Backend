@@ -12,6 +12,7 @@ const {
   createBillingDateRevertNotification,
   updateBillingDateRevertNotificationStatus,
 } = require("../NotificationController/CmdNotificationController");
+const { notifyBillingDateRevertChat } = require("../../../utils/googleChat");
 
 // ─────────────────────────────────────────────────────────────
 // PREVIOUS BILLING DATE REVERT (with CMD approval)
@@ -300,6 +301,7 @@ exports.createBillingDateRevertRequest = async (req, res) => {
       request.notificationId = notificationId;
       await BillingDateRevertRequest.updateOne({ _id: request._id }, { $set: { notificationId } });
     }
+    notifyBillingDateRevertChat({ request, event: "requested" });
 
     return successResponse(
       res,
@@ -564,6 +566,7 @@ exports.approveBillingDateRevertRequest = async (req, res) => {
     claimed.removedBills = removedBills;
     await BillingDateRevertRequest.updateOne({ _id: requestObjectId }, { $set: { appliedDates, removedBills } });
     await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.APPROVED);
+    notifyBillingDateRevertChat({ request: claimed, event: "approved" });
 
     return successResponse(res, "Billing date revert approved and site billing dates updated", formatRequest(claimed.toObject()));
   } catch (error) {
@@ -614,6 +617,7 @@ exports.rejectBillingDateRevertRequest = async (req, res) => {
     }
 
     await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.REJECTED);
+    notifyBillingDateRevertChat({ request: updated, event: "rejected" });
     return successResponse(res, "Billing date revert request rejected", formatRequest(updated));
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
