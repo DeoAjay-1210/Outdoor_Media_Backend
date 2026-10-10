@@ -444,6 +444,9 @@ const getDashboardV2 = async (req, res) => {
     rental.cards.pastRent = { sites: past.pastRentPendingSites || 0, amount: Math.floor(past.pastRentPending || 0) };
     rental.cards.pastGst = { sites: past.pastGstPendingSites || 0, amount: Math.floor(past.pastGstPending || 0) };
 
+    const ledgerEntries = X.computeLedgerEntries(active, range, filters.gst);
+    rental.cards.pastRent.landlords = ledgerEntries.pastRentPending.count;
+    rental.cards.pastGst.landlords = ledgerEntries.pastGstPending.count;
     return successResponse(res, "Dashboard fetched", {
       period: { months: range.months, start: range.start, end: range.end },
       filters,
@@ -451,7 +454,7 @@ const getDashboardV2 = async (req, res) => {
       rental: rental.cards,
       donut: rental.donut,
       disbursement: X.computeDisbursement(active, range, filters.gst),
-      ledgerEntries: X.computeLedgerEntries(active, range, filters.gst),
+      ledgerEntries,
       activity: X.computeActivity(all, 10).filter((e) => !filters.loginRole || e.actorRole === X.ROLE_LABEL[filters.loginRole]),
     });
   } catch (error) {

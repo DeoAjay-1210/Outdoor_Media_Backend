@@ -136,6 +136,7 @@ function computeRental(docs, range, filters) {
   const roleStats = { 1: { p: [0, 0], a: [0, 0] }, 2: { p: [0, 0], a: [0, 0] }, 3: { p: [0, 0], a: [0, 0] } }; // Rental Master per-role Pending / Approved cards
   const sum = { due: [0, 0], approved: [0, 0], overdue: [0, 0], gst: 0, tds: 0, hold: [0, 0] };
   const gstSites = new Set(), tdsSites = new Set();
+  const LL = { due: new Set(), approved: new Set(), overdue: new Set(), gst: new Set(), tds: new Set(), hold: new Set() }; // distinct landlords per card
   const drill = { 1: { pending: new Set(), approved: new Set() }, 2: { pending: new Set(), approved: new Set() }, 3: { pending: new Set(), approved: new Set() } }; // site ids per donut bucket
   const bucket = () => ({ pending: { count: 0, amount: 0, ll: new Set() }, approved: { count: 0, amount: 0, ll: new Set() } });
   const donut = { 1: bucket(), 2: bucket(), 3: bucket() };
@@ -144,17 +145,21 @@ function computeRental(docs, range, filters) {
     curMonth = { year, month };
     const st = computeRentalDueStats(gdocs, {
       year, month, targetRole, faceFilter,
-      onFace: ({ media, entry, amount, cycle }) => {
+      onFace: ({ media, entry, amount, cycle, state, past }) => {
+        if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
+        addLandlords(LL.due, media);
+        if (state === "approved") addLandlords(LL.approved, media);
+        if (state === "overdue") addLandlords(LL.overdue, media);
         const faceCount = (media.mediaDetails || []).filter((d) => num(d.status) === 1).length || 1;
         const gstFace = num(cycle.currentMonthGstAmount) / faceCount;
         const tdsFace = (media.landOwners || []).reduce((t, o) => t + (num(o.tdsApplicable) ? num(o.tdsAmount) : 0), 0) / faceCount;
         sum.gst += gstFace;
         sum.tds += tdsFace;
-        if (gstFace > 0) gstSites.add(String(media._id)); // distinct sites, never rows/landlords
-        if (tdsFace > 0) tdsSites.add(String(media._id));
+        if (gstFace > 0) { gstSites.add(String(media._id)); addLandlords(LL.gst, media); } // distinct sites / landlords, never rows
+        if (tdsFace > 0) { tdsSites.add(String(media._id)); addLandlords(LL.tds, media); }
         // hold = existing marker (entry.withGst === 1 or owner.gstHold === 1), see buildLandOwnerObject
         const hold = num(entry?.withGst) === 1 || (media.landOwners || []).some((o) => num(o.gstHold) === 1);
-        if (hold && gstFace > 0) { sum.hold[0] += 1; sum.hold[1] += gstFace; }
+        if (hold && gstFace > 0) { sum.hold[0] += 1; sum.hold[1] += gstFace; addLandlords(LL.hold, media); }
         // donut: each face counted once — approved under its final approver, otherwise pending at its single open stage
         if (num(entry?.approvalStatus) === 3) {
           const r = finalApproverOf(entry);
@@ -169,7 +174,8 @@ function computeRental(docs, range, filters) {
     for (const r of [1, 2, 3]) {
       const sr = computeRentalDueStats(gdocs, {
         year, month, targetRole: r, faceFilter: (e) => inWindow(range, e, year, month),
-        onFace: ({ media, state }) => {
+        onFace: ({ media, state, past }) => {
+          if (past) return;
           const set = state === "approved" ? roleLL[r].a : state === "pending" || state === "overdue" ? roleLL[r].p : null;
           if (set) addLandlords(set, media);
         },
@@ -198,12 +204,12 @@ function computeRental(docs, range, filters) {
   return {
     drill: Object.fromEntries([1, 2, 3].map((r) => [r, { pending: [...drill[r].pending], approved: [...drill[r].approved] }])),
     cards: {
-      due: { sites: sum.due[0], amount: r0(sum.due[1]) },
-      gst: { amount: r0(sum.gst), sites: gstSites.size },
-      tds: { amount: r0(sum.tds), sites: tdsSites.size },
-      overdue: { sites: sum.overdue[0], amount: r0(sum.overdue[1]) },
-      approved: { sites: sum.approved[0], amount: r0(sum.approved[1]) },
-      gstHold: { sites: sum.hold[0], amount: r0(sum.hold[1]) },
+      due: { landlords: LL.due.size, sites: sum.due[0], amount: r0(sum.due[1]) },
+      gst: { landlords: LL.gst.size, amount: r0(sum.gst), sites: gstSites.size },
+      tds: { landlords: LL.tds.size, amount: r0(sum.tds), sites: tdsSites.size },
+      overdue: { landlords: LL.overdue.size, sites: sum.overdue[0], amount: r0(sum.overdue[1]) },
+      approved: { landlords: LL.approved.size, sites: sum.approved[0], amount: r0(sum.approved[1]) },
+      gstHold: { landlords: LL.hold.size, sites: sum.hold[0], amount: r0(sum.hold[1]) },
     },
     donut: {
       dueThisMonth: { sites: sum.due[0], amount: r0(sum.due[1]) },
@@ -289,16 +295,31 @@ function computeDisbursement(docs, range, gst) {
 
 /** Ledger Entries cards = the Ledger screen's own summary (calculateOverallLedgerSummary): same amounts, same site counts. */
 function computeLedgerEntries(docs, range, gst) {
-  const s = calculateOverallLedgerSummary(applyGst(docs, gst), { month: range.first.month, year: range.first.year });
-  const c = (amount, sites) => ({ count: num(sites), amount: Math.round(num(amount)) });
+  const list = applyGst(docs, gst);
+  const ym = { month: range.first.month, year: range.first.year };
+  const s = calculateOverallLedgerSummary(list, ym);
+  // landlords behind each card: distinct landlords of the sites whose own ledger summary has that value (same rule as the totals)
+  const ll = { rp: new Set(), gp: new Set(), rpend: new Set(), gpend: new Set(), prp: new Set(), pgp: new Set() };
+  for (const d of list) {
+    if (!(d.mediaDetails || []).some((f) => num(f.status) === 1)) continue;
+    const m = getOverallSummaryForCycle(d, ym);
+    if (num(m.currentMonthRentPaid) > 0) addLandlords(ll.rp, d);
+    if (num(m.currentMonthGstPaid) > 0) addLandlords(ll.gp, d);
+    if (num(m.currentMonthRentPending) > 0) addLandlords(ll.rpend, d);
+    if (num(m.currentMonthGstPending) > 0) addLandlords(ll.gpend, d);
+    if (num(m.pastRentPending) > 0) addLandlords(ll.prp, d);
+    if (num(m.pastGstPending) > 0) addLandlords(ll.pgp, d);
+  }
+  const c = (amount, set, sites) => ({ count: set.size, sites: num(sites), amount: Math.round(num(amount)) });
+  const both = new Set([...ll.rp, ...ll.gp]);
   return {
-    total: c(num(s.currentMonthRentPaid) + num(s.currentMonthGstPaid), num(s.currentMonthRentPaidSites) + num(s.currentMonthGstPaidSites)),
-    rent: c(s.currentMonthRentPaid, s.currentMonthRentPaidSites),
-    gst: c(s.currentMonthGstPaid, s.currentMonthGstPaidSites),
-    rentPending: c(s.currentMonthRentPending, s.currentMonthRentPendingSites),
-    gstPending: c(s.currentMonthGstPending, s.currentMonthGstPendingSites),
-    pastRentPending: c(s.pastRentPending, s.pastRentPendingSites),
-    pastGstPending: c(s.pastGstPending, s.pastGstPendingSites),
+    total: c(num(s.currentMonthRentPaid) + num(s.currentMonthGstPaid), both, num(s.currentMonthRentPaidSites) + num(s.currentMonthGstPaidSites)),
+    rent: c(s.currentMonthRentPaid, ll.rp, s.currentMonthRentPaidSites),
+    gst: c(s.currentMonthGstPaid, ll.gp, s.currentMonthGstPaidSites),
+    rentPending: c(s.currentMonthRentPending, ll.rpend, s.currentMonthRentPendingSites),
+    gstPending: c(s.currentMonthGstPending, ll.gpend, s.currentMonthGstPendingSites),
+    pastRentPending: c(s.pastRentPending, ll.prp, s.pastRentPendingSites),
+    pastGstPending: c(s.pastGstPending, ll.pgp, s.pastGstPendingSites),
   };
 }
 
