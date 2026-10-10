@@ -3095,6 +3095,7 @@ const cityMatchQuery = city
     const overallLedgerSummary = calculateOverallLedgerSummary(
       summaryDocs,
       parsedMonthFilter ? outstandingMonthYear : null,
+      { includeLandOwnerCounts: true }, // ✅ NEW — adds *LandOwners counts
     );
 
     // ✅ NEW — CMD Approval count (current + all past months up to the applied
@@ -3103,8 +3104,13 @@ const cityMatchQuery = city
     // if duplicate rows exist (an approved row wins over a waiting duplicate).
     const cmdApprovalSiteKeys = new Set();
     const cmdFaceMonthStatus = new Map(); // faceKey_month -> "approved" | "pending"
+    const cmdMonthOwnerKeys = new Map(); // ✅ NEW — faceKey_month -> that site's landowner keys
     for (const media of summaryDocs) {
       const activeFaces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
+      // same landowner identity as the *LandOwners ledger counts
+      const siteOwnerKeys = (media.landOwners || []).map((o) =>
+        o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+      );
       for (const due of media.rentalDue || []) {
         if (!isDueInCmdApproval(due) || isCmdDueFullySettled(media, media.landOwners, due)) continue; // ✅ paid months drop out
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
@@ -3121,6 +3127,7 @@ const cityMatchQuery = city
             const monthKey = `${faceKey}_${due.dueMonth}`;
             cmdApprovalSiteKeys.add(faceKey);
             if (cmdFaceMonthStatus.get(monthKey) !== "approved") cmdFaceMonthStatus.set(monthKey, status);
+            cmdMonthOwnerKeys.set(monthKey, siteOwnerKeys);
           });
       }
     }
@@ -3129,6 +3136,19 @@ const cityMatchQuery = city
     overallLedgerSummary.cmdApprovalSites = cmdApprovalSiteKeys.size;
     overallLedgerSummary.cmdApprovalPendingCount = cmdStatuses.filter((s) => s === "pending").length;
     overallLedgerSummary.cmdApprovedCount = cmdStatuses.filter((s) => s === "approved").length;
+
+    // ✅ NEW — distinct landowners of the sites behind the CMD approval counts
+    const cmdOwnersFor = (wanted) => {
+      const owners = new Set();
+      cmdFaceMonthStatus.forEach((status, monthKey) => {
+        if (wanted && status !== wanted) return;
+        (cmdMonthOwnerKeys.get(monthKey) || []).forEach((k) => owners.add(k));
+      });
+      return owners.size;
+    };
+    overallLedgerSummary.cmdApprovalLandOwners = cmdOwnersFor(null);
+    overallLedgerSummary.cmdApprovalPendingLandOwners = cmdOwnersFor("pending");
+    overallLedgerSummary.cmdApprovedLandOwners = cmdOwnersFor("approved");
 
     return successResponse(
       res,

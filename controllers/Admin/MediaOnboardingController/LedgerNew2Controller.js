@@ -6844,7 +6844,33 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
  * ✅ NEW — Main helper for Overall Ledger Summary (Current Month)
  * Exported for use in landOwnerMasterController.js
  */
-function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
+// ✅ NEW — optional landowner counts (options.includeLandOwnerCounts): for each
+// amount, the number of DISTINCT landowners of the sites counted in its *Sites
+// field (by landOwnerMasterId). Off by default, so existing callers' output is
+// unchanged.
+const LAND_OWNER_COUNT_CONDITIONS = [
+  ["totalLedgerAmount", (s) => s.hasTotalLedger],
+  ["totalLedgerGstAmount", (s) => s.hasTotalGst],
+  ["totalLedgerPendingAmount", (s) => s.hasPendingLedger],
+  ["totalGstPendingAmount", (s) => s.hasPendingGst],
+  ["overallDueMonthAmount", (s) => s.hasDueMonth],
+  ["currentMonthRentPending", (s) => s.hasCurrentMonthRentPending],
+  ["currentMonthGstPending", (s) => s.hasCurrentMonthGstPending],
+  ["currentMonthRentPaid", (s) => s.hasCurrentMonthRentPaid],
+  ["currentMonthGstPaid", (s) => s.hasCurrentMonthGstPaid],
+  ["overAllCurrentRentalAmount", (s) => s.currentMonthRentalAmount > 0],
+  ["overAllCurrentMonthGstAmount", (s) => s.currentMonthGstAmount > 0],
+  ["pastRentPending", (s) => s.hasPastRentPending],
+  ["pastGstPending", (s) => s.hasPastGstPending],
+  ["currentMonthOverallDueAmount", (s) => s.hasCurrentMonthOverallDueAmount],
+  ["totalOutstanding", (s) => s.hasTotalOutstanding],
+];
+
+function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
+  const includeLandOwnerCounts = !!options.includeLandOwnerCounts;
+  const landOwnerSets = includeLandOwnerCounts
+    ? Object.fromEntries(LAND_OWNER_COUNT_CONDITIONS.map(([key]) => [key, new Set()]))
+    : null;
   const summary = {
     totalLedgerAmount: 0,
     totalLedgerAmountSites: new Set(),
@@ -6932,7 +6958,21 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
 
     summary.totalOutstanding += s.totalOutstanding;
     addSites(summary.totalOutstandingSites, s.hasTotalOutstanding);
+
+    // same condition as the *Sites count; only sites with an active face count
+    if (includeLandOwnerCounts && activeDetails.length > 0) {
+      const ownerKeys = (media.landOwners || []).map((o) =>
+        o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+      );
+      for (const [key, condition] of LAND_OWNER_COUNT_CONDITIONS) {
+        if (condition(s)) ownerKeys.forEach((k) => landOwnerSets[key].add(k));
+      }
+    }
   }
+
+  const landOwnerCounts = includeLandOwnerCounts
+    ? Object.fromEntries(Object.entries(landOwnerSets).map(([key, set]) => [`${key}LandOwners`, set.size]))
+    : {};
 
 
   return {
@@ -6966,6 +7006,7 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     currentMonthOverallDueAmountSites: summary.currentMonthOverallDueAmountSites.size,
     totalOutstanding: Math.floor(summary.totalOutstanding),
     totalOutstandingSites: summary.totalOutstandingSites.size,
+    ...landOwnerCounts,
   };
 }
 exports.computeOutstandingSummary = computeOutstandingSummary;

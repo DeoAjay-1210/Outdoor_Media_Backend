@@ -160,6 +160,7 @@ const agreementHistorySchema = new mongoose.Schema({
   agreementStatus: {
     type: Number,
     enum: [1, 2],
+    default: 1,
   },
   agreementPDF: {
     originalName: { type: String },

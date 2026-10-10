@@ -5760,6 +5760,7 @@ const details = (item.mediaDetails || []).map((d) => ({
           endDate: item.agreement?.endDate,
           agreementPDF: item.agreement?.agreementPDF,
           status: item.agreement?.status,
+          agreementStatus: item.agreement?.agreementStatus ?? null, // 1=Original 2=Draft
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,
