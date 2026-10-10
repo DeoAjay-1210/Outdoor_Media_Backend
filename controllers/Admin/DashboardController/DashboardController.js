@@ -1,4 +1,5 @@
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
+const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/LandOwnerMasterSchema");
 const { generateMissedEntriesForMedia } = require("../MediaOnboardingController/RentalDueNew2Controller");
 const {
@@ -36,7 +37,9 @@ const getCurrentMonthMMYYYY = () => {
  */
 const getAdminDashboard = async (req, res) => {
   try {
-    const { month, selectedMonth: reqSelectedMonth } = req.body || req.query || {};
+    const { month, selectedMonth: reqSelectedMonth, approvalRole, gst } = { ...(req.query || {}), ...(req.body || {}) };
+    const roleFilter = [1, 2, 3].includes(Number(approvalRole)) ? Number(approvalRole) : null; // null = All
+    const gstFilter = ["with", "without"].includes(gst) ? gst : "all";
 
     // 1. Resolve Selected Month parameter (supports "month" or "selectedMonth", format MM-YYYY e.g. "08-2026")
     let rawMonthParam = month || reqSelectedMonth;
@@ -149,10 +152,29 @@ const getAdminDashboard = async (req, res) => {
     // ✅ FIXED — shared Rental Due stats (same rule as admin/rental-due-list and
     // landowner/site-filter): ledger cycle amounts, appraisal-aware; overdue =
     // not approved after its due date (current + past months), 1 day after (IST).
-    const statsDocs = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
-    const stats = computeRentalDueStats(statsDocs, { year: yearNum, month: monthNum });
+    const allStatsDocs = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
+    const siteHasGst = (m) => Number(m.gstApplicableFlag) > 0;
+    const statsDocs = gstFilter === "all"
+      ? allStatsDocs
+      : allStatsDocs.filter((m) => (gstFilter === "with" ? siteHasGst(m) : !siteHasGst(m)));
+    const stats = computeRentalDueStats(statsDocs, { year: yearNum, month: monthNum, targetRole: roleFilter });
+
+    // Extra monthly figures from the stored rentalDue entries of the selected month
+    // (GST amount, TDS from landowner tdsAmount, GST hold = existing withGst === 1 marker)
+    const extra = { gstAmount: 0, tdsAmount: 0, gstHoldCount: 0, gstHoldAmount: 0 };
+    for (const m of statsDocs) {
+      const entries = (m.rentalDue || []).filter((e) => e.dueDate && new Date(e.dueDate) >= monthStart && new Date(e.dueDate) <= monthEnd);
+      if (!entries.length) continue;
+      const best = entries.sort((a, b) => Number(b.approvalStatus === 3) - Number(a.approvalStatus === 3))[0];
+      extra.gstAmount += Number(best.gstAmount || 0);
+      extra.tdsAmount += (m.landOwners || []).reduce((t, o) => t + (Number(o.tdsApplicable) ? Number(o.tdsAmount || 0) : 0), 0);
+      if (Number(best.withGst) === 1) { extra.gstHoldCount += 1; extra.gstHoldAmount += Number(best.gstAmount || 0); }
+    }
 
     const rentalObj = {
+      gstThisMonth: { amount: Math.round(extra.gstAmount) },
+      tdsThisMonth: { amount: Math.round(extra.tdsAmount) },
+      gstHold: { amount: Math.round(extra.gstHoldAmount), sites: extra.gstHoldCount },
       totalDueThisMonth: {
         amount: Math.round(stats.dueThisMonthAmount),
         sites: stats.dueThisMonthCount,
@@ -224,7 +246,7 @@ const getAdminDashboard = async (req, res) => {
 
     const onlineByMode = {
       bankTransfer: 0,
-      // upi: 0,
+      upi: 0,
       cheque: 0,
     };
 
@@ -372,6 +394,139 @@ const getAdminDashboard = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
+// Dashboard v2 (POST /admin/dashboard/v2 and sub-resources). The legacy
+// getAdminDashboard above is unchanged for existing clients.
+// ─────────────────────────────────────────────────────────────
+const X = require("./DashboardExtras");
+
+const DRAFT_AGREEMENTS_STATIC = { count: 0, amount: 0, isStatic: true }; // explicitly static for now
+
+// roles 1/2/3 are the only valid userTypes; backend is the final authority
+const allowedRole = (req) => [1, 2, 3].includes(Number(req.user?.userType));
+
+const loadDocs = () => MediaOnboarding.find({}).lean();
+
+const getDashboardV2 = async (req, res) => {
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const parsed = X.parseFilters({ ...(req.query || {}), ...(req.body || {}) });
+    if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+    const { range, filters } = parsed;
+
+    const all = await loadDocs();
+    const active = all.filter((d) => (d.mediaDetails || []).some((f) => Number(f.status) === 1));
+
+    // media (same meaning of active/inactive & agreement thresholds as the legacy dashboard)
+    const gAll = X.applyGst(all, filters.gst);
+    const media = { totalSites: 0, activeSites: 0, inactiveSites: 0, activeAgreements: 0, expiringAgreements: 0, expiredAgreements: 0, sitesByMediaType: {} };
+    for (const site of gAll) {
+      const ag = site.agreement || {};
+      if (ag.startDate && ag.endDate) {
+        const days = Math.ceil((new Date(ag.endDate).getTime() - range.end.getTime()) / 86400000);
+        if (days < 0) media.expiredAgreements++;
+        else if (days <= Number(ag.reminderBeforeExpiry || 30)) media.expiringAgreements++;
+        else media.activeAgreements++;
+      }
+      const details = site.mediaDetails || [];
+      if (!details.length) { media.totalSites++; media.inactiveSites++; continue; }
+      for (const f of details) {
+        media.totalSites++;
+        Number(f.status) === 1 ? media.activeSites++ : media.inactiveSites++;
+        const t = typeof f.mediaType === "string" && f.mediaType.trim() ? f.mediaType.trim() : "Unspecified";
+        media.sitesByMediaType[t] = (media.sitesByMediaType[t] || 0) + 1;
+      }
+    }
+
+    const rental = X.computeRental(active, range, filters);
+    // Past pending = outstanding before the selected period (existing ledger definition, evaluated at the period start)
+    const past = calculateOverallLedgerSummary(X.applyGst(active, filters.gst), { month: range.first.month, year: range.first.year });
+    rental.cards.pastRent = { sites: past.pastRentPendingSites || 0, amount: Math.floor(past.pastRentPending || 0) };
+    rental.cards.pastGst = { sites: past.pastGstPendingSites || 0, amount: Math.floor(past.pastGstPending || 0) };
+
+    return successResponse(res, "Dashboard fetched", {
+      period: { months: range.months, start: range.start, end: range.end },
+      filters,
+      media: { ...media, draftAgreements: DRAFT_AGREEMENTS_STATIC },
+      rental: rental.cards,
+      donut: rental.donut,
+      disbursement: X.computeDisbursement(active, range, filters.gst),
+      ledgerEntries: X.computeLedgerEntries(active, range, filters.gst),
+      activity: X.computeActivity(all, 10).filter((e) => !filters.loginRole || e.actorRole === X.ROLE_LABEL[filters.loginRole]),
+    });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+const getRentalDetailsV2 = async (req, res) => {
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const parsed = X.parseFilters(req.body || {});
+    if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+    const docs = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
+    // remarks are stored per rental due in OverDueHistory (same source as Rental Master) — one batched query
+    const remarksByDue = new Map();
+    const hist = await OverDueHistory.find({ mediaId: { $in: docs.map((d) => d._id) } }, "rentalDueId remarks overDueRemarks").lean();
+    for (const h of hist) {
+      const texts = [h.remarks, ...(h.overDueRemarks || []).map((r) => r.remarks)].filter((t) => t && String(t).trim());
+      if (h.rentalDueId && texts.length) remarksByDue.set(String(h.rentalDueId), texts[texts.length - 1]);
+    }
+    const rows = X.buildRentalRows(docs, parsed.range, parsed.filters, remarksByDue);
+    const { search, sortBy, sortDir, page, limit } = req.body || {};
+    const out = X.searchSortPage(rows, { search, sortBy, sortDir, page, limit });
+    return successResponse(res, "Rental details fetched", out);
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+const getLedgerMismatchV2 = async (req, res) => {
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const parsed = X.parseFilters(req.body || {});
+    if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+    const docs = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
+    const m = X.computeLedgerMismatch(docs, parsed.range, parsed.filters.gst);
+    const type = ["missing", "short", "excess"].includes(req.body?.type) ? req.body.type : null;
+    const rows = type ? m.rows.filter((r) => r.type === type) : m.rows;
+    return successResponse(res, "Ledger mismatch fetched", { summary: m.summary, rows, mediaIds: [...new Set(rows.map((r) => r.mediaId))] });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+const getActivityV2 = async (req, res) => {
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const docs = await loadDocs();
+    return successResponse(res, "Activity fetched", X.computeActivity(docs, req.body?.limit || 50));
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+/** Site ids behind one donut bucket, so the destination screen lists exactly what the dashboard counted. */
+const getDrillV2 = async (req, res) => {
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const parsed = X.parseFilters(req.body || {});
+    if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+    const role = Number(req.body?.role), kind = req.body?.kind;
+    if (![1, 2, 3].includes(role) || !["pending", "approved"].includes(kind)) return errorResponse(res, "role (1-3) and kind (pending|approved) are required", null, 400);
+    const active = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
+    const r = X.computeRental(active, parsed.range, parsed.filters);
+    return successResponse(res, "Drilldown fetched", { mediaIds: r.drill[role][kind] });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
 module.exports = {
   getAdminDashboard,
+  getDrillV2,
+  getDashboardV2,
+  getRentalDetailsV2,
+  getLedgerMismatchV2,
+  getActivityV2,
 };
