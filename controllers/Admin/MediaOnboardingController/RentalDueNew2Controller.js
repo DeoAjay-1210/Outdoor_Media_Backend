@@ -864,6 +864,24 @@ const getCurrentCycle = (date) => {
   return `${year}-${month}-${day}`;
 };
 
+// ✅ NEW — cycles under which THIS bill (rentalDueId) was doc-verified.
+// Differs from the bill's own dueDate cycle only when a billing date revert
+// moved the bill after it was verified.
+const billVerificationCycles = (item, rentalDueId) =>
+  new Set(
+    (item.agreementDocVerification || [])
+      .filter((h) => h.isVerified && h.rentalDueId && h.cycle && String(h.rentalDueId) === String(rentalDueId))
+      .map((h) => getCurrentCycle(h.cycle)),
+  );
+
+const isBillRedatedAfterVerification = (item, rentalDueId, billCycleStr) => {
+  if (!rentalDueId || !billCycleStr) return false;
+  for (const c of billVerificationCycles(item, rentalDueId)) {
+    if (c !== billCycleStr) return true;
+  }
+  return false;
+};
+
 const formatDate = (date) => {
   if (!date) return "";
   let d;
@@ -5216,6 +5234,33 @@ if (Number(isPastPending) === 1) {
   const buildVerificationProgress = (item, targetCycleDate, targetRentalDueId) => {
   const targetCycleStr = getCurrentCycle(targetCycleDate);
 
+  // ✅ FIXED — a billing date revert can move a bill's dueDate AFTER it was
+  // verified (e.g. verified on the 16.10 cycle, bill now due 28.10). Its
+  // verification records still carry its rentalDueId, so for such a
+  // re-dated bill match by rentalDueId as well. Bills never re-dated keep
+  // the existing cycle-based logic below unchanged.
+  if (targetRentalDueId && isBillRedatedAfterVerification(item, targetRentalDueId, targetCycleStr)) {
+    const billVerifications = (item.agreementDocVerification || []).filter(
+      (h) =>
+        h.isVerified &&
+        ((h.rentalDueId && String(h.rentalDueId) === String(targetRentalDueId)) ||
+          (h.cycle && targetCycleStr && getCurrentCycle(h.cycle) === targetCycleStr)),
+    );
+    const staffOk = billVerifications.some((h) => h.verifiedByRole === ROLE.STAFF);
+    const teamLeadOk = billVerifications.some((h) => h.verifiedByRole === ROLE.TEAM_LEAD);
+    const ownerOk = billVerifications.some((h) => h.verifiedByRole === ROLE.OWNER);
+    const count = [staffOk, teamLeadOk, ownerOk].filter(Boolean).length;
+    return {
+      currentCycle: formatDate(targetCycleStr),
+      staffVerified: staffOk,
+      teamLeadVerified: teamLeadOk,
+      ownerVerified: ownerOk,
+      verifiedCount: count,
+      isComplete: count >= 2,
+      highestVerifiedRole: ownerOk ? ROLE.OWNER : teamLeadOk ? ROLE.TEAM_LEAD : staffOk ? ROLE.STAFF : null,
+    };
+  }
+
   const historyForMonth = (item.verificationProgressHistory || []).filter(
     (v) => {
       if (targetRentalDueId && v.rentalDueId) {
@@ -5443,6 +5488,11 @@ if (Number(isPastPending) === 1) {
       const filteredRentalDueEntries = finalPendingEntries.map((entry) => {
       const entryObj = entry.toObject ? entry.toObject() : entry;
       const entryCycleKey = entryObj.dueDate ? getCurrentCycle(entryObj.dueDate) : null;
+      // ✅ FIXED — a bill re-dated by a billing date revert also shows the
+      // history rows of the cycle it was verified under
+      const entryVerifiedCycleKeys = isBillRedatedAfterVerification(item, entryObj._id, entryCycleKey)
+        ? billVerificationCycles(item, entryObj._id)
+        : new Set();
 
 const entryVerificationProgressHistory = (
   item.verificationProgressHistory || []
@@ -5455,7 +5505,7 @@ const entryVerificationProgressHistory = (
     typeof v.cycle === "string" && v.cycle.match(/^\d{4}-\d{2}-\d{2}$/)
       ? v.cycle
       : getCurrentCycle(v.cycle);
-  return vCycleKey === entryCycleKey;
+  return vCycleKey === entryCycleKey || entryVerifiedCycleKeys.has(vCycleKey);
 });
 
   const resolvedGstDisplay = resolveGstApplicable(item, entryObj.gstApplicableFlag, entryObj.pastgstApplicableFlag);
@@ -5488,9 +5538,13 @@ const entryVerificationProgressHistory = (
   pendingEntriesUpToMonth.map((e) => getCurrentCycle(e.dueDate)),
 );
 
+// ✅ FIXED — also keep records of a shown bill that was re-dated after it was
+// verified (matched by rentalDueId instead of the moved cycle)
+const pendingEntryIds = new Set(pendingEntriesUpToMonth.map((e) => String(e._id)));
 const filteredAgreementDocVerificationHistory = (
   item.agreementDocVerification || []
 ).filter((h) => {
+  if (h.rentalDueId && pendingEntryIds.has(String(h.rentalDueId))) return true;
   if (!h.cycle) return false;
   const hCycleKey =
     typeof h.cycle === "string" && h.cycle.match(/^\d{4}-\d{2}-\d{2}$/)
