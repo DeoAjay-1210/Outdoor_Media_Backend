@@ -2544,6 +2544,25 @@ async function runBulkLedgerEntry(req, res) {
     return errorResponse(res, error.message || "Bulk ledger entry failed", null, error.statusCode || 500);
   }
 }
+
+// ✅ NEW — the rentalDue bill of a month for the ledger list. A site can hold
+// one bill PER FACE for the same month (single-bill sites included); CMD
+// approving one of them left the others pending, and `.find` by month picked
+// whichever came first (status 3 one time, 1 the next). Prefer the most
+// approved bill — same rule as landOwnerSiteFilter ("approved wins over a
+// waiting duplicate"). One bill / equal statuses → same bill as before.
+const RENTAL_DUE_STATUS_RANK = { 3: 3, 2: 2 };
+function findRentalDueForMonth(rentalDue, dueMonth) {
+  let best = null;
+  for (const d of rentalDue || []) {
+    if (d.dueMonth !== dueMonth) continue;
+    if (!best || (RENTAL_DUE_STATUS_RANK[d.approvalStatus] || 0) > (RENTAL_DUE_STATUS_RANK[best.approvalStatus] || 0)) {
+      best = d;
+    }
+  }
+  return best || undefined;
+}
+
 exports.listMediaByLedger = async (req, res) => {
   try {
     const {
@@ -2950,7 +2969,7 @@ for (const media of results) {
 
               // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
               const monthLabel = `${monthBucket.month} ${yearBucket.year}`;
-              const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === monthLabel);
+              const matchedDue = findRentalDueForMonth(mediaObj.rentalDue, monthLabel);
               const isApproved = Number(matchedDue?.approvalStatus) === 3;
 
               const gst2Entries = entries.filter((e) => {
@@ -3342,9 +3361,7 @@ for (const media of results) {
         // dueMonth against mediaObj.rentalDue[] and read
         // approvalStatus from there, defaulting to 0 if no match.
         const dueMonthForMatch = entry.dueMonth || entry.month || null;
-        const matchedDueForApproval = (mediaObj.rentalDue || []).find(
-          (d) => d.dueMonth === dueMonthForMatch,
-        );
+        const matchedDueForApproval = findRentalDueForMonth(mediaObj.rentalDue, dueMonthForMatch);
 
         // ✅ FIXED — Only trust withGst: 2 (Direct to Owner) if owner has appraised (3).
         let resolvedWithGst =
@@ -3460,9 +3477,7 @@ for (const media of results) {
                 e.dueMonth === cycleMonthLabel,
             );
             if (realHistoryEntry) {
-              const matchedDueForApproval = (mediaObj.rentalDue || []).find(
-                (d) => d.dueMonth === cycleMonthLabel,
-              );
+              const matchedDueForApproval = findRentalDueForMonth(mediaObj.rentalDue, cycleMonthLabel);
 
               const resolvedWithGst =
                 realHistoryEntry.withGst ?? matchedDueForApproval?.withGst ?? 0;
@@ -3503,12 +3518,8 @@ for (const media of results) {
               ? Number(owner.shareAmount || 0)
               : undefined;
 
-            const matchedRealDueForLedger = (mediaObj.rentalDue || []).find(
-              (d) => d.dueMonth === cycleMonthLabel,
-            );
-            const matchedDueForApproval = (mediaObj.rentalDue || []).find(
-              (d) => d.dueMonth === cycleMonthLabel,
-            );
+            const matchedRealDueForLedger = findRentalDueForMonth(mediaObj.rentalDue, cycleMonthLabel);
+            const matchedDueForApproval = findRentalDueForMonth(mediaObj.rentalDue, cycleMonthLabel);
 
             const isOwnerApprovedVirtual = matchedDueForApproval?.approvalStatus === 3;
             const resolvedWithGstVirtual = isOwnerApprovedVirtual ? (matchedDueForApproval?.withGst ?? 0) : 0;
@@ -3770,7 +3781,7 @@ latestLedger = latestLedger.sort((a, b) => {
       let fullGstBalanceHistory = dedupeGstBalanceHistory(
         Array.isArray(mediaObj.gstBalanceHistory) ? mediaObj.gstBalanceHistory : [],
       ).map(entry => {
-        const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
+        const matchedDue = findRentalDueForMonth(mediaObj.rentalDue, entry.dueMonth);
         const isApproved = matchedDue?.approvalStatus === 3;
         let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
         if (Number(effectiveWithGst) === 2 && !isApproved) effectiveWithGst = 1;
@@ -3825,7 +3836,7 @@ latestLedger = latestLedger.sort((a, b) => {
             const missingGst = Math.max(0, expectedOwnerGst - existingGstForOwnerMonth);
 
             if (missingGst > 0) {
-              const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+              const matchedDue = findRentalDueForMonth(mediaObj.rentalDue, cycleMonthLabel);
               const isApproved = matchedDue?.approvalStatus === 3;
               const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
               let isPaid = false;
@@ -4276,7 +4287,7 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
       let fullGstBalanceHistory = dedupeGstBalanceHistory(
         Array.isArray(mediaObj.gstBalanceHistory) ? mediaObj.gstBalanceHistory : [],
       ).map(entry => {
-        const matchedDue = (mediaObj.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
+        const matchedDue = findRentalDueForMonth(mediaObj.rentalDue, entry.dueMonth);
         const isApproved = matchedDue?.approvalStatus === 3;
         let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
         if (Number(effectiveWithGst) === 2 && !isApproved) effectiveWithGst = 1;
