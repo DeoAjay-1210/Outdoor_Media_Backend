@@ -1,5 +1,4 @@
 const fs = require("fs");
-const path = require("path");
 const mongoose = require("mongoose");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
@@ -636,9 +635,7 @@ exports.getBillingDateRevertRequests = async (req, res) => {
     const pageNumber = Math.max(parseInt(params.pageNumber) || 1, 1);
     const count = Math.max(parseInt(params.count) || 10, 1);
 
-    // requests older than the retention period are hidden even before the
-    // daily purge removes them
-    const filter = { createdAt: { $gte: retentionCutoff() } };
+    const filter = {};
     const status = Number(params.status);
     if (Object.values(REVERT_STATUS).includes(status)) filter.status = status;
     if (params.mediaId) {
@@ -683,57 +680,3 @@ exports.getBillingDateRevertRequests = async (req, res) => {
     return errorResponse(res, error.message, null, 500);
   }
 };
-
-// ─────────────────────────────────────────────────────────────
-// AUTO DELETE — requests are kept for BILLING_DATE_REVERT_RETENTION_DAYS
-// (default 10) days from creation, whatever their status. Run daily from
-// server.js. Also removes each request's image and its CMD notification.
-// Never touches the site's billing dates or bills.
-// ─────────────────────────────────────────────────────────────
-function retentionCutoff() {
-  const days = parseInt(process.env.BILLING_DATE_REVERT_RETENTION_DAYS || "10", 10) || 10;
-  // createdAt is stored with nowIST(), so compare on the same clock
-  return new Date(nowIST().getTime() - days * 24 * 60 * 60 * 1000);
-}
-
-async function deleteRequestImage(image) {
-  if (!image?.filePath) return;
-  try {
-    if (/^https?:\/\/(localhost|127\.0\.0\.1)/.test(image.filePath) || !process.env.DO_SPACES_CDN_BASE) {
-      if (!image.fileName) return;
-      const localPath = path.join(
-        process.cwd(),
-        process.env.LOCAL_UPLOAD_PATH || "public",
-        "billingDateRevert",
-        path.basename(image.fileName),
-      );
-      await fs.promises.unlink(localPath).catch((err) => {
-        if (err.code !== "ENOENT") throw err;
-      });
-    } else {
-      await deleteFromSpaces(image.filePath);
-    }
-  } catch (err) {
-    console.error("[BillingDateRevert] image delete failed:", err.message);
-  }
-}
-
-async function purgeOldBillingDateRevertRequests() {
-  const oldRequests = await BillingDateRevertRequest.find({ createdAt: { $lt: retentionCutoff() } })
-    .select("_id image")
-    .lean();
-  if (oldRequests.length === 0) return { deleted: 0 };
-
-  // delete the DB records FIRST, files last — if the process stops midway a
-  // request never points to an image that is already gone
-  const ids = oldRequests.map((r) => r._id);
-  await CmdNotification.deleteMany({
-    dedupeKey: { $in: ids.map((id) => `billingDateRevert:${String(id)}`) },
-  });
-  const result = await BillingDateRevertRequest.deleteMany({ _id: { $in: ids } });
-
-  for (const r of oldRequests) await deleteRequestImage(r.image);
-  return { deleted: result.deletedCount || 0 };
-}
-
-exports.purgeOldBillingDateRevertRequests = purgeOldBillingDateRevertRequests;

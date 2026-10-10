@@ -51,17 +51,17 @@ const runApplyDueAppraisals = async () => {
 runApplyDueAppraisals();
 cron.schedule("10 0 * * *", runApplyDueAppraisals);
 
-// Delete billing date revert requests older than 10 days (startup + daily 00:15)
-const { purgeOldBillingDateRevertRequests } = require("./controllers/Admin/MediaOnboardingController/BillingDateRevertController");
-const runPurgeBillingDateReverts = async () => {
+// Delete CMD notifications with no activity for 10 days (startup + daily 00:15)
+const { purgeOldCmdNotifications } = require("./controllers/Admin/NotificationController/CmdNotificationController");
+const runPurgeCmdNotifications = async () => {
   try {
-    await purgeOldBillingDateRevertRequests();
+    await purgeOldCmdNotifications();
   } catch (err) {
-    console.error("[purgeOldBillingDateRevertRequests] failed:", err.message);
+    console.error("[purgeOldCmdNotifications] failed:", err.message);
   }
 };
-runPurgeBillingDateReverts();
-cron.schedule("15 0 * * *", runPurgeBillingDateReverts);
+runPurgeCmdNotifications();
+cron.schedule("15 0 * * *", runPurgeCmdNotifications);
 const app = express();
 
 app.use(cors());

@@ -617,7 +617,27 @@ const sendCmdReminder = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
+// AUTO DELETE — notifications with no activity (updatedAt, else createdAt)
+// for CMD_NOTIFICATION_RETENTION_DAYS (default 10) days are deleted.
+// Run daily from server.js. Only notification rows are removed — rental dues,
+// approvals and billing date revert requests are never touched.
+// ─────────────────────────────────────────────────────────────
+async function purgeOldCmdNotifications() {
+  const days = parseInt(process.env.CMD_NOTIFICATION_RETENTION_DAYS || "10", 10) || 10;
+  // createdAt / updatedAt are stored with nowIST(), so compare on the same clock
+  const cutoff = new Date(nowIST().getTime() - days * 24 * 60 * 60 * 1000);
+  const result = await CmdNotification.deleteMany({
+    $or: [
+      { updatedAt: { $lt: cutoff } },
+      { updatedAt: null, createdAt: { $lt: cutoff } },
+    ],
+  });
+  return { deleted: result.deletedCount || 0 };
+}
+
 module.exports = {
+  purgeOldCmdNotifications,
   createRentalApprovalNotification,
   createBillingDateRevertNotification,
   updateBillingDateRevertNotificationStatus,
