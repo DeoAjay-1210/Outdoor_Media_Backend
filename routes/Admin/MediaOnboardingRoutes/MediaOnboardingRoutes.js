@@ -10,6 +10,7 @@ const {
   updateAgreement,
   getMediaById,
   syncBillingCyclesNow,
+  deleteMedia, // ✅ NEW
 } = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -48,6 +49,8 @@ router.post(
 );
 
 router.post("/media-list", protect, mediaList);
+// ✅ NEW — permanently delete a media (body: { mediaId })
+router.post("/media-delete", protect, deleteMedia);
 router.post("/sync-billing-cycles", syncBillingCyclesNow);
 // router.post("/update-agreement",protect, updateAgreement);
 router.post(

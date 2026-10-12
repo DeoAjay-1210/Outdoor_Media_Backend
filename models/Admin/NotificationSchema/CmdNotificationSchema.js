@@ -24,9 +24,11 @@ const cmdNotificationSchema = new mongoose.Schema(
 
     // "normalApproval" = Executive / Manager approval notification
     // "reminder"       = Executive / Manager reminded CMD to approve a site
+    // "billingDateRevert" = Executive / Manager requested a previous billing
+    //                       date for a site (CMD approves / rejects)
     notificationType: {
       type: String,
-      enum: ["normalApproval", "reminder"],
+      enum: ["normalApproval", "reminder", "billingDateRevert"],
       default: "normalApproval",
     },
 
@@ -59,12 +61,26 @@ const cmdNotificationSchema = new mongoose.Schema(
     lastRemindedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
     lastRemindedAt: { type: Date, default: null },
 
+    // billingDateRevert rows only — snapshot of the request
+    billingDateRevertRequestId: { type: mongoose.Schema.Types.ObjectId, ref: "BillingDateRevertRequest", default: null },
+    revertStatus: { type: Number, enum: [1, 2, 3, null], default: null }, // 1=Pending 2=Approved 3=Rejected
+    currentLastBillPaidDate: { type: Date, default: null },
+    currentNextBillingDate: { type: Date, default: null },
+    requestedLastBillPaidDate: { type: Date, default: null },
+    requestedNextBillingDate: { type: Date, default: null },
+    requestedBy: { type: String, trim: true, default: "" },
+    requestedByRole: { type: Number, enum: [1, 2, null], default: null },
+    requestedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    requestedAt: { type: Date, default: null },
+    imagePath: { type: String, trim: true, default: "" },
+
     readBy: { type: [readBySchema], default: [] },
 
     // "media:<mediaId>:<dueMonth>:role:<role>" — ONE notification per site
     // (mediaId) per month per approving role; every face of the site merges
     // into its role row, never duplicates.
     // "reminder:media:<mediaId>:<dueMonth>" — ONE reminder row per site per month
+    // "billingDateRevert:<requestId>" — ONE row per billing date revert request
     dedupeKey: { type: String, required: true, unique: true },
 
     createdAt: { type: Date, default: nowIST },

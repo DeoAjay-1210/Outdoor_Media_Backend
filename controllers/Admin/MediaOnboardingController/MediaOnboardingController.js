@@ -1831,6 +1831,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       agreementPDF:
         incoming.agreementPDF ?? existingHistory[matchingIdx].agreementPDF,
       reason: incoming.reason ?? existingHistory[matchingIdx].reason,
+      agreementStatus: incoming.agreementStatus ?? existingHistory[matchingIdx].agreementStatus, // ✅ NEW
       rentalPayment: {
         totalRentalAmount: incomingRentAmt,
         paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
@@ -1854,6 +1855,7 @@ const handleAgreementHistory = (mediaData, existingMedia, userName) => {
       status: incoming.status ?? 1,
       agreementPDF: incoming.agreementPDF,
       reason: incoming.reason,
+      agreementStatus: incoming.agreementStatus, // ✅ NEW — 1=Original 2=Draft
       rentalPayment: {
         totalRentalAmount: incomingRentAmt,
         paymentFrequency: incoming.rentalPayment?.paymentFrequency ?? 1,
@@ -3242,6 +3244,11 @@ const updateAgreement = async (req, res) => {
           : media.agreement?.advanceRent || 0,
       agreementPDF: incoming.agreementPDF,
       reason: incoming.reason?.trim() || media.agreement?.reason || "",
+      // ✅ NEW — 1=Original 2=Draft; keep the current value when not sent
+      agreementStatus:
+        incoming.agreementStatus !== undefined && incoming.agreementStatus !== null && incoming.agreementStatus !== ""
+          ? Number(incoming.agreementStatus)
+          : media.agreement?.agreementStatus,
       rentalPayment: {
         totalRentalAmount: incomingTotalRentalAmount,
         paymentFrequency: paymentFrequencyValue,
@@ -3345,6 +3352,7 @@ const updateAgreement = async (req, res) => {
           reminderBeforeExpiry: currentAgreement.reminderBeforeExpiry || 30,
           advanceRent: currentAgreement.advanceRent || 0,
           reason: currentAgreement.reason || "",
+          agreementStatus: currentAgreement.agreementStatus, // ✅ NEW
           status: computeAgreementStatus(
             currentAgreement.startDate,
             currentAgreement.endDate,
@@ -3422,6 +3430,13 @@ const updateAgreement = async (req, res) => {
       reminderBeforeExpiry: newAgreement.reminderBeforeExpiry,
       advanceRent: newAgreement.advanceRent || 0,
       reason: newAgreement.reason || "",
+      // ✅ NEW — sent value wins; otherwise this history entry keeps its own status
+      agreementStatus:
+        incoming.agreementStatus !== undefined && incoming.agreementStatus !== null && incoming.agreementStatus !== ""
+          ? Number(incoming.agreementStatus)
+          : entryIndex !== -1 && existingHistory[entryIndex]?.agreementStatus !== undefined
+            ? existingHistory[entryIndex].agreementStatus
+            : newAgreement.agreementStatus,
       status: computeAgreementStatus(
         newAgreement.startDate,
         newAgreement.endDate,
@@ -3513,6 +3528,7 @@ const updateAgreement = async (req, res) => {
         reminderBeforeExpiry: activeAgreement.reminderBeforeExpiry,
         advanceRent: activeAgreement.advanceRent || 0,
         reason: activeAgreement.reason || "",
+        agreementStatus: activeAgreement.agreementStatus, // ✅ NEW
         updatedBy: userName,
         status: computeAgreementStatus(
           activeAgreement.startDate,
@@ -3803,6 +3819,7 @@ if (landOwnerMasterId) {
         item.totalSqFt = item.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
         item.mediaType = item.mediaDetails[0]?.mediaType;
         item.city = item.mediaDetails[0]?.city;
+        item.district = item.mediaDetails[0]?.district; // ✅ NEW
         item.state = item.mediaDetails[0]?.state;
         item.location = item.mediaDetails[0]?.location;
         item.siteBillMode = item.mediaDetails[0]?.siteBillMode;
@@ -3848,13 +3865,12 @@ if (landOwnerMasterId) {
     ]);
     const activeCount = activeCountAgg[0]?.count || 0;
 
-    // Get agreement expired face count
-    const agreementExpiredCountAgg = await MediaOnboarding.aggregate([
-      { $match: { "agreement.status": 3 } },
-      { $unwind: "$mediaDetails" },
-      { $count: "count" },
-    ]);
-    const agreementExpiredCount = agreementExpiredCountAgg[0]?.count || 0;
+    // ✅ CHANGED — expired agreement SITE count from the real end date
+    // (agreement.endDate before now), not the stored agreement.status (only
+    // refreshed on save) and not per face.
+    const agreementExpiredCount = await MediaOnboarding.countDocuments({
+      "agreement.endDate": { $lt: new Date() },
+    });
 
     // Get total rental amounts from all documents
     const rentalAggregation = await MediaOnboarding.aggregate([
@@ -3959,6 +3975,7 @@ mediaData.mediaId = parentMediaId;
       mediaData.totalSqFt = mediaData.mediaDetails.reduce((sum, d) => sum + (d.totalSqFt || 0), 0);
       mediaData.mediaType = mediaData.mediaDetails[0]?.mediaType;
       mediaData.city = mediaData.mediaDetails[0]?.city;
+      mediaData.district = mediaData.mediaDetails[0]?.district; // ✅ NEW
       mediaData.state = mediaData.mediaDetails[0]?.state;
       mediaData.location = mediaData.mediaDetails[0]?.location;
       mediaData.siteBillMode = mediaData.mediaDetails[0]?.siteBillMode;
@@ -4016,6 +4033,7 @@ mediaData.mediaId = parentMediaId;
 const COLUMN_MAP = {
   state: "state",
   city: "city",
+  district: "district", // ✅ NEW — optional
   "media name": "mediaName",
   "media code": "mediaCode",
   "media type": "mediaType",
@@ -4091,6 +4109,7 @@ const uploadExcel = async (req, res) => {
         mediaType: mapped.mediaType,
         state: mapped.state,
         city: mapped.city,
+        district: mapped.district ? String(mapped.district).trim() : "", // ✅ NEW — optional
         location: mapped.location || "",
         width: Math.floor(Number(mapped.width) || 0),
         height: Math.floor(Number(mapped.height) || 0),
@@ -4512,6 +4531,60 @@ const syncBillingCyclesNow = async (req, res) => {
     return errorResponse(res, "Failed to sync billing cycles", { error: error.message }, 500);
   }
 };
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — DELETE MEDIA (by mediaId)
+// Permanently deletes the media and cleans every record that points to it:
+//   • LandOwnerMaster.linkedSites (site totals recalculated)
+//   • OverDueHistory + CmdNotification of this media
+// The links are cleaned first and the media is deleted last.
+// ─────────────────────────────────────────────────────────────
+const deleteMedia = async (req, res) => {
+  try {
+    const mediaId = req.body?.mediaId || req.params?.mediaId;
+    if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
+      return errorResponse(res, "A valid mediaId is required", null, 400);
+    }
+
+    const media = await MediaOnboarding.findById(mediaId)
+      .select("mediaDetails.mediaCode mediaDetails.mediaName landOwners.landOwnerMasterId landOwners.name")
+      .lean();
+    if (!media) {
+      return errorResponse(res, "Media not found with this ID", null, 404);
+    }
+
+    // 1) Landowner masters linked to this media (from the media AND from any
+    //    master whose linkedSites still point to it)
+    const masterIds = new Set(
+      (media.landOwners || []).map((o) => o.landOwnerMasterId).filter(Boolean).map(String),
+    );
+    const mastersWithLink = await LandOwnerMaster.find({ "linkedSites.mediaId": media._id }).select("_id").lean();
+    mastersWithLink.forEach((m) => masterIds.add(String(m._id)));
+    for (const masterId of masterIds) {
+      await removeLinkedSiteFromMaster(masterId, media._id);
+    }
+
+    // 2) Records of this media in other collections
+    const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+    const CmdNotification = require("../../../models/Admin/NotificationSchema/CmdNotificationSchema");
+    const overDueResult = await OverDueHistory.deleteMany({ mediaId: media._id });
+    const notificationResult = await CmdNotification.deleteMany({ mediaId: media._id });
+
+    // 3) The media itself
+    await MediaOnboarding.deleteOne({ _id: media._id });
+
+    return successResponse(res, "Media deleted successfully", {
+      mediaId: media._id,
+      mediaCode: (media.mediaDetails || []).map((d) => d.mediaCode).join(" / "),
+      mediaName: (media.mediaDetails || []).map((d) => d.mediaName).join(", "),
+      landOwnersUnlinked: masterIds.size,
+      overDueHistoryDeleted: overDueResult.deletedCount || 0,
+      notificationsDeleted: notificationResult.deletedCount || 0,
+    }, 200);
+  } catch (error) {
+    return errorResponse(res, error.message, null, 400);
+  }
+};
+
 module.exports = {
   mediaOnboarding,
   mediaList,
@@ -4520,4 +4593,5 @@ module.exports = {
   getMediaById,
   syncBillingCyclesNow,
   applyDueAppraisals,
+  deleteMedia, // ✅ NEW
 };

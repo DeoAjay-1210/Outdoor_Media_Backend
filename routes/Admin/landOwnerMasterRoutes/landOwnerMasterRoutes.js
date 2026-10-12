@@ -5,6 +5,7 @@ const {
   landOwnerSave,
   landOwnerList,
   landOwnerSiteFilter,
+  landOwnerDelete, // ✅ NEW
 } = require("../../../controllers/Admin/landOwnerMasterController/landOwnerMasterController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -31,5 +32,7 @@ router.post(
 
 router.post("/landowner/list", protect, landOwnerList);
 router.post("/landowner/site-filter", protect, landOwnerSiteFilter);
+// ✅ NEW — permanently delete a landowner (body: { landOwnerMasterId })
+router.post("/landowner/delete", protect, landOwnerDelete);
 
 module.exports = router;

@@ -22,6 +22,7 @@ const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
+const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -862,6 +863,24 @@ const getCurrentCycle = (date) => {
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+};
+
+// ✅ NEW — cycles under which THIS bill (rentalDueId) was doc-verified.
+// Differs from the bill's own dueDate cycle only when a billing date revert
+// moved the bill after it was verified.
+const billVerificationCycles = (item, rentalDueId) =>
+  new Set(
+    (item.agreementDocVerification || [])
+      .filter((h) => h.isVerified && h.rentalDueId && h.cycle && String(h.rentalDueId) === String(rentalDueId))
+      .map((h) => getCurrentCycle(h.cycle)),
+  );
+
+const isBillRedatedAfterVerification = (item, rentalDueId, billCycleStr) => {
+  if (!rentalDueId || !billCycleStr) return false;
+  for (const c of billVerificationCycles(item, rentalDueId)) {
+    if (c !== billCycleStr) return true;
+  }
+  return false;
 };
 
 const formatDate = (date) => {
@@ -1983,6 +2002,25 @@ async function processSingleRentalDueInternal({
     entry.savedBy = { userId, userName, role: userType, savedAt: nowIST() };
   }
 
+  // ✅ NEW — a Rental Executive / Manager saving again AFTER their own approval
+  // (not their turn, e.g. Executive re-saves after the Manager approved) and
+  // before CMD's final approval: refresh their own step's approvedAt to this
+  // save. Only that step's time / user change — status, turn and the other
+  // roles' steps stay as they are.
+  if (
+    isStaffOrTeamLead &&
+    !isTeamLeadOverride &&
+    userType !== entry.currentPendingRole &&
+    Number(entry.approvalStatus) !== 3
+  ) {
+    const ownApprovedStep = (entry.approvalSteps || []).find((s) => s.role === userType && s.status === 2);
+    if (ownApprovedStep) {
+      ownApprovedStep.approvedAt = nowIST();
+      ownApprovedStep.userId = userId;
+      ownApprovedStep.userName = userName;
+    }
+  }
+
   if (isOwnerOverride || isTeamLeadOverride || userType === entry.currentPendingRole) {
     if (isOwnerOverride) {
       entry.approvalSteps.forEach((step) => {
@@ -2162,6 +2200,10 @@ async function processSingleRentalDue({
       if (isRentalApproverRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
         await createRentalApprovalNotification({ media, entry: result.entryDoc, userType, userId, userName });
       }
+      // ✅ NEW — Google Chat message for an approval made in this request (any role)
+      if (!roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+        notifyRentalDueChat({ media, entry: result.entryDoc, userType, userName, action: "approved" });
+      }
     }
     return result;
   }
@@ -2278,6 +2320,10 @@ async function processSingleRentalDue({
     // approves their own step at creation
     if (isRentalApproverRole(userType)) {
       await createRentalApprovalNotification({ media, entry: savedEntry, userType, userId, userName });
+    }
+    // ✅ NEW — Google Chat message: the creator's own step is approved at creation
+    if (isRoleStepApproved(savedEntry, userType)) {
+      notifyRentalDueChat({ media, entry: savedEntry, userType, userName, action: "approved" });
     }
 
     if (!skipMail && isOwnerOverride && savedEntry.approvalStatus === 3) {
@@ -2417,6 +2463,7 @@ exports.saveRentalDue = async (req, res) => {
 
         // ✅ NEW — approvals made in this request, notified only after the save below
         const groupCmdApprovals = [];
+        const groupChatApprovals = []; // any role — Google Chat
 
         for (const item of group) {
           const index = item.originalIndex;
@@ -2462,6 +2509,13 @@ exports.saveRentalDue = async (req, res) => {
           ) {
             groupCmdApprovals.push(processResult.entryDoc);
           }
+          if (
+            processResult.success &&
+            !roleStepWasApproved &&
+            isRoleStepApproved(processResult.entryDoc, userType)
+          ) {
+            groupChatApprovals.push(processResult.entryDoc);
+          }
         }
 
         // Save the document ONCE after all updates for its faces/cycles are done
@@ -2470,6 +2524,9 @@ exports.saveRentalDue = async (req, res) => {
         // ✅ NEW — CMD notifications (site-wise) only after a successful save
         for (const approvedEntry of groupCmdApprovals) {
           await createRentalApprovalNotification({ media, entry: approvedEntry, userType, userId, userName });
+        }
+        for (const approvedEntry of groupChatApprovals) {
+          notifyRentalDueChat({ media, entry: approvedEntry, userType, userName, action: "approved" });
         }
       }
 
@@ -3696,6 +3753,17 @@ exports.overDueRemark = async (req, res) => {
         addedBy: userName,
         addedAt: newRemark.addedAt,
       });
+
+      // ✅ NEW — Google Chat message after the remark is saved
+      notifyOverdueRemarkChat({
+        media,
+        mediaDetailId: newRemark.mediaDetailId,
+        landOwnerId: newRemark.landOwnerId,
+        dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
+        remark: trimmedRemarks,
+        userType: Number(req.user?.userType),
+        userName,
+      });
     }
 
     return res.status(200).json({
@@ -4829,9 +4897,15 @@ exports.getRentalDueListWithStats = async (req, res) => {
     // nextBillingDate/lastBillPaidDate (Rule 1). This guarantees the
     // list always reflects up-to-date pending/overdue bills even for
     // sites nobody has opened saveRentalDue for recently.
-  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 });
+  // ✅ FIXED — load only ids up front and re-read each site right before
+  // processing it. Saving a copy loaded at the start of the sweep wrote
+  // stale rentalPayment back over changes made meanwhile (e.g. a CMD
+  // billing date revert approval or a manual media edit).
+  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 }).select("_id").lean();
 // const sweepDebugLog = [];
-for (const siteDoc of activeSitesForSweep) {
+for (const { _id: sweepSiteId } of activeSitesForSweep) {
+  const siteDoc = await Media.findById(sweepSiteId);
+  if (!siteDoc) continue;
   const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
   const result = await generateMissedEntriesForMedia(siteDoc, "");
   const generatedCount = result?.generatedEntries?.length || 0;
@@ -5210,6 +5284,33 @@ if (Number(isPastPending) === 1) {
   const buildVerificationProgress = (item, targetCycleDate, targetRentalDueId) => {
   const targetCycleStr = getCurrentCycle(targetCycleDate);
 
+  // ✅ FIXED — a billing date revert can move a bill's dueDate AFTER it was
+  // verified (e.g. verified on the 16.10 cycle, bill now due 28.10). Its
+  // verification records still carry its rentalDueId, so for such a
+  // re-dated bill match by rentalDueId as well. Bills never re-dated keep
+  // the existing cycle-based logic below unchanged.
+  if (targetRentalDueId && isBillRedatedAfterVerification(item, targetRentalDueId, targetCycleStr)) {
+    const billVerifications = (item.agreementDocVerification || []).filter(
+      (h) =>
+        h.isVerified &&
+        ((h.rentalDueId && String(h.rentalDueId) === String(targetRentalDueId)) ||
+          (h.cycle && targetCycleStr && getCurrentCycle(h.cycle) === targetCycleStr)),
+    );
+    const staffOk = billVerifications.some((h) => h.verifiedByRole === ROLE.STAFF);
+    const teamLeadOk = billVerifications.some((h) => h.verifiedByRole === ROLE.TEAM_LEAD);
+    const ownerOk = billVerifications.some((h) => h.verifiedByRole === ROLE.OWNER);
+    const count = [staffOk, teamLeadOk, ownerOk].filter(Boolean).length;
+    return {
+      currentCycle: formatDate(targetCycleStr),
+      staffVerified: staffOk,
+      teamLeadVerified: teamLeadOk,
+      ownerVerified: ownerOk,
+      verifiedCount: count,
+      isComplete: count >= 2,
+      highestVerifiedRole: ownerOk ? ROLE.OWNER : teamLeadOk ? ROLE.TEAM_LEAD : staffOk ? ROLE.STAFF : null,
+    };
+  }
+
   const historyForMonth = (item.verificationProgressHistory || []).filter(
     (v) => {
       if (targetRentalDueId && v.rentalDueId) {
@@ -5297,6 +5398,82 @@ if (Number(isPastPending) === 1) {
         return d >= monthStart && d <= monthEnd;
       });
 
+      // ✅ FIXED — month-wise billing dates. When the selected month has a billing
+      // cycle (its rentalDue entry, or the site's own cycle date in that month),
+      // the dates come from THAT cycle instead of the site's latest cycle.
+      // No cycle in the selected month → the site-level values, as before.
+      const billFreq = Number(item.rentalPayment?.paymentFrequency || 1);
+      const billCycleMonths =
+        billFreq === 6
+          ? Number(item.rentalPayment?.customPaymentFrequency || 1)
+          : ({ 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 }[billFreq] || 1);
+      // lastBillPaidDate = the previous cycle (the last bill before this one)
+      const cycleBillDates = (cycleDate) => ({
+        lastBillPaidDate: addMonthsUTC(cycleDate, -billCycleMonths),
+        nextBillingDate: addMonthsUTC(cycleDate, billCycleMonths),
+        previousBillGenerateDate: formatDate(addMonthsUTC(cycleDate, -billCycleMonths)),
+        currentBillDate: formatDate(cycleDate),
+      });
+      const isInSelectedMonth = (dt) => {
+        if (!dt) return false;
+        const d = new Date(dt);
+        return d >= monthStart && d <= monthEnd;
+      };
+      // ✅ FIXED — a lastBillPaidDate in a FUTURE month (billing date moved
+      // forward by an approved billing date revert) is not a generated bill,
+      // so it must not show as that month's billing cycle.
+      const lastBillPaid = item.rentalPayment?.lastBillPaidDate
+        ? new Date(item.rentalPayment.lastBillPaidDate)
+        : null;
+      const lastBillPaidIsFutureMonth =
+        !!lastBillPaid &&
+        lastBillPaid.getUTCFullYear() * 12 + lastBillPaid.getUTCMonth() >
+          today.getUTCFullYear() * 12 + today.getUTCMonth();
+      const selectedCycleDate = currentMonthEntry?.dueDate
+        ? new Date(currentMonthEntry.dueDate)
+        : isInSelectedMonth(item.rentalPayment?.nextBillingDate)
+          ? new Date(item.rentalPayment.nextBillingDate)
+          : !lastBillPaidIsFutureMonth && isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
+            ? new Date(item.rentalPayment.lastBillPaidDate)
+            : null;
+      const selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+      // ✅ FIXED — after a forward move, the cycle right after this one may
+      // fall on/before the future lastBillPaidDate and will never be billed;
+      // the real next bill is the site's nextBillingDate.
+      if (
+        selectedCycleBillDates &&
+        lastBillPaidIsFutureMonth &&
+        item.rentalPayment?.nextBillingDate &&
+        new Date(selectedCycleBillDates.nextBillingDate) <= lastBillPaid
+      ) {
+        selectedCycleBillDates.nextBillingDate = new Date(item.rentalPayment.nextBillingDate);
+      }
+
+      // ✅ NEW — month-wise amounts of each rentalDueEntries item (its own dueMonth),
+      // from the existing ledger cycle summary (appraisal-aware rent + GST).
+      // One summary per month per site.
+      const monthSummaryCache = new Map();
+      const monthWiseAmountFor = (entry) => {
+        if (!entry?.dueDate) return null;
+        const d = new Date(entry.dueDate);
+        const year = d.getUTCFullYear();
+        const month = d.getUTCMonth() + 1;
+        const key = `${year}-${month}`;
+        if (!monthSummaryCache.has(key)) {
+          monthSummaryCache.set(key, getOverallSummaryForCycle(item, { year, month }));
+        }
+        const s = monthSummaryCache.get(key) || {};
+        const totalRentalAmount = Math.round(Number(s.currentMonthRentalAmount || 0));
+        const gstAmount = Math.round(Number(s.currentMonthGstAmount || 0));
+
+        return {
+          dueMonth: entry.dueMonth,
+          totalRentalAmount,
+          gstAmount,
+          totalAmount: totalRentalAmount + gstAmount,
+        };
+      };
+
       const isOverdue =
         item.rentalPayment?.status === 3 ||
         (currentMonthEntry &&
@@ -5361,6 +5538,11 @@ if (Number(isPastPending) === 1) {
       const filteredRentalDueEntries = finalPendingEntries.map((entry) => {
       const entryObj = entry.toObject ? entry.toObject() : entry;
       const entryCycleKey = entryObj.dueDate ? getCurrentCycle(entryObj.dueDate) : null;
+      // ✅ FIXED — a bill re-dated by a billing date revert also shows the
+      // history rows of the cycle it was verified under
+      const entryVerifiedCycleKeys = isBillRedatedAfterVerification(item, entryObj._id, entryCycleKey)
+        ? billVerificationCycles(item, entryObj._id)
+        : new Set();
 
 const entryVerificationProgressHistory = (
   item.verificationProgressHistory || []
@@ -5373,7 +5555,7 @@ const entryVerificationProgressHistory = (
     typeof v.cycle === "string" && v.cycle.match(/^\d{4}-\d{2}-\d{2}$/)
       ? v.cycle
       : getCurrentCycle(v.cycle);
-  return vCycleKey === entryCycleKey;
+  return vCycleKey === entryCycleKey || entryVerifiedCycleKeys.has(vCycleKey);
 });
 
   const resolvedGstDisplay = resolveGstApplicable(item, entryObj.gstApplicableFlag, entryObj.pastgstApplicableFlag);
@@ -5406,9 +5588,13 @@ const entryVerificationProgressHistory = (
   pendingEntriesUpToMonth.map((e) => getCurrentCycle(e.dueDate)),
 );
 
+// ✅ FIXED — also keep records of a shown bill that was re-dated after it was
+// verified (matched by rentalDueId instead of the moved cycle)
+const pendingEntryIds = new Set(pendingEntriesUpToMonth.map((e) => String(e._id)));
 const filteredAgreementDocVerificationHistory = (
   item.agreementDocVerification || []
 ).filter((h) => {
+  if (h.rentalDueId && pendingEntryIds.has(String(h.rentalDueId))) return true;
   if (!h.cycle) return false;
   const hCycleKey =
     typeof h.cycle === "string" && h.cycle.match(/^\d{4}-\d{2}-\d{2}$/)
@@ -5455,6 +5641,10 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
             totalSqFt: face.totalSqFt,
+            // ✅ NEW — this entry's own cycle dates (from its dueDate)
+            ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),
+            // ✅ NEW — this entry's month-wise amounts (new object)
+            monthWiseAmount: monthWiseAmountFor(entry),
           });
         });
       });
@@ -5491,9 +5681,14 @@ const details = (item.mediaDetails || []).map((d) => ({
         customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
         paymentFrequencyLabel:
           FREQ_LABEL[item.rentalPayment?.paymentFrequency] || "",
-        nextBillingDate: item.rentalPayment?.nextBillingDate,
-        lastBillPaidDate: item.rentalPayment?.lastBillPaidDate,
+        nextBillingDate: selectedCycleBillDates
+          ? selectedCycleBillDates.nextBillingDate
+          : item.rentalPayment?.nextBillingDate,
+        lastBillPaidDate: selectedCycleBillDates
+          ? selectedCycleBillDates.lastBillPaidDate
+          : item.rentalPayment?.lastBillPaidDate,
         previousBillGenerateDate: (() => {
+          if (selectedCycleBillDates) return selectedCycleBillDates.previousBillGenerateDate;
           const lp = item.rentalPayment?.lastBillPaidDate;
           const pbgd = item.rentalPayment?.previousBillGenerateDate;
 
@@ -5525,6 +5720,8 @@ const details = (item.mediaDetails || []).map((d) => ({
         // ✅ FIXED — currentBillDate should only show if a cycle falls in the target month.
         currentBillDate: (() => {
           if (currentMonthEntry) return formatDate(currentMonthEntry.dueDate);
+          // ✅ FIXED — same month-wise cycle as the dates above (e.g. a future month's cycle)
+          if (selectedCycleBillDates) return selectedCycleBillDates.currentBillDate;
 
           const nb = item.rentalPayment?.nextBillingDate;
           if (nb) {
@@ -5582,6 +5779,7 @@ const details = (item.mediaDetails || []).map((d) => ({
           endDate: item.agreement?.endDate,
           agreementPDF: item.agreement?.agreementPDF,
           status: item.agreement?.status,
+          agreementStatus: item.agreement?.agreementStatus ?? null, // 1=Original 2=Draft
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,

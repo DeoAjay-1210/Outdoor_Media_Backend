@@ -16,6 +16,7 @@ const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes'
 const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
 const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
 const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
+const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
 (async () => {
@@ -49,6 +50,18 @@ const runApplyDueAppraisals = async () => {
 };
 runApplyDueAppraisals();
 cron.schedule("10 0 * * *", runApplyDueAppraisals);
+
+// Delete CMD notifications with no activity for 10 days (startup + daily 00:15)
+const { purgeOldCmdNotifications } = require("./controllers/Admin/NotificationController/CmdNotificationController");
+const runPurgeCmdNotifications = async () => {
+  try {
+    await purgeOldCmdNotifications();
+  } catch (err) {
+    console.error("[purgeOldCmdNotifications] failed:", err.message);
+  }
+};
+runPurgeCmdNotifications();
+cron.schedule("15 0 * * *", runPurgeCmdNotifications);
 const app = express();
 
 app.use(cors());
@@ -63,6 +76,7 @@ app.use("/admin", RentalOOHExcelRoutes);
 app.use("/admin", LandownerMasterRoutes);
 app.use("/admin", dashboardRoutes);
 app.use("/admin", cmdNotificationRoutes);
+app.use("/admin", billingDateRevertRoutes);
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {

@@ -156,6 +156,12 @@ const agreementHistorySchema = new mongoose.Schema({
     enum: [1, 2, 3], // 1=Active  2=Expire soon  3=Expired
     default: 1,
   },
+  // ✅ NEW — agreement document type: 1=Original 2=Draft (optional)
+  agreementStatus: {
+    type: Number,
+    enum: [1, 2],
+    default: 1,
+  },
   agreementPDF: {
     originalName: { type: String },
     fileName: { type: String },
@@ -425,6 +431,11 @@ const MediaSchema = new mongoose.Schema(
         city: {
           type: String,
           required: true,
+          trim: true,
+        },
+        // ✅ NEW — optional district of the face (shown after City everywhere)
+        district: {
+          type: String,
           trim: true,
         },
         location: {
@@ -796,6 +807,11 @@ const MediaSchema = new mongoose.Schema(
         type: Number,
         enum: [0,1, 2, 3], // 1=Active 2=Expire Soon 3=Expired
         default: 0,
+      },
+      // ✅ NEW — agreement document type: 1=Original 2=Draft (optional)
+      agreementStatus: {
+        type: Number,
+        enum: [1, 2],
       },
       reason: { type: String, trim: true },
       agreementPDF: {

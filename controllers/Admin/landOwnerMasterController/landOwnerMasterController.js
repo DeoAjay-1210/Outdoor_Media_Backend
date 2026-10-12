@@ -1142,9 +1142,14 @@ const landOwnerSiteFilter = async (req, res) => {
     const [statsMonth, statsYear] = monthFilterApplied.split("-").map(Number);
     const statsMonthStart = new Date(statsYear, statsMonth - 1, 1);
     const statsMonthEnd = new Date(statsYear, statsMonth, 0, 23, 59, 59);
-
+const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds : []).filter((id) => mongoose.Types.ObjectId.isValid(id));
     let ownerFilter = {};
-    if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
+    if (restrictMediaIds.length > 0) {
+      const restrictDocs = await MediaOnboarding.find({ _id: { $in: restrictMediaIds } }, "landOwners.landOwnerMasterId").lean();
+      const restrictOwners = new Set();
+      restrictDocs.forEach((m) => (m.landOwners || []).forEach((o) => o.landOwnerMasterId && restrictOwners.add(String(o.landOwnerMasterId))));
+      ownerFilter._id = { $in: Array.from(restrictOwners) };
+    } else if (Array.isArray(landOwnerMasterIds) && landOwnerMasterIds.length > 0) {
       ownerFilter._id = { $in: landOwnerMasterIds };
     } else if (genericSearchRegex) {
       // ✅ ADDED — first, find owner ids matching mediaName/mediaCode
@@ -3032,7 +3037,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       year: statsYear,
       month: statsMonth,
       targetRole,
+      trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
     });
+    const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
     const approvedAmountTotal = rentalDueStats.approvedAmountTotal;
     const pendingCount = rentalDueStats.pendingCount;
@@ -3088,6 +3095,7 @@ const cityMatchQuery = city
     const overallLedgerSummary = calculateOverallLedgerSummary(
       summaryDocs,
       parsedMonthFilter ? outstandingMonthYear : null,
+      { includeLandOwnerCounts: true }, // ✅ NEW — adds *LandOwners counts
     );
 
     // ✅ NEW — CMD Approval count (current + all past months up to the applied
@@ -3096,8 +3104,13 @@ const cityMatchQuery = city
     // if duplicate rows exist (an approved row wins over a waiting duplicate).
     const cmdApprovalSiteKeys = new Set();
     const cmdFaceMonthStatus = new Map(); // faceKey_month -> "approved" | "pending"
+    const cmdMonthOwnerKeys = new Map(); // ✅ NEW — faceKey_month -> that site's landowner keys
     for (const media of summaryDocs) {
       const activeFaces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
+      // same landowner identity as the *LandOwners ledger counts
+      const siteOwnerKeys = (media.landOwners || []).map((o) =>
+        o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+      );
       for (const due of media.rentalDue || []) {
         if (!isDueInCmdApproval(due) || isCmdDueFullySettled(media, media.landOwners, due)) continue; // ✅ paid months drop out
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
@@ -3114,6 +3127,7 @@ const cityMatchQuery = city
             const monthKey = `${faceKey}_${due.dueMonth}`;
             cmdApprovalSiteKeys.add(faceKey);
             if (cmdFaceMonthStatus.get(monthKey) !== "approved") cmdFaceMonthStatus.set(monthKey, status);
+            cmdMonthOwnerKeys.set(monthKey, siteOwnerKeys);
           });
       }
     }
@@ -3122,6 +3136,19 @@ const cityMatchQuery = city
     overallLedgerSummary.cmdApprovalSites = cmdApprovalSiteKeys.size;
     overallLedgerSummary.cmdApprovalPendingCount = cmdStatuses.filter((s) => s === "pending").length;
     overallLedgerSummary.cmdApprovedCount = cmdStatuses.filter((s) => s === "approved").length;
+
+    // ✅ NEW — distinct landowners of the sites behind the CMD approval counts
+    const cmdOwnersFor = (wanted) => {
+      const owners = new Set();
+      cmdFaceMonthStatus.forEach((status, monthKey) => {
+        if (wanted && status !== wanted) return;
+        (cmdMonthOwnerKeys.get(monthKey) || []).forEach((k) => owners.add(k));
+      });
+      return owners.size;
+    };
+    overallLedgerSummary.cmdApprovalLandOwners = cmdOwnersFor(null);
+    overallLedgerSummary.cmdApprovalPendingLandOwners = cmdOwnersFor("pending");
+    overallLedgerSummary.cmdApprovedLandOwners = cmdOwnersFor("approved");
 
     return successResponse(
       res,
@@ -3146,12 +3173,23 @@ const cityMatchQuery = city
         ...overallOutstandingTotals,
         overallLedgerSummary,
         // ✅ NEW: Rental Due Stats
-        dueThisMonth: { siteCount: rentalDueStats.dueThisMonthCount, amount: Math.round(rentalDueStats.dueThisMonthAmount) },
-        overDue: { siteCount: overdueSiteCount, amount: Math.round(overdueAmountTotal) },
+        dueThisMonth: {
+          siteCount: rentalDueStats.dueThisMonthCount,
+          amount: Math.round(rentalDueStats.dueThisMonthAmount),
+          landOwnerCount: ownerStats.dueThisMonth.length, // ✅ NEW
+        },
+        overDue: {
+          siteCount: overdueSiteCount,
+          amount: Math.round(overdueAmountTotal),
+          landOwnerCount: ownerStats.overdue.length, // ✅ NEW
+        },
         approvedCount: approvedCount,
         approvedAmountTotal: Math.round(approvedAmountTotal),
         pendingCount: pendingCount,
         pendingAmountTotal: Math.round(pendingAmountTotal),
+        // ✅ NEW — landowner counts behind approvedAmountTotal / pendingAmountTotal
+        approvedLandOwnerCount: ownerStats.approved.length,
+        pendingLandOwnerCount: ownerStats.pending.length,
       },
       200,
     );
@@ -3160,10 +3198,77 @@ const cityMatchQuery = city
     return errorResponse(res, error.message, null, 400);
   }
 };
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — DELETE LANDOWNER (by landOwnerMasterId)
+// Removes the landowner from every site's landOwners (+ landOwnerMasterIds,
+// numberOfLandOwners), then permanently deletes the LandOwnerMaster record.
+// Sites are updated with $pull only — no save hooks / recalculation run.
+// ─────────────────────────────────────────────────────────────
+const landOwnerDelete = async (req, res) => {
+  try {
+    const id = req.body?.landOwnerMasterId || req.body?.id || req.params?.id;
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return errorResponse(res, "A valid landOwnerMasterId is required", null, 400);
+    }
+
+    const owner = await LandOwnerMaster.findById(id).select("name phone").lean();
+    if (!owner) {
+      return errorResponse(res, "LandOwner not found with this ID", null, 404);
+    }
+
+    // 1) Remove the landowner from every site that has them
+    const sites = await MediaOnboarding.find(
+      { "landOwners.landOwnerMasterId": owner._id },
+      "mediaDetails.mediaCode landOwners.landOwnerMasterId",
+    ).lean();
+
+    const sitesUpdated = [];
+    for (const site of sites) {
+      const remainingOwners = (site.landOwners || []).filter(
+        (o) => String(o.landOwnerMasterId) !== String(owner._id),
+      ).length;
+
+      await MediaOnboarding.updateOne(
+        { _id: site._id },
+        {
+          $pull: {
+            landOwners: { landOwnerMasterId: owner._id },
+            landOwnerMasterIds: owner._id,
+          },
+          ...(remainingOwners > 0
+            ? { $set: { numberOfLandOwners: remainingOwners } }
+            : { $unset: { numberOfLandOwners: "" } }),
+        },
+        { timestamps: false },
+      );
+
+      sitesUpdated.push({
+        mediaId: site._id,
+        mediaCode: (site.mediaDetails || []).map((d) => d.mediaCode).join(" / "),
+        remainingLandOwners: remainingOwners,
+      });
+    }
+
+    // 2) The landowner itself
+    await LandOwnerMaster.deleteOne({ _id: owner._id });
+
+    return successResponse(res, "LandOwner deleted successfully", {
+      landOwnerMasterId: owner._id,
+      name: owner.name,
+      sitesUpdated,
+      // sites left without any landowner — owners must be added again in Media Onboarding
+      sitesWithoutLandOwner: sitesUpdated.filter((s) => s.remainingLandOwners === 0),
+    }, 200);
+  } catch (error) {
+    return errorResponse(res, error.message, null, 400);
+  }
+};
+
 module.exports = {
   landOwnerSave,
   landOwnerList,
   landOwnerSiteFilter,
+  landOwnerDelete, // ✅ NEW
   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
   removeLinkedSiteFromMaster, // used by mediaOnboardingController.js
