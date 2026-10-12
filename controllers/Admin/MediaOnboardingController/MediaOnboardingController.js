@@ -3676,20 +3676,35 @@ const mediaList = async (req, res) => {
     let searchFilter = {};
 
     if (search && search.trim() !== "") {
-      const searchRegex = new RegExp(escapeRegex(search.trim()), "i");
-      searchFilter = {
-        $or: [
-          { mediaId: searchRegex },
-          { siteCode: searchRegex },
-          { "mediaDetails.mediaCode": searchRegex },
-          { "mediaDetails.mediaName": searchRegex },
-          { "mediaDetails.mediaType": searchRegex },
-          { "mediaDetails.state": searchRegex },
-          { "mediaDetails.city": searchRegex },
-          { "mediaDetails.location": searchRegex },
-          { "landOwners.name": searchRegex },
-        ],
-      };
+      const trimmedSearch = search.trim();
+      const searchRegex = new RegExp(escapeRegex(trimmedSearch), "i");
+
+      const orConditions = [
+        { mediaId: searchRegex },
+        { siteCode: searchRegex },
+        { "mediaDetails.mediaCode": searchRegex },
+        { "mediaDetails.mediaName": searchRegex },
+        { "mediaDetails.mediaType": searchRegex },
+        { "mediaDetails.state": searchRegex },
+        { "mediaDetails.city": searchRegex },
+        { "mediaDetails.location": searchRegex },
+        { "landOwners.name": searchRegex },
+        {
+          $expr: {
+            $regexMatch: {
+              input: { $toString: "$_id" },
+              regex: escapeRegex(trimmedSearch),
+              options: "i",
+            },
+          },
+        },
+      ];
+
+      if (mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+        orConditions.push({ _id: new mongoose.Types.ObjectId(trimmedSearch) });
+      }
+
+      searchFilter = { $or: orConditions };
     }
 
     // ===============================
