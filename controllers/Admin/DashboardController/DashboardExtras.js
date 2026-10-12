@@ -459,6 +459,13 @@ function computeActivity(docs, limit = 20, extra = []) {
       for (const s of e.approvalSteps || []) {
         if (num(s.status) === 2 && s.approvedAt) push({ activityType: "approval", action: `${ROLE_LABEL[s.role]} Approved`, status: "Approved", actorName: s.userName || "", actorRole: ROLE_LABEL[s.role] || "", occurredAt: s.approvedAt, dueMonth: e.dueMonth, ctx: { label: "Stage", value: ROLE_LABEL[s.role] || "", sub: "Approved" }, sentence: `${s.userName || "User"} (${ROLE_LABEL[s.role]}) approved the rental for ${e.dueMonth}.` });
       }
+      // GST hold (existing marker: withGst === 1) is recorded once the rental is approved
+      if (num(e.withGst) === 1 && num(e.gstAmount) > 0 && num(e.approvalStatus) === 3) {
+        const at = (e.approvalSteps || []).filter((s) => num(s.status) === 2 && s.approvedAt).map((s) => new Date(s.approvedAt)).sort((a, b) => b - a)[0] || e.ownerApprovalDate;
+        const who = (e.approvalSteps || []).filter((s) => num(s.status) === 2).sort((a, b) => b.role - a.role)[0];
+        if (at) push({ activityType: "gst", action: "GST Hold", status: "On Hold", actorName: who?.userName || "", actorRole: ROLE_LABEL[who?.role] || "", occurredAt: at, dueMonth: e.dueMonth, amount: num(e.gstAmount),
+          ctx: { label: "GST", value: "On hold", sub: `₹${num(e.gstAmount).toLocaleString("en-IN")}` }, sentence: `GST of ₹${num(e.gstAmount).toLocaleString("en-IN")} is on hold for ${e.dueMonth}.` });
+      }
     }
     for (const v of d.agreementDocVerification || []) {
       if (!v.verifiedAt) continue;
@@ -482,6 +489,17 @@ function computeActivity(docs, limit = 20, extra = []) {
         }
       }
     }
+    (d.agreementHistory || []).forEach((a, i) => {
+      if (!a.uploadedAt) return;
+      push({ activityType: "agreement", action: i === 0 ? "Agreement Added" : "Agreement Updated", status: i === 0 ? "Added" : "Updated", actorName: a.updatedBy || "", actorRole: "", occurredAt: a.uploadedAt,
+        ctx: { label: "Agreement", value: Number(a.agreementStatus) === 2 ? "Draft" : "Original", sub: `${a.startDate ? fmtD(a.startDate) : "—"} → ${a.endDate ? fmtD(a.endDate) : "—"}` },
+        sentence: `${a.updatedBy || "User"} ${i === 0 ? "added" : "updated"} the agreement.` });
+    });
+    for (const t of d.tdsBalanceHistory || []) {
+      if (t.paidAt || t.date) push({ activityType: "ledger", action: "TDS Ledger Entry Added", status: "Ledger", actorName: t.paidBy || t.createdBy || "", actorRole: "", occurredAt: t.paidAt || t.date, dueMonth: t.dueMonth, landlordName: t.landOwnerName || "",
+        amount: num(t.paidAmount || t.tdsAmount), entryType: "TDS", ctx: { label: "TDS Ledger", value: t.utrNumber ? `UTR: ${t.utrNumber}` : "Entry added", sub: t.paidAt || t.date ? `Paid: ${fmtD(t.paidAt || t.date)}` : "" },
+        sentence: `${t.paidBy || t.createdBy || "User"} recorded the TDS payment.` });
+    }
     const seen = new Set();
     const ledgerEntries = [...(d.ledger || []).filter((l) => num(l.status) === 1 && !l.isVirtual && !l.isUtrEntry),
       ...(d.ledgerHistory || []).flatMap((y) => (y.months || []).flatMap((mo) => (mo.entries || []).filter((l) => !l.isUtrEntry).map((l) => ({ ...l, month: l.month || `${mo.month} ${y.year}` }))))];
@@ -490,20 +508,62 @@ function computeActivity(docs, limit = 20, extra = []) {
       if (seen.has(k) || !l.paymentMode || num(l.amount) <= 0) continue;
       seen.add(k);
       const at = l.updatedAt || l.date;
-      if (at) push({ activityType: "ledger", action: "Rent Ledger Entry Added", status: "Ledger", actorName: l.updatedBy || "", actorRole: "", occurredAt: at, dueMonth: l.month, landlordName: l.landOwnerName || "", paymentMode: l.paymentMode, amount: num(l.amount), entryType: "Rent", ctx: { label: "Ledger", value: l.utrNumber ? `UTR: ${l.utrNumber}` : "Entry added", sub: l.date ? `Paid: ${fmtD(l.date)}` : "" },
+      if (at) push({ activityType: "ledger", action: "Rent Ledger Entry Added", status: "Ledger", actorName: l.updatedBy || "", actorRole: "", occurredAt: at, dueMonth: l.month, landlordName: l.landOwnerName || "", paymentMode: l.paymentMode, amount: num(l.amount), entryType: "Rent", entryMode: l.paymentMode, utr: l.utrNumber || "", paidOn: l.date ? fmtD(l.date) : "",
+        ctx: l.paymentMode === "Cash"
+          ? { label: "Ledger · Cash", value: l.date ? `Paid: ${fmtD(l.date)}` : "Cash entry" }
+          : { label: "Ledger · Online", value: l.utrNumber ? `UTR: ${l.utrNumber}` : "Entry added", sub: l.date ? `Paid: ${fmtD(l.date)}` : "" },
         sentence: `${l.updatedBy || "User"} added a Rent ledger entry of ₹${num(l.amount).toLocaleString("en-IN")}.` });
     }
-    for (const g of d.gstBalanceHistory || []) {
-      if (g.isPaid && g.paidAt) push({ activityType: "ledger", action: "GST Ledger Entry Added", status: "Ledger", actorName: g.paidBy || "", actorRole: "", occurredAt: g.paidAt, dueMonth: g.dueMonth, amount: num(g.paidAmount || g.gstAmount), entryType: "GST", ctx: { label: "GST Ledger", value: g.utrNumber ? `UTR: ${g.utrNumber}` : "Entry added", sub: g.paidAt ? `Paid: ${fmtD(g.paidAt)}` : "" }, sentence: `${g.paidBy || "User"} recorded the GST payment.` });
+    // GST ledger entries (also GST-hold entries): the entry is "done" at updatedAt; `date` is the paid date the user chose
+    const gstSeen = new Set();
+    const gstRows = [
+      ...(d.gstBalanceHistory || []).map((g) => ({ at: g.updatedAt || g.paidAt || g.date, paid: g.paidAt || g.date, utr: g.utrNumber || "", by: g.updatedBy || g.paidBy || g.createdBy || "", month: g.dueMonth, owner: g.ownerName || "", amount: num(g.paidAmount || g.gstAmount), done: g.isPaid || g.utrNumber, mode: "Online" })),
+      ...(d.withGst1Ledger || []).map((g) => ({ at: g.updatedAt || g.date, paid: g.date, utr: g.utrNumber || "", by: g.updatedBy || "", month: g.month || g.dueMonth, owner: g.landOwnerName || "", amount: num(g.amount), done: true, mode: g.paymentMode || "Online" })),
+    ];
+    for (const g of gstRows) {
+      if (!g.done || !g.at) continue;
+      const k = `${g.month}|${g.utr}|${g.amount}`;
+      if (gstSeen.has(k)) continue; // same entry stored in both places
+      gstSeen.add(k);
+      push({ activityType: "ledger", action: "GST Ledger Entry Added", status: "Ledger", actorName: g.by, actorRole: "", occurredAt: g.at, dueMonth: g.month, landlordName: g.owner || undefined,
+        paymentMode: g.mode, amount: g.amount, entryType: "GST", entryMode: "GST",
+        ctx: { label: "GST Ledger", value: g.utr ? `UTR: ${g.utr}` : "Entry added", sub: g.paid ? `Paid: ${fmtD(g.paid)}` : "" },
+        sentence: `${g.by || "User"} added a GST ledger entry of ₹${g.amount.toLocaleString("en-IN")}.` });
     }
   }
   const seenEv = new Set();
   const uniq = ev.filter((x) => {
-    const k = [x.mediaId, x.action, x.actorName, x.dueMonth, x.landlordName || "", x.campaignName || "", x.amount || "", Math.floor(new Date(x.occurredAt).getTime() / 1000)].join("|");
+    const k = [x.mediaId, x.action, x.actorName, x.dueMonth, x.landlordName || "", x.campaignName || "", x.entryMode || "", x.amount || "", Math.floor(new Date(x.occurredAt).getTime() / 1000)].join("|");
     if (seenEv.has(k)) return false;
     seenEv.add(k);
     return true;
   });
+  // Cash + Online ledger entries saved together for the same landlord/month → ONE activity with both modes
+  const lg = new Map();
+  for (const x of uniq) {
+    if (x.activityType !== "ledger" || x.entryType !== "Rent" || !x.entryMode) continue;
+    const k = [x.mediaId, x.dueMonth, x.landlordName, x.actorName, Math.floor(new Date(x.occurredAt).getTime() / 180000)].join("|");
+    if (!lg.has(k)) lg.set(k, []);
+    lg.get(k).push(x);
+  }
+  const dropped = new Set();
+  for (const grp of lg.values()) {
+    const cash = grp.find((x) => x.entryMode === "Cash"), online = grp.find((x) => x.entryMode === "Online");
+    if (!cash || !online) continue;
+    const head = cash.occurredAt > online.occurredAt ? cash : online;
+    const cashAmt = num(cash.amount), onlineAmt = num(online.amount);
+    head.paymentMode = "Cash + Online";
+    head.amount = cashAmt + onlineAmt;
+    head.ctx = {
+      label: "Ledger · Cash + Online",
+      value: cash.paidOn ? `Cash · Paid: ${cash.paidOn}` : "Cash entry",
+      sub: online.utr ? `Online · UTR: ${online.utr}` : "Online entry",
+      extra: online.paidOn ? `Paid: ${online.paidOn}` : "",
+    };
+    head.sentence = `${head.actorName || "User"} added a Rent ledger entry of ₹${head.amount.toLocaleString("en-IN")} (Cash ₹${cashAmt.toLocaleString("en-IN")} + Online ₹${onlineAmt.toLocaleString("en-IN")}).`;
+    dropped.add(head === cash ? online : cash);
+  }
+  for (let i = uniq.length - 1; i >= 0; i--) if (dropped.has(uniq[i])) uniq.splice(i, 1);
   // campaign details are mandatory before approval → show them inside the approval they belong to (same site, month, actor, within 5 min)
   const merged = new Set();
   for (const ap of uniq.filter((x) => x.activityType === "approval")) {

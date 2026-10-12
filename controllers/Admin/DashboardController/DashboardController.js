@@ -408,7 +408,23 @@ const allowedRole = (req) => [1, 2, 3].includes(Number(req.user?.userType));
 const loadDocs = () => MediaOnboarding.find({}).lean();
 
 
-const SHIFT = 330 * 60000; // createdAt from mongoose timestamps is real UTC; the rest of the app stores IST-shifted times
+const SHIFT = 330 * 60000; // LandOwnerMaster.createdAt is real UTC; site createdAt is already stored as IST wall-clock
+const MODE_BY_CAT = { 1: "Cash", 2: "Online", 3: "Cash + Online" };
+const modeOfOwners = (owners) => {
+  const set = new Set();
+  for (const o of owners || []) {
+    const m = MODE_BY_CAT[Number(o.paymentCategory)] || "";
+    m.split(" + ").filter(Boolean).forEach((x) => set.add(x));
+  }
+  return ["Cash", "Online"].filter((m) => set.has(m)).join(" + ");
+};
+const ownerInfo = (o) => ({
+  name: o.name || "",
+  splitType: Number(o.typeShare) === 2 ? "amount" : "percentage",
+  splitValue: Number(o.typeShare) === 2 ? Number(o.shareAmount) || 0 : Number(o.sharePercentage) || 0,
+  allocated: Math.round(Number(o.shareAmount) || 0),
+  paymentMode: MODE_BY_CAT[Number(o.paymentCategory)] || "",
+});
 /** Remarks, landlord-added and site-added events (real history only). */
 const loadExtraEvents = async (docs) => {
   const byId = new Map(docs.map((d) => [String(d._id), d]));
@@ -416,9 +432,10 @@ const loadExtraEvents = async (docs) => {
   const siteInfo = (d) => ({
     siteName: (d.mediaDetails || []).map((f) => f.mediaName).filter(Boolean).join(", "),
     siteCode: (d.mediaDetails || []).map((f) => f.mediaCode).filter(Boolean).join(" / "),
-    sites: (d.mediaDetails || []).map((f) => ({ mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location })),
-    landlords: (d.landOwners || []).map((o) => ({ name: o.name || "" })),
+    sites: (d.mediaDetails || []).map((f) => ({ mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location, width: f.width, height: f.height, totalSqFt: f.totalSqFt })),
+    landlords: (d.landOwners || []).map(ownerInfo),
     landlordName: (d.landOwners || []).map((o) => o.name).filter(Boolean).join(", "),
+    paymentMode: modeOfOwners(d.landOwners),
   });
   const rem = await OverDueHistory.find({}, "mediaId dueMonth remarks overDueRemarks").lean();
   for (const h of rem) {
@@ -431,16 +448,39 @@ const loadExtraEvents = async (docs) => {
     }
   }
   for (const d of docs) {
-    if (d.createdAt) out.push({ mediaId: String(d._id), ...siteInfo(d), activityType: "site", action: "Site Added", status: "Added", actorName: d.createdBy || "", actorRole: "", occurredAt: new Date(new Date(d.createdAt).getTime() + SHIFT),
+    if (d.createdAt) out.push({ mediaId: String(d._id), ...siteInfo(d), activityType: "site", action: "Site Added", status: "Added", actorName: d.createdBy || "", actorRole: "", occurredAt: d.createdAt,
       ctx: { label: "Sites", value: `${(d.mediaDetails || []).length} site(s)` }, sentence: `${d.createdBy || "User"} added the site${(d.mediaDetails || []).length > 1 ? "s" : ""}.` });
   }
   const lords = await LandOwnerMaster.find({}).sort({ createdAt: -1 }).limit(20).lean();
   for (const l of lords) {
     if (!l.createdAt) continue;
-    out.push({ mediaId: `landlord-${l._id}`, siteName: "", siteCode: "", sites: [], landlords: [{ name: l.name || "" }], landlordName: l.name || "", activityType: "landlord", action: "Landlord Added", status: "Added", actorName: l.createdBy || "", actorRole: "",
-      occurredAt: new Date(new Date(l.createdAt).getTime() + SHIFT), ctx: { label: "Landlord", value: l.name || "" }, sentence: `Landlord ${l.name || ""} was added.` });
+    const linked = docs.filter((d) => (d.landOwners || []).some((o) => String(o.landOwnerMasterId) === String(l._id)));
+    out.push({
+      mediaId: `landlord-${l._id}`, activityType: "landlord", action: "Landlord Added", status: "Added", actorName: l.createdBy || "", actorRole: "",
+      siteName: linked.map((d) => (d.mediaDetails || []).map((f) => f.mediaName).filter(Boolean).join(", ")).join(", "),
+      siteCode: "",
+      sites: linked.flatMap((d) => (d.mediaDetails || []).map((f) => ({ mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location }))),
+      landlords: [l.typeShare || Number(l.sharePercentage) > 0 || Number(l.shareAmount) > 0 ? ownerInfo(l) : { name: l.name || "" }], // split lives on the site; none yet → name only
+      landlordName: l.name || "", paymentMode: MODE_BY_CAT[Number(l.paymentCategory)] || "",
+      occurredAt: new Date(new Date(l.createdAt).getTime() + SHIFT),
+      ctx: { label: "Landlord", value: l.name || "" }, sentence: `Landlord ${l.name || ""} was added.`,
+    });
   }
   return out;
+};
+
+
+const UserModel = require("../../../models/Admin/UserSchema/UserSchema");
+/** Recent activity feed: real events + actor roles resolved from the users collection (names are unique usernames). */
+const activityFeed = async (docs, { limit = 10, loginRole = null } = {}) => {
+  const [extra, users] = await Promise.all([loadExtraEvents(docs), UserModel.find({}, "userName userType").lean()]);
+  const roleByName = new Map(users.map((u) => [String(u.userName).trim().toLowerCase(), X.ROLE_LABEL[Number(u.userType)] || ""]));
+  let list = X.computeActivity(docs, 150, extra).map((e) => ({
+    ...e,
+    actorRole: e.actorRole || roleByName.get(String(e.actorName || "").trim().toLowerCase()) || "",
+  }));
+  if (loginRole) list = list.filter((e) => e.actorRole === X.ROLE_LABEL[loginRole]);
+  return list.slice(0, Math.min(Math.max(Number(limit) || 10, 1), 100));
 };
 
 const getDashboardV2 = async (req, res) => {
@@ -493,7 +533,7 @@ const getDashboardV2 = async (req, res) => {
       donut: rental.donut,
       disbursement: X.computeDisbursement(active, range, filters.gst),
       ledgerEntries,
-      activity: X.computeActivity(all, 10, await loadExtraEvents(all)).filter((e) => !filters.loginRole || e.actorRole === X.ROLE_LABEL[filters.loginRole]),
+      activity: await activityFeed(all, { limit: 10, loginRole: filters.loginRole }),
     });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
@@ -541,7 +581,7 @@ const getActivityV2 = async (req, res) => {
   try {
     if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
     const docs = await loadDocs();
-    return successResponse(res, "Activity fetched", X.computeActivity(docs, req.body?.limit || 50, await loadExtraEvents(docs)));
+    return successResponse(res, "Activity fetched", await activityFeed(docs, { limit: req.body?.limit || 50 }));
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
   }
