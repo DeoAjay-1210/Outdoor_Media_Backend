@@ -3727,11 +3727,18 @@ if (landOwnerMasterId) {
     // 1 / 2 / 3  -> plain `status` field (unchanged legacy behavior)
     // 4          -> virtual status, maps to agreement.status === 2
     // 5          -> virtual status, maps to agreement.status === 3
+    // ── STATUS FILTER ──────────────────────────────────────────
+    // 1 / 2 / 3  -> plain `status` field (1=Active, 2=Inactive, 3=Pending)
+    // 4          -> virtual status, maps to agreement.status === 2 (Expiring)
+    // 5          -> virtual status, maps to agreement.status === 3 (Expired)
+    // 6          -> virtual status, maps to agreement.agreementStatus === 2 (Draft)
     if (status !== undefined && status !== null && status !== "") {
       const statusArray = Array.isArray(status) ? status : [status];
       const statusNums = statusArray.map(Number);
 
-      const regularStatuses = statusNums.filter((s) => s !== 4 && s !== 5);
+      const regularStatuses = statusNums.filter(
+        (s) => s !== 4 && s !== 5 && s !== 6,
+      );
       const orConditions = [];
 
       if (regularStatuses.length > 0) {
@@ -3743,6 +3750,9 @@ if (landOwnerMasterId) {
       if (statusNums.includes(5)) {
         orConditions.push({ "agreement.status": 3 });
       }
+      if (statusNums.includes(6)) {
+        orConditions.push({ "agreement.agreementStatus": 2 });
+      }
 
       if (orConditions.length === 1) {
         // only one condition type selected — apply directly, no $or needed
@@ -3753,12 +3763,47 @@ if (landOwnerMasterId) {
       }
     }
 
+    // ── AGREEMENT STATUS FILTER ────────────────────────────────
+    // 1 / 2 / 3  -> agreement.status === 1 (Active), 2 (Expiring), 3 (Expired)
+    // 4          -> virtual agreementStatus, maps to agreement.agreementStatus === 2 (Draft)
     if (
       agreementStatus !== undefined &&
       agreementStatus !== null &&
       agreementStatus !== ""
     ) {
-      filter["agreement.status"] = Number(agreementStatus);
+      const agStatusArray = Array.isArray(agreementStatus)
+        ? agreementStatus
+        : [agreementStatus];
+      const agStatusNums = agStatusArray.map(Number);
+
+      const regularAgStatuses = agStatusNums.filter((s) => s !== 4);
+      const agOrConditions = [];
+
+      if (regularAgStatuses.length > 0) {
+        if (regularAgStatuses.length === 1) {
+          agOrConditions.push({ "agreement.status": regularAgStatuses[0] });
+        } else {
+          agOrConditions.push({
+            "agreement.status": { $in: regularAgStatuses },
+          });
+        }
+      }
+      if (agStatusNums.includes(4)) {
+        agOrConditions.push({ "agreement.agreementStatus": 2 });
+      }
+
+      if (agOrConditions.length === 1) {
+        Object.assign(filter, agOrConditions[0]);
+      } else if (agOrConditions.length > 1) {
+        if (filter.$or) {
+          const existingOr = filter.$or;
+          delete filter.$or;
+          filter.$and = filter.$and || [];
+          filter.$and.push({ $or: existingOr }, { $or: agOrConditions });
+        } else {
+          filter.$or = agOrConditions;
+        }
+      }
     }
 
     // Merge search + dropdown filters
@@ -3871,6 +3916,10 @@ if (landOwnerMasterId) {
       "agreement.endDate": { $lt: new Date() },
     });
 
+    const draftSitesCount = await MediaOnboarding.countDocuments({
+      "agreement.agreementStatus": 2,
+    });
+
     // Get total rental amounts from all documents
     const rentalAggregation = await MediaOnboarding.aggregate([
       {
@@ -3933,6 +3982,8 @@ const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
         // New keys added:
         activeCount,
         agreementExpiredCount,
+        draftCount: draftSitesCount,
+        draftSitesCount,
         totalRentalAmount,
         totalNetPayable,
       },
