@@ -53,6 +53,7 @@ function parseFilters(body = {}) {
     start: new Date(Date.UTC(first.year, first.month - 1, 1)),
     end: new Date(Date.UTC(last.year, last.month, 0, 23, 59, 59, 999)),
     labels: new Set(months.map((x) => labelOf(x.year, x.month).toLowerCase())),
+    isCurrent: date !== "last" && date !== "custom",
     from: date === "custom" ? new Date(Date.UTC(new Date(body.startDate).getUTCFullYear(), new Date(body.startDate).getUTCMonth(), new Date(body.startDate).getUTCDate())) : null,
     to: date === "custom" ? new Date(Date.UTC(new Date(body.endDate).getUTCFullYear(), new Date(body.endDate).getUTCMonth(), new Date(body.endDate).getUTCDate(), 23, 59, 59, 999)) : null,
   };
@@ -193,7 +194,15 @@ function computeRental(docs, range, filters) {
 
   // Overdue Sites on the donut: independent of ALL dashboard filters (today's month, all docs)
   const n = nowIST();
-  const un = computeRentalDueStats(docs, { year: n.getUTCFullYear(), month: n.getUTCMonth() + 1 });
+  const unLL = new Set();
+  const un = computeRentalDueStats(docs, {
+    year: n.getUTCFullYear(), month: n.getUTCMonth() + 1,
+    onFace: ({ media, state }) => { if (state === "overdue") addLandlords(unLL, media); },
+  });
+  // current month: unfiltered overdue (as before). Last month / custom range: overdue of the selected period.
+  const ov = range.isCurrent
+    ? { sites: un.overdueCount, amount: un.overdueAmountTotal, landlords: unLL.size }
+    : { sites: sum.overdue[0], amount: sum.overdue[1], landlords: LL.overdue.size };
 
   const r0 = (x) => Math.round(x);
   const roleOut = (r) => ({
@@ -212,9 +221,9 @@ function computeRental(docs, range, filters) {
       gstHold: { landlords: LL.hold.size, sites: sum.hold[0], amount: r0(sum.hold[1]) },
     },
     donut: {
-      dueThisMonth: { sites: sum.due[0], amount: r0(sum.due[1]) },
+      dueThisMonth: { sites: sum.due[0], landlords: LL.due.size, amount: r0(sum.due[1]) },
       roles: [1, 2, 3].map(roleOut),
-      overdue: { sites: un.overdueCount, amount: r0(un.overdueAmountTotal), unfiltered: true },
+      overdue: { sites: ov.sites, landlords: ov.landlords, amount: r0(ov.amount), unfiltered: range.isCurrent },
     },
   };
 }
@@ -424,8 +433,11 @@ function computeLedgerMismatch(docs, range, gst) {
 }
 
 // ── Recent activity: normalized workflow events from approval, verification, campaign, ledger and GST history ──
-function computeActivity(docs, limit = 20) {
-  const ev = [];
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const fmtD = (d) => { const x = new Date(d); return isNaN(x) ? "" : `${String(x.getUTCDate()).padStart(2, "0")} ${MON[x.getUTCMonth()]} ${x.getUTCFullYear()}`; };
+
+function computeActivity(docs, limit = 20, extra = []) {
+  const ev = [...extra];
   for (const d of docs) {
     const faces = d.mediaDetails || [];
     const base = {
@@ -478,11 +490,11 @@ function computeActivity(docs, limit = 20) {
       if (seen.has(k) || !l.paymentMode || num(l.amount) <= 0) continue;
       seen.add(k);
       const at = l.updatedAt || l.date;
-      if (at) push({ activityType: "ledger", action: "Rent Ledger Entry Added", status: "Ledger", actorName: l.updatedBy || "", actorRole: "", occurredAt: at, dueMonth: l.month, landlordName: l.landOwnerName || "", paymentMode: l.paymentMode, amount: num(l.amount), entryType: "Rent", ctx: { label: "Ledger", value: "Rent", amount: num(l.amount) },
+      if (at) push({ activityType: "ledger", action: "Rent Ledger Entry Added", status: "Ledger", actorName: l.updatedBy || "", actorRole: "", occurredAt: at, dueMonth: l.month, landlordName: l.landOwnerName || "", paymentMode: l.paymentMode, amount: num(l.amount), entryType: "Rent", ctx: { label: "Ledger", value: l.utrNumber ? `UTR: ${l.utrNumber}` : "Entry added", sub: l.date ? `Paid: ${fmtD(l.date)}` : "" },
         sentence: `${l.updatedBy || "User"} added a Rent ledger entry of ₹${num(l.amount).toLocaleString("en-IN")}.` });
     }
     for (const g of d.gstBalanceHistory || []) {
-      if (g.isPaid && g.paidAt) push({ activityType: "ledger", action: "GST Ledger Entry Added", status: "Ledger", actorName: g.paidBy || "", actorRole: "", occurredAt: g.paidAt, dueMonth: g.dueMonth, amount: num(g.paidAmount || g.gstAmount), entryType: "GST", ctx: { label: "GST", value: "Ledger", amount: num(g.paidAmount || g.gstAmount) }, sentence: `${g.paidBy || "User"} recorded the GST payment.` });
+      if (g.isPaid && g.paidAt) push({ activityType: "ledger", action: "GST Ledger Entry Added", status: "Ledger", actorName: g.paidBy || "", actorRole: "", occurredAt: g.paidAt, dueMonth: g.dueMonth, amount: num(g.paidAmount || g.gstAmount), entryType: "GST", ctx: { label: "GST Ledger", value: g.utrNumber ? `UTR: ${g.utrNumber}` : "Entry added", sub: g.paidAt ? `Paid: ${fmtD(g.paidAt)}` : "" }, sentence: `${g.paidBy || "User"} recorded the GST payment.` });
     }
   }
   const seenEv = new Set();
@@ -507,6 +519,7 @@ function computeActivity(docs, limit = 20) {
 
 // ── Rental details table rows (one per site document per month) ──
 function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
+  const remarkOf = (m) => (m && typeof m === "object" ? m : { text: m || "" });
   const rows = [];
   // Login = role R → only rentals that role R has approved (its own actions)
   const lf = filters.loginRole ? (e) => (e?.approvalSteps || []).some((st) => st.role === filters.loginRole && num(st.status) === 2) : null;
@@ -532,6 +545,11 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
         .filter((v) => v.isVerified && v.verifiedAt && ((entry && String(v.rentalDueId) === String(entry._id)) || v.dueMonth === label))
         .sort((x, y) => new Date(x.verifiedAt) - new Date(y.verifiedAt))
         .map((v) => ({ role: ROLE_LABEL[v.verifiedByRole] || "", by: v.verifiedBy || "", at: v.verifiedAt, action: "Verified" }));
+      if (!verEvents.length && entry) {
+        for (const st of entry.approvalSteps || []) {
+          if (st.docVerified && st.approvedAt) verEvents.push({ role: ROLE_LABEL[st.role] || "", by: st.userName || "", at: st.approvedAt, action: "Verified" });
+        }
+      }
       const verifiedFlag = verEvents.length > 0 || !!entry?.agreementDocVerified;
       // campaign revisions from rentalDueHistory (one record per save), humans only, consecutive duplicates collapsed
       const revisions = [];
@@ -560,7 +578,9 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
         rentWithTds: Math.round(rent), tds: Math.round(tds), baseRent: Math.round(rent - tds),
         gstApplicable: gstAmt > 0, gstAmount: Math.round(gstAmt), gstHold: hold,
         totalAmount: Math.round(rent + gstAmt),
-        remarks: (entry && (remarksByDue.get(String(entry._id)) || (/^auto-generated/i.test(entry.remarks || "") ? "" : entry.remarks))) || "",
+        remarks: (entry && (remarkOf(remarksByDue.get(String(entry._id))).text || (/^auto-generated/i.test(entry.remarks || "") ? "" : entry.remarks))) || "",
+        remarksBy: entry ? remarkOf(remarksByDue.get(String(entry._id))).by || "" : "",
+        remarksAt: entry ? remarkOf(remarksByDue.get(String(entry._id))).at || null : null,
         verification: { verified: verifiedFlag, events: verEvents },
         campaign: entry ? { revisions, name: entry.campaignName || "", reason: entry.reason || "", by: entry.savedBy?.userName || "", role: ROLE_LABEL[entry.savedBy?.role] || "", at: entry.proofOfCampaign?.uploadedAt || entry.invoice?.uploadedAt || entry.savedBy?.savedAt || null, proof: entry.proofOfCampaign?.filePath ? entry.proofOfCampaign : null, invoice: entry.invoice?.filePath ? entry.invoice : null } : null,
         approval: {

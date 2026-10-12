@@ -407,6 +407,42 @@ const allowedRole = (req) => [1, 2, 3].includes(Number(req.user?.userType));
 
 const loadDocs = () => MediaOnboarding.find({}).lean();
 
+
+const SHIFT = 330 * 60000; // createdAt from mongoose timestamps is real UTC; the rest of the app stores IST-shifted times
+/** Remarks, landlord-added and site-added events (real history only). */
+const loadExtraEvents = async (docs) => {
+  const byId = new Map(docs.map((d) => [String(d._id), d]));
+  const out = [];
+  const siteInfo = (d) => ({
+    siteName: (d.mediaDetails || []).map((f) => f.mediaName).filter(Boolean).join(", "),
+    siteCode: (d.mediaDetails || []).map((f) => f.mediaCode).filter(Boolean).join(" / "),
+    sites: (d.mediaDetails || []).map((f) => ({ mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location })),
+    landlords: (d.landOwners || []).map((o) => ({ name: o.name || "" })),
+    landlordName: (d.landOwners || []).map((o) => o.name).filter(Boolean).join(", "),
+  });
+  const rem = await OverDueHistory.find({}, "mediaId dueMonth remarks overDueRemarks").lean();
+  for (const h of rem) {
+    const d = byId.get(String(h.mediaId));
+    if (!d) continue;
+    for (const r of h.overDueRemarks || []) {
+      if (!r.remarks || !r.addedAt) continue;
+      out.push({ mediaId: String(d._id), ...siteInfo(d), activityType: "remarks", action: "Remarks Added", status: "Added", actorName: r.addedBy || "", actorRole: "", occurredAt: r.addedAt, dueMonth: h.dueMonth || null,
+        ctx: { label: "Remarks", value: String(r.remarks) }, sentence: `${r.addedBy || "User"} added remarks.` });
+    }
+  }
+  for (const d of docs) {
+    if (d.createdAt) out.push({ mediaId: String(d._id), ...siteInfo(d), activityType: "site", action: "Site Added", status: "Added", actorName: d.createdBy || "", actorRole: "", occurredAt: new Date(new Date(d.createdAt).getTime() + SHIFT),
+      ctx: { label: "Sites", value: `${(d.mediaDetails || []).length} site(s)` }, sentence: `${d.createdBy || "User"} added the site${(d.mediaDetails || []).length > 1 ? "s" : ""}.` });
+  }
+  const lords = await LandOwnerMaster.find({}).sort({ createdAt: -1 }).limit(20).lean();
+  for (const l of lords) {
+    if (!l.createdAt) continue;
+    out.push({ mediaId: `landlord-${l._id}`, siteName: "", siteCode: "", sites: [], landlords: [{ name: l.name || "" }], landlordName: l.name || "", activityType: "landlord", action: "Landlord Added", status: "Added", actorName: l.createdBy || "", actorRole: "",
+      occurredAt: new Date(new Date(l.createdAt).getTime() + SHIFT), ctx: { label: "Landlord", value: l.name || "" }, sentence: `Landlord ${l.name || ""} was added.` });
+  }
+  return out;
+};
+
 const getDashboardV2 = async (req, res) => {
   try {
     if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
@@ -420,8 +456,10 @@ const getDashboardV2 = async (req, res) => {
     // media (same meaning of active/inactive & agreement thresholds as the legacy dashboard)
     const gAll = X.applyGst(all, filters.gst);
     const media = { totalSites: 0, activeSites: 0, inactiveSites: 0, activeAgreements: 0, expiringAgreements: 0, expiredAgreements: 0, sitesByMediaType: {} };
+    let draftSites = 0;
     for (const site of gAll) {
       const ag = site.agreement || {};
+      if (Number(ag.agreementStatus) === 2) draftSites += Math.max((site.mediaDetails || []).length, 1); // 1=Original 2=Draft; counted in sites
       if (ag.startDate && ag.endDate) {
         const days = Math.ceil((new Date(ag.endDate).getTime() - range.end.getTime()) / 86400000);
         if (days < 0) media.expiredAgreements++;
@@ -450,12 +488,12 @@ const getDashboardV2 = async (req, res) => {
     return successResponse(res, "Dashboard fetched", {
       period: { months: range.months, start: range.start, end: range.end },
       filters,
-      media: { ...media, draftAgreements: DRAFT_AGREEMENTS_STATIC },
+      media: { ...media, draftAgreements: { count: draftSites, amount: 0 } },
       rental: rental.cards,
       donut: rental.donut,
       disbursement: X.computeDisbursement(active, range, filters.gst),
       ledgerEntries,
-      activity: X.computeActivity(all, 10).filter((e) => !filters.loginRole || e.actorRole === X.ROLE_LABEL[filters.loginRole]),
+      activity: X.computeActivity(all, 10, await loadExtraEvents(all)).filter((e) => !filters.loginRole || e.actorRole === X.ROLE_LABEL[filters.loginRole]),
     });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
@@ -472,8 +510,8 @@ const getRentalDetailsV2 = async (req, res) => {
     const remarksByDue = new Map();
     const hist = await OverDueHistory.find({ mediaId: { $in: docs.map((d) => d._id) } }, "rentalDueId remarks overDueRemarks").lean();
     for (const h of hist) {
-      const texts = [h.remarks, ...(h.overDueRemarks || []).map((r) => r.remarks)].filter((t) => t && String(t).trim());
-      if (h.rentalDueId && texts.length) remarksByDue.set(String(h.rentalDueId), texts[texts.length - 1]);
+      const items = [{ text: h.remarks }, ...(h.overDueRemarks || []).map((r) => ({ text: r.remarks, by: r.addedBy, at: r.addedAt }))].filter((t) => t.text && String(t.text).trim());
+      if (h.rentalDueId && items.length) remarksByDue.set(String(h.rentalDueId), items[items.length - 1]);
     }
     const rows = X.buildRentalRows(docs, parsed.range, parsed.filters, remarksByDue);
     const { search, sortBy, sortDir, page, limit } = req.body || {};
@@ -503,7 +541,7 @@ const getActivityV2 = async (req, res) => {
   try {
     if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
     const docs = await loadDocs();
-    return successResponse(res, "Activity fetched", X.computeActivity(docs, req.body?.limit || 50));
+    return successResponse(res, "Activity fetched", X.computeActivity(docs, req.body?.limit || 50, await loadExtraEvents(docs)));
   } catch (error) {
     return errorResponse(res, error.message, null, 500);
   }
