@@ -2544,6 +2544,24 @@ async function runBulkLedgerEntry(req, res) {
     return errorResponse(res, error.message || "Bulk ledger entry failed", null, error.statusCode || 500);
   }
 }
+// ✅ NEW — the rentalDue bill of a month for the ledger list. A site can hold
+// one bill PER FACE for the same month (single-bill sites included); CMD
+// approving one of them left the others pending, and `.find` by month picked
+// whichever came first (status 3 one time, 1 the next). Prefer the most
+// approved bill — same rule as landOwnerSiteFilter ("approved wins over a
+// waiting duplicate"). One bill / equal statuses → same bill as before.
+const RENTAL_DUE_STATUS_RANK = { 3: 3, 2: 2 };
+function findRentalDueForMonth(rentalDue, dueMonth) {
+  let best = null;
+  for (const d of rentalDue || []) {
+    if (d.dueMonth !== dueMonth) continue;
+    if (!best || (RENTAL_DUE_STATUS_RANK[d.approvalStatus] || 0) > (RENTAL_DUE_STATUS_RANK[best.approvalStatus] || 0)) {
+      best = d;
+    }
+  }
+  return best || undefined;
+}
+
 exports.listMediaByLedger = async (req, res) => {
   try {
     const {
