@@ -1,6 +1,7 @@
 const axios = require("axios");
 const { getOverallSummaryForCycle } = require("../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
 const { getDueMonthLabel } = require("./Datehelpers");
+const { landOwnersAsOfDate } = require("./appraisalRent");
 
 // ─────────────────────────────────────────────────────────────
 // GOOGLE CHAT — rental due approval messages.
@@ -15,10 +16,15 @@ const { getDueMonthLabel } = require("./Datehelpers");
 // ─────────────────────────────────────────────────────────────
 const ROLE_LABEL = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
 
+// ✅ NEW — master switch for ALL Google Chat messages: GOOGLE_CHAT=on | off
+// (.env). "off" / "false" / "0" / "no" → nothing is sent. Not set → on.
+const isGoogleChatEnabled = () =>
+  !["off", "false", "0", "no"].includes(String(process.env.GOOGLE_CHAT || "on").trim().toLowerCase());
+
 const APPROVAL_ROUTES = {
-  1: { envKeys: ["RENTAL_MANAGER_URL"], status: "⏳ *Waiting for your approval* (Rental Manager)" },
-  2: { envKeys: ["CMD_URL"], status: "⏳ *Waiting for your approval* (CMD)" },
-  3: { envKeys: ["RENTAL_EXECUTIVE_URL", "RENTAL_MANAGER_URL"], status: "🎉 *Approved by CMD* — fully approved" },
+  1: { envKeys: ["RENTAL_MANAGER_URL"], status: "*Awaiting your approval* (Rental Manager)" },
+  2: { envKeys: ["CMD_URL"], status: "*Awaiting your approval* (CMD)" },
+  3: { envKeys: ["RENTAL_EXECUTIVE_URL", "RENTAL_MANAGER_URL"], status: "*Approved by CMD* — fully approved" },
 };
 
 const formatINR = (n) => `₹${Math.round(Number(n) || 0).toLocaleString("en-IN")}`;
@@ -45,6 +51,38 @@ function getBillAmounts(mediaPlain, entry, cycleDate) {
   return { totalRentalAmount: rent, gstAmount: gst, totalNetPayable: rent + gst };
 }
 
+// ✅ NEW — total TDS of the site's landowners for the bill's month (owner TDS
+// is stored against the current rent; scaled to the rent in force for the due
+// date, same as the ledger). TDS is part of the Total Rental Amount, not extra.
+function getBillTds(mediaPlain, dueDate) {
+  let owners = mediaPlain.landOwners || [];
+  if (dueDate) {
+    try {
+      owners = landOwnersAsOfDate(mediaPlain, dueDate) || owners;
+    } catch (err) {
+      // fall back to the stored owner amounts
+    }
+  }
+  const withTds = owners.filter((o) => Number(o.tdsApplicable) === 1 && Number(o.tdsAmount || 0) > 0);
+  const amount = withTds.reduce((sum, o) => sum + Number(o.tdsAmount || 0), 0);
+  const rates = [...new Set(withTds.map((o) => Number(o.tdsPercentage || 0)))];
+  return { amount: Math.round(amount), percentage: rates.length === 1 && rates[0] > 0 ? rates[0] : null };
+}
+
+// same cycle length / month-end handling as the rental due list
+const FREQUENCY_MONTHS = { 1: 1, 2: 3, 3: 6, 4: 12, 5: 24 };
+const cycleMonthsOf = (rentalPayment) => {
+  const f = Number(rentalPayment?.paymentFrequency || 1);
+  return f === 6 ? Number(rentalPayment?.customPaymentFrequency) || 1 : FREQUENCY_MONTHS[f] || 1;
+};
+function addMonthsUTC(date, months) {
+  const d = new Date(date);
+  const originalDay = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+  if (d.getUTCDate() !== originalDay) d.setUTCDate(0);
+  return d;
+}
+
 function buildMessage({ media, entry, userType, userName, action, cycleDate, status = "" }) {
   const plain = typeof media?.toObject === "function" ? media.toObject({ virtuals: true }) : media || {};
   const details = plain.mediaDetails || [];
@@ -61,8 +99,25 @@ function buildMessage({ media, entry, userType, userName, action, cycleDate, sta
   const landOwnerName = (plain.landOwners || []).map((o) => o.name).filter(Boolean).join(", ") || "-";
   const dueMonth = entry?.dueMonth || (cycleDate ? getDueMonthLabel(cycleDate) : "-");
   const amounts = getBillAmounts(plain, entry, cycleDate);
+  // this bill's previous / following billing date (its due date ± one cycle)
+  const billDate = entry?.dueDate || cycleDate;
+  const cycleMonths = cycleMonthsOf(plain.rentalPayment);
+  const billDates = billDate
+    ? [
+        `*Last Bill Date:* ${formatDMY(addMonthsUTC(billDate, -cycleMonths))}`,
+        `*Next Bill Date:* ${formatDMY(addMonthsUTC(billDate, cycleMonths))}`,
+      ]
+    : [];
 
-  const title = "✅ *Rental Due Approved*";
+  const tds = getBillTds(plain, billDate);
+  const tdsLine =
+    tds.amount > 0
+      ? [
+          `*TDS Amount${tds.percentage ? ` (${tds.percentage}%)` : ""}:* ${formatINR(tds.amount)} (already included in the Total Rental Amount)`,
+        ]
+      : [];
+
+  const title = "*Rental Due Approved*";
   const by = `${ROLE_LABEL[Number(userType)] || "User"}${userName ? ` (${userName})` : ""}`;
 
   return [
@@ -72,7 +127,9 @@ function buildMessage({ media, entry, userType, userName, action, cycleDate, sta
     `*Site Code:* ${siteCode}`,
     `*Landowner Name:* ${landOwnerName}`,
     `*Due Month:* ${dueMonth}`,
+    ...billDates,
     `*Total Rental Amount:* ${formatINR(amounts.totalRentalAmount)}`,
+    ...tdsLine,
     `*GST Amount:* ${formatINR(amounts.gstAmount)}`,
     `*Total Net Payable:* ${formatINR(amounts.totalNetPayable)}`,
   ].join("\n");
@@ -81,7 +138,7 @@ function buildMessage({ media, entry, userType, userName, action, cycleDate, sta
 // action: "approved". Message is built immediately (before any
 // later change to media), then posted in the background.
 function notifyRentalDueChat({ media, entry, userType, userName, action, cycleDate }) {
-  if (!media) return;
+  if (!isGoogleChatEnabled() || !media) return;
   if (action !== "approved") return;
   const route = APPROVAL_ROUTES[Number(userType)];
   if (!route) return;
@@ -145,8 +202,8 @@ function buildBillingDateRevertMessage(request, event) {
 
   if (event === "requested") {
     return [
-      `📅 *Billing Date Change Requested* — by ${actorLabel(request.requestedBy)}`,
-      "⏳ *Waiting for CMD approval*",
+      `*Billing Date Change Requested* — by ${actorLabel(request.requestedBy)}`,
+      "*Waiting for CMD approval*",
       ...site,
       `*Current Last Bill Date:* ${formatDMY(original.lastBillPaidDate)}`,
       `*Current Next Bill Date:* ${formatDMY(original.nextBillingDate)}`,
@@ -166,8 +223,8 @@ function buildBillingDateRevertMessage(request, event) {
       .map((b) => `${b.dueMonth || formatDMY(b.dueDate)} (${formatINR(b.netPayable)})`)
       .join(", ");
     return [
-      `✅ *Billing Date Change Approved* — by ${actorLabel(request.cmdAction)}`,
-      "🎉 *New billing dates applied*",
+      `*Billing Date Change Approved* — by ${actorLabel(request.cmdAction)}`,
+      " *New billing dates applied*",
       ...site,
       `*Requested By:* ${actorLabel(request.requestedBy)}`,
       `*Previous Last Bill Date:* ${formatDMY(before.lastBillPaidDate)}`,
@@ -183,7 +240,7 @@ function buildBillingDateRevertMessage(request, event) {
 
   // rejected
   return [
-    `❌ *Billing Date Change Rejected* — by ${actorLabel(request.cmdAction)}`,
+    `*Billing Date Change Rejected* — by ${actorLabel(request.cmdAction)}`,
     "Billing dates not changed",
     ...site,
     `*Requested By:* ${actorLabel(request.requestedBy)}`,
@@ -200,7 +257,7 @@ function buildBillingDateRevertMessage(request, event) {
 // event: "requested" | "approved" | "rejected". Built immediately, posted in
 // the background; never throws.
 function notifyBillingDateRevertChat({ request, event }) {
-  if (!request) return;
+  if (!isGoogleChatEnabled() || !request) return;
   const envKeys =
     event === "requested"
       ? REVERT_REQUEST_ROUTES[Number(request.requestedBy?.role)]
@@ -255,7 +312,7 @@ function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth
   const shownOwners = owner ? [owner] : owners;
 
   return [
-    `📝 *Overdue Remark Added* — by ${ROLE_LABEL[Number(userType)] || "User"}${userName ? ` (${userName})` : ""}`,
+    `*Overdue Remark Added* — by ${ROLE_LABEL[Number(userType)] || "User"}${userName ? ` (${userName})` : ""}`,
     `*Site Name:* ${shownFaces.map((d) => d.mediaName).filter(Boolean).join(", ") || "-"}`,
     `*Site Code:* ${shownFaces.map((d) => d.mediaCode).filter(Boolean).join(", ") || "-"}`,
     `*Landowner Name:* ${shownOwners.map((o) => o.name).filter(Boolean).join(", ") || "-"}`,
@@ -266,7 +323,7 @@ function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth
 
 // Built immediately, posted in the background; never throws.
 function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName }) {
-  if (!media) return;
+  if (!isGoogleChatEnabled() || !media) return;
   const envKeys = OVERDUE_REMARK_ROUTES[Number(userType)];
   if (!envKeys) return;
   const urls = [...new Set(envKeys.map((k) => process.env[k]).filter(Boolean))];

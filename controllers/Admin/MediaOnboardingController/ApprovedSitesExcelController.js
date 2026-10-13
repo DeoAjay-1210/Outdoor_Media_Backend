@@ -272,11 +272,11 @@ const downloadApprovedSitesExcel = async (req, res) => {
 
     // ── Build sheet (same design as the Rental OOH report) ──
     const colHeaders = [
-      "📅 Month", "✅ Approval Date", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City", "🧭 District / Town",
-      "📍 Location", "📐 Size", "👤 Landowner Name", "📞 Landowner Phone", "💳 Payment Category",
-      "🏦 Bank / IFSC / Account", "🪪 PAN", "📌 GST Applicable", "🧮 TDS Applicable",
-      "🏠 Total Rental Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)",
-      "👤 Rental Executive", "👔 Rental Manager", "🏛️ CMD", "📋 Overall Approval Status",
+      "Month", "Approval Date", "Media Code", "Media Name", "Media Type", "State", "City", "District / Town",
+      "Location", "Size", "Landowner Name", "Landowner Phone", "Payment Category",
+      "Bank / IFSC / Account", "PAN", "GST Applicable", "TDS Applicable",
+      "Total Rental Amount (₹)", "GST Amount (₹)", "Total Amount (₹)",
+      "Rental Executive", "Rental Manager", "CMD", "Overall Approval Status",
     ];
     const LAST_COL = colHeaders.length - 1;
     const COL_RENTAL = 17, COL_GST = 18, COL_TOTAL = 19;

@@ -23,6 +23,7 @@ const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("..
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
 const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
+const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -1924,6 +1925,7 @@ async function processSingleRentalDueInternal({
   userType,
   userId,
   userName,
+  changeLog, // ✅ NEW — optional array; receives campaignName/reason/proof/invoice changes
 }) {
   const mediaId = media._id;
 
@@ -1951,6 +1953,11 @@ async function processSingleRentalDueInternal({
       mediaId,
       message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
     };
+  }
+
+  // ✅ NEW — capture old → new BEFORE the values are applied (rental due history)
+  if (Array.isArray(changeLog)) {
+    changeLog.push(...collectRentalDueChanges(entry, { campaignName, reason, proofOfCampaign, invoice }));
   }
 
   if (campaignName) entry.campaignName = campaignName;
@@ -2172,6 +2179,7 @@ async function processSingleRentalDue({
   if (rentalDueId) {
     // ✅ NEW — snapshot before processing, to detect an approval made in this request
     const roleStepWasApproved = isRoleStepApproved(findRentalDueEntryById(media, rentalDueId), userType);
+    const changeLog = []; // ✅ NEW — rental due history
 
     const result = await processSingleRentalDueInternal({
       media,
@@ -2187,10 +2195,13 @@ async function processSingleRentalDue({
       userType,
       userId,
       userName,
+      changeLog,
     });
 
     if (result.success) {
       await media.save({ timestamps: false });
+      // ✅ NEW — rental due history, only after the save succeeded
+      recordRentalDueChanges({ media, entry: result.entryDoc, changes: changeLog, userId, userName, userType });
       if (!skipMail && userType === ROLE.OWNER && result.approvalStatus === 3) {
         const mailRes = await sendRentalDueApprovalMail(media, result.entryDoc);
         result.entryDoc.mailSent = !!mailRes.sent;
@@ -2283,7 +2294,7 @@ async function processSingleRentalDue({
     updatedAt: nowIST(),
   };
 
-  const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
+  const { result: atomicResult, action: atomicAction } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
   if (atomicResult) {
     media.rentalDue = atomicResult.rentalDue;
     const savedEntry = media.rentalDue[media.rentalDue.length - 1];
@@ -2315,6 +2326,17 @@ async function processSingleRentalDue({
     monthBucket.entries.push({ rentalDueId: savedEntry._id, siteName: media.mediaName, campaignName, reason, dueDate: dueDateObj, netPayable: Number(newEntry.netPayable) || 0, approvalStatus: newEntry.approvalStatus, savedBy: userName, savedByRole: userType, updatedAt: nowIST(), updatedBy: userName });
 
     await media.save({ timestamps: false });
+    // ✅ NEW — rental due history: initial values of a newly created bill
+    if (atomicAction === "created") {
+      recordRentalDueChanges({
+        media,
+        entry: savedEntry,
+        changes: collectRentalDueChanges({}, { campaignName, reason, proofOfCampaign, invoice }),
+        userId,
+        userName,
+        userType,
+      });
+    }
 
     // ✅ NEW — CMD notification: a Rental Executive / Manager creating the entry
     // approves their own step at creation
@@ -2464,6 +2486,7 @@ exports.saveRentalDue = async (req, res) => {
         // ✅ NEW — approvals made in this request, notified only after the save below
         const groupCmdApprovals = [];
         const groupChatApprovals = []; // any role — Google Chat
+        const groupHistoryChanges = []; // ✅ NEW — rental due history, recorded after the save
 
         for (const item of group) {
           const index = item.originalIndex;
@@ -2479,6 +2502,7 @@ exports.saveRentalDue = async (req, res) => {
 
           // ✅ NEW — snapshot before processing, to detect an approval made in this request
           const roleStepWasApproved = isRoleStepApproved(findRentalDueEntryById(media, item.rentalDueId), userType);
+          const itemChangeLog = []; // ✅ NEW — rental due history
 
           // Directly process on the loaded document instance
           const processResult = await processSingleRentalDueInternal({
@@ -2495,9 +2519,13 @@ exports.saveRentalDue = async (req, res) => {
             userType,
             userId,
             userName,
+            changeLog: itemChangeLog,
           });
 
           results.push({ ...processResult, originalIndex: index });
+          if (processResult.success && itemChangeLog.length) {
+            groupHistoryChanges.push({ entry: processResult.entryDoc, changes: itemChangeLog });
+          }
           if (processResult.success && processResult.approvalStatus === 3) {
             batchApprovedSites.push({ media, entry: processResult.entryDoc });
           }
@@ -2520,6 +2548,11 @@ exports.saveRentalDue = async (req, res) => {
 
         // Save the document ONCE after all updates for its faces/cycles are done
         await media.save({ timestamps: false });
+
+        // ✅ NEW — rental due history, only after the save succeeded
+        for (const h of groupHistoryChanges) {
+          recordRentalDueChanges({ media, entry: h.entry, changes: h.changes, userId, userName, userType });
+        }
 
         // ✅ NEW — CMD notifications (site-wise) only after a successful save
         for (const approvedEntry of groupCmdApprovals) {
