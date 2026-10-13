@@ -63,10 +63,35 @@ function recordRentalDueChanges({ media, entry, changes, userId, userName, userT
 
 // ─────────────────────────────────────────────────────────────
 // POST /admin/rental-due-history
-// body: { mediaId, pageNumber?, count? } — count = due months per page
+// body: { mediaId, dueMonth?, pageNumber?, count? } — count = due months per page
+// dueMonth: "MM-YYYY" (e.g. "10-2026") or "October 2026" — optional filter.
+// Only real edits are listed: a first-time value (old value empty) is hidden.
 // mediaId: one id (string) or an array of ids. One site → site details at the
 // top (unchanged shape); several sites → each month block carries its site.
 // ─────────────────────────────────────────────────────────────
+// a first-time value (nothing before it) is not shown as an edit
+const isRealEdit = (c) => c && c.oldValue !== null && c.oldValue !== undefined && c.oldValue !== "";
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+// "10-2026" / "10/2026" → "October 2026"; "October 2026" (any case) → "October 2026"
+function toDueMonthLabel(input) {
+  const str = String(input).trim();
+  const numeric = str.match(/^(\d{1,2})[-/](\d{4})$/);
+  if (numeric) {
+    const m = Number(numeric[1]);
+    return m >= 1 && m <= 12 ? `${MONTH_NAMES[m - 1]} ${numeric[2]}` : null;
+  }
+  const named = str.match(/^([A-Za-z]+)\s+(\d{4})$/);
+  if (named) {
+    const idx = MONTH_NAMES.findIndex((n) => n.toLowerCase() === named[1].toLowerCase());
+    return idx >= 0 ? `${MONTH_NAMES[idx]} ${named[2]}` : null;
+  }
+  return null;
+}
+
 const siteInfoOf = (media) => {
   const details = media.mediaDetails || [];
   const activeFaces = details.filter((d) => Number(d.status) === 1);
@@ -92,6 +117,15 @@ const getRentalDueHistory = async (req, res) => {
     }
     const isMulti = mediaObjectIds.length > 1;
 
+    // optional month filter → "October 2026" label (same as rentalDue.dueMonth)
+    let dueMonthLabel = null;
+    if (params.dueMonth !== undefined && params.dueMonth !== null && String(params.dueMonth).trim() !== "") {
+      dueMonthLabel = toDueMonthLabel(params.dueMonth);
+      if (!dueMonthLabel) {
+        return errorResponse(res, "Invalid dueMonth. Use MM-YYYY (e.g. 10-2026)", null, 400);
+      }
+    }
+
     const pageNumber = Math.max(parseInt(params.pageNumber) || 1, 1);
     const count = Math.max(parseInt(params.count) || 10, 1);
 
@@ -103,7 +137,9 @@ const getRentalDueHistory = async (req, res) => {
     // one group per bill (rentalDueId), newest due month first (latest change
     // first when several sites share a month)
     const [grouped] = await RentalDueChangeHistory.aggregate([
-      { $match: { mediaId: { $in: foundIds } } },
+      { $match: { mediaId: { $in: foundIds }, ...(dueMonthLabel ? { dueMonth: dueMonthLabel } : {}) } },
+      // only bills that have at least one real edit (old value not empty)
+      { $match: { changes: { $elemMatch: { oldValue: { $nin: [null, ""] } } } } },
       { $sort: { createdAt: 1 } },
       {
         $group: {
@@ -138,7 +174,7 @@ const getRentalDueHistory = async (req, res) => {
       const updates = records
         .filter((r) => String(r.rentalDueId) === String(g._id))
         .flatMap((r) =>
-          (r.changes || []).map((c) => ({
+          (r.changes || []).filter(isRealEdit).map((c) => ({
             fieldName: c.fieldName,
             oldValue: c.oldValue ?? null,
             newValue: c.newValue ?? null,
