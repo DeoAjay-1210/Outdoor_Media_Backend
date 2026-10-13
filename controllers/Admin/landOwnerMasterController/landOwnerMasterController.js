@@ -3095,7 +3095,7 @@ const cityMatchQuery = city
     const overallLedgerSummary = calculateOverallLedgerSummary(
       summaryDocs,
       parsedMonthFilter ? outstandingMonthYear : null,
-      { includeLandOwnerCounts: true }, // ✅ NEW — adds *LandOwners counts
+      { includeLandOwnerCounts: true, includePastPaidAmounts: true }, // ✅ NEW — *LandOwners counts + past paid / remaining
     );
 
     // ✅ NEW — CMD Approval count (current + all past months up to the applied

@@ -6613,6 +6613,10 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     currentMonthGstAmount: 0,    // ✅ NEW (Target GST)
     pastRentPending: 0,
     pastGstPending: 0,
+    pastRentPaid: 0, // ✅ NEW — past months (and legacy outstanding) already paid
+    pastGstPaid: 0,  // ✅ NEW
+    pastRentTotal: 0, // ✅ NEW — full past rent due (paid + unpaid), nothing deducted
+    pastGstTotal: 0,  // ✅ NEW — full past GST due (paid + unpaid), nothing deducted
     currentMonthOverallDueAmount: 0,
     totalOutstanding: 0,
     hasTotalLedger: false,
@@ -6626,6 +6630,10 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     hasCurrentMonthGstPaid: false,  // ✅ NEW
     hasPastRentPending: false,
     hasPastGstPending: false,
+    hasPastRentPaid: false, // ✅ NEW
+    hasPastGstPaid: false,  // ✅ NEW
+    hasPastRentTotal: false, // ✅ NEW
+    hasPastGstTotal: false,  // ✅ NEW
     hasCurrentMonthOverallDueAmount: false,
     hasTotalOutstanding: false
   };
@@ -6701,6 +6709,12 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         if (isCurrentCycle) {
           result.currentMonthRentalAmount += rentAmount;
           result.currentMonthGstAmount += currentOwnerGst;
+        } else {
+          // ✅ NEW — past rent due (withGst 2 "Direct" GST folded into Rent,
+          // same as pastRentPending / pastRentPaid)
+          const pastDue = rentAmount + (isDirectGst ? currentOwnerGst : 0);
+          result.pastRentTotal += pastDue;
+          if (pastDue > 0) result.hasPastRentTotal = true;
         }
 
         // Find the payment entry to check date and status
@@ -6713,6 +6727,12 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           if (isCurrentCycle) {
             result.currentMonthRentPaid += rentAmount;
             if (rentAmount > 0) result.hasCurrentMonthRentPaid = true;
+          } else {
+            // ✅ NEW — past month paid; mirrors pastRentPending (withGst 2
+            // "Direct" GST is folded into Rent there, so here too)
+            const pastPaid = rentAmount + (isDirectGst ? currentOwnerGst : 0);
+            result.pastRentPaid += pastPaid;
+            if (pastPaid > 0) result.hasPastRentPaid = true;
           }
 
           if (isDirectGst) {
@@ -6762,6 +6782,9 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
 
       if (isCurrentCycle) {
         result.currentMonthGstAmount += expectedGstPerCycle;
+      } else {
+        result.pastGstTotal += expectedGstPerCycle; // ✅ NEW
+        if (expectedGstPerCycle > 0) result.hasPastGstTotal = true;
       }
 
       if (paidAmountForCycle > 0) {
@@ -6771,6 +6794,9 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         if (isCurrentCycle) {
           result.currentMonthGstPaid += paidAmountForCycle;
           if (paidAmountForCycle > 0) result.hasCurrentMonthGstPaid = true;
+        } else {
+          result.pastGstPaid += paidAmountForCycle; // ✅ NEW
+          if (paidAmountForCycle > 0) result.hasPastGstPaid = true;
         }
       }
 
@@ -6794,6 +6820,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
   // 1) GST Outstanding
   (media.rentalPayment?.gstOutstandingHistory || []).forEach((row) => {
     const amt = Number(row.gstOutStandingAmount || 0);
+    result.pastGstTotal += amt; // ✅ NEW — legacy outstanding counts as past
+    if (amt > 0) result.hasPastGstTotal = true;
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
     // Note: Legacy outstanding is excluded from overallDueMonthAmount (Target)
@@ -6805,6 +6833,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     if (isPaid) {
       result.totalLedgerGstAmount += amt;
       if (amt > 0) result.hasTotalGst = true;
+      result.pastGstPaid += amt; // ✅ NEW — legacy outstanding counts as past
+      if (amt > 0) result.hasPastGstPaid = true;
     } else {
       result.totalGstPendingAmount += amt;
       result.pastGstPending += amt;
@@ -6818,6 +6848,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
   // 2) Rental Outstanding
   (media.rentalPayment?.rentalOutstandingHistory || []).forEach((row) => {
     let amt = Number(row.baseRentOutstandingAmount || 0);
+    result.pastRentTotal += amt; // ✅ NEW — legacy outstanding counts as past
+    if (amt > 0) result.hasPastRentTotal = true;
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
     // Note: Legacy outstanding is excluded from overallDueMonthAmount (Target)
@@ -6831,6 +6863,8 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     if (isPaid) {
       result.totalLedgerAmount += amt;
       if (amt > 0) result.hasTotalLedger = true;
+      result.pastRentPaid += amt; // ✅ NEW — legacy outstanding counts as past
+      if (amt > 0) result.hasPastRentPaid = true;
     } else {
       result.totalLedgerPendingAmount += amt;
       result.pastRentPending += amt;
@@ -6878,6 +6912,23 @@ const LAND_OWNER_COUNT_CONDITIONS = [
 
 function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const includeLandOwnerCounts = !!options.includeLandOwnerCounts;
+  // ✅ NEW — options.includePastPaidAmounts: past rent / GST paid + remaining
+  // (remaining = the existing pastRentPending / pastGstPending). Off by default.
+  const includePastPaidAmounts = !!options.includePastPaidAmounts;
+  const pastPaid = {
+    rent: 0,
+    rentSites: new Set(),
+    rentOwners: new Set(),
+    gst: 0,
+    gstSites: new Set(),
+    gstOwners: new Set(),
+    rentTotal: 0,
+    rentTotalSites: new Set(),
+    rentTotalOwners: new Set(),
+    gstTotal: 0,
+    gstTotalSites: new Set(),
+    gstTotalOwners: new Set(),
+  };
   const landOwnerSets = includeLandOwnerCounts
     ? Object.fromEntries(LAND_OWNER_COUNT_CONDITIONS.map(([key]) => [key, new Set()]))
     : null;
@@ -6978,7 +7029,52 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = 
         if (condition(s)) ownerKeys.forEach((k) => landOwnerSets[key].add(k));
       }
     }
+
+    // ✅ NEW — past paid totals (same site / landowner rules as above)
+    if (includePastPaidAmounts) {
+      pastPaid.rent += Number(s.pastRentPaid || 0);
+      addSites(pastPaid.rentSites, s.hasPastRentPaid);
+      pastPaid.gst += Number(s.pastGstPaid || 0);
+      addSites(pastPaid.gstSites, s.hasPastGstPaid);
+      pastPaid.rentTotal += Number(s.pastRentTotal || 0);
+      addSites(pastPaid.rentTotalSites, s.hasPastRentTotal);
+      pastPaid.gstTotal += Number(s.pastGstTotal || 0);
+      addSites(pastPaid.gstTotalSites, s.hasPastGstTotal);
+      if (activeDetails.length > 0) {
+        const ownerKeys = (media.landOwners || []).map((o) =>
+          o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+        );
+        if (s.hasPastRentPaid) ownerKeys.forEach((k) => pastPaid.rentOwners.add(k));
+        if (s.hasPastGstPaid) ownerKeys.forEach((k) => pastPaid.gstOwners.add(k));
+        if (s.hasPastRentTotal) ownerKeys.forEach((k) => pastPaid.rentTotalOwners.add(k));
+        if (s.hasPastGstTotal) ownerKeys.forEach((k) => pastPaid.gstTotalOwners.add(k));
+      }
+    }
   }
+
+  const pastPaidAmounts = includePastPaidAmounts
+    ? {
+        pastRentPaidAmount: Math.floor(pastPaid.rent),
+        pastRentPaidAmountSites: pastPaid.rentSites.size,
+        ...(includeLandOwnerCounts ? { pastRentPaidAmountLandOwners: pastPaid.rentOwners.size } : {}),
+        pastRentRemainingAmount: Math.floor(summary.pastRentPending),
+        pastRentRemainingAmountSites: summary.pastRentPendingSites.size,
+        ...(includeLandOwnerCounts ? { pastRentRemainingAmountLandOwners: landOwnerSets.pastRentPending.size } : {}),
+        pastGstPaidAmount: Math.floor(pastPaid.gst),
+        pastGstPaidAmountSites: pastPaid.gstSites.size,
+        ...(includeLandOwnerCounts ? { pastGstPaidAmountLandOwners: pastPaid.gstOwners.size } : {}),
+        pastGstRemainingAmount: Math.floor(summary.pastGstPending),
+        pastGstRemainingAmountSites: summary.pastGstPendingSites.size,
+        ...(includeLandOwnerCounts ? { pastGstRemainingAmountLandOwners: landOwnerSets.pastGstPending.size } : {}),
+        // full past amount, nothing deducted for payments
+        newOverAllPastRentAmount: Math.floor(pastPaid.rentTotal),
+        newOverAllPastRentAmountSites: pastPaid.rentTotalSites.size,
+        ...(includeLandOwnerCounts ? { newOverAllPastRentAmountLandOwners: pastPaid.rentTotalOwners.size } : {}),
+        newOverAllPastGstAmount: Math.floor(pastPaid.gstTotal),
+        newOverAllPastGstAmountSites: pastPaid.gstTotalSites.size,
+        ...(includeLandOwnerCounts ? { newOverAllPastGstAmountLandOwners: pastPaid.gstTotalOwners.size } : {}),
+      }
+    : {};
 
   const landOwnerCounts = includeLandOwnerCounts
     ? Object.fromEntries(Object.entries(landOwnerSets).map(([key, set]) => [`${key}LandOwners`, set.size]))
@@ -7017,6 +7113,7 @@ function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = 
     totalOutstanding: Math.floor(summary.totalOutstanding),
     totalOutstandingSites: summary.totalOutstandingSites.size,
     ...landOwnerCounts,
+    ...pastPaidAmounts,
   };
 }
 exports.computeOutstandingSummary = computeOutstandingSummary;
