@@ -979,6 +979,29 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         return d.toISOString().split("T")[0];
       };
 
+      // ✅ NEW — billing dates of the APPROVED BILL's own cycle (due-month
+      // based), not the site's latest cycle: Sep bill → last 10.08,
+      // current 10.09, next 10.10. Falls back to the site's stored dates
+      // only when the bill has no due date.
+      const billCycleDates = (site, siteEntry) => {
+        const rp = site?.rentalPayment || {};
+        const due = siteEntry?.dueDate ? new Date(siteEntry.dueDate) : null;
+        if (!due || isNaN(due.getTime())) {
+          return {
+            lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+            currentBillPaidDate: null,
+            nextBillingDate: formatYMD(rp.nextBillingDate),
+          };
+        }
+        const freq = Number(rp.paymentFrequency || 1);
+        const cycleMonths = freq === 6 ? Number(rp.customPaymentFrequency) || 1 : FREQUENCY_MONTHS_MAP[freq] || 1;
+        return {
+          lastBillPaidDate: formatYMD(addMonthsUTC(due, -cycleMonths)),
+          currentBillPaidDate: formatYMD(due),
+          nextBillingDate: formatYMD(addMonthsUTC(due, cycleMonths)),
+        };
+      };
+
       const parseEmailList = (mailStr) => {
         if (!mailStr) return [];
         if (Array.isArray(mailStr)) {
@@ -994,6 +1017,20 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
         ? batchSites
         : [{ media, entry }];
+
+      // ✅ FIXED — the same bill approved twice in one batch (same rentalDueId
+      // sent twice in entries[]) was listed twice in sites[]. One row per bill.
+      {
+        const seenBills = new Set();
+        sitesInGroupData = sitesInGroupData.filter((item) => {
+          const key = item?.entry?._id
+            ? String(item.entry._id)
+            : `${String(item?.media?._id)}_${String(item?.entry?.mediaDetailId || "")}_${item?.entry?.dueMonth || ""}`;
+          if (seenBills.has(key)) return false;
+          seenBills.add(key);
+          return true;
+        });
+      }
 
       // ✅ FIXED — price each site as of its due entry's month, so a cycle
       // before an appraisal (e.g. Sep when appraisal starts Oct) mails the
@@ -1027,6 +1064,17 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
             ? String(siteEntry.dueMonth).toLowerCase()
             : "";
 
+          // ✅ FIXED — the appraisal belongs ONLY to the bill whose billing
+          // period contains the appraisal month (monthly → that same month;
+          // quarterly → the 3 months ending with the due month, etc.).
+          // Previously any appraisal dated on/before the bill matched, so a
+          // Sep appraisal was mailed again with Oct, Nov, ... bills.
+          const entryCycleMonths = (() => {
+            const f = Number(siteEntry?.paymentFrequency || 1);
+            return f === 6 ? Number(siteEntry?.customPaymentFrequency) || 1 : FREQUENCY_MONTHS_MAP[f] || 1;
+          })();
+          const entryMonthIndex = entryYear * 12 + entryMonth;
+
           const checkDateMatch = (dateInput) => {
             if (!dateInput) return false;
             const d = new Date(dateInput);
@@ -1034,7 +1082,8 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
             if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) {
               return true;
             }
-            if (d <= entryDate) {
+            const appraisalMonthIndex = d.getFullYear() * 12 + d.getMonth();
+            if (appraisalMonthIndex <= entryMonthIndex && appraisalMonthIndex > entryMonthIndex - entryCycleMonths) {
               return true;
             }
             if (entryMonthLabel) {
@@ -1267,8 +1316,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       };
 
       rentalPaymentObj.paymentFrequency = Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1);
-      rentalPaymentObj.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
-      rentalPaymentObj.nextBillingDate = formatYMD(rp.nextBillingDate);
+      Object.assign(rentalPaymentObj, billCycleDates(site, siteEntry));
 
       const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
 
@@ -1412,8 +1460,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
           gstInvoiceUrl: rootGstInvoiceUrl,
           netPayableAmount: totalNetPayableSum || (totalRentalSum + totalGstSum),
           paymentFrequency: Number(sitesInGroupData[0]?.entry?.paymentFrequency || firstSite.rentalPayment?.paymentFrequency || 1),
-          lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
-          nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
+          ...billCycleDates(firstSite, sitesInGroupData[0]?.entry),
         };
 
         const sitesPayload = sitesInGroupData.map((item) => {
@@ -1473,11 +1520,15 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
               siteRentalPayment.gstInvoiceUrl = siteGstInvoiceUrlVal;
             }
 
-            if (rp.lastBillPaidDate) {
-              siteRentalPayment.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
+            const siteCycleDates = billCycleDates(site, siteEntry);
+            if (siteCycleDates.lastBillPaidDate) {
+              siteRentalPayment.lastBillPaidDate = siteCycleDates.lastBillPaidDate;
             }
-            if (rp.nextBillingDate) {
-              siteRentalPayment.nextBillingDate = formatYMD(rp.nextBillingDate);
+            if (siteCycleDates.currentBillPaidDate) {
+              siteRentalPayment.currentBillPaidDate = siteCycleDates.currentBillPaidDate;
+            }
+            if (siteCycleDates.nextBillingDate) {
+              siteRentalPayment.nextBillingDate = siteCycleDates.nextBillingDate;
             }
 
             siteObj.rentalPayment = siteRentalPayment;
