@@ -8,6 +8,7 @@ const {
   dedupeGstBalanceHistory,
   getOwnerWiseOutstanding,
   calculateOverallLedgerSummary,
+  calculateNewOverallLedgerSummary, // ✅ NEW
   getOverallSummaryForCycle,
   ensureRentalDueForCycles,
 isOwnerModePaidForCycle,
@@ -3172,6 +3173,11 @@ const cityMatchQuery = city
         // ledger APIs' summary block
         ...overallOutstandingTotals,
         overallLedgerSummary,
+        // ✅ NEW — pure rent / pure GST (Total / Paid / Remaining), current + past
+        newOverallLedgerSummary: calculateNewOverallLedgerSummary(
+          summaryDocs,
+          parsedMonthFilter ? outstandingMonthYear : null,
+        ),
         // ✅ NEW: Rental Due Stats
         dueThisMonth: {
           siteCount: rentalDueStats.dueThisMonthCount,
