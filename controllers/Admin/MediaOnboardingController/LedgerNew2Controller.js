@@ -6848,12 +6848,6 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     const amt = Number(row.gstOutStandingAmount || 0);
     result.pastGstTotal += amt; // ✅ NEW — legacy outstanding counts as past
     if (amt > 0) result.hasPastGstTotal = true;
-    {
-      const legacyGstPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
-      result.splitPastGstTotal += amt; // ✅ NEW
-      if (legacyGstPaid) result.splitPastGstPaid += amt;
-      else result.splitPastGstRemaining += amt;
-    }
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
     // Note: Legacy outstanding is excluded from overallDueMonthAmount (Target)
@@ -6882,12 +6876,6 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     let amt = Number(row.baseRentOutstandingAmount || 0);
     result.pastRentTotal += amt; // ✅ NEW — legacy outstanding counts as past
     if (amt > 0) result.hasPastRentTotal = true;
-    {
-      const legacyRentPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
-      result.splitPastRentTotal += amt; // ✅ NEW
-      if (legacyRentPaid) result.splitPastRentPaid += amt;
-      else result.splitPastRentRemaining += amt;
-    }
     const isPaid = row.isPaid || (row.utrNumber && row.utrNumber.trim() !== "");
 
     // Note: Legacy outstanding is excluded from overallDueMonthAmount (Target)
@@ -6958,7 +6946,39 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     pastRentTotal: 0, pastRentPaid: 0, pastRentRemaining: 0,
     pastGstTotal: 0, pastGstPaid: 0, pastGstRemaining: 0,
   };
+  // pre-onboarding (legacy) outstanding rows, placed by their OWN dueMonth:
+  // before the requested month → past, same month → current, later → not
+  // counted yet. No requested month → all past. Counted even when the site has
+  // no billing cycle up to the requested month yet.
+  const targetIndex = requestedMonthYear ? requestedMonthYear.year * 12 + (requestedMonthYear.month - 1) : null;
+  const legacyBucket = (dueMonthLabel) => {
+    if (targetIndex === null) return "past";
+    const parts = String(dueMonthLabel || "").trim().split(/\s+/);
+    const mIdx = MONTH_NAMES_FOR_CYCLES.findIndex((m) => m.toLowerCase() === String(parts[0] || "").toLowerCase());
+    const year = Number(parts[1]);
+    if (mIdx < 0 || !year) return "past";
+    const idx = year * 12 + mIdx;
+    if (idx < targetIndex) return "past";
+    if (idx === targetIndex) return "cur";
+    return null;
+  };
+  const addLegacy = (kind, rows, amountKey) => {
+    (rows || []).forEach((row) => {
+      const amt = Number(row[amountKey] || 0);
+      if (amt <= 0) return;
+      const bucket = legacyBucket(row.dueMonth);
+      if (!bucket) return;
+      const paid = row.isPaid || (row.utrNumber && String(row.utrNumber).trim() !== "");
+      t[`${bucket}${kind}Total`] += amt;
+      t[`${bucket}${kind}${paid ? "Paid" : "Remaining"}`] += amt;
+    });
+  };
+
   for (const media of mediaDocs || []) {
+    if ((media.mediaDetails || []).some((d) => d.status === 1)) {
+      addLegacy("Rent", media.rentalPayment?.rentalOutstandingHistory, "baseRentOutstandingAmount");
+      addLegacy("Gst", media.rentalPayment?.gstOutstandingHistory, "gstOutStandingAmount");
+    }
     const s = getOverallSummaryForCycle(media, requestedMonthYear);
     t.curRentTotal += s.splitCurRentTotal; t.curRentPaid += s.splitCurRentPaid; t.curRentRemaining += s.splitCurRentRemaining;
     t.curGstTotal += s.splitCurGstTotal; t.curGstPaid += s.splitCurGstPaid; t.curGstRemaining += s.splitCurGstRemaining;

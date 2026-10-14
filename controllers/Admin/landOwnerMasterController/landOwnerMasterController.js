@@ -3173,10 +3173,14 @@ const cityMatchQuery = city
         // ledger APIs' summary block
         ...overallOutstandingTotals,
         overallLedgerSummary,
-        // ✅ NEW — pure rent / pure GST (Total / Paid / Remaining), current + past
+        // ✅ NEW — pure rent / pure GST (Total / Paid / Remaining), current + past.
+        // Optional req.body.dueMonth ("MM-YYYY") changes ONLY this object's
+        // month (that month = current, earlier months = past); everything
+        // else in the response still follows monthFilter.
         newOverallLedgerSummary: calculateNewOverallLedgerSummary(
           summaryDocs,
-          parsedMonthFilter ? outstandingMonthYear : null,
+          parseSiteFilterMonthParam(typeof req.body?.dueMonth === "string" ? req.body.dueMonth.trim() : "") ||
+            (parsedMonthFilter ? outstandingMonthYear : null),
         ),
         // ✅ NEW: Rental Due Stats
         dueThisMonth: {
