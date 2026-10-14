@@ -102,6 +102,18 @@ const snapshotDates = (rp) => ({
   billingStartDate: rp?.billingStartDate || null,
 });
 
+// requestId, or a notificationId of that request (from the notification
+// list) → the request's _id. Unknown ids are returned as-is (→ 404 later).
+async function resolveRevertRequestId(id) {
+  const objectId = toObjectId(id);
+  if (!objectId) return null;
+  if (await BillingDateRevertRequest.exists({ _id: objectId })) return objectId;
+  const byRequest = await BillingDateRevertRequest.findOne({ notificationId: objectId }).select("_id").lean();
+  if (byRequest) return byRequest._id;
+  const notification = await CmdNotification.findById(objectId).select("billingDateRevertRequestId").lean();
+  return notification?.billingDateRevertRequestId || objectId;
+}
+
 // ── read / unread (per user) ──
 // CMD → pending requests are unread until read.
 // Executive / Manager → CMD's decision (approved / rejected) is unread until read.
@@ -582,7 +594,7 @@ exports.approveBillingDateRevertRequest = async (req, res) => {
     }
 
     const { requestId, remark } = req.body || {};
-    const requestObjectId = toObjectId(requestId);
+    const requestObjectId = await resolveRevertRequestId(requestId);
     if (!requestObjectId) return errorResponse(res, "A valid requestId is required", null, 400);
 
     const request = await BillingDateRevertRequest.findById(requestObjectId).lean();
@@ -671,7 +683,8 @@ exports.approveBillingDateRevertRequest = async (req, res) => {
     claimed.appliedDates = appliedDates;
     claimed.removedBills = removedBills;
     await BillingDateRevertRequest.updateOne({ _id: requestObjectId }, { $set: { appliedDates, removedBills } });
-    await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.APPROVED);
+    // + "CMD approved" notification for the Executive and the Manager
+    await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.APPROVED, claimed.toObject());
     notifyBillingDateRevertChat({ request: claimed, event: "approved" });
 
     return successResponse(res, "Billing date revert approved and site billing dates updated", formatRequest(claimed.toObject()));
@@ -693,7 +706,7 @@ exports.rejectBillingDateRevertRequest = async (req, res) => {
     }
 
     const { requestId, remark } = req.body || {};
-    const requestObjectId = toObjectId(requestId);
+    const requestObjectId = await resolveRevertRequestId(requestId);
     if (!requestObjectId) return errorResponse(res, "A valid requestId is required", null, 400);
 
     const remarkText = typeof remark === "string" ? remark.trim() : "";
@@ -724,7 +737,8 @@ exports.rejectBillingDateRevertRequest = async (req, res) => {
       );
     }
 
-    await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.REJECTED);
+    // + "CMD rejected" notification for the Executive and the Manager
+    await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.REJECTED, updated);
     notifyBillingDateRevertChat({ request: updated, event: "rejected" });
     return successResponse(res, "Billing date revert request rejected", formatRequest(updated));
   } catch (error) {
@@ -816,15 +830,22 @@ exports.markBillingDateRevertRead = async (req, res) => {
       return errorResponse(res, "You are not allowed to update billing date revert requests", null, 403);
     }
 
-    const { requestId, requestIds } = req.body || {};
-    const ids = (Array.isArray(requestIds) ? requestIds : [requestId]).map(toObjectId).filter(Boolean);
+    // requestId(s) or the request's notificationId(s) — body or query
+    const params = { ...(req.query || {}), ...(req.body || {}) };
+    const toList = (many, one) => (Array.isArray(many) ? many : many ? [many] : [one]);
+    const ids = [
+      ...toList(params.requestIds, params.requestId),
+      ...toList(params.notificationIds, params.notificationId),
+    ]
+      .map(toObjectId)
+      .filter(Boolean);
     if (ids.length === 0) {
       return errorResponse(res, "A valid requestId or requestIds[] is required", null, 400);
     }
 
     const userObjectId = toObjectId(req.user?.userId);
     const result = await BillingDateRevertRequest.updateMany(
-      { _id: { $in: ids }, "readBy.userId": { $ne: userObjectId } },
+      { $or: [{ _id: { $in: ids } }, { notificationId: { $in: ids } }], "readBy.userId": { $ne: userObjectId } },
       { $push: { readBy: { userId: userObjectId, role, readAt: nowIST() } } },
     );
     const counts = await getUnreadCounts(role, userObjectId);

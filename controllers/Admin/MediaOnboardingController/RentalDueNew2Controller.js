@@ -21,7 +21,10 @@ const {
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
-const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
+const {
+  createRentalApprovalNotification,
+  createOverdueRemarkNotification,
+} = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
 const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 
@@ -30,6 +33,8 @@ const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDue
 // step moves to status 2 in THIS request (a save while it is not their turn
 // only updates fields and must not notify).
 const isRentalApproverRole = (userType) => userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
+// ✅ NEW — roles whose approval sends a notification (CMD approval → Executive + Manager)
+const isApprovalNotifyRole = (userType) => isRentalApproverRole(userType) || userType === ROLE.OWNER;
 const isRoleStepApproved = (entry, role) =>
   !!(entry?.approvalSteps || []).find((s) => s.role === role && s.status === 2);
 const findRentalDueEntryById = (media, rentalDueId) =>
@@ -2259,7 +2264,7 @@ async function processSingleRentalDue({
         await media.save({ timestamps: false });
       }
       // ✅ NEW — CMD notification after a saved Rental Executive / Manager approval
-      if (isRentalApproverRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+      if (isApprovalNotifyRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
         await createRentalApprovalNotification({ media, entry: result.entryDoc, userType, userId, userName });
       }
       // ✅ NEW — Google Chat message for an approval made in this request (any role)
@@ -2391,7 +2396,7 @@ async function processSingleRentalDue({
 
     // ✅ NEW — CMD notification: a Rental Executive / Manager creating the entry
     // approves their own step at creation
-    if (isRentalApproverRole(userType)) {
+    if (isApprovalNotifyRole(userType)) {
       await createRentalApprovalNotification({ media, entry: savedEntry, userType, userId, userName });
     }
     // ✅ NEW — Google Chat message: the creator's own step is approved at creation
@@ -2582,7 +2587,7 @@ exports.saveRentalDue = async (req, res) => {
           }
           if (
             processResult.success &&
-            isRentalApproverRole(userType) &&
+            isApprovalNotifyRole(userType) &&
             !roleStepWasApproved &&
             isRoleStepApproved(processResult.entryDoc, userType)
           ) {
@@ -3851,6 +3856,18 @@ roleName: ROLE_LABEL[userTypeNum] || "User",
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
         remark: trimmedRemarks,
         userType: Number(req.user?.userType),
+        userName,
+      });
+
+      // ✅ NEW — Rental Executive's remark → notification for Manager + CMD (read only)
+      await createOverdueRemarkNotification({
+        media,
+        dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
+        rentalDueId: targetEntry ? targetEntry._id : rId,
+        mediaDetailId: newRemark.mediaDetailId,
+        remark: trimmedRemarks,
+        userType: Number(req.user?.userType),
+        userId: req.user?.userId,
         userName,
       });
     }
