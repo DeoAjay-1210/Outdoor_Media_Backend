@@ -547,12 +547,98 @@ const getRentalDetailsV2 = async (req, res) => {
     if (parsed.error) return errorResponse(res, parsed.error, null, 400);
     const docs = await MediaOnboarding.find({ "mediaDetails.status": 1 }).lean();
     // remarks are stored per rental due in OverDueHistory (same source as Rental Master) — one batched query
-    const remarksByDue = new Map();
-    const hist = await OverDueHistory.find({ mediaId: { $in: docs.map((d) => d._id) } }, "rentalDueId remarks overDueRemarks").lean();
-    for (const h of hist) {
-      const items = [{ text: h.remarks }, ...(h.overDueRemarks || []).map((r) => ({ text: r.remarks, by: r.addedBy, at: r.addedAt }))].filter((t) => t.text && String(t.text).trim());
-      if (h.rentalDueId && items.length) remarksByDue.set(String(h.rentalDueId), items[items.length - 1]);
+    const users = await UserModel.find({}, "userName userType").lean();
+    const roleNumByName = new Map();
+    const roleNameByName = new Map();
+    for (const u of users) {
+      const name = String(u.userName || "").trim().toLowerCase();
+      const uType = Number(u.userType);
+      roleNumByName.set(name, uType);
+      roleNameByName.set(name, X.ROLE_LABEL[uType] || "User");
     }
+
+    const resolveRoleInfo = (userName, storedRole) => {
+      let rNum = Number(storedRole) || null;
+      if (!rNum && userName) {
+        const lower = String(userName).trim().toLowerCase();
+        rNum = roleNumByName.get(lower) || null;
+        if (!rNum) {
+          if (lower.includes("cmd") || lower.includes("owner")) rNum = 3;
+          else if (lower.includes("manager") || lower.includes("team lead")) rNum = 2;
+          else if (lower.includes("executive") || lower.includes("staff")) rNum = 1;
+        }
+      }
+      const rName = X.ROLE_LABEL[rNum] || (userName ? roleNameByName.get(String(userName).trim().toLowerCase()) : "") || "User";
+      return { role: rNum, roleName: rName };
+    };
+
+    const remarksByDue = new Map();
+    const hist = await OverDueHistory.find(
+      { mediaId: { $in: docs.map((d) => d._id) } },
+      "mediaId rentalDueId dueMonth remarks overDueRemarks updatedAt createdAt"
+    ).lean();
+
+    for (const h of hist) {
+      const rawList = [];
+      if (Array.isArray(h.overDueRemarks) && h.overDueRemarks.length > 0) {
+        for (const r of h.overDueRemarks) {
+          if (!r.remarks || !String(r.remarks).trim()) continue;
+          const { role, roleName } = resolveRoleInfo(r.addedBy, r.role || r.userType);
+          rawList.push({
+            id: String(r._id || ""),
+            text: String(r.remarks).trim(),
+            by: r.addedBy || "",
+            at: r.addedAt || null,
+            role,
+            roleName,
+          });
+        }
+      } else if (h.remarks && String(h.remarks).trim()) {
+        const { role, roleName } = resolveRoleInfo(
+          h.updatedBy || h.staffApprovedBy || h.teamLeadApprovedBy || h.ownerApprovedBy,
+          null
+        );
+        rawList.push({
+          id: String(h._id || ""),
+          text: String(h.remarks).trim(),
+          by: h.updatedBy || "",
+          at: h.updatedAt || h.createdAt || null,
+          role,
+          roleName,
+        });
+      }
+
+      if (rawList.length === 0) continue;
+
+      const keys = [];
+      if (h.rentalDueId) keys.push(String(h.rentalDueId));
+      if (h.mediaId && h.dueMonth) keys.push(`${h.mediaId}_${h.dueMonth}`);
+
+      for (const key of keys) {
+        const existing = remarksByDue.get(key) || [];
+        remarksByDue.set(key, [...existing, ...rawList]);
+      }
+    }
+
+    // Deduplicate and sort newest-first (latest on top, oldest at bottom)
+    for (const [key, list] of remarksByDue.entries()) {
+      const seen = new Set();
+      const deduped = [];
+      for (const item of list) {
+        const sig = `${item.text}_${item.by}_${item.at ? new Date(item.at).getTime() : ""}`;
+        if (!seen.has(sig)) {
+          seen.add(sig);
+          deduped.push(item);
+        }
+      }
+      deduped.sort((a, b) => {
+        const timeA = a.at ? new Date(a.at).getTime() : 0;
+        const timeB = b.at ? new Date(b.at).getTime() : 0;
+        return timeB - timeA;
+      });
+      remarksByDue.set(key, deduped);
+    }
+
     const rows = X.buildRentalRows(docs, parsed.range, parsed.filters, remarksByDue);
     const { search, sortBy, sortDir, page, limit } = req.body || {};
     const out = X.searchSortPage(rows, { search, sortBy, sortDir, page, limit });

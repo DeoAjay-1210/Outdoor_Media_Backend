@@ -711,9 +711,9 @@ const downloadRentalOOHExcel = async (req, res) => {
     const periodLabel = monthLabels.length > 1 ? `${startMonth} - ${endMonth}` : startMonth;
 
     const colHeaders = [
-      "📅 Month", "🆔 Media Code", "📝 Media Name", "🏗️ Media Type", "🗺️ State", "🏙️ City", "🧭 District / Town",
-      "👥 Total Landowners", "👤 Landowner Name", "📌 GST Applicable", "🧮 TDS Applicable",
-      "🏠 Total Rental Amount (₹)", "💰 GST Amount (₹)", "🧾 Total Amount (₹)"
+      "Month", "Media Code", "Media Name", "Media Type", "State", "City", "District / Town",
+      "Total Landowners", "Landowner Name", "GST Applicable", "TDS Applicable",
+      "Total Rental Amount (₹)", "GST Amount (₹)", "Total Amount (₹)"
     ];
     const NOTE_TEXT = "Note: The TDS Amount is included in the Total Rental Amount. Green amounts are paid (ledger entry made); red amounts are not paid.";
     const noteRowIdx = 2;

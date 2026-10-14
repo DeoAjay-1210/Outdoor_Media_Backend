@@ -35,4 +35,8 @@ router.post("/landowner/site-filter", protect, landOwnerSiteFilter);
 // ✅ NEW — permanently delete a landowner (body: { landOwnerMasterId })
 router.post("/landowner/delete", protect, landOwnerDelete);
 
+// ✅ NEW — landowner Excel: GET /admin/landowner/download-excel?landOwnerMasterId=&search=
+const { downloadLandOwnerExcel } = require("../../../controllers/Admin/landOwnerMasterController/LandOwnerExcelController");
+router.get("/landowner/download-excel", protect, downloadLandOwnerExcel);
+
 module.exports = router;

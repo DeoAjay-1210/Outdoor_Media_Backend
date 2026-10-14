@@ -23,6 +23,7 @@ const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("..
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
 const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
+const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -978,6 +979,29 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         return d.toISOString().split("T")[0];
       };
 
+      // ✅ NEW — billing dates of the APPROVED BILL's own cycle (due-month
+      // based), not the site's latest cycle: Sep bill → last 10.08,
+      // current 10.09, next 10.10. Falls back to the site's stored dates
+      // only when the bill has no due date.
+      const billCycleDates = (site, siteEntry) => {
+        const rp = site?.rentalPayment || {};
+        const due = siteEntry?.dueDate ? new Date(siteEntry.dueDate) : null;
+        if (!due || isNaN(due.getTime())) {
+          return {
+            lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+            currentBillPaidDate: null,
+            nextBillingDate: formatYMD(rp.nextBillingDate),
+          };
+        }
+        const freq = Number(rp.paymentFrequency || 1);
+        const cycleMonths = freq === 6 ? Number(rp.customPaymentFrequency) || 1 : FREQUENCY_MONTHS_MAP[freq] || 1;
+        return {
+          lastBillPaidDate: formatYMD(addMonthsUTC(due, -cycleMonths)),
+          currentBillPaidDate: formatYMD(due),
+          nextBillingDate: formatYMD(addMonthsUTC(due, cycleMonths)),
+        };
+      };
+
       const parseEmailList = (mailStr) => {
         if (!mailStr) return [];
         if (Array.isArray(mailStr)) {
@@ -993,6 +1017,20 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       let sitesInGroupData = (Array.isArray(batchSites) && batchSites.length > 0)
         ? batchSites
         : [{ media, entry }];
+
+      // ✅ FIXED — the same bill approved twice in one batch (same rentalDueId
+      // sent twice in entries[]) was listed twice in sites[]. One row per bill.
+      {
+        const seenBills = new Set();
+        sitesInGroupData = sitesInGroupData.filter((item) => {
+          const key = item?.entry?._id
+            ? String(item.entry._id)
+            : `${String(item?.media?._id)}_${String(item?.entry?.mediaDetailId || "")}_${item?.entry?.dueMonth || ""}`;
+          if (seenBills.has(key)) return false;
+          seenBills.add(key);
+          return true;
+        });
+      }
 
       // ✅ FIXED — price each site as of its due entry's month, so a cycle
       // before an appraisal (e.g. Sep when appraisal starts Oct) mails the
@@ -1026,6 +1064,17 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
             ? String(siteEntry.dueMonth).toLowerCase()
             : "";
 
+          // ✅ FIXED — the appraisal belongs ONLY to the bill whose billing
+          // period contains the appraisal month (monthly → that same month;
+          // quarterly → the 3 months ending with the due month, etc.).
+          // Previously any appraisal dated on/before the bill matched, so a
+          // Sep appraisal was mailed again with Oct, Nov, ... bills.
+          const entryCycleMonths = (() => {
+            const f = Number(siteEntry?.paymentFrequency || 1);
+            return f === 6 ? Number(siteEntry?.customPaymentFrequency) || 1 : FREQUENCY_MONTHS_MAP[f] || 1;
+          })();
+          const entryMonthIndex = entryYear * 12 + entryMonth;
+
           const checkDateMatch = (dateInput) => {
             if (!dateInput) return false;
             const d = new Date(dateInput);
@@ -1033,7 +1082,8 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
             if (d.getFullYear() === entryYear && d.getMonth() === entryMonth) {
               return true;
             }
-            if (d <= entryDate) {
+            const appraisalMonthIndex = d.getFullYear() * 12 + d.getMonth();
+            if (appraisalMonthIndex <= entryMonthIndex && appraisalMonthIndex > entryMonthIndex - entryCycleMonths) {
               return true;
             }
             if (entryMonthLabel) {
@@ -1266,8 +1316,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       };
 
       rentalPaymentObj.paymentFrequency = Number(siteEntry?.paymentFrequency || rp.paymentFrequency || 1);
-      rentalPaymentObj.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
-      rentalPaymentObj.nextBillingDate = formatYMD(rp.nextBillingDate);
+      Object.assign(rentalPaymentObj, billCycleDates(site, siteEntry));
 
       const landOwnersList = (site.landOwners || []).map((o) => buildLandOwnerObject(o, siteEntry));
 
@@ -1411,8 +1460,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
           gstInvoiceUrl: rootGstInvoiceUrl,
           netPayableAmount: totalNetPayableSum || (totalRentalSum + totalGstSum),
           paymentFrequency: Number(sitesInGroupData[0]?.entry?.paymentFrequency || firstSite.rentalPayment?.paymentFrequency || 1),
-          lastBillPaidDate: formatYMD(firstSite.rentalPayment?.lastBillPaidDate),
-          nextBillingDate: formatYMD(firstSite.rentalPayment?.nextBillingDate),
+          ...billCycleDates(firstSite, sitesInGroupData[0]?.entry),
         };
 
         const sitesPayload = sitesInGroupData.map((item) => {
@@ -1472,11 +1520,15 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
               siteRentalPayment.gstInvoiceUrl = siteGstInvoiceUrlVal;
             }
 
-            if (rp.lastBillPaidDate) {
-              siteRentalPayment.lastBillPaidDate = formatYMD(rp.lastBillPaidDate);
+            const siteCycleDates = billCycleDates(site, siteEntry);
+            if (siteCycleDates.lastBillPaidDate) {
+              siteRentalPayment.lastBillPaidDate = siteCycleDates.lastBillPaidDate;
             }
-            if (rp.nextBillingDate) {
-              siteRentalPayment.nextBillingDate = formatYMD(rp.nextBillingDate);
+            if (siteCycleDates.currentBillPaidDate) {
+              siteRentalPayment.currentBillPaidDate = siteCycleDates.currentBillPaidDate;
+            }
+            if (siteCycleDates.nextBillingDate) {
+              siteRentalPayment.nextBillingDate = siteCycleDates.nextBillingDate;
             }
 
             siteObj.rentalPayment = siteRentalPayment;
@@ -1924,6 +1976,7 @@ async function processSingleRentalDueInternal({
   userType,
   userId,
   userName,
+  changeLog, // ✅ NEW — optional array; receives campaignName/reason/proof/invoice changes
 }) {
   const mediaId = media._id;
 
@@ -1951,6 +2004,11 @@ async function processSingleRentalDueInternal({
       mediaId,
       message: `It's not your turn to approve. Waiting on ${ROLE_LABEL[entry.currentPendingRole] || "N/A"}`,
     };
+  }
+
+  // ✅ NEW — capture old → new BEFORE the values are applied (rental due history)
+  if (Array.isArray(changeLog)) {
+    changeLog.push(...collectRentalDueChanges(entry, { campaignName, reason, proofOfCampaign, invoice }));
   }
 
   if (campaignName) entry.campaignName = campaignName;
@@ -2172,6 +2230,7 @@ async function processSingleRentalDue({
   if (rentalDueId) {
     // ✅ NEW — snapshot before processing, to detect an approval made in this request
     const roleStepWasApproved = isRoleStepApproved(findRentalDueEntryById(media, rentalDueId), userType);
+    const changeLog = []; // ✅ NEW — rental due history
 
     const result = await processSingleRentalDueInternal({
       media,
@@ -2187,10 +2246,13 @@ async function processSingleRentalDue({
       userType,
       userId,
       userName,
+      changeLog,
     });
 
     if (result.success) {
       await media.save({ timestamps: false });
+      // ✅ NEW — rental due history, only after the save succeeded
+      recordRentalDueChanges({ media, entry: result.entryDoc, changes: changeLog, userId, userName, userType });
       if (!skipMail && userType === ROLE.OWNER && result.approvalStatus === 3) {
         const mailRes = await sendRentalDueApprovalMail(media, result.entryDoc);
         result.entryDoc.mailSent = !!mailRes.sent;
@@ -2283,7 +2345,7 @@ async function processSingleRentalDue({
     updatedAt: nowIST(),
   };
 
-  const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
+  const { result: atomicResult, action: atomicAction } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
   if (atomicResult) {
     media.rentalDue = atomicResult.rentalDue;
     const savedEntry = media.rentalDue[media.rentalDue.length - 1];
@@ -2315,6 +2377,17 @@ async function processSingleRentalDue({
     monthBucket.entries.push({ rentalDueId: savedEntry._id, siteName: media.mediaName, campaignName, reason, dueDate: dueDateObj, netPayable: Number(newEntry.netPayable) || 0, approvalStatus: newEntry.approvalStatus, savedBy: userName, savedByRole: userType, updatedAt: nowIST(), updatedBy: userName });
 
     await media.save({ timestamps: false });
+    // ✅ NEW — rental due history: initial values of a newly created bill
+    if (atomicAction === "created") {
+      recordRentalDueChanges({
+        media,
+        entry: savedEntry,
+        changes: collectRentalDueChanges({}, { campaignName, reason, proofOfCampaign, invoice }),
+        userId,
+        userName,
+        userType,
+      });
+    }
 
     // ✅ NEW — CMD notification: a Rental Executive / Manager creating the entry
     // approves their own step at creation
@@ -2464,6 +2537,7 @@ exports.saveRentalDue = async (req, res) => {
         // ✅ NEW — approvals made in this request, notified only after the save below
         const groupCmdApprovals = [];
         const groupChatApprovals = []; // any role — Google Chat
+        const groupHistoryChanges = []; // ✅ NEW — rental due history, recorded after the save
 
         for (const item of group) {
           const index = item.originalIndex;
@@ -2479,6 +2553,7 @@ exports.saveRentalDue = async (req, res) => {
 
           // ✅ NEW — snapshot before processing, to detect an approval made in this request
           const roleStepWasApproved = isRoleStepApproved(findRentalDueEntryById(media, item.rentalDueId), userType);
+          const itemChangeLog = []; // ✅ NEW — rental due history
 
           // Directly process on the loaded document instance
           const processResult = await processSingleRentalDueInternal({
@@ -2495,9 +2570,13 @@ exports.saveRentalDue = async (req, res) => {
             userType,
             userId,
             userName,
+            changeLog: itemChangeLog,
           });
 
           results.push({ ...processResult, originalIndex: index });
+          if (processResult.success && itemChangeLog.length) {
+            groupHistoryChanges.push({ entry: processResult.entryDoc, changes: itemChangeLog });
+          }
           if (processResult.success && processResult.approvalStatus === 3) {
             batchApprovedSites.push({ media, entry: processResult.entryDoc });
           }
@@ -2520,6 +2599,11 @@ exports.saveRentalDue = async (req, res) => {
 
         // Save the document ONCE after all updates for its faces/cycles are done
         await media.save({ timestamps: false });
+
+        // ✅ NEW — rental due history, only after the save succeeded
+        for (const h of groupHistoryChanges) {
+          recordRentalDueChanges({ media, entry: h.entry, changes: h.changes, userId, userName, userType });
+        }
 
         // ✅ NEW — CMD notifications (site-wise) only after a successful save
         for (const approvedEntry of groupCmdApprovals) {
@@ -3557,13 +3641,15 @@ exports.overDueRemark = async (req, res) => {
 
       // Sync any active overdue entries for this media first
       await syncAllOverdueEntriesForMedia(media, userName);
-
+const userTypeNum = Number(req.user?.userType) || null;
       const newRemark = {
         mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
         landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
         remarks: trimmedRemarks,
         addedBy: userName,
         addedAt: nowIST(),
+        userType: userTypeNum,
+role: userTypeNum,
       };
 
       // Find matching rentalDue entry from media to populate full overdue details
@@ -3752,6 +3838,9 @@ exports.overDueRemark = async (req, res) => {
         remarks: trimmedRemarks,
         addedBy: userName,
         addedAt: newRemark.addedAt,
+        userType: userTypeNum,
+role: userTypeNum,
+roleName: ROLE_LABEL[userTypeNum] || "User",
       });
 
       // ✅ NEW — Google Chat message after the remark is saved
@@ -3812,7 +3901,30 @@ exports.getOverDueRemarks = async (req, res) => {
     }
 
     const records = await OverDueHistory.find(query).lean();
+const UserModel = require("../../../models/Admin/UserSchema/UserSchema");
+const allUsers = await UserModel.find({}, "userName userType").lean();
+const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowerCase(), Number(u.userType)]));
 
+
+records.forEach((rec) => {
+  if (Array.isArray(rec.overDueRemarks)) {
+    rec.overDueRemarks.forEach((r) => {
+      let rNum = Number(r.role || r.userType) || null;
+      if (!rNum && r.addedBy) {
+        rNum = roleByName.get(String(r.addedBy).trim().toLowerCase()) || null;
+        if (!rNum) {
+          const lower = String(r.addedBy).trim().toLowerCase();
+          if (lower.includes("cmd") || lower.includes("owner")) rNum = 3;
+          else if (lower.includes("manager") || lower.includes("team lead")) rNum = 2;
+          else if (lower.includes("executive") || lower.includes("staff")) rNum = 1;
+        }
+      }
+      r.role = rNum;
+      r.userType = rNum;
+      r.roleName = ROLE_LABEL[rNum] || "User";
+    });
+  }
+});
     return res.status(200).json({
       success: true,
       message: "Overdue remarks fetched successfully",

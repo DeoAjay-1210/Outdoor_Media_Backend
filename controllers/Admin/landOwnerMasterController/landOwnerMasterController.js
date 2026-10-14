@@ -8,6 +8,7 @@ const {
   dedupeGstBalanceHistory,
   getOwnerWiseOutstanding,
   calculateOverallLedgerSummary,
+  calculateNewOverallLedgerSummary, // ✅ NEW
   getOverallSummaryForCycle,
   ensureRentalDueForCycles,
 isOwnerModePaidForCycle,
@@ -3095,7 +3096,7 @@ const cityMatchQuery = city
     const overallLedgerSummary = calculateOverallLedgerSummary(
       summaryDocs,
       parsedMonthFilter ? outstandingMonthYear : null,
-      { includeLandOwnerCounts: true }, // ✅ NEW — adds *LandOwners counts
+      { includeLandOwnerCounts: true, includePastPaidAmounts: true }, // ✅ NEW — *LandOwners counts + past paid / remaining
     );
 
     // ✅ NEW — CMD Approval count (current + all past months up to the applied
@@ -3172,6 +3173,15 @@ const cityMatchQuery = city
         // ledger APIs' summary block
         ...overallOutstandingTotals,
         overallLedgerSummary,
+        // ✅ NEW — pure rent / pure GST (Total / Paid / Remaining), current + past.
+        // Optional req.body.dueMonth ("MM-YYYY") changes ONLY this object's
+        // month (that month = current, earlier months = past); everything
+        // else in the response still follows monthFilter.
+        newOverallLedgerSummary: calculateNewOverallLedgerSummary(
+          summaryDocs,
+          parseSiteFilterMonthParam(typeof req.body?.dueMonth === "string" ? req.body.dueMonth.trim() : "") ||
+            (parsedMonthFilter ? outstandingMonthYear : null),
+        ),
         // ✅ NEW: Rental Due Stats
         dueThisMonth: {
           siteCount: rentalDueStats.dueThisMonthCount,

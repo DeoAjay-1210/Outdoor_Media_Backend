@@ -15,6 +15,7 @@ const {
   overDueRemark,
   getOverDueRemarks
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+const { getRentalDueHistory } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueHistoryController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
@@ -43,6 +44,8 @@ router.post(
   saveRentalDue,
 );
 
+// ✅ NEW — campaignName / reason / proofOfCampaign / invoice change history (body: mediaId, pageNumber, count)
+router.post("/rental-due-history", protect, getRentalDueHistory);
 router.post("/verify-agreement", protect, verifyAgreementDoc);
 router.post("/gst-paid",protect, GstAmountPaid);
 router.post("/revert-Agreement",protect, revertAgreementDocVerification);
