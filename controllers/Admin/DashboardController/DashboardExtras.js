@@ -604,13 +604,25 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
       const verEvents = (d.agreementDocVerification || [])
         .filter((v) => v.isVerified && v.verifiedAt && ((entry && String(v.rentalDueId) === String(entry._id)) || v.dueMonth === label))
         .sort((x, y) => new Date(x.verifiedAt) - new Date(y.verifiedAt))
-        .map((v) => ({ role: ROLE_LABEL[v.verifiedByRole] || "", by: v.verifiedBy || "", at: v.verifiedAt, action: "Verified" }));
+        .map((v) => ({
+          role: ROLE_LABEL[v.verifiedByRole] || "",
+          roleNum: v.verifiedByRole,
+          by: v.verifiedBy || "",
+          at: v.verifiedAt,
+          action: "Verified",
+          pdf: v.agreementPDF && v.agreementPDF.filePath ? v.agreementPDF : null,
+        }));
       if (!verEvents.length && entry) {
         for (const st of entry.approvalSteps || []) {
-          if (st.docVerified && st.approvedAt) verEvents.push({ role: ROLE_LABEL[st.role] || "", by: st.userName || "", at: st.approvedAt, action: "Verified" });
+          if (st.docVerified && st.approvedAt) verEvents.push({ role: ROLE_LABEL[st.role] || "", roleNum: st.role, by: st.userName || "", at: st.approvedAt, action: "Verified" });
         }
       }
       const verifiedFlag = verEvents.length > 0 || !!entry?.agreementDocVerified;
+      const docFile = (d.agreement?.agreementPDF && d.agreement.agreementPDF.filePath)
+        ? d.agreement.agreementPDF
+        : (d.agreementPDF && d.agreementPDF.filePath)
+          ? d.agreementPDF
+          : (verEvents.find((e) => e.pdf)?.pdf || null);
       // campaign revisions from rentalDueHistory (one record per save), humans only, consecutive duplicates collapsed
       const revisions = [];
       if (entry) {
@@ -624,10 +636,55 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
           revisions.push({ name: h.campaignName || "", reason: h.reason || "", by, role: ROLE_LABEL[h.savedByRole] || "", at: h.updatedAt || null });
         }
       }
+      const key1 = entry ? String(entry._id) : "";
+      const key2 = `${d._id}_${label}`;
+      const foundRem = (key1 && remarksByDue.get(key1)) || remarksByDue.get(key2) || null;
+      let remList = [];
+      if (Array.isArray(foundRem)) {
+        remList = foundRem;
+      } else if (foundRem && Array.isArray(foundRem.list)) {
+        remList = foundRem.list;
+      } else if (foundRem && foundRem.text) {
+        remList = [foundRem];
+      }
+      const fallbackText = (entry && !/^auto-generated/i.test(entry.remarks || "")) ? entry.remarks : "";
+      if (remList.length === 0 && fallbackText) {
+        remList = [{ text: fallbackText, by: "", at: null, role: null, roleName: "" }];
+      }
+      const topRem = remList[0] || null;
+
       const hold = num(entry?.withGst) === 1 || (d.landOwners || []).some((o) => num(o.gstHold) === 1);
       rows.push({
         id: `${d._id}_${year}-${month}`, mediaId: String(d._id), month: label, dueDate: entry?.dueDate || null,
-        sites: faces.map((f) => ({ mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location, width: f.width, height: f.height, totalSqFt: f.totalSqFt })),
+        sites: faces.map((f) => {
+          const fEntry = (d.rentalDue || []).find((e) => e.dueMonth === label && String(e.mediaDetailId || "") === String(f._id || "")) || entry;
+          let fRevs = revisions;
+          if (fEntry && fEntry !== entry) {
+            fRevs = [];
+            const yb = (d.rentalDueHistory || []).find((y) => String(y.year) === String(year));
+            const mb = yb?.months?.find((m) => String(m.month).toLowerCase() === MONTH_NAMES[month - 1].toLowerCase());
+            for (const h of (mb?.entries || []).filter((x) => String(x.rentalDueId) === String(fEntry._id)).sort((x, y) => new Date(x.updatedAt || 0) - new Date(y.updatedAt || 0))) {
+              const by = h.updatedBy || h.savedBy || "";
+              if (/^system/i.test(by) || (!h.campaignName && !h.reason)) continue;
+              const last = fRevs[fRevs.length - 1];
+              if (last && last.name === (h.campaignName || "") && last.reason === (h.reason || "") && last.by === by) continue;
+              fRevs.push({ name: h.campaignName || "", reason: h.reason || "", by, role: ROLE_LABEL[h.savedByRole] || "", at: h.updatedAt || null });
+            }
+          }
+          return {
+            mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location, width: f.width, height: f.height, totalSqFt: f.totalSqFt,
+            campaign: fEntry ? {
+              revisions: fRevs,
+              name: fEntry.campaignName || "",
+              reason: fEntry.reason || "",
+              by: fEntry.savedBy?.userName || "",
+              role: ROLE_LABEL[fEntry.savedBy?.role] || "",
+              at: fEntry.proofOfCampaign?.uploadedAt || fEntry.invoice?.uploadedAt || fEntry.savedBy?.savedAt || null,
+              proof: fEntry.proofOfCampaign?.filePath ? fEntry.proofOfCampaign : null,
+              invoice: fEntry.invoice?.filePath ? fEntry.invoice : null,
+            } : null,
+          };
+        }),
         landlords: (d.landOwners || []).map((o) => ({
           name: o.name || "", splitType: num(o.typeShare) === 2 ? "amount" : "percentage",
           splitValue: num(o.typeShare) === 2 ? num(o.shareAmount) : num(o.sharePercentage), shareAmount: num(o.shareAmount),
@@ -638,10 +695,12 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
         rentWithTds: Math.round(rent), tds: Math.round(tds), baseRent: Math.round(rent - tds),
         gstApplicable: gstAmt > 0, gstAmount: Math.round(gstAmt), gstHold: hold,
         totalAmount: Math.round(rent + gstAmt),
-        remarks: (entry && (remarkOf(remarksByDue.get(String(entry._id))).text || (/^auto-generated/i.test(entry.remarks || "") ? "" : entry.remarks))) || "",
-        remarksBy: entry ? remarkOf(remarksByDue.get(String(entry._id))).by || "" : "",
-        remarksAt: entry ? remarkOf(remarksByDue.get(String(entry._id))).at || null : null,
-        verification: { verified: verifiedFlag, events: verEvents },
+        remarks: topRem?.text || "",
+        remarksBy: topRem?.by || "",
+        remarksAt: topRem?.at || null,
+        remarksCount: remList.length,
+        remarksHistory: remList,
+        verification: { verified: verifiedFlag, count: verEvents.length, events: verEvents, doc: docFile },
         campaign: entry ? { revisions, name: entry.campaignName || "", reason: entry.reason || "", by: entry.savedBy?.userName || "", role: ROLE_LABEL[entry.savedBy?.role] || "", at: entry.proofOfCampaign?.uploadedAt || entry.invoice?.uploadedAt || entry.savedBy?.savedAt || null, proof: entry.proofOfCampaign?.filePath ? entry.proofOfCampaign : null, invoice: entry.invoice?.filePath ? entry.invoice : null } : null,
         approval: {
           status: stage.status, approved: num(entry?.approvalStatus) === 3,
@@ -658,6 +717,7 @@ const SORTERS = {
   totalAmount: (r) => r.totalAmount, rent: (r) => r.rentWithTds, gst: (r) => r.gstAmount,
   site: (r) => (r.sites[0]?.mediaName || "").toLowerCase(), landlord: (r) => (r.landlords[0]?.name || "").toLowerCase(),
   month: (r) => new Date(r.dueDate || 0).getTime(), status: (r) => r.approval.status,
+  remarks: (r) => r.remarksCount || 0,
 };
 
 function searchSortPage(rows, { search, sortBy, sortDir, page, limit }) {
@@ -666,7 +726,9 @@ function searchSortPage(rows, { search, sortBy, sortDir, page, limit }) {
   if (q) {
     out = out.filter((r) => [
       ...r.sites.flatMap((s) => [s.mediaName, s.mediaCode, s.city, s.location, s.mediaType]),
-      ...r.landlords.map((l) => l.name), r.month, r.remarks, r.campaign?.name, r.campaign?.reason, r.approval.status,
+      ...r.landlords.map((l) => l.name), r.month, r.remarks, r.remarksBy,
+      ...(r.remarksHistory || []).flatMap((rem) => [rem.text, rem.by, rem.roleName]),
+      r.campaign?.name, r.campaign?.reason, r.approval.status,
     ].some((v) => String(v || "").toLowerCase().includes(q)));
   }
   const key = SORTERS[sortBy] || SORTERS.month;
