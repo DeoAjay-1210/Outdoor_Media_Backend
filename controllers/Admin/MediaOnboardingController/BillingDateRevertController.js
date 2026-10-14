@@ -10,6 +10,7 @@ const { nowIST } = require("../../../utils/updatedAt");
 const deleteFromSpaces = require("../../../utils/deleteFromSpaces");
 const {
   createBillingDateRevertNotification,
+  refreshBillingDateRevertNotification,
   updateBillingDateRevertNotificationStatus,
 } = require("../NotificationController/CmdNotificationController");
 const { notifyBillingDateRevertChat } = require("../../../utils/googleChat");
@@ -101,6 +102,40 @@ const snapshotDates = (rp) => ({
   billingStartDate: rp?.billingStartDate || null,
 });
 
+// ── read / unread (per user) ──
+// CMD → pending requests are unread until read.
+// Executive / Manager → CMD's decision (approved / rejected) is unread until read.
+const unreadStatusesFor = (role) =>
+  Number(role) === USER_ROLE.CMD ? [REVERT_STATUS.PENDING] : [REVERT_STATUS.APPROVED, REVERT_STATUS.REJECTED];
+
+const unreadFilterFor = (role, userObjectId) => ({
+  status: { $in: unreadStatusesFor(role) },
+  "readBy.userId": { $ne: userObjectId },
+});
+
+const readStatusFor = (r, role, userObjectId) => {
+  const mine = (r.readBy || []).find((x) => String(x.userId) === String(userObjectId));
+  const unread = !mine && unreadStatusesFor(role).includes(r.status);
+  return { isRead: !unread, readAt: mine?.readAt || null };
+};
+
+const getUnreadCounts = async (role, userObjectId) => {
+  const rows = await BillingDateRevertRequest.aggregate([
+    { $match: unreadFilterFor(role, userObjectId) },
+    { $group: { _id: "$status", count: { $sum: 1 } } },
+  ]);
+  const countFor = (s) => rows.find((c) => c._id === s)?.count || 0;
+  const pendingUnreadCount = countFor(REVERT_STATUS.PENDING);
+  const approvedUnreadCount = countFor(REVERT_STATUS.APPROVED);
+  const rejectedUnreadCount = countFor(REVERT_STATUS.REJECTED);
+  return {
+    overallUnreadCount: pendingUnreadCount + approvedUnreadCount + rejectedUnreadCount,
+    pendingUnreadCount,
+    approvedUnreadCount,
+    rejectedUnreadCount,
+  };
+};
+
 // Removes an uploaded image when the request is not saved. Never throws.
 async function cleanupUploadedFile(req) {
   const file = req.file;
@@ -131,6 +166,28 @@ const formatRequest = (r) => ({
   datesBeforeApproval: r.datesBeforeApproval || null,
   appliedDates: r.appliedDates || null,
   removedBills: r.removedBills || [],
+  editCount: r.editCount || 0,
+  // Every version of this request, oldest first — earlier edits + the current one.
+  requestHistory: [
+    ...(r.requestHistory || []).map((h) => ({
+      requestedDates: h.requestedDates || null,
+      remark: h.remark || "",
+      image: h.image?.filePath ? h.image : null,
+      requestedBy: h.requestedBy || null,
+      requestedAt: h.requestedAt || null,
+      replacedAt: h.replacedAt || null,
+      isCurrent: false,
+    })),
+    {
+      requestedDates: r.requestedDates || null,
+      remark: r.remark || "",
+      image: r.image?.filePath ? r.image : null,
+      requestedBy: r.requestedBy || null,
+      requestedAt: r.updatedAt || r.createdAt || null,
+      replacedAt: null,
+      isCurrent: true,
+    },
+  ],
   remark: r.remark,
   image: r.image?.filePath ? r.image : null,
   status: r.status,
@@ -240,13 +297,60 @@ exports.createBillingDateRevertRequest = async (req, res) => {
     const pending = await BillingDateRevertRequest.findOne({
       mediaId: mediaObjectId,
       status: REVERT_STATUS.PENDING,
-    })
-      .select("_id")
-      .lean();
+    }).lean();
     if (pending) {
-      return fail("A billing date revert request is already pending for this site", 409, {
-        requestId: pending._id,
-      });
+      // ✅ CHANGED — a request is already pending for this site: EDIT it
+      // (new dates / remark / image) instead of refusing. The replaced version
+      // is kept in requestHistory; CMD keeps ONE request + ONE notification.
+      const editNow = nowIST();
+      const previousVersion = {
+        requestedDates: {
+          lastBillPaidDate: pending.requestedDates?.lastBillPaidDate || null,
+          nextBillingDate: pending.requestedDates?.nextBillingDate || null,
+        },
+        remark: pending.remark || "",
+        ...(pending.image?.filePath ? { image: pending.image } : {}),
+        requestedBy: pending.requestedBy || {},
+        requestedAt: pending.updatedAt || pending.createdAt || null,
+        replacedAt: editNow,
+      };
+      const updated = await BillingDateRevertRequest.findOneAndUpdate(
+        { _id: pending._id, status: REVERT_STATUS.PENDING },
+        {
+          $push: { requestHistory: previousVersion },
+          $inc: { editCount: 1 },
+          $set: {
+            cycleMonths: validation.cycleMonths,
+            originalDates: snapshotDates(media.rentalPayment || {}),
+            requestedDates: {
+              lastBillPaidDate: validation.lastBillPaidDate,
+              nextBillingDate: validation.nextBillingDate,
+            },
+            remark: remarkText,
+            ...(req.file ? { image: req.processFile(req.file) } : {}), // no new image → keep the previous one
+            requestedBy: actorFromReq(req, remarkText),
+            readBy: [], // updated request → unread again for CMD
+            updatedAt: editNow,
+          },
+        },
+        { returnDocument: "after" },
+      );
+      if (!updated) {
+        // approved / rejected between the read and the update
+        return fail("This request was already processed by CMD. Please raise a new request.", 409, {
+          requestId: pending._id,
+        });
+      }
+
+      await refreshBillingDateRevertNotification({ request: updated });
+      notifyBillingDateRevertChat({ request: updated, event: "requested" });
+
+      return successResponse(
+        res,
+        "Billing date revert request updated — awaiting CMD approval",
+        formatRequest(updated.toObject()),
+        200,
+      );
     }
 
     const details = media.mediaDetails || [];
@@ -529,6 +633,8 @@ exports.approveBillingDateRevertRequest = async (req, res) => {
           status: REVERT_STATUS.APPROVED,
           cmdAction: actorFromReq(req, remarkText),
           datesBeforeApproval,
+          // decision → read for this CMD, unread for every Executive / Manager
+          readBy: [{ userId: toObjectId(req.user?.userId), role: USER_ROLE.CMD, readAt: nowIST() }],
           updatedAt: nowIST(),
         },
       },
@@ -553,7 +659,7 @@ exports.approveBillingDateRevertRequest = async (req, res) => {
       await BillingDateRevertRequest.updateOne(
         { _id: requestObjectId, status: REVERT_STATUS.APPROVED },
         {
-          $set: { status: REVERT_STATUS.PENDING, cmdAction: null, datesBeforeApproval: null, updatedAt: nowIST() },
+          $set: { status: REVERT_STATUS.PENDING, cmdAction: null, datesBeforeApproval: null, readBy: [], updatedAt: nowIST() },
         },
       );
       return errorResponse(res, `Failed to update site billing dates: ${err.message}`, null, 500);
@@ -599,6 +705,8 @@ exports.rejectBillingDateRevertRequest = async (req, res) => {
         $set: {
           status: REVERT_STATUS.REJECTED,
           cmdAction: actorFromReq(req, remarkText),
+          // decision → read for this CMD, unread for every Executive / Manager
+          readBy: [{ userId: toObjectId(req.user?.userId), role: USER_ROLE.CMD, readAt: nowIST() }],
           updatedAt: nowIST(),
         },
       },
@@ -653,7 +761,16 @@ exports.getBillingDateRevertRequests = async (req, res) => {
       filter.$or = [{ siteCode: regex }, { siteName: regex }, { landOwnerName: regex }];
     }
 
-    const [totalCount, statusCounts, rows] = await Promise.all([
+    // optional isRead filter (for the logged-in user)
+    const viewerRole = Number(req.user?.userType);
+    const viewerId = toObjectId(req.user?.userId);
+    if (params.isRead === true || params.isRead === "true") {
+      filter.$nor = [unreadFilterFor(viewerRole, viewerId)];
+    } else if (params.isRead === false || params.isRead === "false") {
+      filter.$and = [unreadFilterFor(viewerRole, viewerId)];
+    }
+
+    const [totalCount, statusCounts, rows, unreadCounts] = await Promise.all([
       BillingDateRevertRequest.countDocuments(filter),
       BillingDateRevertRequest.aggregate([
         { $match: { ...filter, status: { $exists: true } } },
@@ -664,6 +781,7 @@ exports.getBillingDateRevertRequests = async (req, res) => {
         .skip((pageNumber - 1) * count)
         .limit(count)
         .lean(),
+      getUnreadCounts(viewerRole, viewerId),
     ]);
 
     const countFor = (s) => statusCounts.find((c) => c._id === s)?.count || 0;
@@ -672,13 +790,48 @@ exports.getBillingDateRevertRequests = async (req, res) => {
       pendingCount: countFor(REVERT_STATUS.PENDING),
       approvedCount: countFor(REVERT_STATUS.APPROVED),
       rejectedCount: countFor(REVERT_STATUS.REJECTED),
+      ...unreadCounts,
       pagination: {
         pageNumber,
         count,
         totalCount,
         totalPages: Math.ceil(totalCount / count),
       },
-      requests: rows.map(formatRequest),
+      requests: rows.map((r) => ({ ...formatRequest(r), ...readStatusFor(r, viewerRole, viewerId) })),
+    });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// Used by POST /admin/cmd-notifications/read (body has requestId / requestIds)
+// Role: Rental Executive (1) / Rental Manager (2) / CMD (3)
+// body: { requestId } or { requestIds: [] } — marks read for the logged-in user
+// ─────────────────────────────────────────────────────────────
+exports.markBillingDateRevertRead = async (req, res) => {
+  try {
+    const role = Number(req.user?.userType);
+    if (!VIEWER_ROLES.includes(role)) {
+      return errorResponse(res, "You are not allowed to update billing date revert requests", null, 403);
+    }
+
+    const { requestId, requestIds } = req.body || {};
+    const ids = (Array.isArray(requestIds) ? requestIds : [requestId]).map(toObjectId).filter(Boolean);
+    if (ids.length === 0) {
+      return errorResponse(res, "A valid requestId or requestIds[] is required", null, 400);
+    }
+
+    const userObjectId = toObjectId(req.user?.userId);
+    const result = await BillingDateRevertRequest.updateMany(
+      { _id: { $in: ids }, "readBy.userId": { $ne: userObjectId } },
+      { $push: { readBy: { userId: userObjectId, role, readAt: nowIST() } } },
+    );
+    const counts = await getUnreadCounts(role, userObjectId);
+
+    return successResponse(res, "Billing date revert request(s) marked as read", {
+      updatedCount: result.modifiedCount || 0,
+      ...counts,
     });
   } catch (error) {
     return errorResponse(res, error.message, null, 500);

@@ -2139,6 +2139,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           updatedAt: siteLatestActivityAt,
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
+          // ✅ NEW — internal: single bill site (no face on separate bill)
+          _isSingleBill: !(mediaDoc.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2),
           rentalStatus: {
             hasApprovedSite: roleFaceFlags ? !!roleFlags?.approved : hasApprovedSite,
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
@@ -2227,7 +2229,24 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
       const hasOtherFilters = hasRentalStatusFilter || hasLedgerCategoryFilter;
 
-      (site.rentalDue || []).forEach((due) => {
+      // ✅ FIXED — a single bill site can hold one bill PER FACE for the same
+      // month; CMD approving one of them left the others pending, and that
+      // untouched pending copy made a CMD-approved site show under pending.
+      // For single bill sites only the most-approved bill of each month counts
+      // (3 Approved > 2 Partially > others) — same rule as the ledger list.
+      // Separate bill sites: unchanged.
+      let siteDues = site.rentalDue || [];
+      if (site._isSingleBill && siteDues.length > 1) {
+        const rank = (d) => (Number(d.approvalStatus) === 3 ? 3 : Number(d.approvalStatus) === 2 ? 2 : 1);
+        const bestRankByMonth = new Map();
+        siteDues.forEach((d) => {
+          const r = rank(d);
+          if (r > (bestRankByMonth.get(d.dueMonth) || 0)) bestRankByMonth.set(d.dueMonth, r);
+        });
+        siteDues = siteDues.filter((d) => rank(d) === bestRankByMonth.get(d.dueMonth));
+      }
+
+      siteDues.forEach((due) => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
         if (!parsed) return;
 

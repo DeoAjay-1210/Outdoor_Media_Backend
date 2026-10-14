@@ -257,6 +257,48 @@ async function createBillingDateRevertNotification({ request }) {
 
 // Keeps the notification row's revertStatus in sync with the request.
 // Never throws.
+// ✅ NEW — a pending request was edited (new dates): refresh the SAME
+// notification row with the latest request and make it unread again, so CMD
+// sees one notification for the one request. Never throws.
+async function refreshBillingDateRevertNotification({ request }) {
+  try {
+    if (!request?._id) return null;
+    const role = Number(request.requestedBy?.role);
+    const roleLabel = APPROVER_ROLE_LABEL[role] || "";
+    const fmt = (d) => (d ? new Date(d).toISOString().slice(0, 10) : "-");
+    const message =
+      `${roleLabel} ${request.requestedBy?.userName || ""} updated billing date revert request` +
+      ` (${fmt(request.originalDates?.lastBillPaidDate)} → ${fmt(request.requestedDates?.lastBillPaidDate)})`;
+    const result = await CmdNotification.updateOne(
+      { dedupeKey: `billingDateRevert:${String(request._id)}` },
+      {
+        $set: {
+          message: message.replace(/\s+/g, " ").trim(),
+          remarks: request.remark || "",
+          revertStatus: request.status,
+          currentLastBillPaidDate: request.originalDates?.lastBillPaidDate || null,
+          currentNextBillingDate: request.originalDates?.nextBillingDate || null,
+          requestedLastBillPaidDate: request.requestedDates?.lastBillPaidDate || null,
+          requestedNextBillingDate: request.requestedDates?.nextBillingDate || null,
+          requestedBy: request.requestedBy?.userName || "",
+          requestedByRole: APPROVER_ROLE_LABEL[role] ? role : null,
+          requestedByUserId: toObjectId(request.requestedBy?.userId),
+          requestedAt: request.updatedAt || nowIST(),
+          imagePath: request.image?.filePath || "",
+          readBy: [], // updated request → unread again for CMD
+          updatedAt: nowIST(),
+        },
+      },
+    );
+    // no row yet (e.g. deleted by the notification clean-up) → create it
+    if (!result.matchedCount) return createBillingDateRevertNotification({ request });
+    return true;
+  } catch (err) {
+    console.error("[CmdNotification] billing date revert refresh failed:", err.message);
+    return null;
+  }
+}
+
 async function updateBillingDateRevertNotificationStatus(requestId, revertStatus) {
   try {
     await CmdNotification.updateOne(
@@ -395,6 +437,14 @@ const getCmdNotificationCount = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 const markCmdNotificationRead = async (req, res) => {
   try {
+    // billing date revert requests: { requestId } / { requestIds: [] } —
+    // Rental Executive / Rental Manager / CMD (lazy require: avoids a circular import)
+    const body = req.body || {};
+    if (body.requestId !== undefined || body.requestIds !== undefined) {
+      const { markBillingDateRevertRead } = require("../MediaOnboardingController/BillingDateRevertController");
+      return markBillingDateRevertRead(req, res);
+    }
+
     if (!ensureCmd(req, res)) return;
     const { notificationId, notificationIds } = req.body || {};
     const ids = (Array.isArray(notificationIds) ? notificationIds : [notificationId])
@@ -645,6 +695,7 @@ module.exports = {
   purgeOldCmdNotifications,
   createRentalApprovalNotification,
   createBillingDateRevertNotification,
+  refreshBillingDateRevertNotification,
   updateBillingDateRevertNotificationStatus,
   sendCmdReminder,
   getCmdNotifications,

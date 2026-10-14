@@ -202,7 +202,7 @@ function buildBillingDateRevertMessage(request, event) {
 
   if (event === "requested") {
     return [
-      `*Billing Date Change Requested* — by ${actorLabel(request.requestedBy)}`,
+      `*Billing Date Change ${Number(request.editCount) > 0 ? "Request Updated" : "Requested"}* — by ${actorLabel(request.requestedBy)}`,
       "*Waiting for CMD approval*",
       ...site,
       `*Current Last Bill Date:* ${formatDMY(original.lastBillPaidDate)}`,
