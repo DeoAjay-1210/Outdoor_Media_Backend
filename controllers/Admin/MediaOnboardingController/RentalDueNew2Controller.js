@@ -3641,13 +3641,15 @@ exports.overDueRemark = async (req, res) => {
 
       // Sync any active overdue entries for this media first
       await syncAllOverdueEntriesForMedia(media, userName);
-
+const userTypeNum = Number(req.user?.userType) || null;
       const newRemark = {
         mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
         landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
         remarks: trimmedRemarks,
         addedBy: userName,
         addedAt: nowIST(),
+        userType: userTypeNum,
+role: userTypeNum,
       };
 
       // Find matching rentalDue entry from media to populate full overdue details
@@ -3836,6 +3838,9 @@ exports.overDueRemark = async (req, res) => {
         remarks: trimmedRemarks,
         addedBy: userName,
         addedAt: newRemark.addedAt,
+        userType: userTypeNum,
+role: userTypeNum,
+roleName: ROLE_LABEL[userTypeNum] || "User",
       });
 
       // ✅ NEW — Google Chat message after the remark is saved
@@ -3896,7 +3901,30 @@ exports.getOverDueRemarks = async (req, res) => {
     }
 
     const records = await OverDueHistory.find(query).lean();
+const UserModel = require("../../../models/Admin/UserSchema/UserSchema");
+const allUsers = await UserModel.find({}, "userName userType").lean();
+const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowerCase(), Number(u.userType)]));
 
+
+records.forEach((rec) => {
+  if (Array.isArray(rec.overDueRemarks)) {
+    rec.overDueRemarks.forEach((r) => {
+      let rNum = Number(r.role || r.userType) || null;
+      if (!rNum && r.addedBy) {
+        rNum = roleByName.get(String(r.addedBy).trim().toLowerCase()) || null;
+        if (!rNum) {
+          const lower = String(r.addedBy).trim().toLowerCase();
+          if (lower.includes("cmd") || lower.includes("owner")) rNum = 3;
+          else if (lower.includes("manager") || lower.includes("team lead")) rNum = 2;
+          else if (lower.includes("executive") || lower.includes("staff")) rNum = 1;
+        }
+      }
+      r.role = rNum;
+      r.userType = rNum;
+      r.roleName = ROLE_LABEL[rNum] || "User";
+    });
+  }
+});
     return res.status(200).json({
       success: true,
       message: "Overdue remarks fetched successfully",

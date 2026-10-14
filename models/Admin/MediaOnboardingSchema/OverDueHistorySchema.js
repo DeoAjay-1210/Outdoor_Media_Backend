@@ -70,6 +70,8 @@ const overDueHistorySchema = new mongoose.Schema(
         remarks: { type: String, trim: true },
         addedBy: { type: String, trim: true },
         addedAt: { type: Date, default: Date.now },
+        userType: { type: Number, default: null },
+role: { type: Number, default: null },
       },
     ],
     updatedBy: { type: String },
