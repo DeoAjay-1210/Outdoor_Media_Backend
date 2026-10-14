@@ -7,8 +7,8 @@ const { freezeHeaderInXlsxBuffer } = require("../MediaOnboardingController/Renta
 // ─────────────────────────────────────────────────────────────
 // LANDOWNER EXCEL (site first)
 // GET /admin/landowner/download-excel?landOwnerMasterId=&search=
-// One block per active site (A → Z): S.No / Site Name / Site Code are shown
-// once (merged) and every landowner of the site gets one row. A site total
+// One block per active site (A → Z): a centred SITE heading row (No. / Site
+// Name / Site Code), then one row per landowner of that site. A site total
 // row is added only when the site has 2+ landowners; grand total at the end.
 // Read-only — nothing is saved.
 //   Total Rental Amount = landowner's share of the site rent (shareAmount)
@@ -97,81 +97,63 @@ const downloadLandOwnerExcel = async (req, res) => {
         a.siteCode.localeCompare(b.siteCode, "en", { sensitivity: "base" }),
     );
 
-    // ── sheet ──
+    // ── sheet: one centred SITE heading row per site, its landowners below ──
     const colHeaders = [
-      "S.No", "Site Name", "Site Code", "Landowner Name", "Share (% / Fixed)", "Agreement Mode", "Bill Mode",
+      "Landowner Name", "Share (% / Fixed)", "Agreement Mode", "Bill Mode",
       "Total Rental Amount (₹)", "TDS Amount (₹)\n(included in Total Rental)", "GST Amount (₹)", "Total Amount (₹)",
     ];
     const LAST_COL = colHeaders.length - 1;
-    const COL_RENTAL = 7, COL_TDS = 8, COL_GST = 9, COL_TOTAL = 10;
-    const CENTER_COLS = new Set([0, 4, 5, 6]);
+    const COL_RENTAL = 4, COL_TDS = 5, COL_GST = 6, COL_TOTAL = 7;
+    const CENTER_COLS = new Set([1, 2, 3]);
     const blankRow = (first) => [first, ...Array(LAST_COL).fill("")];
     const FREEZE_ROWS = 4; // title, summary, note, header
 
     const aoa = [];
     const merges = [];
-    const rowKind = []; // per aoa row: "title" | "sub" | "header" | "data" | "siteTotal" | "grand" | "empty"
-    const rowShade = []; // per aoa row: true → light grey site block
+    const rowKind = []; // "title" | "sub" | "note" | "header" | "site" | "data" | "siteTotal" | "grand" | "empty"
 
-    const push = (row, kind, shade = false) => {
+    const push = (row, kind) => {
       aoa.push(row);
       rowKind.push(kind);
-      rowShade.push(shade);
     };
+    const mergeRow = (fromCol, toCol) =>
+      merges.push({ s: { r: aoa.length - 1, c: fromCol }, e: { r: aoa.length - 1, c: toCol } });
 
     push(blankRow("LANDOWNER REPORT"), "title");
-    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST_COL } });
+    mergeRow(0, LAST_COL);
     const generatedOn = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata" });
     const ownerCount = new Set(sites.flatMap((s) => s.owners.map((o) => o.name.toLowerCase()))).size;
     push(blankRow(`${sites.length} active ${sites.length === 1 ? "site" : "sites"} • ${ownerCount} ${ownerCount === 1 ? "landowner" : "landowners"} • Generated on ${generatedOn}`), "sub");
-    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST_COL } });
+    mergeRow(0, LAST_COL);
     push(blankRow("Note: TDS Amount is already included in the Total Rental Amount — it is shown for reference only and is not added again. Total Amount = Total Rental Amount + GST Amount."), "note");
-    merges.push({ s: { r: 2, c: 0 }, e: { r: 2, c: LAST_COL } });
+    mergeRow(0, LAST_COL);
     push(colHeaders, "header");
 
     let grandRental = 0;
     let grandTds = 0;
     let grandGst = 0;
     sites.forEach((site, i) => {
-      const shade = i % 2 === 1;
-      const firstRowIdx = aoa.length;
+      // site heading — centred across the whole row
+      push(blankRow(`${i + 1}.  ${site.siteName}   |   Site Code: ${site.siteCode}`), "site");
+      mergeRow(0, LAST_COL);
+
       let siteRental = 0;
       let siteTds = 0;
       let siteGst = 0;
-      site.owners.forEach((o, j) => {
-        push(
-          [
-            j === 0 ? i + 1 : "",
-            j === 0 ? site.siteName : "",
-            j === 0 ? site.siteCode : "",
-            o.name,
-            o.shareText,
-            o.agreementMode,
-            o.billMode,
-            o.rental,
-            o.tds,
-            o.gst,
-            o.rental + o.gst,
-          ],
-          "data",
-          shade,
-        );
+      site.owners.forEach((o) => {
+        push([o.name, o.shareText, o.agreementMode, o.billMode, o.rental, o.tds, o.gst, o.rental + o.gst], "data");
         siteRental += o.rental;
         siteTds += o.tds;
         siteGst += o.gst;
       });
-      // S.No / Site Name / Site Code shown once for the whole site block
       if (site.owners.length > 1) {
-        const lastRowIdx = aoa.length - 1;
-        [0, 1, 2].forEach((c) => merges.push({ s: { r: firstRowIdx, c }, e: { r: lastRowIdx, c } }));
-        const totalRow = blankRow("");
-        totalRow[3] = `Site Total (${site.owners.length} landowners)`;
+        const totalRow = blankRow(`Site Total (${site.owners.length} landowners)`);
         totalRow[COL_RENTAL] = siteRental;
         totalRow[COL_TDS] = siteTds;
         totalRow[COL_GST] = siteGst;
         totalRow[COL_TOTAL] = siteRental + siteGst;
-        push(totalRow, "siteTotal", shade);
-        merges.push({ s: { r: aoa.length - 1, c: 3 }, e: { r: aoa.length - 1, c: COL_RENTAL - 1 } });
+        push(totalRow, "siteTotal");
+        mergeRow(0, COL_RENTAL - 1);
       }
       grandRental += siteRental;
       grandTds += siteTds;
@@ -186,11 +168,11 @@ const downloadLandOwnerExcel = async (req, res) => {
       grand[COL_GST] = grandGst;
       grand[COL_TOTAL] = grandRental + grandGst;
       push(grand, "grand");
-      merges.push({ s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: COL_RENTAL - 1 } });
+      mergeRow(0, COL_RENTAL - 1);
     } else {
       noRecordsRowIdx = aoa.length;
       push(blankRow("No landowners found for the selected filters"), "empty");
-      merges.push({ s: { r: noRecordsRowIdx, c: 0 }, e: { r: noRecordsRowIdx, c: LAST_COL } });
+      mergeRow(0, LAST_COL);
     }
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -200,9 +182,10 @@ const downloadLandOwnerExcel = async (req, res) => {
     const numFormat = "₹ #,##,##0";
     const styles = {
       title: { fill: { fgColor: { rgb: "FFFFFF" } }, font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center" } },
-      note: { fill: { fgColor: { rgb: "FFF8E1" } }, font: { italic: true, bold: true, color: { rgb: "8A5300" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true } },
       sub: { fill: { fgColor: { rgb: "E9F0FD" } }, font: { bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center" } },
+      note: { fill: { fgColor: { rgb: "FFF8E1" } }, font: { italic: true, bold: true, color: { rgb: "8A5300" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true } },
       header: { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: allBorders },
+      site: { fill: { fgColor: { rgb: "DCE6F2" } }, font: { bold: true, sz: 12, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: allBorders },
       grand: { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" }, border: allBorders },
     };
 
@@ -213,7 +196,7 @@ const downloadLandOwnerExcel = async (req, res) => {
         if (!ws[addr]) continue;
         const isAmount = c >= COL_RENTAL && c <= COL_TOTAL;
 
-        if (kind === "title" || kind === "sub" || kind === "note" || kind === "header" || kind === "grand") {
+        if (styles[kind]) {
           ws[addr].s = styles[kind];
           if (kind === "grand" && isAmount) {
             ws[addr].z = numFormat;
@@ -222,13 +205,13 @@ const downloadLandOwnerExcel = async (req, res) => {
         } else if (kind === "data" || kind === "siteTotal") {
           const isTotal = kind === "siteTotal";
           ws[addr].s = {
-            fill: { fgColor: { rgb: rowShade[r] ? "F3F6FA" : "FFFFFF" } },
+            fill: { fgColor: { rgb: isTotal ? "F3F6FA" : "FFFFFF" } },
             border: allBorders,
-            font: isTotal ? { bold: true, color: { rgb: "002D62" } } : c === 1 || c === 2 ? { bold: true } : {},
+            font: isTotal ? { bold: true, color: { rgb: "002D62" } } : {},
             alignment: {
               vertical: "center",
               wrapText: true,
-              horizontal: isAmount ? "right" : isTotal && c === 3 ? "right" : CENTER_COLS.has(c) ? "center" : "left",
+              horizontal: isAmount || isTotal ? "right" : CENTER_COLS.has(c) ? "center" : "left",
             },
           };
           if (isAmount) ws[addr].z = numFormat;
@@ -247,19 +230,18 @@ const downloadLandOwnerExcel = async (req, res) => {
     ws["!merges"] = merges;
     ws["!views"] = [{ state: "frozen", xSplit: 0, ySplit: FREEZE_ROWS, topLeftCell: `A${FREEZE_ROWS + 1}`, activePane: "bottomLeft" }];
     ws["!cols"] = [
-      { wch: 7 }, // S.No
-      { wch: 34 }, // Site Name
-      { wch: 20 }, // Site Code
-      { wch: 32 }, // Landowner Name
+      { wch: 36 }, // Landowner Name
       { wch: 18 }, // Share (% / Fixed)
-      { wch: 20 }, // Agreement Mode
-      { wch: 15 }, // Bill Mode
+      { wch: 22 }, // Agreement Mode
+      { wch: 16 }, // Bill Mode
       { wch: 22 }, // Total Rental Amount
       { wch: 24 }, // TDS Amount (included in Total Rental)
-      { wch: 16 }, // GST Amount
-      { wch: 18 }, // Total Amount
+      { wch: 18 }, // GST Amount
+      { wch: 20 }, // Total Amount
     ];
-    ws["!rows"] = [{ hpt: 30 }, { hpt: 20 }, { hpt: 30 }, { hpt: 34 }];
+    ws["!rows"] = aoa.map((_, r) =>
+      r === 0 ? { hpt: 30 } : r === 2 ? { hpt: 32 } : r === 3 ? { hpt: 34 } : rowKind[r] === "site" ? { hpt: 24 } : {},
+    );
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Landowners");
