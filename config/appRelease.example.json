@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "latestVersion": "1.0.1",
+  "versionCode": 2,
+  "minimumVersion": "1.0.0",
+  "minimumVersionCode": 1,
+  "apkFile": "app-release-1.0.1-2.apk",
+  "apkUrl": "",
+  "sha256": "REPLACE_WITH_SHA256_OF_RELEASE_APK_64_HEX_CHARS_000000000000000",
+  "apkSize": 0,
+  "forceUpdate": false,
+  "message": "A new version is available.",
+  "releaseNotes": [],
+  "publishedAt": ""
+}
