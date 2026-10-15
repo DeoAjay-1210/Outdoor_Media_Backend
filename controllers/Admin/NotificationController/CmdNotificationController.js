@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const CmdNotification = require("../../../models/Admin/NotificationSchema/CmdNotificationSchema");
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
+const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { nowIST } = require("../../../utils/updatedAt");
 
@@ -55,10 +56,36 @@ const overdueRemarkFilter = { notificationType: NOTIFICATION_TYPE.OVERDUE_REMARK
 
 // overdue remark → who is notified:
 // Executive's remark → Manager + CMD | Manager's remark → Executive + CMD
+// | CMD's remark → Executive + Manager
 const OVERDUE_REMARK_NOTIFY_TARGETS = {
   [USER_ROLE.RENTAL_EXECUTIVE]: [USER_ROLE.RENTAL_MANAGER, USER_ROLE.CMD],
   [USER_ROLE.RENTAL_MANAGER]: [USER_ROLE.RENTAL_EXECUTIVE, USER_ROLE.CMD], // ✅ NEW
+  [USER_ROLE.CMD]: [USER_ROLE.RENTAL_EXECUTIVE, USER_ROLE.RENTAL_MANAGER], // ✅ NEW
 };
+
+// ✅ NEW — reading an overdueRemark notification marks that site + month's
+// remarks (added up to now) as read for the reader's ROLE, so
+// GET /admin/overdue-remarks shows isRead per role. Remarks saved before read
+// tracking existed have no readByRoles and already count as read. Never throws.
+async function markOverdueRemarksReadForRole(notificationRows, role) {
+  try {
+    const now = nowIST();
+    for (const n of notificationRows || []) {
+      if (!n?.mediaId) continue;
+      const sameBill = [];
+      if (n.dueMonth) sameBill.push({ dueMonth: n.dueMonth });
+      if (n.rentalDueId) sameBill.push({ rentalDueId: n.rentalDueId });
+      if (sameBill.length === 0) continue;
+      await OverDueHistory.updateMany(
+        { mediaId: n.mediaId, $or: sameBill },
+        { $addToSet: { "overDueRemarks.$[r].readByRoles": Number(role) } },
+        { arrayFilters: [{ "r.readByRoles": { $exists: true }, "r.addedAt": { $lte: now } }] },
+      );
+    }
+  } catch (err) {
+    console.error("[CmdNotification] overdue remark read sync failed:", err.message);
+  }
+}
 
 // unread counts for THIS CMD user: overall + split by who approved
 // (each site has one Executive row and one Manager row, counted separately)
@@ -629,6 +656,31 @@ const typeFilterFor = (rawType) => {
   return {};
 };
 
+// ✅ NEW — notification tabs (`filter`). The role comes from the login token.
+//   everyone : read, unread, remarks
+//   CMD      : approvals, reminders, pending (billing date change waiting on CMD)
+//   RE / RM  : approved, rejected (billing date change decided by CMD)
+const COMMON_FILTER_TABS = ["read", "unread", "remarks"];
+const FILTER_TABS_BY_ROLE = {
+  [USER_ROLE.CMD]: [...COMMON_FILTER_TABS, "approvals", "reminders", "pending"],
+  [USER_ROLE.RENTAL_EXECUTIVE]: [...COMMON_FILTER_TABS, "approved", "rejected"],
+  [USER_ROLE.RENTAL_MANAGER]: [...COMMON_FILTER_TABS, "approved", "rejected"],
+};
+// Mongo condition for one tab (read / unread depend on the logged-in user)
+const filterTabCondition = (tab, userObjectId) => {
+  switch (tab) {
+    case "read": return { "readBy.userId": userObjectId };
+    case "unread": return { "readBy.userId": { $ne: userObjectId } };
+    case "remarks": return overdueRemarkFilter;
+    case "approvals": return normalApprovalFilter;
+    case "reminders": return reminderFilter;
+    case "pending": return revertStatusFilterFor(1);
+    case "approved": return revertStatusFilterFor(2);
+    case "rejected": return revertStatusFilterFor(3);
+    default: return null;
+  }
+};
+
 // ✅ NEW — billing date change (last bill date revert) status filter
 // 1 = Pending (request rows, not yet decided)
 // 2 = Approved by CMD / 3 = Rejected by CMD (the CMD decision rows only —
@@ -671,6 +723,21 @@ const getCmdNotifications = async (req, res) => {
       return errorResponse(res, "status must be 1 (Pending), 2 (Approved by CMD) or 3 (Rejected by CMD)", null, 400);
     }
 
+    // ✅ NEW — optional tab filter, allowed per role (role from the token)
+    const allowedTabs = FILTER_TABS_BY_ROLE[role] || COMMON_FILTER_TABS;
+    const tab = params.filter !== undefined && params.filter !== null ? String(params.filter).trim().toLowerCase() : "";
+    if (tab && !allowedTabs.includes(tab)) {
+      const known = Object.values(FILTER_TABS_BY_ROLE).some((tabs) => tabs.includes(tab));
+      return errorResponse(
+        res,
+        known
+          ? `filter "${tab}" is not available for ${ROLE_LABEL[role]}. Allowed: ${allowedTabs.join(", ")}`
+          : `Unknown filter "${tab}". Allowed: ${allowedTabs.join(", ")}`,
+        null,
+        400,
+      );
+    }
+
     const pageNumber = Math.max(parseInt(params.pageNumber) || 1, 1);
     const count = Math.max(parseInt(params.count) || 10, 1);
 
@@ -686,7 +753,11 @@ const getCmdNotifications = async (req, res) => {
     if (ROLE_LABEL[fromRole]) {
       filter.$or =
         fromRole === USER_ROLE.CMD
-          ? [{ approvedByRole: fromRole }, { dedupeKey: { $regex: "^billingDateRevertDecision:" } }]
+          ? [
+              { approvedByRole: fromRole },
+              { dedupeKey: { $regex: "^billingDateRevertDecision:" } },
+              { ...overdueRemarkFilter, remarkedByRole: fromRole }, // ✅ NEW — CMD's remarks
+            ]
           : [
               { ...normalApprovalFilter, approvedByRole: fromRole },
               { ...reminderFilter, lastRemindedByRole: fromRole },
@@ -698,6 +769,11 @@ const getCmdNotifications = async (req, res) => {
     // ($and, so it combines with notificationType / fromRole / isRead)
     if (hasStatus) {
       filter.$and = [...(filter.$and || []), revertStatusFilterFor(status)];
+    }
+    // ✅ NEW — tab filter; the read / unread tabs decide read state themselves
+    if (tab) {
+      if (tab === "read" || tab === "unread") delete filter["readBy.userId"];
+      filter.$and = [...(filter.$and || []), filterTabCondition(tab, userObjectId)];
     }
 
     // ✅ NEW — per-status totals (read + unread) for the logged-in role
@@ -719,7 +795,20 @@ const getCmdNotifications = async (req, res) => {
       overdueRemark: { totalCount: remarkTotal, readCount: remarkTotal - remarkUnread, unreadCount: remarkUnread },
     }));
 
-    const [totalCount, counts, rows, [pendingCount, approvedCount, rejectedCount], notificationTypeCount] = await Promise.all([
+    // ✅ NEW — per-tab badge counts for the logged-in role / user
+    const filterCountPromise = Promise.all(
+      allowedTabs.map(async (t) => {
+        const cond = filterTabCondition(t, userObjectId);
+        const totalTab = await CmdNotification.countDocuments({ ...roleOnly, ...cond });
+        const unreadTab =
+          t === "read" ? 0
+          : t === "unread" ? totalTab
+          : await CmdNotification.countDocuments({ ...unreadOnly, ...cond });
+        return [t, { totalCount: totalTab, unreadCount: unreadTab }];
+      }),
+    ).then(Object.fromEntries);
+
+    const [totalCount, counts, rows, [pendingCount, approvedCount, rejectedCount], notificationTypeCount, filterCount] = await Promise.all([
       CmdNotification.countDocuments(filter),
       getUnreadCounts(role, userObjectId),
       CmdNotification.find(filter)
@@ -729,12 +818,14 @@ const getCmdNotifications = async (req, res) => {
         .lean(),
       statusCountsPromise,
       typeCountPromise,
+      filterCountPromise,
     ]);
 
     return successResponse(res, "Notifications fetched successfully", {
       ...counts,
       billingDateRevertStatusCount: { pendingCount, approvedCount, rejectedCount }, // ✅ NEW
       notificationTypeCount, // ✅ NEW — { normalApproval, overdueRemark }: total / read / unread
+      filterCount, // ✅ NEW — per tab of this role: { totalCount, unreadCount }
       pagination: {
         pageNumber,
         count,
@@ -793,6 +884,11 @@ const markCmdNotificationRead = async (req, res) => {
       { _id: { $in: ids }, ...unreadFilterFor(role, userObjectId) },
       { $push: { readBy: { userId: userObjectId, readAt: nowIST() } } },
     );
+    // ✅ NEW — remark notifications → that site + month's remarks read for this role
+    const remarkRows = await CmdNotification.find({ _id: { $in: ids }, ...targetRoleFilter(role), ...overdueRemarkFilter })
+      .select("mediaId dueMonth rentalDueId")
+      .lean();
+    await markOverdueRemarksReadForRole(remarkRows, role);
     const counts = await getUnreadCounts(role, userObjectId);
 
     return successResponse(res, "Notification(s) marked as read", {
@@ -815,10 +911,20 @@ const markAllCmdNotificationsRead = async (req, res) => {
     if (!role) return;
     const params = { ...(req.query || {}), ...(req.body || {}) };
     const userObjectId = toObjectId(req.user.userId);
+    // ✅ NEW — unread remark notifications covered by this read-all (no type, or
+    // the remark type) → their remarks become read for this role
+    const type = NOTIFICATION_TYPE_ALIAS[params.notificationType] || params.notificationType;
+    const coversRemarks = !type || type === NOTIFICATION_TYPE.OVERDUE_REMARK;
+    const remarkRows = coversRemarks
+      ? await CmdNotification.find({ ...unreadFilterFor(role, userObjectId), ...overdueRemarkFilter })
+          .select("mediaId dueMonth rentalDueId")
+          .lean()
+      : [];
     const result = await CmdNotification.updateMany(
       { ...unreadFilterFor(role, userObjectId), ...typeFilterFor(params.notificationType) },
       { $push: { readBy: { userId: userObjectId, readAt: nowIST() } } },
     );
+    await markOverdueRemarksReadForRole(remarkRows, role);
     const counts = await getUnreadCounts(role, userObjectId);
     return successResponse(res, "All notifications marked as read", {
       updatedCount: result.modifiedCount || 0,

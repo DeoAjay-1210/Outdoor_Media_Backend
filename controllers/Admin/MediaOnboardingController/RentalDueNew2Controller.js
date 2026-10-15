@@ -33,6 +33,9 @@ const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDue
 // step moves to status 2 in THIS request (a save while it is not their turn
 // only updates fields and must not notify).
 const isRentalApproverRole = (userType) => userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
+// ✅ NEW — overdue remark roleName (same names as notifications / Google Chat);
+// ROLE_LABEL ("Owner" for 3) stays as-is for the approval / verification messages
+const REMARK_ROLE_NAME = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
 // ✅ NEW — roles whose approval sends a notification (CMD approval → Executive + Manager)
 const isApprovalNotifyRole = (userType) => isRentalApproverRole(userType) || userType === ROLE.OWNER;
 const isRoleStepApproved = (entry, role) =>
@@ -3662,6 +3665,9 @@ const userTypeNum = Number(req.user?.userType) || null;
         addedAt: nowIST(),
         userType: userTypeNum,
 role: userTypeNum,
+        // ✅ NEW — read for the adding role; other roles read it via
+        // /admin/cmd-notifications/read (role-based isRead)
+        readByRoles: userTypeNum ? [userTypeNum] : [],
       };
 
       // Find matching rentalDue entry from media to populate full overdue details
@@ -3852,7 +3858,7 @@ role: userTypeNum,
         addedAt: newRemark.addedAt,
         userType: userTypeNum,
 role: userTypeNum,
-roleName: ROLE_LABEL[userTypeNum] || "User",
+roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
       });
 
       // ✅ NEW — Google Chat message after the remark is saved
@@ -3867,7 +3873,8 @@ roleName: ROLE_LABEL[userTypeNum] || "User",
       });
 
       // ✅ NEW — overdue remark notification (read only): Executive's remark →
-      // Manager + CMD, Manager's remark → Executive + CMD
+      // Manager + CMD, Manager's remark → Executive + CMD, CMD's remark →
+      // Executive + Manager
       await createOverdueRemarkNotification({
         media,
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
@@ -3926,6 +3933,8 @@ exports.getOverDueRemarks = async (req, res) => {
     }
 
     const records = await OverDueHistory.find(query).lean();
+    // ✅ NEW — isRead per remark for the logged-in role (from the token)
+    const viewerRole = Number(req.user?.userType) || null;
 const UserModel = require("../../../models/Admin/UserSchema/UserSchema");
 const allUsers = await UserModel.find({}, "userName userType").lean();
 const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowerCase(), Number(u.userType)]));
@@ -3946,7 +3955,13 @@ records.forEach((rec) => {
       }
       r.role = rNum;
       r.userType = rNum;
-      r.roleName = ROLE_LABEL[rNum] || "User";
+      r.roleName = REMARK_ROLE_NAME[rNum] || "User";
+      // ✅ NEW — read for the adding role, or once this role read it; remarks
+      // saved before read tracking existed (no readByRoles) count as read
+      r.isRead = !Array.isArray(r.readByRoles)
+        ? true
+        : (!!viewerRole && rNum === viewerRole) || r.readByRoles.map(Number).includes(viewerRole);
+      delete r.readByRoles;
     });
   }
 });
