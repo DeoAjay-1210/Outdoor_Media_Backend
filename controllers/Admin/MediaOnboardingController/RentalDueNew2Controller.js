@@ -3859,7 +3859,8 @@ roleName: ROLE_LABEL[userTypeNum] || "User",
         userName,
       });
 
-      // ✅ NEW — Rental Executive's remark → notification for Manager + CMD (read only)
+      // ✅ NEW — overdue remark notification (read only): Executive's remark →
+      // Manager + CMD, Manager's remark → Executive + CMD
       await createOverdueRemarkNotification({
         media,
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),

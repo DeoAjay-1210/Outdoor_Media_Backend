@@ -53,9 +53,11 @@ const reminderFilter = { notificationType: NOTIFICATION_TYPE.REMINDER };
 const billingDateRevertFilter = { notificationType: NOTIFICATION_TYPE.BILLING_DATE_REVERT };
 const overdueRemarkFilter = { notificationType: NOTIFICATION_TYPE.OVERDUE_REMARK };
 
-// overdue remark → who is notified: only an Executive's remark, to Manager + CMD
+// overdue remark → who is notified:
+// Executive's remark → Manager + CMD | Manager's remark → Executive + CMD
 const OVERDUE_REMARK_NOTIFY_TARGETS = {
   [USER_ROLE.RENTAL_EXECUTIVE]: [USER_ROLE.RENTAL_MANAGER, USER_ROLE.CMD],
+  [USER_ROLE.RENTAL_MANAGER]: [USER_ROLE.RENTAL_EXECUTIVE, USER_ROLE.CMD], // ✅ NEW
 };
 
 // unread counts for THIS CMD user: overall + split by who approved
@@ -983,7 +985,8 @@ const sendCmdReminder = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 // INTERNAL — called from RentalDueNew2Controller after an overdue remark is
-// saved. Only a Rental Executive's remark notifies (Manager + CMD, read only).
+// saved. Executive's remark → Manager + CMD, Manager's remark → Executive +
+// CMD (read only); see OVERDUE_REMARK_NOTIFY_TARGETS.
 // ONE row per site per month per receiver: a new remark updates it,
 // increments remarkCount and makes it unread again. Never throws.
 async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, mediaDetailId, remark, userType, userId, userName }) {
