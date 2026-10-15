@@ -420,6 +420,20 @@ async function refreshBillingDateRevertNotification({ request }) {
   }
 }
 
+// ✅ NEW — the CMD's OWN copy of a revert request (decided requests are
+// removed from the CMD's notifications; Executive / Manager rows are kept)
+const isDecidedRevertStatus = (status) => [2, 3].includes(Number(status)); // 2 Approved, 3 Rejected
+const cmdRevertRequestRowFilter = (requestId) => ({
+  $or: [
+    { dedupeKey: revertRequestKey(requestId, USER_ROLE.CMD) },
+    {
+      billingDateRevertRequestId: toObjectId(requestId),
+      notificationType: NOTIFICATION_TYPE.BILLING_DATE_REVERT,
+      ...targetRoleFilter(USER_ROLE.CMD),
+    },
+  ],
+});
+
 // Keeps every row of the request in sync with its status; with `request`
 // (CMD approve / reject) it also notifies the Executive and the Manager.
 // Never throws.
@@ -434,6 +448,11 @@ async function updateBillingDateRevertNotificationStatus(requestId, revertStatus
       { dedupeKey: revertRequestKey(requestId, USER_ROLE.CMD) },
       { $set: { revertStatus, updatedAt: nowIST() } },
     );
+    // ✅ NEW — CMD approved / rejected: the request no longer shows in the
+    // CMD's own notifications; only the Executive and Manager are notified
+    if (isDecidedRevertStatus(revertStatus)) {
+      await CmdNotification.deleteMany(cmdRevertRequestRowFilter(requestId));
+    }
   } catch (err) {
     console.error("[CmdNotification] billing date revert status update failed:", err.message);
   }
@@ -560,6 +579,10 @@ const formatNotification = (n, userObjectId) => ({
         cmdActionBy: n.cmdActionBy || null,
         cmdRemark: n.cmdRemark || "",
         cmdActionAt: n.cmdActionAt || null,
+        // ✅ NEW — status filter values: 1 Pending, 2 Approved by CMD, 3 Rejected by CMD
+        status: Number(n.revertStatus) || 1,
+        statusLabel: REVERT_FILTER_STATUS_LABEL[Number(n.revertStatus) || 1] || "",
+        rejectReason: Number(n.revertStatus) === 3 ? n.cmdRemark || "" : "",
       }
     : {}),
   mediaId: n.mediaId,
@@ -596,13 +619,33 @@ const typeFilterFor = (notificationType) => {
   return {};
 };
 
+// ✅ NEW — billing date change (last bill date revert) status filter
+// 1 = Pending (request rows, not yet decided)
+// 2 = Approved by CMD / 3 = Rejected by CMD (the CMD decision rows only —
+//     one per request, no duplicate request copies)
+const REVERT_FILTER_STATUS_LABEL = { 1: "Pending", 2: "Approved by CMD", 3: "Rejected by CMD" };
+const revertStatusFilterFor = (status) =>
+  Number(status) === 1
+    ? {
+        ...billingDateRevertFilter,
+        revertStatus: { $in: [1, null] },
+        dedupeKey: { $not: /^billingDateRevertDecision:/ },
+      }
+    : {
+        ...billingDateRevertFilter,
+        revertStatus: Number(status),
+        dedupeKey: { $regex: "^billingDateRevertDecision:" },
+      };
+
 // ─────────────────────────────────────────────────────────────
 // POST/GET /admin/cmd-notifications
 // Role: Rental Executive (1) / Rental Manager (2) / CMD (3) — rows sent to
 // the logged-in role only.
 // body/query: pageNumber, count, isRead (true/false — optional filter),
 //             notificationType ("normalApproval" | "reminder" | "billingDateRevert" — optional),
-//             fromRole (1 | 2 | 3 — optional: who sent it)
+//             fromRole (1 | 2 | 3 — optional: who sent it),
+//             status (1 Pending | 2 Approved by CMD | 3 Rejected by CMD —
+//                     optional: billing date change notifications only)
 // ─────────────────────────────────────────────────────────────
 const getCmdNotifications = async (req, res) => {
   try {
@@ -610,6 +653,13 @@ const getCmdNotifications = async (req, res) => {
     if (!role) return;
     const params = { ...(req.query || {}), ...(req.body || {}) };
     const userObjectId = toObjectId(req.user.userId);
+
+    // ✅ NEW — optional billing date change status filter
+    const hasStatus = params.status !== undefined && params.status !== null && params.status !== "";
+    const status = hasStatus ? Number(params.status) : null;
+    if (hasStatus && !REVERT_FILTER_STATUS_LABEL[status]) {
+      return errorResponse(res, "status must be 1 (Pending), 2 (Approved by CMD) or 3 (Rejected by CMD)", null, 400);
+    }
 
     const pageNumber = Math.max(parseInt(params.pageNumber) || 1, 1);
     const count = Math.max(parseInt(params.count) || 10, 1);
@@ -634,8 +684,19 @@ const getCmdNotifications = async (req, res) => {
               { ...billingDateRevertFilter, requestedByRole: fromRole, dedupeKey: { $not: /^billingDateRevertDecision:/ } },
             ];
     }
+    // ✅ NEW — status → billing date change rows of that status only
+    // ($and, so it combines with notificationType / fromRole / isRead)
+    if (hasStatus) {
+      filter.$and = [...(filter.$and || []), revertStatusFilterFor(status)];
+    }
 
-    const [totalCount, counts, rows] = await Promise.all([
+    // ✅ NEW — per-status totals (read + unread) for the logged-in role
+    const roleOnly = targetRoleFilter(role);
+    const statusCountsPromise = Promise.all(
+      [1, 2, 3].map((s) => CmdNotification.countDocuments({ ...roleOnly, ...revertStatusFilterFor(s) })),
+    );
+
+    const [totalCount, counts, rows, [pendingCount, approvedCount, rejectedCount]] = await Promise.all([
       CmdNotification.countDocuments(filter),
       getUnreadCounts(role, userObjectId),
       CmdNotification.find(filter)
@@ -643,10 +704,12 @@ const getCmdNotifications = async (req, res) => {
         .skip((pageNumber - 1) * count)
         .limit(count)
         .lean(),
+      statusCountsPromise,
     ]);
 
     return successResponse(res, "Notifications fetched successfully", {
       ...counts,
+      billingDateRevertStatusCount: { pendingCount, approvedCount, rejectedCount }, // ✅ NEW
       pagination: {
         pageNumber,
         count,
@@ -1004,7 +1067,14 @@ async function purgeOldCmdNotifications() {
     "readBy.0": { $exists: true }, // read at least once
     readBy: { $not: { $elemMatch: { readAt: { $gte: cutoff } } } }, // every read is older than the cutoff
   });
-  return { deleted: result.deletedCount || 0 };
+  // ✅ NEW — CMD's own copies of revert requests the CMD already approved /
+  // rejected (rows from before that removal existed); read or unread
+  const decided = await CmdNotification.deleteMany({
+    notificationType: NOTIFICATION_TYPE.BILLING_DATE_REVERT,
+    ...targetRoleFilter(USER_ROLE.CMD),
+    revertStatus: { $in: [2, 3] },
+  });
+  return { deleted: (result.deletedCount || 0) + (decided.deletedCount || 0) };
 }
 
 module.exports = {

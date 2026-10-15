@@ -12,6 +12,7 @@ const {
   syncOrLinkMediaOwnerToMaster,
   correctLinkedSiteAmounts,
   removeLinkedSiteFromMaster,
+  resolveMediaOwnerBankAccounts, // ✅ NEW — landOwners[].bankAccountId
 } = require("../landOwnerMasterController/landOwnerMasterController");
 const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
 
@@ -2440,6 +2441,17 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       );
       if (!appraisalCheck.valid)
         return errorResponse(res, appraisalCheck.message, null, 400);
+    }
+
+    // ✅ NEW — landOwners[].bankAccountId → copy the chosen bank account's
+    // details onto the owner. Runs before ANY save, so an invalid id
+    // returns 400 with nothing written. No id sent → old flow unchanged.
+    if (Array.isArray(mediaData.landOwners)) {
+      try {
+        await resolveMediaOwnerBankAccounts(mediaData.landOwners);
+      } catch (bankErr) {
+        return errorResponse(res, bankErr.message, null, bankErr.statusCode || 400);
+      }
     }
 
     // const uploadedAgreementPDF = req.files?.agreementPDF?.[0];

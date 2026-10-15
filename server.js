@@ -53,7 +53,8 @@ cron.schedule("10 0 * * *", runApplyDueAppraisals);
 
 // Delete Executive / Manager / CMD notifications read more than
 // CMD_NOTIFICATION_READ_RETENTION_MINUTES (.env, default 1 day) ago;
-// unread ones are kept (startup + hourly at :15). For testing, set in .env:
+// unread ones are kept. Also removes CMD's copies of billing date revert
+// requests the CMD already approved / rejected (startup + hourly at :15). For testing, set in .env:
 // CMD_NOTIFICATION_READ_RETENTION_MINUTES=1 and CMD_NOTIFICATION_PURGE_CRON="* * * * *"
 const { purgeOldCmdNotifications } = require("./controllers/Admin/NotificationController/CmdNotificationController");
 const runPurgeCmdNotifications = async () => {
@@ -64,6 +65,13 @@ const runPurgeCmdNotifications = async () => {
   }
 };
 runPurgeCmdNotifications();
+
+// One-time backfill: landowners without bankAccounts[] get their current
+// bank details as the primary account (no-op once every owner has one)
+const { seedLandOwnerBankAccounts } = require("./controllers/Admin/landOwnerMasterController/landOwnerMasterController");
+seedLandOwnerBankAccounts()
+  .then((r) => r.seeded && console.log(`[seedLandOwnerBankAccounts] seeded=${r.seeded}`))
+  .catch((err) => console.error("[seedLandOwnerBankAccounts] failed:", err.message));
 cron.schedule(process.env.CMD_NOTIFICATION_PURGE_CRON || "15 * * * *", runPurgeCmdNotifications);
 const app = express();
 
