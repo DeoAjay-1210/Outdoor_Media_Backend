@@ -6,7 +6,7 @@ const {
   getRequiredModesShared,
   calculateOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
-const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
+const { computeRentalDueStats, roleStatus } = require("../../../utils/rentalDueStats");
 
 const IST_OFFSET_MS = 330 * 60000;
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -73,10 +73,15 @@ const applyGst = (docs, gst) => (gst === "all" ? docs : docs.filter((d) => (gst 
 // Login filter = rentalDue entry was saved by a user of that role (entry.savedBy.role)
 // Pending / Approved for a role (Rental Master rule): approved = that role's step approved; pending = not fully approved and the role has not acted.
 // No role (All Logins) → overall approval state.
-function matchStatus(entry, role, status) {
+// ✅ NEW — opts.pendingAtRoleOnly (dashboard/v2 only): pending = waiting on that
+// role (earlier roles approved, this role not yet) — same rule as landowner/site-filter.
+function matchStatus(entry, role, status, opts = {}) {
   if (status === "all") return true;
   const overall = num(entry?.approvalStatus) === 3;
   if (!role) return status === "approved" ? overall : !overall;
+  if (opts.pendingAtRoleOnly && status === "pending") {
+    return roleStatus(entry, role, { pendingAtRoleOnly: true }).isOpen;
+  }
   const st = (entry?.approvalSteps || []).find((x) => x.role === role);
   const approved = !!st && num(st.status) === 2, acted = !!st && [2, 3].includes(num(st.status));
   return status === "approved" ? approved : !overall && !acted;
@@ -132,7 +137,11 @@ function computeRental(docs, range, filters) {
   const gdocs = applyGst(docs, filters.gst);
   const targetRole = filters.loginRole || null; // Login = Rental Master "View for" role
   let curMonth = null;
-  const faceFilter = (entry) => inWindow(range, entry, curMonth.year, curMonth.month) && matchStatus(entry, targetRole, filters.status);
+  // ✅ NEW — pendingAtRoleOnly: a role's pending = dues waiting on that role
+  // (Executive → Manager → CMD), same as landowner/site-filter roleType
+  const faceFilter = (entry) =>
+    inWindow(range, entry, curMonth.year, curMonth.month) &&
+    matchStatus(entry, targetRole, filters.status, { pendingAtRoleOnly: true });
   const roleLL = { 1: { p: new Set(), a: new Set() }, 2: { p: new Set(), a: new Set() }, 3: { p: new Set(), a: new Set() } }; // distinct landlords behind each role card
   const roleStats = { 1: { p: [0, 0], a: [0, 0] }, 2: { p: [0, 0], a: [0, 0] }, 3: { p: [0, 0], a: [0, 0] } }; // Rental Master per-role Pending / Approved cards
   const sum = { due: [0, 0], approved: [0, 0], overdue: [0, 0], gst: 0, tds: 0, hold: [0, 0] };
@@ -145,7 +154,7 @@ function computeRental(docs, range, filters) {
   range.months.forEach(({ year, month }, idx) => {
     curMonth = { year, month };
     const st = computeRentalDueStats(gdocs, {
-      year, month, targetRole, faceFilter,
+      year, month, targetRole, faceFilter, pendingAtRoleOnly: true,
       onFace: ({ media, entry, amount, cycle, state, past }) => {
         if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
         addLandlords(LL.due, media);
@@ -175,9 +184,11 @@ function computeRental(docs, range, filters) {
     for (const r of [1, 2, 3]) {
       const sr = computeRentalDueStats(gdocs, {
         year, month, targetRole: r, faceFilter: (e) => inWindow(range, e, year, month),
-        onFace: ({ media, state, past }) => {
+        pendingAtRoleOnly: true, // ✅ NEW — pending card = dues waiting on role r
+        onFace: ({ media, state, past, rolePending }) => {
           if (past) return;
-          const set = state === "approved" ? roleLL[r].a : state === "pending" || state === "overdue" ? roleLL[r].p : null;
+          // pending landlords = the faces counted in this role's pendingCount
+          const set = state === "approved" ? roleLL[r].a : rolePending ? roleLL[r].p : null;
           if (set) addLandlords(set, media);
         },
       });

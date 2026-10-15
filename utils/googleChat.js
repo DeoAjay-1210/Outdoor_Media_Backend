@@ -83,28 +83,57 @@ function addMonthsUTC(date, months) {
   return d;
 }
 
-function buildMessage({ media, entry, userType, userName, action, cycleDate, status = "" }) {
-  const plain = typeof media?.toObject === "function" ? media.toObject({ virtuals: true }) : media || {};
+// ✅ NEW — payment frequency label for the message
+const FREQUENCY_LABEL = { 1: "Monthly", 2: "Quarterly", 3: "Half Yearly", 4: "Yearly", 5: "2 Years" };
+const frequencyLabelOf = (rentalPayment) => {
+  const f = Number(rentalPayment?.paymentFrequency || 1);
+  if (f === 6) {
+    const months = Number(rentalPayment?.customPaymentFrequency) || 1;
+    return `Custom (${months} month${months === 1 ? "" : "s"})`;
+  }
+  return FREQUENCY_LABEL[f] || "Monthly";
+};
+
+// faces a bill covers: separate bill (siteBillMode 2) → only its face;
+// single bill → every active face of the site
+function billFacesOf(plain, entry) {
   const details = plain.mediaDetails || [];
   const activeFaces = details.filter((d) => Number(d.status) === 1);
-  // separate bill (siteBillMode 2) → only that face; single bill → the
-  // bill covers every active face of the site
   const entryFace = entry?.mediaDetailId
     ? details.find((d) => String(d._id) === String(entry.mediaDetailId))
     : null;
-  const faces = entryFace && Number(entryFace.siteBillMode) === 2 ? [entryFace] : activeFaces;
-  const shownFaces = faces.length ? faces : entryFace ? [entryFace] : details;
+  const isSeparateBill = !!entryFace && Number(entryFace.siteBillMode) === 2;
+  const faces = isSeparateBill ? [entryFace] : activeFaces;
+  return { faces: faces.length ? faces : entryFace ? [entryFace] : details, entryFace, isSeparateBill };
+}
+
+// ✅ NEW — one chat message per bill: a single-bill site's per-face rows of the
+// same month build the SAME message, so they share one key (callers send once
+// per key); a separate-bill face keeps its own key.
+function rentalDueChatKey(media, entry) {
+  const plain = typeof media?.toObject === "function" ? media.toObject() : media || {};
+  const { entryFace, isSeparateBill } = billFacesOf(plain, entry);
+  const month = entry?.dueMonth || (entry?.dueDate ? getDueMonthLabel(entry.dueDate) : "");
+  return `${String(plain._id || "")}:${month}${isSeparateBill ? `:${String(entryFace._id)}` : ""}`;
+}
+
+function buildMessage({ media, entry, userType, userName, action, cycleDate, status = "" }) {
+  const plain = typeof media?.toObject === "function" ? media.toObject({ virtuals: true }) : media || {};
+  // separate bill (siteBillMode 2) → only that face; single bill → the
+  // bill covers every active face of the site
+  const { faces: shownFaces } = billFacesOf(plain, entry);
   const siteName = shownFaces.map((d) => d.mediaName).filter(Boolean).join(", ") || "-";
   const siteCode = shownFaces.map((d) => d.mediaCode).filter(Boolean).join(", ") || "-";
   const landOwnerName = (plain.landOwners || []).map((o) => o.name).filter(Boolean).join(", ") || "-";
   const dueMonth = entry?.dueMonth || (cycleDate ? getDueMonthLabel(cycleDate) : "-");
   const amounts = getBillAmounts(plain, entry, cycleDate);
-  // this bill's previous / following billing date (its due date ± one cycle)
+  // this bill's previous / own / following billing date (its due date ± one cycle)
   const billDate = entry?.dueDate || cycleDate;
   const cycleMonths = cycleMonthsOf(plain.rentalPayment);
   const billDates = billDate
     ? [
         `*Last Bill Date:* ${formatDMY(addMonthsUTC(billDate, -cycleMonths))}`,
+        `*Current Bill Date:* ${formatDMY(billDate)}`, // ✅ NEW
         `*Next Bill Date:* ${formatDMY(addMonthsUTC(billDate, cycleMonths))}`,
       ]
     : [];
@@ -127,6 +156,7 @@ function buildMessage({ media, entry, userType, userName, action, cycleDate, sta
     `*Site Code:* ${siteCode}`,
     `*Landowner Name:* ${landOwnerName}`,
     `*Due Month:* ${dueMonth}`,
+    `*Payment Frequency:* ${frequencyLabelOf(plain.rentalPayment)}`, // ✅ NEW
     ...billDates,
     `*Total Rental Amount:* ${formatINR(amounts.totalRentalAmount)}`,
     ...tdsLine,
@@ -171,14 +201,16 @@ const REVERT_REQUEST_ROUTES = {
 };
 const REVERT_DECISION_ROUTE = ["RENTAL_EXECUTIVE_URL", "RENTAL_MANAGER_URL"];
 
-// DD.MM.YYYY (billing dates are stored at UTC midnight)
+// "10 October 2026" (billing dates are stored at UTC midnight)
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 const formatDMY = (d) => {
   if (!d) return "-";
   const date = new Date(d);
   if (Number.isNaN(date.getTime())) return "-";
-  const dd = String(date.getUTCDate()).padStart(2, "0");
-  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}.${date.getUTCFullYear()}`;
+  return `${date.getUTCDate()} ${MONTH_NAMES[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 };
 
 const actorLabel = (actor) =>
@@ -347,6 +379,7 @@ module.exports = {
   notifyOverdueRemarkChat,
   buildOverdueRemarkMessage,
   notifyRentalDueChat,
+  rentalDueChatKey, // ✅ NEW — one message per bill (see saveRentalDue batch)
   buildMessage,
   APPROVAL_ROUTES,
   notifyBillingDateRevertChat,

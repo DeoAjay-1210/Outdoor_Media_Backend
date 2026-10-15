@@ -612,8 +612,16 @@ async function withLandOwnerIds(rows) {
   );
 }
 
+// ✅ NEW — short names accepted for notificationType
+const NOTIFICATION_TYPE_ALIAS = {
+  approval: NOTIFICATION_TYPE.NORMAL_APPROVAL,
+  remark: NOTIFICATION_TYPE.OVERDUE_REMARK,
+};
+
 // optional notificationType filter: "normalApproval" | "reminder" | "billingDateRevert"
-const typeFilterFor = (notificationType) => {
+// | "overdueRemark" (also "approval" / "remark")
+const typeFilterFor = (rawType) => {
+  const notificationType = NOTIFICATION_TYPE_ALIAS[rawType] || rawType;
   if (notificationType === NOTIFICATION_TYPE.REMINDER) return reminderFilter;
   if (notificationType === NOTIFICATION_TYPE.NORMAL_APPROVAL) return normalApprovalFilter;
   if (notificationType === NOTIFICATION_TYPE.BILLING_DATE_REVERT) return billingDateRevertFilter;
@@ -698,7 +706,20 @@ const getCmdNotifications = async (req, res) => {
       [1, 2, 3].map((s) => CmdNotification.countDocuments({ ...roleOnly, ...revertStatusFilterFor(s) })),
     );
 
-    const [totalCount, counts, rows, [pendingCount, approvedCount, rejectedCount]] = await Promise.all([
+    // ✅ NEW — total / read / unread per type (approvals, overdue remarks) for
+    // the logged-in user, independent of the list filters
+    const unreadOnly = unreadFilterFor(role, userObjectId);
+    const typeCountPromise = Promise.all(
+      [normalApprovalFilter, overdueRemarkFilter].flatMap((typeFilter) => [
+        CmdNotification.countDocuments({ ...roleOnly, ...typeFilter }),
+        CmdNotification.countDocuments({ ...unreadOnly, ...typeFilter }),
+      ]),
+    ).then(([approvalTotal, approvalUnread, remarkTotal, remarkUnread]) => ({
+      normalApproval: { totalCount: approvalTotal, readCount: approvalTotal - approvalUnread, unreadCount: approvalUnread },
+      overdueRemark: { totalCount: remarkTotal, readCount: remarkTotal - remarkUnread, unreadCount: remarkUnread },
+    }));
+
+    const [totalCount, counts, rows, [pendingCount, approvedCount, rejectedCount], notificationTypeCount] = await Promise.all([
       CmdNotification.countDocuments(filter),
       getUnreadCounts(role, userObjectId),
       CmdNotification.find(filter)
@@ -707,11 +728,13 @@ const getCmdNotifications = async (req, res) => {
         .limit(count)
         .lean(),
       statusCountsPromise,
+      typeCountPromise,
     ]);
 
     return successResponse(res, "Notifications fetched successfully", {
       ...counts,
       billingDateRevertStatusCount: { pendingCount, approvedCount, rejectedCount }, // ✅ NEW
+      notificationTypeCount, // ✅ NEW — { normalApproval, overdueRemark }: total / read / unread
       pagination: {
         pageNumber,
         count,

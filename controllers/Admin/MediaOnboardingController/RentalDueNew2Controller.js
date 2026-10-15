@@ -25,7 +25,7 @@ const {
   createRentalApprovalNotification,
   createOverdueRemarkNotification,
 } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
-const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
+const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
@@ -2614,7 +2614,14 @@ exports.saveRentalDue = async (req, res) => {
         for (const approvedEntry of groupCmdApprovals) {
           await createRentalApprovalNotification({ media, entry: approvedEntry, userType, userId, userName });
         }
+        // ✅ FIXED — single-bill site: every face has its own row for the month,
+        // and each built the SAME message → sent once per bill (per site per
+        // month; a separate-bill face still gets its own message)
+        const sentChatKeys = new Set();
         for (const approvedEntry of groupChatApprovals) {
+          const chatKey = rentalDueChatKey(media, approvedEntry);
+          if (sentChatKeys.has(chatKey)) continue;
+          sentChatKeys.add(chatKey);
           notifyRentalDueChat({ media, entry: approvedEntry, userType, userName, action: "approved" });
         }
       }
