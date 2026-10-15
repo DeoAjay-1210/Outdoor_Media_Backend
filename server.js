@@ -17,6 +17,7 @@ const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/land
 const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
 const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
 const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
+const appUpdateRoutes = require("./routes/Admin/AppUpdateRoutes/AppUpdateRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
 (async () => {
@@ -88,6 +89,9 @@ app.use("/admin", LandownerMasterRoutes);
 app.use("/admin", dashboardRoutes);
 app.use("/admin", cmdNotificationRoutes);
 app.use("/admin", billingDateRevertRoutes);
+app.use("/admin", appUpdateRoutes);
+// Auto-publish a new public/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
+if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
