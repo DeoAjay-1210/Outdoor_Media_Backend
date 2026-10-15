@@ -988,20 +988,21 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
 }
 
 // ─────────────────────────────────────────────────────────────
-// AUTO DELETE — notifications with no activity (updatedAt, else createdAt)
-// for CMD_NOTIFICATION_RETENTION_DAYS (default 10) days are deleted.
-// Run daily from server.js. Only notification rows are removed — rental dues,
+// AUTO DELETE — Rental Executive / Rental Manager / CMD notifications that were
+// READ more than CMD_NOTIFICATION_READ_RETENTION_MINUTES (default 1440 = 1 day; set in .env)
+// ago are deleted. UNREAD notifications (readBy empty — including rows made unread
+// again by a new approval / reminder / remark) are never deleted.
+// Run hourly from server.js. Only notification rows are removed — rental dues,
 // approvals and billing date revert requests are never touched.
 // ─────────────────────────────────────────────────────────────
 async function purgeOldCmdNotifications() {
-  const days = parseInt(process.env.CMD_NOTIFICATION_RETENTION_DAYS || "10", 10) || 10;
-  // createdAt / updatedAt are stored with nowIST(), so compare on the same clock
-  const cutoff = new Date(nowIST().getTime() - days * 24 * 60 * 60 * 1000);
+  const minutes = parseFloat(process.env.CMD_NOTIFICATION_READ_RETENTION_MINUTES || "1440") || 1440;
+  // readAt is stored with nowIST(), so compare on the same clock
+  const cutoff = new Date(nowIST().getTime() - minutes * 60 * 1000);
   const result = await CmdNotification.deleteMany({
-    $or: [
-      { updatedAt: { $lt: cutoff } },
-      { updatedAt: null, createdAt: { $lt: cutoff } },
-    ],
+    targetRole: { $in: [USER_ROLE.RENTAL_EXECUTIVE, USER_ROLE.RENTAL_MANAGER, USER_ROLE.CMD, null] },
+    "readBy.0": { $exists: true }, // read at least once
+    readBy: { $not: { $elemMatch: { readAt: { $gte: cutoff } } } }, // every read is older than the cutoff
   });
   return { deleted: result.deletedCount || 0 };
 }

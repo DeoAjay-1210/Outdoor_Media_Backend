@@ -51,7 +51,10 @@ const runApplyDueAppraisals = async () => {
 runApplyDueAppraisals();
 cron.schedule("10 0 * * *", runApplyDueAppraisals);
 
-// Delete CMD notifications with no activity for 10 days (startup + daily 00:15)
+// Delete Executive / Manager / CMD notifications read more than
+// CMD_NOTIFICATION_READ_RETENTION_MINUTES (.env, default 1 day) ago;
+// unread ones are kept (startup + hourly at :15). For testing, set in .env:
+// CMD_NOTIFICATION_READ_RETENTION_MINUTES=1 and CMD_NOTIFICATION_PURGE_CRON="* * * * *"
 const { purgeOldCmdNotifications } = require("./controllers/Admin/NotificationController/CmdNotificationController");
 const runPurgeCmdNotifications = async () => {
   try {
@@ -61,7 +64,7 @@ const runPurgeCmdNotifications = async () => {
   }
 };
 runPurgeCmdNotifications();
-cron.schedule("15 0 * * *", runPurgeCmdNotifications);
+cron.schedule(process.env.CMD_NOTIFICATION_PURGE_CRON || "15 * * * *", runPurgeCmdNotifications);
 const app = express();
 
 app.use(cors());
