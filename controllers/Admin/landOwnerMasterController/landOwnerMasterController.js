@@ -107,19 +107,32 @@ const syncLandOwnerToMedia = async (landOwner, session) => {
         owner.landOwnerMasterId &&
         String(owner.landOwnerMasterId) === String(landOwner._id)
       ) {
+        // ✅ NEW — a site that picked a bank account gets THAT account's
+        // details; every other site keeps the old top-level (primary) copy.
+        const siteAccount = owner.bankAccountId
+          ? (landOwner.bankAccounts || []).find(
+              (a) => String(a._id) === String(owner.bankAccountId),
+            )
+          : null;
         owner.name = landOwner.name;
         owner.phone = landOwner.phone;
-        owner.bankName = landOwner.bankName;
-        owner.ifsc = landOwner.ifsc;
-        owner.accountNumber = landOwner.accountNumber;
+        if (!siteAccount) {
+          owner.bankName = landOwner.bankName;
+          owner.ifsc = landOwner.ifsc;
+          owner.accountNumber = landOwner.accountNumber;
+        }
         owner.upiId = landOwner.upiId;
         owner.panNumber = landOwner.panNumber;
         owner.panCardImage = landOwner.panCardImage;
         owner.aadharCardNumber = landOwner.aadharCardNumber;
         owner.aadharCardImage = landOwner.aadharCardImage;
         owner.paymentCategory = landOwner.paymentCategory;
-        owner.bankPassbook = landOwner.bankPassbook;
-        owner.cancelCheckLeaf = landOwner.cancelCheckLeaf;
+        if (siteAccount) {
+          applyAccountToMediaOwner(owner, siteAccount);
+        } else {
+          owner.bankPassbook = landOwner.bankPassbook;
+          owner.cancelCheckLeaf = landOwner.cancelCheckLeaf;
+        }
         owner.onlineMode = landOwner.onlineMode;
         changed = true;
       }
@@ -251,14 +264,20 @@ const syncOrLinkMediaOwnerToMaster = async (
       cancelCheckLeaf: owner.cancelCheckLeaf,
       onlineMode: owner.onlineMode,
     });
+    syncPrimaryFromTopLevel(landOwnerMaster); // ✅ NEW — first bank account
   } else {
+    // ✅ NEW — a site paying into a chosen bank account must not overwrite
+    // the master's primary bank details with that account.
+    const usesBankAccount = !!owner.bankAccountId;
     // reuse the same complete field list as landOwnerSave's UPDATE
     // branch — guarantees this stays in sync with that logic.
     OWNER_UPDATABLE_FIELDS.forEach((field) => {
+      if (usesBankAccount && BANK_TEXT_FIELDS.includes(field)) return;
       if (owner[field] !== undefined) {
         landOwnerMaster[field] = owner[field];
       }
     });
+    if (!usesBankAccount) syncPrimaryFromTopLevel(landOwnerMaster);
   }
 
   // ✅ per-site record — THIS is what lets one landowner have
@@ -587,10 +606,366 @@ const applyOwnerFileFields = (landOwner, owner) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// ✅ NEW — MULTIPLE BANK ACCOUNTS PER LANDOWNER
+// master.bankAccounts[] holds every account; the top-level bank fields
+// mirror the PRIMARY one. A Media site picks an account through
+// landOwners[].bankAccountId and gets that account's details copied in.
+// Without bankAccountId every flow behaves exactly as before.
+// ─────────────────────────────────────────────────────────────
+const BANK_TEXT_FIELDS = ["bankName", "ifsc", "accountNumber"];
+const BANK_FILE_FIELDS = ["bankPassbook", "cancelCheckLeaf"];
+
+const badRequest = (message) => {
+  const err = new Error(message);
+  err.statusCode = 400;
+  return err;
+};
+const cleanStr = (v) => (v === undefined || v === null ? "" : String(v).trim());
+const bankKey = (accountNumber, ifsc) =>
+  `${cleanStr(accountNumber)}|${cleanStr(ifsc).toUpperCase()}`;
+const hasFile = (f) => !!(f && typeof f === "object" && f.filePath);
+const plainCopy = (v) => JSON.parse(JSON.stringify(v));
+const isPrimaryAccount = (a) => Number(a?.isPrimary) === 1;
+const getPrimaryAccount = (accounts) =>
+  (accounts || []).find(isPrimaryAccount) || (accounts || [])[0] || null;
+
+// file object / URL string → file object valid for the master schema
+const toMasterFile = (val) => {
+  if (hasFile(val)) {
+    const file = plainCopy(val);
+    if (!["image", "other"].includes(file.fileType)) {
+      file.fileType = inferFileTypeFromPath(file.filePath) === "pdf" ? "other" : "image";
+    }
+    return file;
+  }
+  if (typeof val === "string" && val.trim() !== "") {
+    const filePath = val.trim();
+    return {
+      originalName: filePath.split("/").pop(),
+      fileName: filePath.split("/").pop(),
+      filePath,
+      fileType: inferFileTypeFromPath(filePath) === "pdf" ? "other" : "image",
+      uploadedAt: nowIST(),
+    };
+  }
+  return null;
+};
+
+// master file → Media landOwners[] file (that schema only allows "image")
+const toMediaFile = (val) => {
+  if (!hasFile(val)) return null;
+  const file = plainCopy(val);
+  return {
+    originalName: file.originalName,
+    fileName: file.fileName,
+    filePath: file.filePath,
+    mimeType: file.mimeType,
+    size: file.size,
+    fileType: "image",
+    uploadedAt: file.uploadedAt || null,
+  };
+};
+
+// copy one master bank account onto a Media-side owner (plain object or subdoc)
+const applyAccountToMediaOwner = (owner, account) => {
+  owner.bankAccountId = account._id;
+  BANK_TEXT_FIELDS.forEach((field) => {
+    owner[field] = account[field] || "";
+  });
+  BANK_FILE_FIELDS.forEach((field) => {
+    const file = toMediaFile(account[field]);
+    if (file) owner[field] = file;
+    else if (typeof owner.set === "function") owner[field] = undefined;
+    else delete owner[field];
+  });
+};
+
+// bankAccounts from multipart (array / {"0":{}} object) or a JSON string.
+// undefined = not sent → old flow.
+const parseIncomingBankAccounts = (raw) => {
+  if (raw === undefined || raw === null) return undefined;
+  let list = raw;
+  if (typeof list === "string") {
+    if (list.trim() === "") return undefined;
+    try {
+      list = JSON.parse(list);
+    } catch {
+      throw badRequest("bankAccounts must be a valid JSON array");
+    }
+  }
+  if (list && !Array.isArray(list) && typeof list === "object") {
+    list = Object.keys(list)
+      .filter((k) => /^\d+$/.test(k))
+      .sort((a, b) => Number(a) - Number(b))
+      .map((k) => list[k]);
+  }
+  if (!Array.isArray(list)) throw badRequest("bankAccounts must be an array");
+  return list.map((item) => (item && typeof item === "object" ? { ...item } : {}));
+};
+
+// uploads named "bankAccounts[0][bankPassbook]" / "bankAccounts[0][cancelCheckLeaf]"
+const attachBankAccountFiles = (list, files, processFile) => {
+  (files || []).forEach((f) => {
+    const match = f.fieldname.match(/^bankAccounts\[(\d+)\]\[(bankPassbook|cancelCheckLeaf)\]$/);
+    if (match && list[Number(match[1])]) {
+      list[Number(match[1])][match[2]] = processFile(f);
+    }
+  });
+};
+
+// top-level bank fields ← primary account
+const syncTopLevelFromPrimary = (landOwner) => {
+  const primary = getPrimaryAccount(landOwner.bankAccounts);
+  BANK_TEXT_FIELDS.forEach((field) => {
+    landOwner[field] = primary ? primary[field] : undefined;
+  });
+  BANK_FILE_FIELDS.forEach((field) => {
+    landOwner[field] = primary && hasFile(primary[field]) ? plainCopy(primary[field]) : undefined;
+  });
+};
+
+// OLD FLOW (no bankAccounts / bankAccountId sent): keep bankAccounts[] in
+// line with the top-level bank fields — seed it the first time, otherwise
+// update the primary account (or make the matching account primary).
+const syncPrimaryFromTopLevel = (landOwner) => {
+  if (!cleanStr(landOwner.accountNumber)) return; // never blank out an account
+  const now = nowIST();
+  const accounts = landOwner.bankAccounts || [];
+  const topFiles = {};
+  BANK_FILE_FIELDS.forEach((field) => {
+    if (hasFile(landOwner[field])) topFiles[field] = toMasterFile(landOwner[field]);
+  });
+
+  if (accounts.length === 0) {
+    landOwner.bankAccounts = [
+      {
+        bankName: landOwner.bankName,
+        ifsc: landOwner.ifsc,
+        accountNumber: landOwner.accountNumber,
+        ...topFiles,
+        isPrimary: 1,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    return;
+  }
+
+  const topKey = bankKey(landOwner.accountNumber, landOwner.ifsc);
+  const target =
+    accounts.find((a) => bankKey(a.accountNumber, a.ifsc) === topKey) ||
+    getPrimaryAccount(accounts);
+  BANK_TEXT_FIELDS.forEach((field) => {
+    if (landOwner[field] !== undefined) target[field] = landOwner[field];
+  });
+  Object.assign(target, topFiles);
+  target.updatedAt = now;
+  accounts.forEach((a) => {
+    a.isPrimary = a === target ? 1 : 0;
+  });
+};
+
+// NEW FLOW: replace bankAccounts[] with the sent list — _id = update,
+// no _id = add, left out = remove (blocked while a site still uses it).
+const applyIncomingBankAccounts = async (landOwner, list, session) => {
+  const now = nowIST();
+  const existing = Array.isArray(landOwner.bankAccounts) ? landOwner.bankAccounts : [];
+  const existingById = new Map(existing.map((a) => [String(a._id), a]));
+  const seenKeys = new Set();
+  // an account sent with isPrimary = 1 wins; else the existing primary stays
+  const primarySent = list.some((item) => Number(item.isPrimary) === 1);
+
+  const next = list.map((item, idx) => {
+    const id = cleanStr(item._id || item.id || item.bankAccountId);
+    const base = id ? existingById.get(id) : null;
+    if (id && !base) throw badRequest(`Bank account ${id} not found for this landowner`);
+
+    const account = base
+      ? plainCopy(base)
+      : { _id: new mongoose.Types.ObjectId(), createdAt: now };
+    BANK_TEXT_FIELDS.forEach((field) => {
+      if (item[field] !== undefined) account[field] = cleanStr(item[field]);
+    });
+    if (account.ifsc) account.ifsc = account.ifsc.toUpperCase();
+    BANK_FILE_FIELDS.forEach((field) => {
+      const file = toMasterFile(item[field]);
+      if (file) account[field] = file; // not sent → keep the existing file
+    });
+
+    if (!cleanStr(account.accountNumber)) {
+      throw badRequest(`bankAccounts[${idx}]: accountNumber is required`);
+    }
+    const key = bankKey(account.accountNumber, account.ifsc);
+    if (seenKeys.has(key)) {
+      throw badRequest(`Bank account ${account.accountNumber} is added more than once`);
+    }
+    seenKeys.add(key);
+
+    account.isPrimary =
+      Number(primarySent ? item.isPrimary : account.isPrimary) === 1 ? 1 : 0;
+    account.updatedAt = now;
+    return account;
+  });
+
+  // exactly ONE primary — the first one marked, else the first account
+  let primaryIdx = next.findIndex(isPrimaryAccount);
+  if (primaryIdx === -1) primaryIdx = 0;
+  next.forEach((a, i) => {
+    a.isPrimary = i === primaryIdx ? 1 : 0;
+  });
+
+  const keptIds = new Set(next.map((a) => String(a._id)));
+  const removed = existing.filter((a) => !keptIds.has(String(a._id)));
+  if (removed.length) {
+    const usedBy = await MediaOnboarding.find({
+      "landOwners.bankAccountId": { $in: removed.map((a) => a._id) },
+    })
+      .select("siteCode mediaDetails.mediaCode landOwners.bankAccountId")
+      .session(session || null)
+      .lean();
+    if (usedBy.length) {
+      const usedAccount = removed.find((a) =>
+        usedBy.some((m) =>
+          (m.landOwners || []).some((lo) => String(lo.bankAccountId) === String(a._id)),
+        ),
+      );
+      const siteCodes = usedBy.map(
+        (m) => m.siteCode || m.mediaDetails?.[0]?.mediaCode || String(m._id),
+      );
+      throw badRequest(
+        `Bank account ${usedAccount?.bankName || ""} (${usedAccount?.accountNumber || ""}) is used by ${usedBy.length} site(s): ${siteCodes.join(", ")}. Change the site's bank account first.`,
+      );
+    }
+  }
+
+  landOwner.bankAccounts = next;
+  syncTopLevelFromPrimary(landOwner);
+};
+
+// response helper — how many sites pay into each account
+const withBankAccountSiteCounts = async (bankAccounts, mediaDocs = null) => {
+  const accounts = (bankAccounts || []).map((a) =>
+    typeof a?.toObject === "function" ? a.toObject() : { ...a },
+  );
+  if (accounts.length === 0) return accounts;
+  const docs =
+    mediaDocs ||
+    (await MediaOnboarding.find({
+      "landOwners.bankAccountId": { $in: accounts.map((a) => a._id) },
+    })
+      .select("landOwners.bankAccountId")
+      .lean());
+  return accounts.map((a) => ({
+    ...a,
+    linkedSiteCount: docs.filter((m) =>
+      (m.landOwners || []).some((lo) => String(lo.bankAccountId) === String(a._id)),
+    ).length,
+  }));
+};
+
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — Media save: resolve landOwners[].bankAccountId BEFORE anything
+// is saved. Valid id → that account's bank details are copied onto the
+// site's owner. No id → old flow; when the typed account number + IFSC
+// equal one of the master's accounts, the site is linked to it.
+// Throws a 400 error for an unknown / unusable bankAccountId.
+// ─────────────────────────────────────────────────────────────
+const resolveMediaOwnerBankAccounts = async (landOwners) => {
+  if (!Array.isArray(landOwners) || landOwners.length === 0) return;
+
+  const masterIds = [
+    ...new Set(
+      landOwners
+        .map((o) => cleanStr(o?.landOwnerMasterId))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  const masters = masterIds.length
+    ? await LandOwnerMaster.find({ _id: { $in: masterIds } }).select("name bankAccounts").lean()
+    : [];
+  const masterById = new Map(masters.map((m) => [String(m._id), m]));
+
+  for (const owner of landOwners) {
+    if (!owner || typeof owner !== "object") continue;
+    const accountId = cleanStr(owner.bankAccountId);
+    const master = masterById.get(cleanStr(owner.landOwnerMasterId));
+    const label = owner.name || master?.name || "";
+
+    if (!accountId || accountId === "null" || accountId === "undefined") {
+      owner.bankAccountId = null;
+      if (master && cleanStr(owner.accountNumber)) {
+        const match = (master.bankAccounts || []).find(
+          (a) => bankKey(a.accountNumber, a.ifsc) === bankKey(owner.accountNumber, owner.ifsc),
+        );
+        if (match) owner.bankAccountId = match._id;
+      }
+      continue;
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(accountId)) {
+      throw badRequest(`Invalid bankAccountId for landowner ${label}`);
+    }
+    if (!master) {
+      throw badRequest(`bankAccountId needs landOwnerMasterId for landowner ${label}`);
+    }
+    const account = (master.bankAccounts || []).find((a) => String(a._id) === accountId);
+    if (!account) {
+      throw badRequest(`Bank account not found for landowner ${label}`);
+    }
+    applyAccountToMediaOwner(owner, account);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — one-time backfill (run at startup): landowners saved before
+// bankAccounts[] existed get their current bank details as the primary
+// account. Only touches owners whose bankAccounts is empty.
+// ─────────────────────────────────────────────────────────────
+const seedLandOwnerBankAccounts = async () => {
+  const emptyAccounts = {
+    $or: [{ bankAccounts: { $exists: false } }, { bankAccounts: { $size: 0 } }],
+  };
+  const owners = await LandOwnerMaster.find({
+    ...emptyAccounts,
+    accountNumber: { $nin: [null, ""] },
+  })
+    .select("bankName ifsc accountNumber bankPassbook cancelCheckLeaf")
+    .lean();
+  if (owners.length === 0) return { seeded: 0 };
+
+  const now = nowIST();
+  const result = await LandOwnerMaster.bulkWrite(
+    owners.map((o) => {
+      const account = {
+        _id: new mongoose.Types.ObjectId(),
+        bankName: o.bankName,
+        ifsc: o.ifsc ? String(o.ifsc).toUpperCase() : o.ifsc,
+        accountNumber: o.accountNumber,
+        isPrimary: 1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      BANK_FILE_FIELDS.forEach((field) => {
+        const file = hasFile(o[field]) ? toMasterFile(o[field]) : null;
+        if (file) account[field] = file;
+      });
+      return {
+        updateOne: {
+          filter: { _id: o._id, ...emptyAccounts },
+          update: { $set: { bankAccounts: [account] } },
+        },
+      };
+    }),
+  );
+  return { seeded: result.modifiedCount || 0 };
+};
+
+// ─────────────────────────────────────────────────────────────
 // SAVE OR UPDATE THE (single) OWNER PAYLOAD.
 // Returns the saved LandOwnerMaster document.
 // ─────────────────────────────────────────────────────────────
-const saveSingleLandOwner = async (owner, userName, session) => {
+// incomingBankAccounts: parsed bankAccounts[] (new flow) or undefined (old flow)
+const saveSingleLandOwner = async (owner, userName, session, incomingBankAccounts) => {
   // ✅ safety net — strips empty-string/junk values from the 4 file
   // fields BEFORE anything is assigned onto a Mongoose document.
   // Fixes "fileType: `` is not a valid enum value" when a file field
@@ -632,6 +1007,13 @@ const saveSingleLandOwner = async (owner, userName, session) => {
     // update, instead of being overwritten/cleared.
     applyOwnerFileFields(landOwner, owner);
 
+    // ✅ NEW — multiple bank accounts (top-level fields follow the primary)
+    if (incomingBankAccounts !== undefined) {
+      await applyIncomingBankAccounts(landOwner, incomingBankAccounts, session);
+    } else {
+      syncPrimaryFromTopLevel(landOwner);
+    }
+
     // ✅ DUPLICATE CHECK — ensure the updated PAN/Aadhaar don't conflict with another record
     const duplicate = await findExactDuplicate(landOwner, session, landOwner._id);
     if (duplicate) {
@@ -672,6 +1054,13 @@ const saveSingleLandOwner = async (owner, userName, session) => {
     }
 
     landOwner = new LandOwnerMaster(owner);
+
+    // ✅ NEW — multiple bank accounts (top-level fields follow the primary)
+    if (incomingBankAccounts !== undefined) {
+      await applyIncomingBankAccounts(landOwner, incomingBankAccounts, session);
+    } else {
+      syncPrimaryFromTopLevel(landOwner);
+    }
 
     // ✅ same paymentCategory-based GST + TDS + netPayable computation
     // as UPDATE — mirrors MediaSchema.pre("save") owner block exactly.
@@ -733,7 +1122,14 @@ const landOwnerSave = async (req, res) => {
       attachFilesToOwner(owner, files, processFile);
     }
 
-    const savedOwner = await saveSingleLandOwner(owner, userName, session);
+    // ✅ NEW — bankAccounts[] is handled on its own, never cast raw
+    const incomingBankAccounts = parseIncomingBankAccounts(owner.bankAccounts);
+    delete owner.bankAccounts;
+    if (incomingBankAccounts && processFile) {
+      attachBankAccountFiles(incomingBankAccounts, files, processFile);
+    }
+
+    const savedOwner = await saveSingleLandOwner(owner, userName, session, incomingBankAccounts);
 
     await session.commitTransaction();
 
@@ -745,6 +1141,7 @@ const landOwnerSave = async (req, res) => {
     // safely preserved via applyOwnerFileFields; this just keeps it
     // OUT of the response body when it wasn't part of this request.
     const responsePayload = buildResponsePayload(savedOwner, owner, isNew);
+    responsePayload.bankAccounts = await withBankAccountSiteCounts(responsePayload.bankAccounts);
 
     return successResponse(res, message, responsePayload, isNew ? 201 : 200);
   } catch (error) {
@@ -911,6 +1308,15 @@ const landOwnerList = async (req, res) => {
         linkedSites: liveFaces, // Update the cache-based field in the response
         sites: liveFaces, // Provide the alias for the frontend
         totalSites: liveFaces.length, // Live count of individual faces
+        // ✅ NEW — every bank account + how many sites pay into it
+        bankAccounts: (owner.bankAccounts || []).map((acc) => ({
+          ...acc,
+          linkedSiteCount: ownerMediaDocs.filter((media) =>
+            (media.landOwners || []).some(
+              (lo) => String(lo.bankAccountId) === String(acc._id),
+            ),
+          ).length,
+        })),
       };
     });
 
@@ -2090,7 +2496,7 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       // ✅ NEW — with roleType, approved / pending / overDue per face follow the
       // same role rule as the header counts (waiting on that role)
       const roleFaceFlags = targetRole
-        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole })
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true })
         : null;
       details.forEach((face) => {
         const faceId = String(face._id);
@@ -2139,6 +2545,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           updatedAt: siteLatestActivityAt,
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
+          // ✅ NEW — internal: single bill site (no face on separate bill)
+          _isSingleBill: !(mediaDoc.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2),
           rentalStatus: {
             hasApprovedSite: roleFaceFlags ? !!roleFlags?.approved : hasApprovedSite,
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
@@ -2227,7 +2635,24 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
       const hasOtherFilters = hasRentalStatusFilter || hasLedgerCategoryFilter;
 
-      (site.rentalDue || []).forEach((due) => {
+      // ✅ FIXED — a single bill site can hold one bill PER FACE for the same
+      // month; CMD approving one of them left the others pending, and that
+      // untouched pending copy made a CMD-approved site show under pending.
+      // For single bill sites only the most-approved bill of each month counts
+      // (3 Approved > 2 Partially > others) — same rule as the ledger list.
+      // Separate bill sites: unchanged.
+      let siteDues = site.rentalDue || [];
+      if (site._isSingleBill && siteDues.length > 1) {
+        const rank = (d) => (Number(d.approvalStatus) === 3 ? 3 : Number(d.approvalStatus) === 2 ? 2 : 1);
+        const bestRankByMonth = new Map();
+        siteDues.forEach((d) => {
+          const r = rank(d);
+          if (r > (bestRankByMonth.get(d.dueMonth) || 0)) bestRankByMonth.set(d.dueMonth, r);
+        });
+        siteDues = siteDues.filter((d) => rank(d) === bestRankByMonth.get(d.dueMonth));
+      }
+
+      siteDues.forEach((due) => {
         const parsed = parseSiteFilterDueMonthLabel(due.dueMonth);
         if (!parsed) return;
 
@@ -2277,10 +2702,10 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) ||
           (isPast && isPending);
         // ✅ NEW — with roleType, approved / pending dues follow the role rule
-        // (approved = role step approved; pending = not yet approved by that role).
-        // overDue stays role independent.
+        // (approved = role step approved; pending = waiting on that role — the
+        // earlier roles approved, this role not yet). overDue stays role independent.
         if (targetRole) {
-          const { isApproved: roleApproved, isOpen: roleOpen } = roleStatus(due, targetRole);
+          const { isApproved: roleApproved, isOpen: roleOpen } = roleStatus(due, targetRole, { pendingAtRoleOnly: true });
           matchesApproved = roleApproved;
           matchesPending = roleOpen;
         }
@@ -3039,6 +3464,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       month: statsMonth,
       targetRole,
       trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
+      // ✅ NEW — roleType: pending = waiting on that role (Executive → Manager → CMD)
+      pendingAtRoleOnly: true,
     });
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
@@ -3282,4 +3709,6 @@ module.exports = {
   syncOrLinkMediaOwnerToMaster, // used by mediaOnboardingController.js — pass 1, before media.save()
   correctLinkedSiteAmounts, // used by mediaOnboardingController.js — pass 2, after media.save()
   removeLinkedSiteFromMaster, // used by mediaOnboardingController.js
+  resolveMediaOwnerBankAccounts, // ✅ NEW — used by mediaOnboardingController.js, before any save
+  seedLandOwnerBankAccounts, // ✅ NEW — run once at startup from server.js
 };

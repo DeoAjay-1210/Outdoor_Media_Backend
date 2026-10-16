@@ -72,6 +72,10 @@ const overDueHistorySchema = new mongoose.Schema(
         addedAt: { type: Date, default: Date.now },
         userType: { type: Number, default: null },
 role: { type: Number, default: null },
+        // ✅ NEW — roles that have read this remark (1 RE, 2 RM, 3 CMD); starts
+        // with the adding role. Not set on remarks saved before this existed →
+        // those count as read for everyone.
+        readByRoles: { type: [Number], default: undefined },
       },
     ],
     updatedBy: { type: String },

@@ -13,6 +13,7 @@ const {
   syncOrLinkMediaOwnerToMaster,
   correctLinkedSiteAmounts,
   removeLinkedSiteFromMaster,
+  resolveMediaOwnerBankAccounts, // ✅ NEW — landOwners[].bankAccountId
 } = require("../landOwnerMasterController/landOwnerMasterController");
 const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
 
@@ -2443,6 +2444,17 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         return errorResponse(res, appraisalCheck.message, null, 400);
     }
 
+    // ✅ NEW — landOwners[].bankAccountId → copy the chosen bank account's
+    // details onto the owner. Runs before ANY save, so an invalid id
+    // returns 400 with nothing written. No id sent → old flow unchanged.
+    if (Array.isArray(mediaData.landOwners)) {
+      try {
+        await resolveMediaOwnerBankAccounts(mediaData.landOwners);
+      } catch (bankErr) {
+        return errorResponse(res, bankErr.message, null, bankErr.statusCode || 400);
+      }
+    }
+
     // const uploadedAgreementPDF = req.files?.agreementPDF?.[0];
     // if (uploadedAgreementPDF) {
     //   if (!mediaData.agreement) mediaData.agreement = {};
@@ -3980,6 +3992,27 @@ const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
   id: item._id,
   name: item.name,
 }));
+    // ✅ NEW — response only: each site's landOwners[] item gets its master's
+    // bankAccounts[] (all accounts of that landowner, for the bank dropdown).
+    // One batched read for the current page; stored data is never changed.
+    {
+      const masterIds = [
+        ...new Set(
+          mediaListData.flatMap((item) =>
+            (item.landOwners || []).map((o) => o.landOwnerMasterId && String(o.landOwnerMasterId)).filter(Boolean),
+          ),
+        ),
+      ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+      const masters = masterIds.length
+        ? await LandOwnerMaster.find({ _id: { $in: masterIds } }).select("bankAccounts").lean()
+        : [];
+      const accountsByMaster = new Map(masters.map((m) => [String(m._id), m.bankAccounts || []]));
+      mediaListData.forEach((item) =>
+        (item.landOwners || []).forEach((o) => {
+          o.bankAccounts = o.landOwnerMasterId ? accountsByMaster.get(String(o.landOwnerMasterId)) || [] : [];
+        }),
+      );
+    }
     return successResponse(
       res,
       "Media list fetched successfully",

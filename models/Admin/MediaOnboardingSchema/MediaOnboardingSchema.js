@@ -599,6 +599,12 @@ const MediaSchema = new mongoose.Schema(
           ref: "LandOwnerMaster",
           default: null,
         },
+        // ✅ NEW — which of the master's bankAccounts[] this site pays to.
+        // null = old flow (bank fields typed on the site / master primary).
+        bankAccountId: {
+          type: mongoose.Schema.Types.ObjectId,
+          default: null,
+        },
 
         name: { type: String, trim: true },
         phone: { type: String, trim: true },

@@ -17,6 +17,7 @@ const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/land
 const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
 const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
 const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
+const appUpdateRoutes = require("./routes/Admin/AppUpdateRoutes/AppUpdateRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 connectDB();
 (async () => {
@@ -51,7 +52,11 @@ const runApplyDueAppraisals = async () => {
 runApplyDueAppraisals();
 cron.schedule("10 0 * * *", runApplyDueAppraisals);
 
-// Delete CMD notifications with no activity for 10 days (startup + daily 00:15)
+// Delete Executive / Manager / CMD notifications read more than
+// CMD_NOTIFICATION_READ_RETENTION_MINUTES (.env, default 1 day) ago;
+// unread ones are kept. Also removes CMD's copies of billing date revert
+// requests the CMD already approved / rejected (startup + hourly at :15). For testing, set in .env:
+// CMD_NOTIFICATION_READ_RETENTION_MINUTES=1 and CMD_NOTIFICATION_PURGE_CRON="* * * * *"
 const { purgeOldCmdNotifications } = require("./controllers/Admin/NotificationController/CmdNotificationController");
 const runPurgeCmdNotifications = async () => {
   try {
@@ -61,7 +66,14 @@ const runPurgeCmdNotifications = async () => {
   }
 };
 runPurgeCmdNotifications();
-cron.schedule("15 0 * * *", runPurgeCmdNotifications);
+
+// One-time backfill: landowners without bankAccounts[] get their current
+// bank details as the primary account (no-op once every owner has one)
+const { seedLandOwnerBankAccounts } = require("./controllers/Admin/landOwnerMasterController/landOwnerMasterController");
+seedLandOwnerBankAccounts()
+  .then((r) => r.seeded && console.log(`[seedLandOwnerBankAccounts] seeded=${r.seeded}`))
+  .catch((err) => console.error("[seedLandOwnerBankAccounts] failed:", err.message));
+cron.schedule(process.env.CMD_NOTIFICATION_PURGE_CRON || "15 * * * *", runPurgeCmdNotifications);
 const app = express();
 
 app.use(cors());
@@ -77,6 +89,9 @@ app.use("/admin", LandownerMasterRoutes);
 app.use("/admin", dashboardRoutes);
 app.use("/admin", cmdNotificationRoutes);
 app.use("/admin", billingDateRevertRoutes);
+app.use("/admin", appUpdateRoutes);
+// Auto-publish a new public/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
+if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {

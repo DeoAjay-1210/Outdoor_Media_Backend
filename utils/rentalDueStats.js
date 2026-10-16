@@ -54,13 +54,34 @@ function pickFaceEntry(entries, faceId) {
 //    skipped yet — so a due pending at Rental Executive is also pending for
 //    Rental Manager and CMD, until each of them (or a higher role) approves.
 // Overdue never uses the role view — it is always the overall status.
-function roleStatus(entry, targetRole) {
+//
+// ✅ NEW — opts.pendingAtRoleOnly (opt-in, used by landowner/site-filter only):
+// pending = the due is WAITING ON that role — every earlier step of the chain
+// is approved / skipped and the role itself has not acted. So a due still at
+// the Rental Executive is pending only for the Executive; once the Executive
+// approves it moves to the Manager; once the Manager approves, to the CMD.
+// Without the option the rule above is unchanged (Dashboard, Rental Due list).
+const FIRST_APPROVER_ROLE = 1; // Rental Executive — first step of every chain
+const isStepActed = (s) => s.status === 2 || s.status === 3;
+function isWaitingOnRole(entry, targetRole) {
+  const steps = entry?.approvalSteps || [];
+  // no due row / no steps yet → nothing approved → waiting on the first role
+  if (steps.length === 0) return Number(targetRole) === FIRST_APPROVER_ROLE;
+  const idx = steps.findIndex((s) => s.role === targetRole);
+  if (idx === -1 || isStepActed(steps[idx])) return false;
+  return steps.slice(0, idx).every(isStepActed);
+}
+
+function roleStatus(entry, targetRole, opts = {}) {
   const isApprovedOverall = entry ? isApprovedDue(entry) : false;
   if (targetRole === null || targetRole === undefined) {
     return { isApproved: isApprovedOverall, isOpen: !isApprovedOverall };
   }
   const roleStep = (entry?.approvalSteps || []).find((s) => s.role === targetRole);
   const hasRoleApproved = !!roleStep && roleStep.status === 2;
+  if (opts.pendingAtRoleOnly) {
+    return { isApproved: hasRoleApproved, isOpen: !isApprovedOverall && isWaitingOnRole(entry, targetRole) };
+  }
   const hasRoleActed = !!roleStep && (roleStep.status === 2 || roleStep.status === 3);
   return { isApproved: hasRoleApproved, isOpen: !isApprovedOverall && !hasRoleActed };
 }
@@ -108,7 +129,7 @@ const finalizeOwnerBucket = (bucket) =>
  * @param {{year:number, month:number, targetRole?:number|null, trackLandOwners?:boolean}} opts  month is 1-12
  *   trackLandOwners (opt-in) → also returns stats.landOwners { dueThisMonth, approved, pending, overdue }
  */
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false }) {
   const ownerBuckets = trackLandOwners
     ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
     : null;
@@ -164,7 +185,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         trackOwner("dueThisMonth", media, faceId, faceAmount);
 
         // const entry = pickFaceEntry(currentMonthEntries, faceId);
-        const { isApproved, isOpen } = roleStatus(entry, targetRole);
+        const { isApproved, isOpen } = roleStatus(entry, targetRole, { pendingAtRoleOnly });
         // overdue is role independent → always the overall approval status
         const isOpenOverall = roleStatus(entry, null).isOpen;
 
@@ -172,14 +193,18 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           stats.approvedCount += 1;
           stats.approvedAmountTotal += faceAmount;
            trackOwner("approved", media, faceId, faceAmount);
-          if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "approved", cycle: cycleSummary });
+          if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "approved", cycle: cycleSummary, rolePending: false });
           continue;
         }
-        if (!isOpen) {
-          if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "closed", cycle: cycleSummary });
+        // ✅ NEW — pendingAtRoleOnly: a due still waiting on an EARLIER role is
+        // not pending for this role, but it must still reach the overdue check
+        // below (overdue is role independent).
+        const notYetAtRole = pendingAtRoleOnly && !isOpen && isOpenOverall;
+        if (!isOpen && !notYetAtRole) {
+          if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "closed", cycle: cycleSummary, rolePending: false });
           continue;
         }
-         
+
          else if (isOpen) {
           // pending = every open current-month due (for the role, when given)
           stats.pendingCount += 1;
@@ -198,7 +223,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           stats.dueAmountOpen += faceAmount;
           trackOwner("overdue", media, faceId, faceAmount);
         }
-        if (onFace) onFace({ media, face, entry, amount: faceAmount, state: isOverdue ? "overdue" : "pending", cycle: cycleSummary });
+        // rolePending (✅ NEW) = this face is counted in pendingCount for the role
+        if (onFace) onFace({ media, face, entry, amount: faceAmount, state: isOverdue ? "overdue" : notYetAtRole ? "closed" : "pending", cycle: cycleSummary, rolePending: isOpen });
       }
     }
 
@@ -253,7 +279,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
  * counts (approvedCount / pendingCount / overDue.siteCount).
  * @returns {Map<string, {approved:boolean, pending:boolean, overdue:boolean}>} keyed by face _id
  */
-function getFaceRoleStatus(media, { year, month, targetRole = null }) {
+function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false }) {
   const result = new Map();
   const activeFacesList = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
   if (activeFacesList.length === 0) return result;
@@ -281,7 +307,7 @@ function getFaceRoleStatus(media, { year, month, targetRole = null }) {
     for (const face of activeFacesList) {
       const flags = result.get(String(face._id));
       const entry = pickFaceEntry(currentMonthEntries, String(face._id));
-      const { isApproved, isOpen } = roleStatus(entry, targetRole);
+      const { isApproved, isOpen } = roleStatus(entry, targetRole, { pendingAtRoleOnly });
       if (isApproved) flags.approved = true;
       else if (isOpen) flags.pending = true;
       // overdue is role independent → overall approval status

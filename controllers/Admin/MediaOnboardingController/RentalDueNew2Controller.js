@@ -21,8 +21,11 @@ const {
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
-const { createRentalApprovalNotification } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
-const { notifyRentalDueChat, notifyOverdueRemarkChat } = require("../../../utils/googleChat");
+const {
+  createRentalApprovalNotification,
+  createOverdueRemarkNotification,
+} = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
+const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
@@ -30,6 +33,11 @@ const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDue
 // step moves to status 2 in THIS request (a save while it is not their turn
 // only updates fields and must not notify).
 const isRentalApproverRole = (userType) => userType === ROLE.STAFF || userType === ROLE.TEAM_LEAD;
+// ✅ NEW — overdue remark roleName (same names as notifications / Google Chat);
+// ROLE_LABEL ("Owner" for 3) stays as-is for the approval / verification messages
+const REMARK_ROLE_NAME = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
+// ✅ NEW — roles whose approval sends a notification (CMD approval → Executive + Manager)
+const isApprovalNotifyRole = (userType) => isRentalApproverRole(userType) || userType === ROLE.OWNER;
 const isRoleStepApproved = (entry, role) =>
   !!(entry?.approvalSteps || []).find((s) => s.role === role && s.status === 2);
 const findRentalDueEntryById = (media, rentalDueId) =>
@@ -2259,7 +2267,7 @@ async function processSingleRentalDue({
         await media.save({ timestamps: false });
       }
       // ✅ NEW — CMD notification after a saved Rental Executive / Manager approval
-      if (isRentalApproverRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+      if (isApprovalNotifyRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
         await createRentalApprovalNotification({ media, entry: result.entryDoc, userType, userId, userName });
       }
       // ✅ NEW — Google Chat message for an approval made in this request (any role)
@@ -2391,7 +2399,7 @@ async function processSingleRentalDue({
 
     // ✅ NEW — CMD notification: a Rental Executive / Manager creating the entry
     // approves their own step at creation
-    if (isRentalApproverRole(userType)) {
+    if (isApprovalNotifyRole(userType)) {
       await createRentalApprovalNotification({ media, entry: savedEntry, userType, userId, userName });
     }
     // ✅ NEW — Google Chat message: the creator's own step is approved at creation
@@ -2582,7 +2590,7 @@ exports.saveRentalDue = async (req, res) => {
           }
           if (
             processResult.success &&
-            isRentalApproverRole(userType) &&
+            isApprovalNotifyRole(userType) &&
             !roleStepWasApproved &&
             isRoleStepApproved(processResult.entryDoc, userType)
           ) {
@@ -2609,7 +2617,14 @@ exports.saveRentalDue = async (req, res) => {
         for (const approvedEntry of groupCmdApprovals) {
           await createRentalApprovalNotification({ media, entry: approvedEntry, userType, userId, userName });
         }
+        // ✅ FIXED — single-bill site: every face has its own row for the month,
+        // and each built the SAME message → sent once per bill (per site per
+        // month; a separate-bill face still gets its own message)
+        const sentChatKeys = new Set();
         for (const approvedEntry of groupChatApprovals) {
+          const chatKey = rentalDueChatKey(media, approvedEntry);
+          if (sentChatKeys.has(chatKey)) continue;
+          sentChatKeys.add(chatKey);
           notifyRentalDueChat({ media, entry: approvedEntry, userType, userName, action: "approved" });
         }
       }
@@ -3650,6 +3665,9 @@ const userTypeNum = Number(req.user?.userType) || null;
         addedAt: nowIST(),
         userType: userTypeNum,
 role: userTypeNum,
+        // ✅ NEW — read for the adding role; other roles read it via
+        // /admin/cmd-notifications/read (role-based isRead)
+        readByRoles: userTypeNum ? [userTypeNum] : [],
       };
 
       // Find matching rentalDue entry from media to populate full overdue details
@@ -3840,7 +3858,7 @@ role: userTypeNum,
         addedAt: newRemark.addedAt,
         userType: userTypeNum,
 role: userTypeNum,
-roleName: ROLE_LABEL[userTypeNum] || "User",
+roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
       });
 
       // ✅ NEW — Google Chat message after the remark is saved
@@ -3851,6 +3869,20 @@ roleName: ROLE_LABEL[userTypeNum] || "User",
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
         remark: trimmedRemarks,
         userType: Number(req.user?.userType),
+        userName,
+      });
+
+      // ✅ NEW — overdue remark notification (read only): Executive's remark →
+      // Manager + CMD, Manager's remark → Executive + CMD, CMD's remark →
+      // Executive + Manager
+      await createOverdueRemarkNotification({
+        media,
+        dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
+        rentalDueId: targetEntry ? targetEntry._id : rId,
+        mediaDetailId: newRemark.mediaDetailId,
+        remark: trimmedRemarks,
+        userType: Number(req.user?.userType),
+        userId: req.user?.userId,
         userName,
       });
     }
@@ -3901,6 +3933,28 @@ exports.getOverDueRemarks = async (req, res) => {
     }
 
     const records = await OverDueHistory.find(query).lean();
+    // ✅ NEW — isRead per remark for the logged-in role (from the token)
+    const viewerRole = Number(req.user?.userType) || null;
+    // ✅ NEW — the logged-in role's overdueRemark notification for each record
+    // (one per site + month), so the frontend can send its notificationId to
+    // /admin/cmd-notifications/read. The adding role has no notification → null.
+    const CmdNotification = require("../../../models/Admin/NotificationSchema/CmdNotificationSchema");
+    const remarkNotifications = viewerRole && records.length
+      ? await CmdNotification.find({
+          notificationType: "overdueRemark",
+          targetRole: viewerRole,
+          mediaId: { $in: [...new Set(records.map((r) => String(r.mediaId)))].map((id) => new mongoose.Types.ObjectId(id)) },
+        })
+          .select("_id mediaId dueMonth rentalDueId")
+          .lean()
+      : [];
+    const notificationIdFor = (rec) => {
+      const sameSite = remarkNotifications.filter((n) => String(n.mediaId) === String(rec.mediaId));
+      const match =
+        (rec.dueMonth && sameSite.find((n) => n.dueMonth === rec.dueMonth)) ||
+        (rec.rentalDueId && sameSite.find((n) => String(n.rentalDueId) === String(rec.rentalDueId)));
+      return match ? match._id : null;
+    };
 const UserModel = require("../../../models/Admin/UserSchema/UserSchema");
 const allUsers = await UserModel.find({}, "userName userType").lean();
 const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowerCase(), Number(u.userType)]));
@@ -3908,6 +3962,7 @@ const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowe
 
 records.forEach((rec) => {
   if (Array.isArray(rec.overDueRemarks)) {
+    const recNotificationId = notificationIdFor(rec); // ✅ NEW
     rec.overDueRemarks.forEach((r) => {
       let rNum = Number(r.role || r.userType) || null;
       if (!rNum && r.addedBy) {
@@ -3921,7 +3976,16 @@ records.forEach((rec) => {
       }
       r.role = rNum;
       r.userType = rNum;
-      r.roleName = ROLE_LABEL[rNum] || "User";
+      r.roleName = REMARK_ROLE_NAME[rNum] || "User";
+      // ✅ NEW — read for the adding role, or once this role read it; remarks
+      // saved before read tracking existed (no readByRoles) count as read
+      r.isRead = !Array.isArray(r.readByRoles)
+        ? true
+        : (!!viewerRole && rNum === viewerRole) || r.readByRoles.map(Number).includes(viewerRole);
+      delete r.readByRoles;
+      // ✅ NEW — send this to /admin/cmd-notifications/read; null for the
+      // adding role's own remark (no notification to read)
+      r.notificationId = !!viewerRole && rNum === viewerRole ? null : recNotificationId;
     });
   }
 });
@@ -4728,6 +4792,49 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   );
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
+// ✅ NEW — response only: each landOwners[].linkedSites[] item gets the bank
+// details that linked site pays to (that site's own landowner row), same as
+// /admin/ledger-list. One batched read; never changes stored data or amounts.
+async function addBankDetailsToLinkedSites(owners) {
+  const linkedPairs = [];
+  (owners || []).forEach((owner) =>
+    (owner.sites || []).forEach((site) =>
+      (site.landOwners || []).forEach((lo) => {
+        if (!lo?.landOwnerMasterId) return;
+        (lo.linkedSites || []).forEach((ls) => {
+          if (ls?.mediaId) linkedPairs.push({ ls, masterId: String(lo.landOwnerMasterId) });
+        });
+      }),
+    ),
+  );
+  if (linkedPairs.length === 0) return;
+
+  const mediaIds = [...new Set(linkedPairs.map((p) => String(p.ls.mediaId)))]
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+  const linkedMedia = await Media.find({ _id: { $in: mediaIds } })
+    .select(
+      "landOwners.landOwnerMasterId landOwners.bankAccountId landOwners.bankName landOwners.ifsc landOwners.accountNumber landOwners.bankPassbook landOwners.cancelCheckLeaf",
+    )
+    .lean();
+  const bankBySiteOwner = new Map();
+  linkedMedia.forEach((m) =>
+    (m.landOwners || []).forEach((o) => {
+      if (o.landOwnerMasterId) bankBySiteOwner.set(`${String(m._id)}:${String(o.landOwnerMasterId)}`, o);
+    }),
+  );
+
+  linkedPairs.forEach(({ ls, masterId }) => {
+    const o = bankBySiteOwner.get(`${String(ls.mediaId)}:${masterId}`);
+    ls.bankAccountId = o?.bankAccountId || null;
+    ls.bankName = o?.bankName || "";
+    ls.ifsc = o?.ifsc || "";
+    ls.accountNumber = o?.accountNumber || "";
+    ls.bankPassbook = o?.bankPassbook || null;
+    ls.cancelCheckLeaf = o?.cancelCheckLeaf || null;
+  });
+}
+
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const today = new Date();
@@ -6058,6 +6165,9 @@ const details = (item.mediaDetails || []).map((d) => ({
       overallPreviousGSTDue,
       overallTotalOutstandingAmount,
     } = overallOutstandingTotals;
+
+    // ✅ NEW — linkedSites[] bank details (response only, current page only)
+    await addBankDetailsToLinkedSites(pagedOwners);
 
     return res.status(200).json({
       success: true,

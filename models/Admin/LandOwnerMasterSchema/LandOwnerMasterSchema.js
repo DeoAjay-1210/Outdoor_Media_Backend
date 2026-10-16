@@ -16,6 +16,30 @@ const fileObjectSchema = {
 };
 
 // ─────────────────────────────────────────────────────────────
+// ✅ NEW — ONE landowner, MANY bank accounts. Each Media site picks one
+// via MediaSchema.landOwners[].bankAccountId. The top-level bankName /
+// ifsc / accountNumber / bankPassbook / cancelCheckLeaf always mirror the
+// PRIMARY account, so every existing reader keeps working unchanged.
+// ─────────────────────────────────────────────────────────────
+const bankAccountSchema = new mongoose.Schema(
+  {
+    bankName: { type: String, trim: true },
+    ifsc: { type: String, trim: true, uppercase: true },
+    accountNumber: { type: String, trim: true },
+    bankPassbook: fileObjectSchema,
+    cancelCheckLeaf: fileObjectSchema,
+    isPrimary: {
+      type: Number,
+      enum: [0, 1], // 0 = other account, 1 = primary account (only one per landowner; mirrored to the top-level bank fields)
+      default: 1,
+    },
+    createdAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
+  },
+  { _id: true },
+);
+
+// ─────────────────────────────────────────────────────────────
 // LAND OWNER MASTER SCHEMA
 // Same field names, same types, same validation rules as
 // MediaSchema.landOwners[] (see MediaOnboardingSchema.js).
@@ -76,6 +100,8 @@ const LandOwnerMasterSchema = new mongoose.Schema(
     panCardImage: fileObjectSchema,
     bankPassbook: fileObjectSchema,
     cancelCheckLeaf: fileObjectSchema,
+    // ✅ NEW — MASTER-ONLY: all bank accounts of this landowner (see above)
+    bankAccounts: { type: [bankAccountSchema], default: [] },
     onlineAmount: {
       type: Number,
       min: 0,

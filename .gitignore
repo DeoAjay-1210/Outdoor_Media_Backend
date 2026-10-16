@@ -35,3 +35,5 @@ temp/
 
 # Coverage
 coverage/
+# App update release metadata (per server; see docs/APP_UPDATE_RELEASE.md)
+config/appRelease.json

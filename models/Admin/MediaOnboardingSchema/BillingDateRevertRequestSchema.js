@@ -116,6 +116,50 @@ const billingDateRevertRequestSchema = new mongoose.Schema(
     },
 
     requestedBy: { type: actorSchema, default: () => ({}) },
+
+    // ✅ NEW — earlier versions of THIS pending request. When a requester edits
+    // the pending request (new dates), the version being replaced is pushed
+    // here; CMD always acts on the latest requestedDates only.
+    requestHistory: {
+      type: [
+        new mongoose.Schema(
+          {
+            requestedDates: { type: billingDatesSchema, default: () => ({}) },
+            remark: { type: String, trim: true, default: "" },
+            image: {
+              originalName: { type: String },
+              fileName: { type: String },
+              filePath: { type: String },
+              mimeType: { type: String },
+              size: { type: Number },
+              fileType: { type: String },
+              uploadedAt: { type: Date, default: null },
+            },
+            requestedBy: { type: actorSchema, default: () => ({}) },
+            requestedAt: { type: Date, default: null },
+            replacedAt: { type: Date, default: null },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
+    editCount: { type: Number, default: 0 },
+    // per-user read status — CMD reads pending requests, Executive / Manager
+    // read CMD's decision; reset on edit and on approve / reject
+    readBy: {
+      type: [
+        new mongoose.Schema(
+          {
+            userId: { type: mongoose.Schema.Types.ObjectId, default: null },
+            role: { type: Number, default: null },
+            readAt: { type: Date, default: null },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
     cmdAction: { type: actorSchema, default: null }, // CMD approve / reject
 
     notificationId: { type: mongoose.Schema.Types.ObjectId, ref: "CmdNotification", default: null },

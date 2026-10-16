@@ -20,7 +20,8 @@ const readBySchema = new mongoose.Schema(
 const cmdNotificationSchema = new mongoose.Schema(
   {
     // 3 = CMD (same userType values as UserSchema)
-    targetRole: { type: Number, enum: [3], default: 3 },
+    // receiver role: 1 = Rental Executive, 2 = Rental Manager, 3 = CMD
+    targetRole: { type: Number, enum: [1, 2, 3], default: 3 },
 
     // "normalApproval" = Executive / Manager approval notification
     // "reminder"       = Executive / Manager reminded CMD to approve a site
@@ -28,7 +29,8 @@ const cmdNotificationSchema = new mongoose.Schema(
     //                       date for a site (CMD approves / rejects)
     notificationType: {
       type: String,
-      enum: ["normalApproval", "reminder", "billingDateRevert"],
+      // "overdueRemark" = Executive added an overdue remark (Manager + CMD, read only)
+      enum: ["normalApproval", "reminder", "billingDateRevert", "overdueRemark"],
       default: "normalApproval",
     },
 
@@ -47,7 +49,7 @@ const cmdNotificationSchema = new mongoose.Schema(
     message: { type: String, trim: true, default: "" },
 
     // who approved this row (one row per role: 1 = Executive, 2 = Manager)
-    approvedByRole: { type: Number, enum: [1, 2] }, // 1 = Rental Executive, 2 = Rental Manager
+    approvedByRole: { type: Number, enum: [1, 2, 3] }, // 1 = Rental Executive, 2 = Rental Manager, 3 = CMD
     approvedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
     approvedByName: { type: String, trim: true, default: "" },
     approvedAt: { type: Date, default: null },
@@ -73,6 +75,18 @@ const cmdNotificationSchema = new mongoose.Schema(
     requestedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
     requestedAt: { type: Date, default: null },
     imagePath: { type: String, trim: true, default: "" },
+    // overdueRemark rows only — one row per site per month per receiver; each
+    // new remark increments remarkCount and makes it unread again
+    remarkCount: { type: Number, default: 0 },
+    remarkedBy: { type: String, trim: true, default: "" },
+    remarkedByRole: { type: Number, enum: [1, 2, 3, null], default: null },
+    remarkedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    remarkedAt: { type: Date, default: null },
+    // billingDateRevert decision rows (to Executive / Manager) — CMD approve / reject
+    cmdActionBy: { type: String, trim: true, default: "" },
+    cmdActionByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    cmdRemark: { type: String, trim: true, default: "" },
+    cmdActionAt: { type: Date, default: null },
 
     readBy: { type: [readBySchema], default: [] },
 
