@@ -71,7 +71,7 @@ const startApkAutoPublish = ({ intervalMs = 5000, ...options } = {}) => {
   tick();
   const timer = setInterval(tick, intervalMs);
   timer.unref();
-  console.log(`[app-update] watching ${publisher.file} for new releases`);
+  // console.log(`[app-update] watching ${publisher.file} for new releases`);
   return () => clearInterval(timer);
 };
 

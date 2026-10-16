@@ -820,6 +820,11 @@ const getCmdNotifications = async (req, res) => {
       typeCountPromise,
       filterCountPromise,
     ]);
+    // ✅ CHANGED — pagination.totalCount = ALL notifications of this role (never
+    // changes with filter / isRead / notificationType / status / fromRole).
+    // filteredCount = rows matching the request; totalPages follows it.
+    const filteredCount = totalCount;
+    const allCount = (filterCount.read?.totalCount || 0) + (filterCount.unread?.totalCount || 0);
 
     return successResponse(res, "Notifications fetched successfully", {
       ...counts,
@@ -829,8 +834,9 @@ const getCmdNotifications = async (req, res) => {
       pagination: {
         pageNumber,
         count,
-        totalCount,
-        totalPages: Math.ceil(totalCount / count),
+        totalCount: allCount,
+        filteredCount,
+        totalPages: Math.ceil(filteredCount / count),
       },
       notifications: (await withLandOwnerIds(rows)).map((n) => formatNotification(n, userObjectId)),
     });
