@@ -28,7 +28,12 @@ const createApkAutoPublisher = ({
   let handledKey = null; // last size:mtime already processed
   let running = false;
 
-  /** One check; returns "published", "skipped", "waiting" or "idle". */
+  // Published APK named in the metadata, or null when the release has no local file (external apkUrl).
+  const publishedFile = (release) =>
+    release && release.apkFile && !release.apkUrl ? path.join(apkDir, path.basename(String(release.apkFile))) : null;
+  const exists = (f) => fs.promises.access(f).then(() => true, () => false);
+
+  /** One check; returns "published", "restored", "skipped", "waiting" or "idle". */
   const check = async () => {
     if (running) return "idle";
     running = true;
@@ -40,7 +45,13 @@ const createApkAutoPublisher = ({
         return "idle"; // no APK dropped
       }
       const key = `${st.size}:${st.mtimeMs}`;
-      if (key === handledKey) return "idle";
+      if (key === handledKey) {
+        // Already handled: re-check only if the published APK went missing (e.g. after a redeploy).
+        const published = publishedFile(readRelease(releaseFile));
+        if (!published || (await exists(published))) return "idle";
+        handledKey = null;
+        seenKey = key; // file is unchanged, so it is already stable
+      }
       if (key !== seenKey) {
         seenKey = key; // changed since last check: wait until it is stable
         return "waiting";
@@ -48,13 +59,33 @@ const createApkAutoPublisher = ({
       handledKey = key;
 
       const previous = readRelease(releaseFile);
-      if (previous && previous.sha256 && previous.sha256 === (await sha256File(file))) return "idle";
+      const published = publishedFile(previous);
+      const brokenRelease = !!published && !(await exists(published)); // metadata points to a missing APK
+      const sha = await sha256File(file);
+
+      if (previous && previous.sha256 === sha) {
+        if (!brokenRelease) return "idle";
+        // Same APK as published but its served copy is missing: restore it.
+        const tmp = `${published}.uploading`;
+        await fs.promises.mkdir(apkDir, { recursive: true });
+        await fs.promises.copyFile(file, tmp);
+        if ((await sha256File(tmp)) !== sha) {
+          await fs.promises.unlink(tmp);
+          log.error(`[app-update] could not restore ${path.basename(published)}: copy checksum mismatch`);
+          return "skipped";
+        }
+        await fs.promises.rename(tmp, published);
+        log.log(`[app-update] restored missing ${path.basename(published)} from ${WATCHED_FILE}`);
+        return "restored";
+      }
 
       try {
         const { meta } = await publishApk({
           apk: file,
           apkDir,
           releaseFile,
+          // A release whose APK is missing cannot be served; let the same versionCode replace it.
+          allowSameVersionCode: brokenRelease,
           minCode: previous ? previous.minimumVersionCode : undefined,
           minVersion: previous ? previous.minimumVersion : undefined,
           message: previous ? previous.message : undefined,
