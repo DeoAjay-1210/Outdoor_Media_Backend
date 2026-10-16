@@ -683,6 +683,25 @@ exports.approveBillingDateRevertRequest = async (req, res) => {
     claimed.appliedDates = appliedDates;
     claimed.removedBills = removedBills;
     await BillingDateRevertRequest.updateOne({ _id: requestObjectId }, { $set: { appliedDates, removedBills } });
+
+    // ✅ FIXED — catch the site up right away (same as the rental-due-list
+    // sweep): generate the missed bills from the new date and move
+    // lastBillPaidDate / nextBillingDate to the current cycle (e.g. 15.08 →
+    // 15.10 / 15.11). Before, media-list showed the requested dates until the
+    // rental-due-list ran. Fresh read; a failure never undoes the approval.
+    try {
+      // lazy require: avoids a circular import
+      const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
+      const freshMedia = await Media.findById(media._id);
+      if (freshMedia) {
+        const sweep = await generateMissedEntriesForMedia(freshMedia, req.user?.userName || "");
+        if ((sweep?.generatedEntries?.length || 0) > 0 || freshMedia.isModified()) {
+          await freshMedia.save({ timestamps: false });
+        }
+      }
+    } catch (err) {
+      console.error("[BillingDateRevert] catch-up after approval failed:", err.message);
+    }
     // + "CMD approved" notification for the Executive and the Manager
     await updateBillingDateRevertNotificationStatus(requestObjectId, REVERT_STATUS.APPROVED, claimed.toObject());
     notifyBillingDateRevertChat({ request: claimed, event: "approved" });
