@@ -234,3 +234,35 @@ test("auto-publish: waits for a stable file, publishes, then ignores the same fi
   assert.equal(await pub.check(), "skipped");
   assert.equal(JSON.parse(fs.readFileSync(rf, "utf8")).versionCode, 4);
 });
+
+test("auto-publish: recovers when the metadata points to an APK missing on the server", async () => {
+  const { createApkAutoPublisher } = require("../utils/apkAutoPublish");
+  const watch = path.join(tmp, "heal-watch");
+  const served = path.join(tmp, "heal-served");
+  fs.mkdirSync(watch);
+  const rf = path.join(tmp, "heal-release.json");
+  const quiet = { log: () => {}, error: () => {} };
+  const bytes = buildFakeApk({ pkg: "com.outdoormedia.app", versionCode: 2, versionName: "1.0.1" });
+  fs.writeFileSync(path.join(watch, "app-release.apk"), bytes);
+  const sha = crypto.createHash("sha256").update(bytes).digest("hex");
+
+  // 1) metadata committed from another machine: same APK, served copy missing → restored
+  fs.writeFileSync(rf, JSON.stringify({ enabled: true, packageName: "com.outdoormedia.app", latestVersion: "1.0.1", versionCode: 2,
+    apkFile: "app-release-1.0.1-2.apk", sha256: sha, apkSize: bytes.length }));
+  const pub = createApkAutoPublisher({ watchDir: watch, apkDir: served, releaseFile: rf, log: quiet });
+  await pub.check();
+  assert.equal(await pub.check(), "restored");
+  assert.ok(fs.existsSync(path.join(served, "app-release-1.0.1-2.apk")));
+
+  // 2) served copy deleted later → noticed again and restored
+  fs.rmSync(path.join(served, "app-release-1.0.1-2.apk"));
+  assert.equal(await pub.check(), "restored");
+
+  // 3) metadata with same versionCode but a different (missing) APK → republished from release/apk
+  fs.writeFileSync(rf, JSON.stringify({ enabled: true, packageName: "com.outdoormedia.app", latestVersion: "1.0.1", versionCode: 2,
+    apkFile: "app-release-other.apk", sha256: "0".repeat(64), apkSize: 1 }));
+  const pub2 = createApkAutoPublisher({ watchDir: watch, apkDir: served, releaseFile: rf, log: quiet });
+  await pub2.check();
+  assert.equal(await pub2.check(), "published");
+  assert.equal(JSON.parse(fs.readFileSync(rf, "utf8")).sha256, sha);
+});
