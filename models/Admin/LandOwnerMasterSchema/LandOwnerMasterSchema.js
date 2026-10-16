@@ -28,7 +28,11 @@ const bankAccountSchema = new mongoose.Schema(
     accountNumber: { type: String, trim: true },
     bankPassbook: fileObjectSchema,
     cancelCheckLeaf: fileObjectSchema,
-    isPrimary: { type: Number, enum: [0, 1], default: 0 },
+    isPrimary: {
+      type: Number,
+      enum: [0, 1], // 0 = other account, 1 = primary account (only one per landowner; mirrored to the top-level bank fields)
+      default: 1,
+    },
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
   },

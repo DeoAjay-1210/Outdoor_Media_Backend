@@ -2897,7 +2897,9 @@ if (city) {
           },
         })
           .select(
-            "mediaDetails landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.shareAmount landOwners.cashAmount landOwners.onlineAmount landOwners.updatedAt",
+            "mediaDetails landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.shareAmount landOwners.cashAmount landOwners.onlineAmount landOwners.updatedAt" +
+              // ✅ NEW — each linked site's own bank details (bank account used on that site)
+              " landOwners.bankAccountId landOwners.bankName landOwners.ifsc landOwners.accountNumber landOwners.bankPassbook landOwners.cancelCheckLeaf",
           )
           .lean()
       : [];
@@ -4070,6 +4072,14 @@ latestLedger = latestLedger.sort((a, b) => {
               onlineAmount: matchedOwnerOnThatSite?.onlineAmount || 0,
               updatedAt: matchedOwnerOnThatSite?.updatedAt || null,
               _id: matchedOwnerOnThatSite?._id,
+              // ✅ NEW — bank details THIS site pays to (its own landowner row,
+              // so a site on a different bank account shows that account)
+              bankAccountId: matchedOwnerOnThatSite?.bankAccountId || null,
+              bankName: matchedOwnerOnThatSite?.bankName || "",
+              ifsc: matchedOwnerOnThatSite?.ifsc || "",
+              accountNumber: matchedOwnerOnThatSite?.accountNumber || "",
+              bankPassbook: matchedOwnerOnThatSite?.bankPassbook || null,
+              cancelCheckLeaf: matchedOwnerOnThatSite?.cancelCheckLeaf || null,
             };
           });
         return {

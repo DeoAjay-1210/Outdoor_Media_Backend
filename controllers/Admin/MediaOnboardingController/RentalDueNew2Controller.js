@@ -4768,6 +4768,49 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   );
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
+// ✅ NEW — response only: each landOwners[].linkedSites[] item gets the bank
+// details that linked site pays to (that site's own landowner row), same as
+// /admin/ledger-list. One batched read; never changes stored data or amounts.
+async function addBankDetailsToLinkedSites(owners) {
+  const linkedPairs = [];
+  (owners || []).forEach((owner) =>
+    (owner.sites || []).forEach((site) =>
+      (site.landOwners || []).forEach((lo) => {
+        if (!lo?.landOwnerMasterId) return;
+        (lo.linkedSites || []).forEach((ls) => {
+          if (ls?.mediaId) linkedPairs.push({ ls, masterId: String(lo.landOwnerMasterId) });
+        });
+      }),
+    ),
+  );
+  if (linkedPairs.length === 0) return;
+
+  const mediaIds = [...new Set(linkedPairs.map((p) => String(p.ls.mediaId)))]
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+  const linkedMedia = await Media.find({ _id: { $in: mediaIds } })
+    .select(
+      "landOwners.landOwnerMasterId landOwners.bankAccountId landOwners.bankName landOwners.ifsc landOwners.accountNumber landOwners.bankPassbook landOwners.cancelCheckLeaf",
+    )
+    .lean();
+  const bankBySiteOwner = new Map();
+  linkedMedia.forEach((m) =>
+    (m.landOwners || []).forEach((o) => {
+      if (o.landOwnerMasterId) bankBySiteOwner.set(`${String(m._id)}:${String(o.landOwnerMasterId)}`, o);
+    }),
+  );
+
+  linkedPairs.forEach(({ ls, masterId }) => {
+    const o = bankBySiteOwner.get(`${String(ls.mediaId)}:${masterId}`);
+    ls.bankAccountId = o?.bankAccountId || null;
+    ls.bankName = o?.bankName || "";
+    ls.ifsc = o?.ifsc || "";
+    ls.accountNumber = o?.accountNumber || "";
+    ls.bankPassbook = o?.bankPassbook || null;
+    ls.cancelCheckLeaf = o?.cancelCheckLeaf || null;
+  });
+}
+
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const today = new Date();
@@ -6098,6 +6141,9 @@ const details = (item.mediaDetails || []).map((d) => ({
       overallPreviousGSTDue,
       overallTotalOutstandingAmount,
     } = overallOutstandingTotals;
+
+    // ✅ NEW — linkedSites[] bank details (response only, current page only)
+    await addBankDetailsToLinkedSites(pagedOwners);
 
     return res.status(200).json({
       success: true,

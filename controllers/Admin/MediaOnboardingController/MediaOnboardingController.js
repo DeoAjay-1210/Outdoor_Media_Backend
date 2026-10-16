@@ -3991,6 +3991,27 @@ const landOwnerNameFilter = allLandOwnersForNameFilter.map((item) => ({
   id: item._id,
   name: item.name,
 }));
+    // ✅ NEW — response only: each site's landOwners[] item gets its master's
+    // bankAccounts[] (all accounts of that landowner, for the bank dropdown).
+    // One batched read for the current page; stored data is never changed.
+    {
+      const masterIds = [
+        ...new Set(
+          mediaListData.flatMap((item) =>
+            (item.landOwners || []).map((o) => o.landOwnerMasterId && String(o.landOwnerMasterId)).filter(Boolean),
+          ),
+        ),
+      ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+      const masters = masterIds.length
+        ? await LandOwnerMaster.find({ _id: { $in: masterIds } }).select("bankAccounts").lean()
+        : [];
+      const accountsByMaster = new Map(masters.map((m) => [String(m._id), m.bankAccounts || []]));
+      mediaListData.forEach((item) =>
+        (item.landOwners || []).forEach((o) => {
+          o.bankAccounts = o.landOwnerMasterId ? accountsByMaster.get(String(o.landOwnerMasterId)) || [] : [];
+        }),
+      );
+    }
     return successResponse(
       res,
       "Media list fetched successfully",
