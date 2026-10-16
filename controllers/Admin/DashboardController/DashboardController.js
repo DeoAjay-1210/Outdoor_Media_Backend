@@ -533,6 +533,7 @@ const getDashboardV2 = async (req, res) => {
       donut: rental.donut,
       disbursement: X.computeDisbursement(active, range, filters.gst),
       ledgerEntries,
+      overdueDetails: X.computeOverdueDetails(active, range, filters),
       activity: await activityFeed(all, { limit: 10, loginRole: filters.loginRole }),
     });
   } catch (error) {
