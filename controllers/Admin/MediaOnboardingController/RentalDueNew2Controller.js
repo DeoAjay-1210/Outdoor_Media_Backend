@@ -3935,6 +3935,26 @@ exports.getOverDueRemarks = async (req, res) => {
     const records = await OverDueHistory.find(query).lean();
     // ✅ NEW — isRead per remark for the logged-in role (from the token)
     const viewerRole = Number(req.user?.userType) || null;
+    // ✅ NEW — the logged-in role's overdueRemark notification for each record
+    // (one per site + month), so the frontend can send its notificationId to
+    // /admin/cmd-notifications/read. The adding role has no notification → null.
+    const CmdNotification = require("../../../models/Admin/NotificationSchema/CmdNotificationSchema");
+    const remarkNotifications = viewerRole && records.length
+      ? await CmdNotification.find({
+          notificationType: "overdueRemark",
+          targetRole: viewerRole,
+          mediaId: { $in: [...new Set(records.map((r) => String(r.mediaId)))].map((id) => new mongoose.Types.ObjectId(id)) },
+        })
+          .select("_id mediaId dueMonth rentalDueId")
+          .lean()
+      : [];
+    const notificationIdFor = (rec) => {
+      const sameSite = remarkNotifications.filter((n) => String(n.mediaId) === String(rec.mediaId));
+      const match =
+        (rec.dueMonth && sameSite.find((n) => n.dueMonth === rec.dueMonth)) ||
+        (rec.rentalDueId && sameSite.find((n) => String(n.rentalDueId) === String(rec.rentalDueId)));
+      return match ? match._id : null;
+    };
 const UserModel = require("../../../models/Admin/UserSchema/UserSchema");
 const allUsers = await UserModel.find({}, "userName userType").lean();
 const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowerCase(), Number(u.userType)]));
@@ -3942,6 +3962,7 @@ const roleByName = new Map(allUsers.map((u) => [String(u.userName).trim().toLowe
 
 records.forEach((rec) => {
   if (Array.isArray(rec.overDueRemarks)) {
+    const recNotificationId = notificationIdFor(rec); // ✅ NEW
     rec.overDueRemarks.forEach((r) => {
       let rNum = Number(r.role || r.userType) || null;
       if (!rNum && r.addedBy) {
@@ -3962,6 +3983,9 @@ records.forEach((rec) => {
         ? true
         : (!!viewerRole && rNum === viewerRole) || r.readByRoles.map(Number).includes(viewerRole);
       delete r.readByRoles;
+      // ✅ NEW — send this to /admin/cmd-notifications/read; null for the
+      // adding role's own remark (no notification to read)
+      r.notificationId = !!viewerRole && rNum === viewerRole ? null : recNotificationId;
     });
   }
 });
