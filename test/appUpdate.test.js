@@ -210,7 +210,7 @@ test("auto-publish: waits for a stable file, publishes, then ignores the same fi
   fs.mkdirSync(dir);
   const rf = path.join(tmp, "auto-release.json");
   const quiet = { log: () => {}, error: () => {} };
-  const pub = createApkAutoPublisher({ apkDir: dir, releaseFile: rf, log: quiet });
+  const pub = createApkAutoPublisher({ watchDir: dir, apkDir: dir, releaseFile: rf, log: quiet });
 
   assert.equal(await pub.check(), "idle"); // nothing dropped yet
   fs.writeFileSync(path.join(dir, "app-release.apk"), buildFakeApk({ pkg: "com.outdoormedia.app", versionCode: 4, versionName: "1.2.0" }));
