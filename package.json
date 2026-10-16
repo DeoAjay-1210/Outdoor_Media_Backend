@@ -33,6 +33,6 @@
     "nodemon": "^3.1.14"
   },
   "nodemonConfig": {
-    "ignore": ["public/*"]
+    "ignore": ["public/*", "release/*"]
   }
 }

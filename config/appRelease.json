@@ -1,16 +1,16 @@
 {
   "enabled": true,
   "packageName": "com.outdoormedia.app",
-  "latestVersion": "1.1.7",
-  "versionCode": 12,
+  "latestVersion": "1.0.0",
+  "versionCode": 1,
   "minimumVersion": "",
-  "minimumVersionCode": 1,
-  "apkFile": "app-release-1.1.7-12.apk",
+  "minimumVersionCode": 0,
+  "apkFile": "app-release-1.0.0-1.apk",
   "apkUrl": "",
-  "sha256": "10d2486e378c9df63a2030652c69bd55f4b737255cb75662d3f850439c2b1b33",
-  "apkSize": 83903220,
+  "sha256": "78202aac235fdf4519b166a48e8ddebc7505747570fe9c2764842bf18427c718",
+  "apkSize": 83952368,
   "forceUpdate": false,
   "message": "A new version of the application is available. Please update to continue.",
   "releaseNotes": [],
-  "publishedAt": "2026-10-15T11:23:21.961Z"
+  "publishedAt": "2026-10-16T11:45:12.922Z"
 }

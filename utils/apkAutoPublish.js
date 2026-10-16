@@ -1,5 +1,7 @@
-// Auto-publish: watches public/apk/app-release.apk and publishes it (same as
-// scripts/publish-apk-release.js) once a new, complete file is there. Polling (not fs.watch)
+// Auto-publish: watches release/apk/app-release.apk (committed to git and deployed with the code)
+// and publishes it (same as scripts/publish-apk-release.js) once a new, complete file is there:
+// a versioned copy goes to public/apk (served for download) and config/appRelease.json is updated.
+// Polling (not fs.watch)
 // so it also works on Docker volumes / network drives. Disable with APP_UPDATE_AUTO_PUBLISH=0.
 //
 // A file is published only when:
@@ -13,9 +15,15 @@ const path = require("path");
 const { publishApk, readRelease, sha256File, DEFAULT_APK_DIR, defaultReleaseFile } = require("./apkRelease");
 
 const WATCHED_FILE = "app-release.apk";
+const DEFAULT_WATCH_DIR = path.join(__dirname, "..", "release", "apk");
 
-const createApkAutoPublisher = ({ apkDir = DEFAULT_APK_DIR, releaseFile = defaultReleaseFile(), log = console } = {}) => {
-  const file = path.join(apkDir, WATCHED_FILE);
+const createApkAutoPublisher = ({
+  watchDir = DEFAULT_WATCH_DIR,
+  apkDir = DEFAULT_APK_DIR,
+  releaseFile = defaultReleaseFile(),
+  log = console,
+} = {}) => {
+  const file = path.join(watchDir, WATCHED_FILE);
   let seenKey = null; // size:mtime from the previous check
   let handledKey = null; // last size:mtime already processed
   let running = false;
