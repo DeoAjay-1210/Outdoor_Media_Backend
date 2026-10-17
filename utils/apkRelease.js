@@ -40,7 +40,8 @@ const readRelease = (releaseFile) => {
 /**
  * Validates the APK, reads its version from the manifest and publishes it.
  * options: apk (required), releaseFile, apkDir, version, code (must match the APK when given),
- * minCode, minVersion, force, message, notes (array), apkUrl, dryRun.
+ * minCode, minVersion, force, message, notes (array), apkUrl, dryRun,
+ * allowSameVersionCode (replace a broken release that has the same versionCode).
  * Returns { meta, apk, inApk, dest, releaseFile }. Throws Error with a readable message.
  */
 const publishApk = async (options) => {
@@ -68,7 +69,8 @@ const publishApk = async (options) => {
   if (previous && previous.packageName && previous.packageName !== inApk.packageName) {
     throw new Error(`APK package ${inApk.packageName} differs from the published package ${previous.packageName}`);
   }
-  if (previous && Number(previous.versionCode) >= inApk.versionCode) {
+  const previousCode = previous ? Number(previous.versionCode) : 0;
+  if (previous && (previousCode > inApk.versionCode || (previousCode === inApk.versionCode && !options.allowSameVersionCode))) {
     throw new Error(`versionCode ${inApk.versionCode} must be greater than the published versionCode ${previous.versionCode}`);
   }
 

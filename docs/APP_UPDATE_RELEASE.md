@@ -58,7 +58,7 @@ The APK is served by the existing `/public` static route from `public/apk/`. Dir
 |---|---|---|---|
 | `APP_UPDATE_PUBLIC_BASE_URL` | **Yes in production** | `https://adinntech.in/ooh-rms/api` | Public base URL used to build `apkUrl` (the API sits behind a reverse-proxy sub-path) |
 | `APP_UPDATE_ALLOW_HTTP` | No | `1` | Allow a non-HTTPS `apkUrl` when `NODE_ENV=production`. Keep it unset in production |
-| `APP_UPDATE_AUTO_PUBLISH` | No | `0` | Turn off auto-publishing of `public/apk/app-release.apk` (on by default) |
+| `APP_UPDATE_AUTO_PUBLISH` | No | `0` | Turn off auto-publishing of `release/apk/app-release.apk` (on by default) |
 | `APP_RELEASE_FILE` | No | `/srv/ooh/appRelease.json` | Alternative location for the release metadata |
 
 Outside production, a missing `APP_UPDATE_PUBLIC_BASE_URL` falls back to the request host, which is fine for LAN testing.
@@ -90,9 +90,10 @@ Outside production, a missing `APP_UPDATE_PUBLIC_BASE_URL` falls back to the req
    apksigner verify --print-certs build\app\outputs\flutter-apk\app-release.apk   # signer must match the installed app
    certutil -hashfile build\app\outputs\flutter-apk\app-release.apk SHA256       # optional, the script computes it too
    ```
-5. **Upload** the APK to the server, anywhere temporary (for example `~/app-release.apk`).
-6. **Publish**. **Automatic:** while the backend runs, it checks `public/apk/app-release.apk` every 5 seconds
-   (`utils/apkAutoPublish.js`). Copy or upload the new APK to that exact name. Once the file has stopped changing,
+5. **Commit the APK**: copy it to `Outdoor_Media_Backend/release/apk/app-release.apk` (replace the old one), then commit
+   and push it with the backend and deploy as usual. Keep it under GitHub's 100 MB file limit.
+6. **Publish**. **Automatic:** while the backend runs, it checks `release/apk/app-release.apk` every 5 seconds
+   (`utils/apkAutoPublish.js`). After the deploy brings in a new file and it has stopped changing,
    the server publishes it by itself, with the same checks as the script. The previous `minimumVersionCode` /
    `minimumVersion` / `message` are kept; `forceUpdate` is off and there are no release notes. The server log shows
    `[app-update] auto-published …` or the reason it was not published. Set `APP_UPDATE_AUTO_PUBLISH=0` to turn this
