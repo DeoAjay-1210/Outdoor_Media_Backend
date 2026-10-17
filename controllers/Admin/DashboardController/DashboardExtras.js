@@ -6,7 +6,13 @@ const {
   getRequiredModesShared,
   calculateOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
-const { computeRentalDueStats, roleStatus } = require("../../../utils/rentalDueStats");
+const {
+  computeRentalDueStats,
+  roleStatus,
+  startOfTodayIST, // used by computeOverdueDetails
+  isSingleBillSite, // used by buildRentalRows (single-bill site stage)
+  pickSiteBillEntry, // used by buildRentalRows (single-bill site stage)
+} = require("../../../utils/rentalDueStats");
 
 const IST_OFFSET_MS = 330 * 60000;
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -155,6 +161,7 @@ function computeRental(docs, range, filters) {
     curMonth = { year, month };
     const st = computeRentalDueStats(gdocs, {
       year, month, targetRole, faceFilter, pendingAtRoleOnly: true,
+      singleBillAsSite: true, // ✅ NEW — a single-bill site's faces share one bill stage
       onFace: ({ media, entry, amount, cycle, state, past }) => {
         if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
         addLandlords(LL.due, media);
@@ -185,6 +192,7 @@ function computeRental(docs, range, filters) {
       const sr = computeRentalDueStats(gdocs, {
         year, month, targetRole: r, faceFilter: (e) => inWindow(range, e, year, month),
         pendingAtRoleOnly: true, // ✅ NEW — pending card = dues waiting on role r
+        singleBillAsSite: true, // ✅ NEW — a single-bill site's faces share one bill stage
         onFace: ({ media, state, past, rolePending }) => {
           if (past) return;
           // pending landlords = the faces counted in this role's pendingCount
@@ -208,6 +216,7 @@ function computeRental(docs, range, filters) {
   const unLL = new Set();
   const un = computeRentalDueStats(docs, {
     year: n.getUTCFullYear(), month: n.getUTCMonth() + 1,
+    singleBillAsSite: true, // ✅ NEW — same bill stage rule as the cards above
     onFace: ({ media, state }) => { if (state === "overdue") addLandlords(unLL, media); },
   });
   // current month: unfiltered overdue (as before). Last month / custom range: overdue of the selected period.
@@ -604,7 +613,9 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
       const label = labelOf(year, month);
       const entries = (d.rentalDue || []).filter((e) => e.dueMonth === label)
         .sort((a, b) => (num(b.approvalStatus) === 3) - (num(a.approvalStatus) === 3) || new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
-      const entry = entries[0];
+      // ✅ NEW — single-bill site: the bill's stage = its furthest-along face
+      // row (same rule as the dashboard cards); other sites unchanged
+      const entry = (isSingleBillSite(faces) && pickSiteBillEntry(entries, faces)) || entries[0];
       if (!inWindow(range, entry, year, month)) continue;
       if (filters.status !== "all") { if (!matchStatus(entry, filters.loginRole, filters.status)) continue; }
       else if (lf && !lf(entry)) continue; // Login only: rentals this role has approved
@@ -750,4 +761,76 @@ function searchSortPage(rows, { search, sortBy, sortDir, page, limit }) {
   return { data: out.slice((p - 1) * size, p * size), pagination: { page: p, limit: size, totalCount: out.length, totalPages: Math.ceil(out.length / size) } };
 }
 
-module.exports = { parseFilters, applyGst, computeRental, computeDisbursement, computeLedgerMismatch, classifyMismatch, computeActivity, pendingRoleOf, finalApproverOf, approvalFlow, computeLedgerEntries, buildRentalRows, searchSortPage, ROLE_LABEL };
+// ── Overdue details (dashboard table): one row per site with every overdue month ──
+// Same overdue rule as the Overdue card (computeRentalDueStats: open after its due date, current + past months,
+// cumulative up to the last month of the period). Dashboard filters: GST narrows the sites; Login narrows to dues
+// waiting on that role (same "pending at role" rule as the donut / Rental Master "View for"). Status / date window
+// do not apply (overdue is always cumulative).
+// paymentFrequency is stored as an integer (MediaOnboardingSchema.rentalPayment): 1 Monthly, 2 Quarterly, 3 Half-Yearly,
+// 4 Yearly, 5 2 Years, 6 Custom (customPaymentFrequency months)
+const PAY_FREQ = { 1: "Monthly", 2: "Quarterly", 3: "Half-Yearly", 4: "Yearly", 5: "2 Years" };
+const payFreqLabel = (rp) => {
+  const f = num(rp?.paymentFrequency);
+  if (f === 6) return `Every ${num(rp?.customPaymentFrequency) || 1} Months`;
+  return PAY_FREQ[f] || "";
+};
+function computeOverdueDetails(docs, range, filters) {
+  const today = startOfTodayIST();
+  const role = filters.loginRole || null;
+  const sites = new Map();
+  computeRentalDueStats(applyGst(docs, filters.gst), {
+    year: range.last.year, month: range.last.month, targetRole: null,
+    faceFilter: role ? (entry) => roleStatus(entry, role, { pendingAtRoleOnly: true }).isOpen : null,
+    onFace: ({ media, entry, amount, state, past, cycleLabel, cycleDate }) => {
+      if (state !== "overdue") return;
+      const id = String(media._id);
+      if (!sites.has(id)) sites.set(id, { media, months: new Map() });
+      const label = cycleLabel || entry?.dueMonth || "";
+      const due = entry?.dueDate ? new Date(entry.dueDate) : cycleDate ? new Date(cycleDate) : new Date(Date.UTC(range.last.year, range.last.month - 1, 1));
+      const m = sites.get(id).months;
+      if (!m.has(label)) m.set(label, { month: label, dueDate: due, amount: 0, past: !!past });
+      m.get(label).amount += amount;
+    },
+  });
+  const rows = [];
+  let total = 0;
+  for (const [id, { media, months }] of sites) {
+    const breakdown = [...months.values()]
+      .map((x) => ({ month: x.month, dueDate: x.dueDate, days: Math.max(Math.floor((today - x.dueDate) / 86400000), 0), amount: Math.round(x.amount) }))
+      .sort((a, b) => a.dueDate - b.dueDate);
+    if (!breakdown.length) continue;
+    const amount = breakdown.reduce((t, x) => t + x.amount, 0);
+    total += amount;
+    const faces = (media.mediaDetails || []).filter((f) => num(f.status) === 1);
+    const owners = media.landOwners || [];
+    const modeOf = (o) => getRequiredModesShared(num(o.paymentCategory) || 1).map((m) => (m === "Cash" ? "Cash" : "Online"));
+    const modes = new Set();
+    owners.forEach((o) => modeOf(o).forEach((m) => modes.add(m)));
+    rows.push({
+      mediaId: id,
+      siteName: faces.map((f) => f.mediaName).filter(Boolean).join(", "),
+      siteCode: faces.map((f) => f.mediaCode).filter(Boolean).join(" / ") || media.siteCode || "",
+      sites: faces.map((f) => ({ mediaName: f.mediaName, mediaCode: f.mediaCode, mediaType: f.mediaType, city: f.city, state: f.state, location: f.location, width: f.width, height: f.height, totalSqFt: f.totalSqFt })),
+      landlords: owners.map((o) => ({
+        name: o.name || "", landOwnerMasterId: o.landOwnerMasterId ? String(o.landOwnerMasterId) : "",
+        splitType: num(o.typeShare) === 2 ? "amount" : "percentage",
+        splitValue: num(o.typeShare) === 2 ? num(o.shareAmount) : num(o.sharePercentage),
+        allocated: Math.round(num(o.shareAmount)),
+        paymentMode: [...new Set(modeOf(o))].join(" + "),
+      })),
+      paymentModes: ["Online", "Cash"].filter((m) => modes.has(m)),
+      paymentMode: ["Cash", "Online"].filter((m) => modes.has(m)).join(" + "),
+      paymentFrequency: num(media.rentalPayment?.paymentFrequency) || null,
+      paymentFrequencyLabel: payFreqLabel(media.rentalPayment),
+      overdueBillDate: breakdown[0].dueDate,
+      overdueDays: breakdown[0].days,
+      overdueMonths: breakdown.length,
+      amount,
+      breakdown,
+    });
+  }
+  rows.sort((a, b) => b.overdueDays - a.overdueDays || b.amount - a.amount);
+  return { total, count: rows.length, rows };
+}
+
+module.exports = { parseFilters, applyGst, computeRental, computeDisbursement, computeLedgerMismatch, classifyMismatch, computeActivity, pendingRoleOf, finalApproverOf, approvalFlow, computeLedgerEntries, computeOverdueDetails, buildRentalRows, searchSortPage, ROLE_LABEL };
