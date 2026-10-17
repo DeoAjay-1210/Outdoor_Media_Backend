@@ -13,8 +13,13 @@ const {
   revertRentalApproval,
   getOverDueHistoryList,
   overDueRemark,
-  getOverDueRemarks
+  getOverDueRemarks,
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+// ✅ NEW — appraisal hold APIs (own controller)
+const {
+  setAppraisalHold,
+  getAppraisalHoldRemarks,
+} = require("../../../controllers/Admin/MediaOnboardingController/AppraisalHoldController");
 const { getRentalDueHistory } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueHistoryController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -52,6 +57,13 @@ router.post("/revert-Agreement",protect, revertAgreementDocVerification);
 router.post("/revert-Approval",protect, revertRentalApproval);
 router.post("/overdue-history-list", protect, getOverDueHistoryList);
 router.get("/overdue-remarks", protect, getOverDueRemarks);
+// ✅ NEW — CMD only: hold / release this month's appraisal amount on one bill
+// body: { mediaId, rentalDueId, appraisalHold: 1 | 0, remark }
+router.post("/appraisal-hold", protect, setAppraisalHold);
+// ✅ NEW — read only (any role): a site's appraisal holds + remarks
+// ?mediaId=...&rentalDueId=... (rentalDueId optional)
+router.get("/appraisal-hold-remarks", protect, getAppraisalHoldRemarks);
+router.post("/appraisal-hold-remarks", protect, getAppraisalHoldRemarks);
 router.post("/overdue-remark", protect, overDueRemark);
 
 module.exports = router;

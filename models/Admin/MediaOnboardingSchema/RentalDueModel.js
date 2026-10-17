@@ -134,6 +134,28 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // ✅ NEW — cycle-based mail status for this entry's approval mail
     mailSent: { type: Boolean, default: false },
 
+    // ✅ NEW — CMD-only appraisal hold for THIS bill (POST /admin/appraisal-hold).
+    // hold 1 → the CMD approval mail is sent at the rent WITHOUT this month's
+    // appraisal and without the appraisal block. Ledger / rent are unchanged.
+    appraisalHold: {
+      hold: { type: Number, enum: [0, 1], default: 0 }, // 0 = no hold, 1 = appraisal amount on hold
+      appraisalAmount: { type: Number, default: 0 },
+      rentWithAppraisal: { type: Number, default: 0 },
+      rentWithoutAppraisal: { type: Number, default: 0 },
+      remark: { type: String, trim: true, default: "" },
+      heldBy: { type: String, trim: true, default: "" },
+      heldByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      heldAt: { type: Date, default: null },
+      releasedBy: { type: String, trim: true, default: "" },
+      releasedAt: { type: Date, default: null },
+      // ✅ NEW — site amounts reduced by THIS hold (restored on release):
+      // { before: {...}, after: {...} } — rentalPayment + landOwners + this bill
+      siteReduced: { type: Boolean, default: false },
+      // ✅ NEW — site appraisal.applicable before the hold (restored on release)
+      appraisalApplicableBefore: { type: Number, default: null },
+      amountsSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+    },
+
     // ✅ NEW — identifies which face this entry belongs to (Separate Bill mode)
     mediaDetailId: { type: mongoose.Schema.Types.ObjectId, default: null },
 

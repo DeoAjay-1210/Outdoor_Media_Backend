@@ -2443,6 +2443,18 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         return errorResponse(res, appraisalCheck.message, null, 400);
     }
 
+    // ✅ NEW — keep the CMD appraisal hold flag (POST /admin/appraisal-hold)
+    // when a site edit sends appraisal without it — otherwise the save would
+    // reset it to 0 and the pre-save hook would re-apply the held appraisal.
+    if (
+      mediaData.appraisal &&
+      typeof mediaData.appraisal === "object" &&
+      (mediaData.appraisal.appraisalHold === undefined || mediaData.appraisal.appraisalHold === "") &&
+      Number(existingMediaForValidation?.appraisal?.appraisalHold) === 1
+    ) {
+      mediaData.appraisal.appraisalHold = 1;
+    }
+
     // ✅ NEW — landOwners[].bankAccountId → copy the chosen bank account's
     // details onto the owner. Runs before ANY save, so an invalid id
     // returns 400 with nothing written. No id sent → old flow unchanged.
@@ -3895,9 +3907,48 @@ if (landOwnerMasterId) {
         item.location = item.mediaDetails[0]?.location;
         item.siteBillMode = item.mediaDetails[0]?.siteBillMode;
       }
+      // ✅ NEW — response only: CMD appraisal holds / releases (POST
+      // /admin/appraisal-hold) shown in rentalAmountHistory with their date
+      // time and reason. Stored rent history is not changed.
+      const appraisalHoldEvents = [];
+      (item.rentalDue || []).forEach((e) => {
+        const h = e.appraisalHold;
+        if (!h || !h.heldAt) return;
+        appraisalHoldEvents.push({
+          amount: Number(h.rentWithoutAppraisal || 0),
+          updatedBy: h.heldBy || "CMD",
+          updatedAt: h.heldAt,
+          type: "appraisalHold",
+          reason: h.remark || "",
+          dueMonth: e.dueMonth || "",
+          appraisalAmount: Number(h.appraisalAmount || 0),
+          rentWithAppraisal: Number(h.rentWithAppraisal || 0),
+          holdStatus: Number(h.hold) === 1 ? "On Hold" : "Released",
+        });
+        if (Number(h.hold) !== 1 && h.releasedAt) {
+          appraisalHoldEvents.push({
+            amount: Number(h.rentWithAppraisal || 0),
+            updatedBy: h.releasedBy || "CMD",
+            updatedAt: h.releasedAt,
+            type: "appraisalHoldReleased",
+            reason: "Appraisal hold released",
+            dueMonth: e.dueMonth || "",
+            appraisalAmount: Number(h.appraisalAmount || 0),
+            rentWithAppraisal: Number(h.rentWithAppraisal || 0),
+            holdStatus: "Released",
+          });
+        }
+      });
+      if (appraisalHoldEvents.length) {
+        if (!item.rentalPayment) item.rentalPayment = {};
+        item.rentalPayment.rentalAmountHistory = [
+          ...(item.rentalPayment.rentalAmountHistory || []),
+          ...appraisalHoldEvents,
+        ];
+      }
       if (item.rentalPayment?.rentalAmountHistory) {
         item.rentalPayment.rentalAmountHistory.sort(
-          (a, b) => b.updatedAt - a.updatedAt
+          (a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0)
         );
       }
       // ✅ ADDED — ensure previousBillGenerateDate is present and CONSISTENT for display

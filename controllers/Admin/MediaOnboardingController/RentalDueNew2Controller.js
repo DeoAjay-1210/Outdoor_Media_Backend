@@ -1048,6 +1048,52 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         media: mediaAsOfDate(item.media, item.entry?.dueDate),
       }));
 
+      // ✅ NEW — CMD appraisal hold (POST /admin/appraisal-hold): a held bill is
+      // mailed at the rent WITHOUT that month's appraisal (e.g. 52k → 50k);
+      // rent, site GST, owner amounts and the bill's own amounts are scaled
+      // the same way, and the appraisal block is not sent. Mail payload only.
+      sitesInGroupData = sitesInGroupData.map((item) => {
+        const held = item.entry?.appraisalHold;
+        const heldRent = Number(held?.rentWithoutAppraisal || 0);
+        const pricedRent = Number(item.media?.rentalPayment?.totalRentalAmount || 0);
+        if (Number(held?.hold) !== 1 || heldRent <= 0 || pricedRent <= 0) return item;
+        if (heldRent === pricedRent) {
+          // site amounts already reduced by the hold → only drop the appraisal block
+          const plain = typeof item.media.toObject === "function" ? item.media.toObject() : item.media;
+          return { ...item, media: { ...plain, appraisal: { ...(plain.appraisal || {}), applicable: 0 } } };
+        }
+        const ratio = heldRent / pricedRent;
+        const scale = (v) => (v === undefined || v === null ? v : Math.round(Number(v) * ratio));
+        const base = typeof item.media.toObject === "function" ? item.media.toObject() : item.media;
+        const rp = base.rentalPayment || {};
+        const entryPlain = typeof item.entry.toObject === "function" ? item.entry.toObject() : item.entry;
+        return {
+          ...item,
+          media: {
+            ...base,
+            rentalPayment: { ...rp, totalRentalAmount: heldRent, gstAmount: scale(rp.gstAmount), netPayable: scale(rp.netPayable) },
+            landOwners: (base.landOwners || []).map((o) => {
+              const op = typeof o.toObject === "function" ? o.toObject() : o;
+              return {
+                ...op,
+                shareAmount: scale(op.shareAmount),
+                cashAmount: scale(op.cashAmount),
+                onlineAmount: scale(op.onlineAmount),
+                gstAmount: scale(op.gstAmount),
+                tdsAmount: scale(op.tdsAmount),
+              };
+            }),
+            appraisal: { ...(base.appraisal || {}), applicable: 0 }, // → no appraisal block
+          },
+          entry: {
+            ...entryPlain,
+            netPayable: scale(entryPlain.netPayable),
+            baseAmount: scale(entryPlain.baseAmount),
+            gstAmount: scale(entryPlain.gstAmount),
+          },
+        };
+      });
+
       const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
         if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
           return {};

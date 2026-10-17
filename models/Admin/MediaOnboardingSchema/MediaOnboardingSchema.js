@@ -902,6 +902,19 @@ const MediaSchema = new mongoose.Schema(
       lastAppraisalDate: Date,
       nextAppraisalDate: Date,
       history: [APPRAISAL_HISTORY_SCHEMA],
+      // ✅ NEW — 1 while CMD holds an applied appraisal (POST /admin/appraisal-hold):
+      // the site rent stays at the pre-appraisal amount and the existing
+      // auto-apply checks (pre-save hook, applyDueAppraisals, syncBillingCycles,
+      // update API) skip re-applying it. 0 = normal.
+      appraisalHold: {
+        type: Number,
+        enum: [0, 1],
+        default: 0,
+      },
+      // ✅ NEW — when the CMD hold switched applicable 1 → 0, and when the
+      // release switched it back 0 → 1
+      appraisalHoldDate: { type: Date, default: null },
+      appraisalReleaseDate: { type: Date, default: null },
     },
 
     // ─────────────────────────────────────────────────────────
