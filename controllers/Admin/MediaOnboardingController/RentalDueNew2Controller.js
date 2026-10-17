@@ -2073,6 +2073,7 @@ async function processSingleRentalDueInternal({
   // before CMD's final approval: refresh their own step's approvedAt to this
   // save. Only that step's time / user change — status, turn and the other
   // roles' steps stay as they are.
+  let lateSkippedStepApproved = false; // ✅ NEW — see below
   if (
     isStaffOrTeamLead &&
     !isTeamLeadOverride &&
@@ -2084,6 +2085,22 @@ async function processSingleRentalDueInternal({
       ownApprovedStep.approvedAt = nowIST();
       ownApprovedStep.userId = userId;
       ownApprovedStep.userName = userName;
+    }
+    // ✅ NEW — the role's step was SKIPPED (e.g. Manager approved first →
+    // Executive "Skipped — approved directly by Team Lead") and that role now
+    // approves: record it as approved by them. The turn (e.g. still CMD) and
+    // the other roles' steps stay as they are.
+    const ownSkippedStep = !ownApprovedStep
+      ? (entry.approvalSteps || []).find((s) => s.role === userType && s.status === 3)
+      : null;
+    if (ownSkippedStep) {
+      ownSkippedStep.status = 2;
+      ownSkippedStep.userId = userId;
+      ownSkippedStep.userName = userName;
+      ownSkippedStep.approvedAt = nowIST();
+      ownSkippedStep.docVerified = true;
+      ownSkippedStep.remarks = "";
+      lateSkippedStepApproved = true;
     }
   }
 
@@ -2194,7 +2211,7 @@ async function processSingleRentalDueInternal({
 
   const resGst = resolveGstApplicable(media, entry.gstApplicableFlag, entry.pastgstApplicableFlag);
 
-  return {
+  const internalResult = {
     success: true,
     mediaId,
     mediaName: media.mediaName,
@@ -2205,6 +2222,10 @@ async function processSingleRentalDueInternal({
     pastgstApplicableFlag: resGst.pastgstApplicableFlag,
     gstApplicableDisplay: resGst,
   };
+  // ✅ NEW — internal only (not in the JSON response): a skipped step approved
+  // late; callers skip the "approved → awaiting next role" notifications for it
+  Object.defineProperty(internalResult, "lateApproval", { value: lateSkippedStepApproved, enumerable: false });
+  return internalResult;
 }
 
 // ── saveRentalDue — one site ───────────────────────────────────
@@ -2267,11 +2288,12 @@ async function processSingleRentalDue({
         await media.save({ timestamps: false });
       }
       // ✅ NEW — CMD notification after a saved Rental Executive / Manager approval
-      if (isApprovalNotifyRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+      // (✅ NEW — not for a late approval of a skipped step: the bill already moved on)
+      if (isApprovalNotifyRole(userType) && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType) && !result.lateApproval) {
         await createRentalApprovalNotification({ media, entry: result.entryDoc, userType, userId, userName });
       }
       // ✅ NEW — Google Chat message for an approval made in this request (any role)
-      if (!roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType)) {
+      if (!roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType) && !result.lateApproval) {
         notifyRentalDueChat({ media, entry: result.entryDoc, userType, userName, action: "approved" });
       }
     }
@@ -2592,14 +2614,16 @@ exports.saveRentalDue = async (req, res) => {
             processResult.success &&
             isApprovalNotifyRole(userType) &&
             !roleStepWasApproved &&
-            isRoleStepApproved(processResult.entryDoc, userType)
+            isRoleStepApproved(processResult.entryDoc, userType) &&
+            !processResult.lateApproval // ✅ NEW — late approval of a skipped step
           ) {
             groupCmdApprovals.push(processResult.entryDoc);
           }
           if (
             processResult.success &&
             !roleStepWasApproved &&
-            isRoleStepApproved(processResult.entryDoc, userType)
+            isRoleStepApproved(processResult.entryDoc, userType) &&
+            !processResult.lateApproval // ✅ NEW — late approval of a skipped step
           ) {
             groupChatApprovals.push(processResult.entryDoc);
           }
@@ -2843,17 +2867,9 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
     };
   }
 
-  if (highestVerifiedRole) {
-    const highestRank = ROLE_RANK[highestVerifiedRole];
-    if (highestRank > userRank) {
-      return {
-        success: false,
-        mediaId,
-        mediaName: media.mediaName,
-        message: `${ROLE_LABEL[userType]} cannot verify because ${ROLE_LABEL[highestVerifiedRole]} has already verified for this billing cycle`,
-      };
-    }
-  }
+  // ✅ CHANGED — no cross-role blocking: Rental Executive, Rental Manager and
+  // CMD each verify once per billing cycle, in any order (even after CMD).
+  // Only the role's own repeat verification is blocked (checks above).
 
   const verificationRecord = {
     isVerified: true,
@@ -2868,9 +2884,8 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
     updatedBy: userName,
   };
 
-  const blockingRoles = [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].filter(
-    (role) => role === userType || ROLE_RANK[role] > userRank,
-  );
+  // ✅ CHANGED — same rule as above: only the role's own verification blocks
+  const blockingRoles = [ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].filter((role) => role === userType);
 
   const updatedMedia = await Media.findOneAndUpdate(
     {
@@ -2901,7 +2916,7 @@ async function processSingleVerification({ mediaId, rentalDueId, userType, userN
       (h) => h.isVerified && isSameCycle(h.cycle, currentCycle),
     );
     const selfAlreadyVerified = latestVerifications.some((h) => h.verifiedByRole === userType);
-    const blocker = latestVerifications.find((h) => ROLE_RANK[h.verifiedByRole] > userRank);
+    const blocker = null; // ✅ CHANGED — other roles never block a verification
 
     if (selfAlreadyVerified) {
       return {

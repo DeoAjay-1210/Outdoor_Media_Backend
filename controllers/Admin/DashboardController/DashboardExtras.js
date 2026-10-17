@@ -6,7 +6,7 @@ const {
   getRequiredModesShared,
   calculateOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
-const { computeRentalDueStats, roleStatus } = require("../../../utils/rentalDueStats");
+const { computeRentalDueStats, roleStatus, isSingleBillSite, pickSiteBillEntry } = require("../../../utils/rentalDueStats");
 
 const IST_OFFSET_MS = 330 * 60000;
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -155,6 +155,7 @@ function computeRental(docs, range, filters) {
     curMonth = { year, month };
     const st = computeRentalDueStats(gdocs, {
       year, month, targetRole, faceFilter, pendingAtRoleOnly: true,
+      singleBillAsSite: true, // ✅ NEW — a single-bill site's faces share one bill stage
       onFace: ({ media, entry, amount, cycle, state, past }) => {
         if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
         addLandlords(LL.due, media);
@@ -185,6 +186,7 @@ function computeRental(docs, range, filters) {
       const sr = computeRentalDueStats(gdocs, {
         year, month, targetRole: r, faceFilter: (e) => inWindow(range, e, year, month),
         pendingAtRoleOnly: true, // ✅ NEW — pending card = dues waiting on role r
+        singleBillAsSite: true, // ✅ NEW — a single-bill site's faces share one bill stage
         onFace: ({ media, state, past, rolePending }) => {
           if (past) return;
           // pending landlords = the faces counted in this role's pendingCount
@@ -208,6 +210,7 @@ function computeRental(docs, range, filters) {
   const unLL = new Set();
   const un = computeRentalDueStats(docs, {
     year: n.getUTCFullYear(), month: n.getUTCMonth() + 1,
+    singleBillAsSite: true, // ✅ NEW — same bill stage rule as the cards above
     onFace: ({ media, state }) => { if (state === "overdue") addLandlords(unLL, media); },
   });
   // current month: unfiltered overdue (as before). Last month / custom range: overdue of the selected period.
@@ -604,7 +607,9 @@ function buildRentalRows(docs, range, filters, remarksByDue = new Map()) {
       const label = labelOf(year, month);
       const entries = (d.rentalDue || []).filter((e) => e.dueMonth === label)
         .sort((a, b) => (num(b.approvalStatus) === 3) - (num(a.approvalStatus) === 3) || new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
-      const entry = entries[0];
+      // ✅ NEW — single-bill site: the bill's stage = its furthest-along face
+      // row (same rule as the dashboard cards); other sites unchanged
+      const entry = (isSingleBillSite(faces) && pickSiteBillEntry(entries, faces)) || entries[0];
       if (!inWindow(range, entry, year, month)) continue;
       if (filters.status !== "all") { if (!matchStatus(entry, filters.loginRole, filters.status)) continue; }
       else if (lf && !lf(entry)) continue; // Login only: rentals this role has approved
