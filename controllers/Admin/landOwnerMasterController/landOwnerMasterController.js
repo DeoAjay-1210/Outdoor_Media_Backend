@@ -2496,7 +2496,7 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       // ✅ NEW — with roleType, approved / pending / overDue per face follow the
       // same role rule as the header counts (waiting on that role)
       const roleFaceFlags = targetRole
-        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true })
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true })
         : null;
       details.forEach((face) => {
         const faceId = String(face._id);
@@ -3466,6 +3466,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
       // ✅ NEW — roleType: pending = waiting on that role (Executive → Manager → CMD)
       pendingAtRoleOnly: true,
+      // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
+      singleBillAsSite: true,
     });
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
