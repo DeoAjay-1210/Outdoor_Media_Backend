@@ -6,7 +6,13 @@ const {
   getRequiredModesShared,
   calculateOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
-const { computeRentalDueStats, roleStatus } = require("../../../utils/rentalDueStats");
+const {
+  computeRentalDueStats,
+  roleStatus,
+  startOfTodayIST, // used by computeOverdueDetails
+  isSingleBillSite, // used by buildRentalRows (single-bill site stage)
+  pickSiteBillEntry, // used by buildRentalRows (single-bill site stage)
+} = require("../../../utils/rentalDueStats");
 
 const IST_OFFSET_MS = 330 * 60000;
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
