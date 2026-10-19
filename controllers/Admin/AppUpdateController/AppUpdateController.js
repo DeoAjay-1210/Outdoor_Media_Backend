@@ -1,6 +1,6 @@
 // Custom APK update (no Play Store): serves the latest Android release metadata.
 // Metadata lives in config/appRelease.json (or APP_RELEASE_FILE) and is read on every request,
-// so publishing a release needs no restart. The APK is a static file under public/apk
+// so publishing a release needs no restart. The APK is served from release/apk (route in server.js)
 // (served by the existing /public static route) or any HTTPS URL set in "apkUrl".
 // See docs/APP_UPDATE_RELEASE.md and scripts/publish-apk-release.js.
 const fs = require("fs");
@@ -9,7 +9,7 @@ const crypto = require("crypto");
 const { successResponse, errorResponse } = require("../../../utils/response");
 
 const DEFAULT_RELEASE_FILE = path.join(__dirname, "../../../config/appRelease.json");
-const DEFAULT_APK_DIR = path.join(__dirname, "../../../public/apk");
+const DEFAULT_APK_DIR = path.join(__dirname, "../../../release/apk");
 
 const VERSION_NAME_RE = /^\d+(\.\d+){0,3}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
@@ -39,7 +39,7 @@ const validateRelease = (meta) => {
   else if (Number.isInteger(versionCode) && minimumVersionCode > versionCode) errors.push("minimumVersionCode cannot exceed versionCode");
   if (!SHA256_RE.test(sha256)) errors.push("sha256 must be the 64-char hex SHA-256 of the APK");
   if (!Number.isInteger(apkSize) || apkSize < 0) errors.push("apkSize must be a non-negative integer (bytes)");
-  if (!apkUrl && !apkFile) errors.push("either apkFile (file in public/apk) or apkUrl is required");
+  if (!apkUrl && !apkFile) errors.push("either apkFile (file in release/apk) or apkUrl is required");
   if (apkFile && !APK_FILE_RE.test(apkFile)) errors.push("apkFile must be a plain file name ending in .apk");
   if (apkUrl) {
     let u = null;
@@ -134,7 +134,8 @@ const createVersionHandler = ({ releaseFile, apkDir } = {}) => async (req, res) 
       console.error("[app-update] APP_UPDATE_PUBLIC_BASE_URL is not set");
       return errorResponse(res, "Release download URL is not configured", null, 500);
     }
-    apkUrl = `${base}/public/apk/${encodeURIComponent(release.apkFile)}`;
+    // ?v= makes every release a new URL, so no proxy/browser cache can serve an older APK
+    apkUrl = `${base}/release/apk/${encodeURIComponent(release.apkFile)}?v=${release.versionCode}`;
     if (!apkUrl.startsWith("https://") && !allowHttp()) {
       return errorResponse(res, "Release download URL must use HTTPS", null, 500);
     }

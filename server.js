@@ -79,6 +79,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/public", express.static(path.join(__dirname, "public")));
+// In-app update APK download (only .apk files from release/apk)
+app.use("/release/apk", (req, res, next) => (/^\/[\w.-]+\.apk$/i.test(req.path) ? next() : res.sendStatus(404)), express.static(path.join(__dirname, "release", "apk"), { index: false }));
 // Admin route
 app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
@@ -90,7 +92,7 @@ app.use("/admin", dashboardRoutes);
 app.use("/admin", cmdNotificationRoutes);
 app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", appUpdateRoutes);
-// Auto-publish a new public/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
+// Auto-publish a new release/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
 if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
 app.use('/gstdetails', gstDetailRoutes);
 
