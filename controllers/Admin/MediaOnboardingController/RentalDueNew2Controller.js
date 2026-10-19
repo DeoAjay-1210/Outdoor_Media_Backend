@@ -485,7 +485,10 @@ function markRoleVerified(media, entry, role, userName) {
 /**
  * ✅ NEW — maintain history of overdue entries before they are removed by approval.
  */
-async function saveOverDueHistoryIfApplicable(media, entry, userName) {
+// siteRows (✅ NEW, optional) = this site's overdue rows loaded once by
+// syncAllOverdueEntriesForMedia; the same 3 lookups then run in memory
+// instead of 1–3 database round trips per bill. Without it → database as before.
+async function saveOverDueHistoryIfApplicable(media, entry, userName, siteRows = null) {
   try {
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
@@ -531,27 +534,31 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       Number(media.rentalPayment?.status) === 3 ||
       (entry.dueDate && new Date(entry.dueDate) < today);
 
+    // ✅ NEW — same lookup, from the preloaded site rows when given
+    const findRow = (predicate, query) =>
+      siteRows ? Promise.resolve(siteRows.find(predicate) || null) : OverDueHistory.findOne(query);
+
     // Check for duplicate for this specific cycle/media
-    let existing = await OverDueHistory.findOne({
-      mediaId: media._id,
-      rentalDueId: entry._id,
-    });
+    let existing = await findRow(
+      (r) => r.rentalDueId && String(r.rentalDueId) === String(entry._id),
+      { mediaId: media._id, rentalDueId: entry._id },
+    );
 
     if (!existing && entry.dueMonth) {
-      existing = await OverDueHistory.findOne({
-        mediaId: media._id,
-        dueMonth: entry.dueMonth,
-      });
+      existing = await findRow(
+        (r) => r.dueMonth === entry.dueMonth,
+        { mediaId: media._id, dueMonth: entry.dueMonth },
+      );
       if (existing && !existing.rentalDueId) {
         existing.rentalDueId = entry._id;
       }
     }
 
     if (!existing) {
-      existing = await OverDueHistory.findOne({
-        mediaId: media._id,
-        $or: [{ rentalDueId: null }, { rentalDueId: { $exists: false } }],
-      });
+      existing = await findRow(
+        (r) => r.rentalDueId === null || r.rentalDueId === undefined,
+        { mediaId: media._id, $or: [{ rentalDueId: null }, { rentalDueId: { $exists: false } }] },
+      );
       if (existing) {
         existing.rentalDueId = entry._id;
         existing.dueMonth = entry.dueMonth;
@@ -679,7 +686,7 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       return;
     }
 
-    await OverDueHistory.create({
+    const createdRow = await OverDueHistory.create({
       mediaId: media._id,
       mediaDetails: mDetails,
       landOwners: lOwners,
@@ -711,6 +718,8 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       createdAt: nowIST(),
       updatedAt: nowIST(),
     });
+    // ✅ NEW — later bills of this site in the same sweep see the new row
+    if (siteRows && createdRow) siteRows.push(createdRow);
   } catch (err) {
     console.error("❌ Error saving OverDue History:", err.message);
   }
@@ -718,9 +727,25 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
 
 async function syncAllOverdueEntriesForMedia(media, userName = "System") {
   if (!media || !Array.isArray(media.rentalDue)) return;
+  // ✅ CHANGED — the site's overdue rows are loaded ONCE (same documents
+  // findOne returned, natural order) instead of 1–3 lookups per bill
+  const siteRows = await OverDueHistory.find({ mediaId: media._id });
   for (const entry of media.rentalDue) {
-    await saveOverDueHistoryIfApplicable(media, entry, userName);
+    await saveOverDueHistoryIfApplicable(media, entry, userName, siteRows);
   }
+}
+
+// ✅ NEW — sweep several sites at a time (each site only touches its own
+// overdue rows); same result as one by one, fewer waits on the database
+async function syncOverdueEntriesForSites(sites, userName = "", concurrency = 5) {
+  let next = 0;
+  const worker = async () => {
+    while (next < sites.length) {
+      const site = sites[next++];
+      await syncAllOverdueEntriesForMedia(site, userName);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, sites.length) }, worker));
 }
 
 async function cleanupDuplicateOverDueHistoryRecords() {
@@ -3241,9 +3266,8 @@ exports.getOverDueHistoryList = async (req, res) => {
   try {
     // Sweep active sites and sync overdue entries FIRST
     const activeSites = await Media.find({ "mediaDetails.status": 1 });
-    for (const siteDoc of activeSites) {
-      await syncAllOverdueEntriesForMedia(siteDoc, "");
-    }
+    // ✅ CHANGED — 5 sites at a time, each site's rows loaded once (same result)
+    await syncOverdueEntriesForSites(activeSites, "");
 
     await cleanupDuplicateOverDueHistoryRecords();
     await ensureOverDueHistoryLandOwnersPopulated();
