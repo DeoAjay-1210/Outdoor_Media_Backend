@@ -2476,6 +2476,24 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
     // ✅ NEW — keep the CMD appraisal hold flag (POST /admin/appraisal-hold)
     // when a site edit sends appraisal without it — otherwise the save would
     // reset it to 0 and the pre-save hook would re-apply the held appraisal.
+    // ✅ NEW — keep each landowner's CMD TDS hold (POST /admin/tds-hold) when a
+    // site edit sends landOwners without it — otherwise the save would reset
+    // tdsHold to 0 and the save hook would put the TDS back.
+    if (Array.isArray(mediaData.landOwners) && Array.isArray(existingMediaForValidation?.landOwners)) {
+      mediaData.landOwners.forEach((o) => {
+        if (!o || (o.tdsHold !== undefined && o.tdsHold !== "")) return;
+        const prev = existingMediaForValidation.landOwners.find(
+          (x) =>
+            (o._id && String(x._id) === String(o._id)) ||
+            (o.landOwnerMasterId && x.landOwnerMasterId && String(x.landOwnerMasterId) === String(o.landOwnerMasterId)),
+        );
+        if (prev && Number(prev.tdsHold) === 1) {
+          o.tdsHold = 1;
+          o.tdsHoldDetail = typeof prev.tdsHoldDetail?.toObject === "function" ? prev.tdsHoldDetail.toObject() : prev.tdsHoldDetail;
+        }
+      });
+    }
+
     // ✅ NEW — appraisal switched back ON here (applicable 0 → 1) while held →
     // the hold ends: appraisalHold 0 (release date stored); the held bills are
     // marked released after the save (releaseAppraisalHoldsAfterReapply).
@@ -3983,6 +4001,39 @@ if (landOwnerMasterId) {
             dueMonth: e.dueMonth || "",
             appraisalAmount: Number(h.appraisalAmount || 0),
             rentWithAppraisal: Number(h.rentWithAppraisal || 0),
+            holdStatus: "Released",
+          });
+        }
+      });
+      // ✅ NEW — CMD TDS holds / releases (POST /admin/tds-hold) per landowner,
+      // with the reason entered (response only)
+      (item.landOwners || []).forEach((o) => {
+        const t = o.tdsHoldDetail;
+        if (!t || !t.heldAt) return;
+        const siteRent = Number(item.rentalPayment?.totalRentalAmount || 0);
+        appraisalHoldEvents.push({
+          amount: siteRent,
+          updatedBy: t.heldBy || "CMD",
+          updatedAt: t.heldAt,
+          type: "tdsHold",
+          reason: t.remark || "",
+          landOwnerId: o._id,
+          landOwnerName: o.name || "",
+          tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+          tdsAmount: 0,
+          holdStatus: Number(o.tdsHold) === 1 ? "On Hold" : "Released",
+        });
+        if (Number(o.tdsHold) !== 1 && t.releasedAt) {
+          appraisalHoldEvents.push({
+            amount: siteRent,
+            updatedBy: t.releasedBy || "CMD",
+            updatedAt: t.releasedAt,
+            type: "tdsHoldReleased",
+            reason: t.releaseReason || "",
+            landOwnerId: o._id,
+            landOwnerName: o.name || "",
+            tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+            tdsAmount: Number(o.tdsAmount || 0),
             holdStatus: "Released",
           });
         }

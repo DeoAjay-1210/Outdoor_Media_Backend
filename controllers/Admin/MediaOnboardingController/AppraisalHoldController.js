@@ -362,7 +362,7 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
       return errorResponse(res, "Invalid rentalDueId", null, 400);
     }
 
-    const media = await Media.findById(mediaId).select("mediaDetails rentalDue").lean();
+    const media = await Media.findById(mediaId).select("mediaDetails rentalDue appraisal.applicable").lean();
     if (!media) return errorResponse(res, "Media not found", null, 404);
 
     const faces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
@@ -399,6 +399,8 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
       mediaId: media._id,
       mediaCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / "),
       mediaName: faces.map((d) => d.mediaName).filter(Boolean).join(", "),
+      // ✅ NEW — the site's appraisal applicable (0 while the appraisal is held)
+      appraisalApplicable: Number(media.appraisal?.applicable) === 1 ? 1 : 0,
       totalCount: holds.length,
       onHoldCount: holds.filter((h) => h.hold === 1).length,
       holds,

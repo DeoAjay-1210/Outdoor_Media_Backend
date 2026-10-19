@@ -716,6 +716,23 @@ const MediaSchema = new mongoose.Schema(
           min: 0,
           default: 0,
         },
+        // ✅ NEW — CMD TDS hold for this landowner on this site
+        // (POST /admin/tds-hold): 1 → tdsAmount stays 0 until released
+        tdsHold: {
+          type: Number,
+          enum: [0, 1], // 0 = not held, 1 = TDS on hold
+          default: 0,
+        },
+        tdsHoldDetail: {
+          tdsAmountBeforeHold: { type: Number, default: 0 },
+          remark: { type: String, trim: true, default: "" },
+          heldBy: { type: String, trim: true, default: "" },
+          heldByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
+          heldAt: { type: Date, default: null },
+          releasedBy: { type: String, trim: true, default: "" },
+          releasedAt: { type: Date, default: null },
+          releaseReason: { type: String, trim: true, default: "" },
+        },
         gstApplicable: {
           type: Number,
           enum: [0, 1], // 0 no  1 yes
@@ -908,7 +925,7 @@ const MediaSchema = new mongoose.Schema(
       // update API) skip re-applying it. 0 = normal.
       appraisalHold: {
         type: Number,
-        enum: [0, 1],
+        enum: [0, 1], // 0 = not Hold, 1 = Hold
         default: 0,
       },
       // ✅ NEW — when the CMD hold switched applicable 1 → 0, and when the
@@ -1352,7 +1369,8 @@ MediaSchema.pre("save", function () {
       tdsApplicable === 1 && tdsPercentage > 0
         ? Math.floor((tdsBaseAmount * tdsPercentage) / 100)
         : 0;
-    owner.tdsAmount = tdsAmount;
+    // ✅ NEW — TDS on hold (POST /admin/tds-hold) → no TDS while held
+    owner.tdsAmount = Number(owner.tdsHold) === 1 ? 0 : tdsAmount;
 
     // ✅ FIXED — owner-level GST is now ENTIRELY independent of
     // rentalGstApplicable. When rentalPayment.gstApplicable is on,

@@ -4853,6 +4853,35 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   );
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
+// ✅ NEW — response only: TDS hold status of a site's landowners
+// (POST /admin/tds-hold), shown on every bill of the site in rentalDueEntries[].
+// hold 1 = any landowner held now; landOwners[] = those ever held.
+function buildTdsHoldSummary(landOwners) {
+  const everHeld = (landOwners || []).filter((o) => o && o.tdsHoldDetail && o.tdsHoldDetail.heldAt);
+  const list = everHeld.map((o) => {
+    const t = o.tdsHoldDetail || {};
+    const held = Number(o.tdsHold) === 1;
+    return {
+      landOwnerId: o._id,
+      landOwnerMasterId: o.landOwnerMasterId || null,
+      landOwnerName: o.name || "",
+      tdsHold: held ? 1 : 0,
+      holdStatus: held ? "On Hold" : "Released",
+      tdsPercentage: Number(o.tdsPercentage || 0),
+      tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+      tdsAmount: Number(o.tdsAmount || 0),
+      remark: t.remark || "",
+      heldBy: t.heldBy || "",
+      heldAt: t.heldAt || null,
+      releasedBy: t.releasedBy || "",
+      releasedAt: t.releasedAt || null,
+      releaseReason: t.releaseReason || "",
+    };
+  });
+  const holdCount = list.filter((x) => x.tdsHold === 1).length;
+  return { hold: holdCount > 0 ? 1 : 0, holdCount, landOwners: list };
+}
+
 // ✅ NEW — response only: each landOwners[].linkedSites[] item gets the bank
 // details that linked site pays to (that site's own landowner row), same as
 // /admin/ledger-list. One batched read; never changes stored data or amounts.
@@ -5944,6 +5973,8 @@ const details = (item.mediaDetails || []).map((d) => ({
                   },
                 }
               : {}),
+            // ✅ NEW — TDS hold status of this site's landowners (always present)
+            tdsHold: buildTdsHoldSummary(item.landOwners),
           });
         });
       });
