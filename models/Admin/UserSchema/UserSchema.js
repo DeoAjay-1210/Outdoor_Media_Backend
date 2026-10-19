@@ -9,11 +9,12 @@ const userSchema = new mongoose.Schema(
     lastLogin: { type: Date },
     userType: {
       type: Number,
-      enum: [1, 2, 3, 4],
+      enum: [1, 2, 3, 4, 5],
       // 1 = Rental Executive
       // 2 = Rental Manager
       // 3 = CMD
       // 4 = Other
+      // 5 = Accounts (✅ NEW)
       required: true,
     },
     pin: {
