@@ -1896,6 +1896,36 @@ const detectInitialGstApplicableFlag = (mediaData) => {
   return rentalGstApplicable || anyOwnerGstApplicable ? 2 : 0;
 };
 // This is for Media Onboarding Save
+// ✅ NEW — appraisal switched back ON in media onboarding while CMD-held:
+// every held bill of the site is marked released (hold 0, who / when / why)
+// and its own amounts go back to what they were before the hold. The site
+// rent is re-applied by the normal appraisal logic of the same save.
+// Direct $set per bill — runs after the save. Never throws.
+async function releaseAppraisalHoldsAfterReapply(mediaId, userName) {
+  try {
+    const fresh = await MediaOnboarding.findById(mediaId).select("rentalDue").lean();
+    const heldBills = (fresh?.rentalDue || []).filter((e) => Number(e.appraisalHold?.hold) === 1);
+    for (const bill of heldBills) {
+      const h = bill.appraisalHold || {};
+      const $set = {
+        "rentalDue.$[e].appraisalHold.hold": 0,
+        "rentalDue.$[e].appraisalHold.releasedBy": userName || "",
+        "rentalDue.$[e].appraisalHold.releasedAt": nowIST(),
+        "rentalDue.$[e].appraisalHold.releaseReason": "Appraisal re-applied from media onboarding",
+      };
+      const before = h.siteReduced ? h.amountsSnapshot?.before?.entry : null;
+      const after = h.siteReduced ? h.amountsSnapshot?.after?.entry : null;
+      Object.keys(before || {}).forEach((k) => {
+        // only a value still at the held amount goes back
+        if (Number(bill[k]) === Number(after?.[k])) $set[`rentalDue.$[e].${k}`] = Number(before[k]);
+      });
+      await MediaOnboarding.updateOne({ _id: mediaId }, { $set }, { arrayFilters: [{ "e._id": bill._id }], timestamps: false });
+    }
+  } catch (err) {
+    console.error("[appraisalHold] release after re-apply failed:", err.message);
+  }
+}
+
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -2446,7 +2476,21 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
     // ✅ NEW — keep the CMD appraisal hold flag (POST /admin/appraisal-hold)
     // when a site edit sends appraisal without it — otherwise the save would
     // reset it to 0 and the pre-save hook would re-apply the held appraisal.
+    // ✅ NEW — appraisal switched back ON here (applicable 0 → 1) while held →
+    // the hold ends: appraisalHold 0 (release date stored); the held bills are
+    // marked released after the save (releaseAppraisalHoldsAfterReapply).
+    let appraisalReappliedFromHold = false;
     if (
+      mediaData.appraisal &&
+      typeof mediaData.appraisal === "object" &&
+      Number(existingMediaForValidation?.appraisal?.appraisalHold) === 1 &&
+      Number(existingMediaForValidation?.appraisal?.applicable) !== 1 &&
+      Number(mediaData.appraisal.applicable) === 1
+    ) {
+      mediaData.appraisal.appraisalHold = 0;
+      mediaData.appraisal.appraisalReleaseDate = nowIST();
+      appraisalReappliedFromHold = true;
+    } else if (
       mediaData.appraisal &&
       typeof mediaData.appraisal === "object" &&
       (mediaData.appraisal.appraisalHold === undefined || mediaData.appraisal.appraisalHold === "") &&
@@ -2919,6 +2963,10 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       media.updatedAt = nowIST();
       await media.save({ timestamps: false });
       await generateMissedEntriesForMedia(media, userName);
+      // ✅ NEW — appraisal re-applied from media onboarding → held bills released
+      if (appraisalReappliedFromHold) {
+        await releaseAppraisalHoldsAfterReapply(media._id, userName);
+      }
       media = (await MediaOnboarding.findById(media._id)).toObject({ virtuals: true });
       if (media.landOwners && Array.isArray(media.landOwners)) {
         for (const savedOwner of media.landOwners) {
