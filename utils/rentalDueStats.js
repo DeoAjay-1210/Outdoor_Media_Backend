@@ -252,7 +252,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           trackOwner("overdue", media, faceId, faceAmount);
         }
         // rolePending (✅ NEW) = this face is counted in pendingCount for the role
-        if (onFace) onFace({ media, face, entry, amount: faceAmount, state: isOverdue ? "overdue" : notYetAtRole ? "closed" : "pending", cycle: cycleSummary, rolePending: isOpen, cycleLabel: `${MONTH_NAMES[month - 1]} ${year}` });
+        if (onFace) onFace({ media, face, entry, amount: faceAmount, state: isOverdue ? "overdue" : notYetAtRole ? "closed" : "pending", cycle: cycleSummary, rolePending: isOpen, cycleLabel: `${MONTH_NAMES[month - 1]} ${year}`, gstShare: Number(cycleSummary.currentMonthGstAmount || 0) / faceCount });
       }
     }
 
@@ -285,7 +285,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         if (!isOpen) continue;
         overdueFaces.add(faceId);
         stats.overdueAmountTotal += pastFaceAmount;
-        if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate });
+        if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate, gstShare: Number(pastSummary.currentMonthGstAmount || 0) / faceCount });
         trackOwner("overdue", media, faceId, pastFaceAmount);
       }
     }
