@@ -187,7 +187,9 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
       }
     }
   } else {
-    holdData = { ...existingHold, hold: 0, releasedBy: userName, releasedAt: nowIST() };
+    // ✅ NEW — the remark sent with the release is its own reason (releaseReason);
+    // the hold's remark is kept as it was
+    holdData = { ...existingHold, hold: 0, releasedBy: userName, releasedAt: nowIST(), releaseReason: remark || "" };
     if (Number(existingHold.hold) === 1 && existingHold.siteReduced && existingHold.amountsSnapshot) {
       // ✅ NEW — restore what this hold reduced. A value still equal to what the
       // hold wrote goes back exactly; a value edited since is scaled back up.
@@ -252,6 +254,7 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
       heldAt: holdData.heldAt || null,
       releasedBy: holdData.releasedBy || "",
       releasedAt: holdData.releasedAt || null,
+      releaseReason: holdData.releaseReason || "", // ✅ NEW — entered on release
       // ✅ NEW — the site's appraisal applicable after this call (0 while held)
       appraisalApplicable:
         $set["appraisal.applicable"] !== undefined ? $set["appraisal.applicable"] : Number(media.appraisal?.applicable || 0),
@@ -387,6 +390,7 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
           heldAt: h.heldAt || null,
           releasedBy: h.releasedBy || "",
           releasedAt: h.releasedAt || null,
+          releaseReason: h.releaseReason || "", // ✅ NEW — entered on release
         };
       })
       .sort((a, b) => new Date(b.heldAt || 0) - new Date(a.heldAt || 0));

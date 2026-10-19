@@ -3979,7 +3979,7 @@ if (landOwnerMasterId) {
             updatedBy: h.releasedBy || "CMD",
             updatedAt: h.releasedAt,
             type: "appraisalHoldReleased",
-            reason: "Appraisal hold released",
+            reason: h.releaseReason || "", // ✅ CHANGED — the reason entered on release
             dueMonth: e.dueMonth || "",
             appraisalAmount: Number(h.appraisalAmount || 0),
             rentWithAppraisal: Number(h.rentWithAppraisal || 0),

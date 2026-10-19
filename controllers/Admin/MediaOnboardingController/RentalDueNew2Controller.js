@@ -5925,6 +5925,25 @@ const details = (item.mediaDetails || []).map((d) => ({
             ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),
             // ✅ NEW — this entry's month-wise amounts (new object)
             monthWiseAmount: monthWiseAmountFor(entry),
+            // ✅ NEW — appraisal hold, display fields only (internal restore data
+            // — amountsSnapshot, siteReduced, appraisalApplicableBefore,
+            // heldByUserId — is not sent)
+            ...(entry.appraisalHold
+              ? {
+                  appraisalHold: {
+                    hold: Number(entry.appraisalHold.hold) === 1 ? 1 : 0,
+                    appraisalAmount: Number(entry.appraisalHold.appraisalAmount || 0),
+                    rentWithAppraisal: Number(entry.appraisalHold.rentWithAppraisal || 0),
+                    rentWithoutAppraisal: Number(entry.appraisalHold.rentWithoutAppraisal || 0),
+                    remark: entry.appraisalHold.remark || "",
+                    heldBy: entry.appraisalHold.heldBy || "",
+                    heldAt: entry.appraisalHold.heldAt || null,
+                    releasedBy: entry.appraisalHold.releasedBy || "",
+                    releasedAt: entry.appraisalHold.releasedAt || null,
+                    releaseReason: entry.appraisalHold.releaseReason || "",
+                  },
+                }
+              : {}),
           });
         });
       });
