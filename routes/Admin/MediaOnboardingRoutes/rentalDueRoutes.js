@@ -21,7 +21,7 @@ const {
   getAppraisalHoldRemarks,
 } = require("../../../controllers/Admin/MediaOnboardingController/AppraisalHoldController");
 // ✅ NEW — TDS hold API (own controller)
-const { setTdsHold } = require("../../../controllers/Admin/MediaOnboardingController/TdsHoldController");
+const { setTdsHold, getTdsHoldRemarks } = require("../../../controllers/Admin/MediaOnboardingController/TdsHoldController");
 const { getRentalDueHistory } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueHistoryController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -65,10 +65,12 @@ router.post("/appraisal-hold", protect, setAppraisalHold);
 // ✅ NEW — read only (any role): a site's appraisal holds + remarks
 // ?mediaId=...&rentalDueId=... (rentalDueId optional)
 router.get("/appraisal-hold-remarks", protect, getAppraisalHoldRemarks);
-router.post("/appraisal-hold-remarks", protect, getAppraisalHoldRemarks);
 // ✅ NEW — CMD only: hold / release a landowner's TDS on a site
 // body: { mediaId, landOwnerId, tdsHold: 1 | 0, remark } or { entries: [...] }
 router.post("/tds-hold", protect, setTdsHold);
+// ✅ NEW — read only (any role): a site's TDS holds + remarks (separate API)
+// ?mediaId=...&landOwnerId=... (landOwnerId optional)
+router.get("/tds-hold-remarks", protect, getTdsHoldRemarks);
 router.post("/overdue-remark", protect, overDueRemark);
 
 module.exports = router;

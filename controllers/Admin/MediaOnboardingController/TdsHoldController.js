@@ -167,4 +167,90 @@ const setTdsHold = async (req, res) => {
   }
 };
 
-module.exports = { setTdsHold };
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — TDS hold list of one site (read only): every landowner whose TDS
+// was ever held (current hold or released), with its remark — newest first.
+// landOwnerId (optional, landOwners[]._id or landOwnerMasterId) → just that one.
+// Used by GET /admin/tds-hold-remarks (getTdsHoldRemarks below).
+// ─────────────────────────────────────────────────────────────
+function buildTdsHoldList(media, landOwnerId = "") {
+  return (media?.landOwners || [])
+    .filter((o) => o && o.tdsHoldDetail && (o.tdsHoldDetail.heldAt || Number(o.tdsHold) === 1))
+    .filter(
+      (o) => !landOwnerId || String(o._id) === String(landOwnerId) || String(o.landOwnerMasterId || "") === String(landOwnerId),
+    )
+    .map((o) => {
+      const t = o.tdsHoldDetail || {};
+      const held = Number(o.tdsHold) === 1;
+      return {
+        landOwnerId: o._id,
+        landOwnerMasterId: o.landOwnerMasterId || null,
+        landOwnerName: o.name || "",
+        tdsApplicable: Number(o.tdsApplicable) === 1 ? 1 : 0,
+        tdsPercentage: Number(o.tdsPercentage || 0),
+        hold: held ? 1 : 0,
+        holdStatus: held ? "On Hold" : "Released",
+        tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+        tdsAmount: Number(o.tdsAmount || 0),
+        remark: t.remark || "",
+        heldBy: t.heldBy || "",
+        heldAt: t.heldAt || null,
+        releasedBy: t.releasedBy || "",
+        releasedAt: t.releasedAt || null,
+        releaseReason: t.releaseReason || "",
+      };
+    })
+    .sort((a, b) => new Date(b.heldAt || 0) - new Date(a.heldAt || 0));
+}
+
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — GET /admin/tds-hold-remarks?mediaId=&landOwnerId=
+// Read only, any logged-in role — separate from appraisal-hold-remarks.
+// landOwnerId (optional, landOwners[]._id or landOwnerMasterId) → just that one.
+// ─────────────────────────────────────────────────────────────
+const getTdsHoldRemarks = async (req, res) => {
+  try {
+    const params = { ...(req.query || {}), ...(req.body || {}) };
+    const mediaId = String(params.mediaId || "").trim();
+    const landOwnerId = params.landOwnerId ? String(params.landOwnerId).trim() : "";
+    if (!mongoose.Types.ObjectId.isValid(mediaId)) {
+      return errorResponse(res, "A valid mediaId is required", null, 400);
+    }
+    if (landOwnerId && !mongoose.Types.ObjectId.isValid(landOwnerId)) {
+      return errorResponse(res, "Invalid landOwnerId", null, 400);
+    }
+
+    const media = await Media.findById(mediaId).select("mediaDetails landOwners").lean();
+    if (!media) return errorResponse(res, "Media not found", null, 404);
+
+    const faces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
+    const holds = buildTdsHoldList(media, landOwnerId);
+    // ✅ NEW — TDS applicable status, shown even when nothing was ever held
+    const siteOwners = (media.landOwners || []).filter(
+      (o) => !landOwnerId || String(o._id) === landOwnerId || String(o.landOwnerMasterId || "") === landOwnerId,
+    );
+    const landOwners = siteOwners.map((o) => ({
+      landOwnerId: o._id,
+      landOwnerMasterId: o.landOwnerMasterId || null,
+      landOwnerName: o.name || "",
+      tdsApplicable: Number(o.tdsApplicable) === 1 ? 1 : 0,
+      tdsPercentage: Number(o.tdsPercentage || 0),
+      tdsAmount: Number(o.tdsAmount || 0),
+      tdsHold: Number(o.tdsHold) === 1 ? 1 : 0,
+    }));
+    return successResponse(res, "TDS hold remarks fetched successfully", {
+      mediaId: media._id,
+      mediaCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / "),
+      mediaName: faces.map((d) => d.mediaName).filter(Boolean).join(", "),
+      tdsApplicable: landOwners.some((o) => o.tdsApplicable === 1) ? 1 : 0, // 1 = any landowner has TDS
+      landOwners,
+      totalCount: holds.length,
+      onHoldCount: holds.filter((h) => h.hold === 1).length,
+      holds,
+    });
+  } catch (err) {
+    return errorResponse(res, err.message, null, 500);
+  }
+};
+
+module.exports = { setTdsHold, buildTdsHoldList, getTdsHoldRemarks };
