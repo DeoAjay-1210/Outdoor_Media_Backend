@@ -5002,6 +5002,55 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   );
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
+// ─────────────────────────────────────────────────────────────
+// ✅ SPEED — shared site sweep for /admin/rental-due-list.
+// Same per-site steps as before (fresh re-read → catch up missed bills →
+// save if changed), 5 sites at a time. Calls arriving while a sweep runs
+// wait for THAT sweep (no second one); a sweep finished within
+// RENTAL_DUE_SWEEP_REUSE_MS (5 min) is reused, so the list answers quickly.
+// ─────────────────────────────────────────────────────────────
+const RENTAL_DUE_SWEEP_REUSE_MS = 5 * 60 * 1000;
+let rentalDueSweepInFlight = null;
+let rentalDueSweepFinishedAt = 0;
+
+async function sweepRentalDueSites() {
+  // load only ids up front and re-read each site right before processing it
+  // (saving a copy loaded at the start would write stale rentalPayment back)
+  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 }).select("_id").lean();
+  const sweepOneSite = async (sweepSiteId) => {
+    const siteDoc = await Media.findById(sweepSiteId);
+    if (!siteDoc) return;
+    const result = await generateMissedEntriesForMedia(siteDoc, "");
+    const generatedCount = result?.generatedEntries?.length || 0;
+    // save even when generatedCount is 0, so a freshly seeded nextBillingDate
+    // (ensureNextBillingDateSeed inside generateMissedEntriesForMedia) isn't lost
+    if (generatedCount > 0 || siteDoc.isModified()) {
+      await siteDoc.save({ timestamps: false });
+    }
+  };
+  let nextSweepIdx = 0;
+  const sweepWorker = async () => {
+    while (nextSweepIdx < activeSitesForSweep.length) {
+      const { _id: sweepSiteId } = activeSitesForSweep[nextSweepIdx++];
+      await sweepOneSite(sweepSiteId);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(5, activeSitesForSweep.length) }, sweepWorker));
+}
+
+async function runSharedRentalDueSweep() {
+  if (rentalDueSweepInFlight) return rentalDueSweepInFlight; // join the running sweep
+  if (Date.now() - rentalDueSweepFinishedAt < RENTAL_DUE_SWEEP_REUSE_MS) return; // recent sweep reused
+  rentalDueSweepInFlight = sweepRentalDueSites()
+    .then(() => {
+      rentalDueSweepFinishedAt = Date.now();
+    })
+    .finally(() => {
+      rentalDueSweepInFlight = null;
+    });
+  return rentalDueSweepInFlight;
+}
+
 // ✅ NEW — response only: TDS hold status of a site's landowners
 // (POST /admin/tds-hold), shown on every bill of the site in rentalDueEntries[].
 // hold 1 = any landowner held now; landOwners[] = those ever held.
@@ -5332,21 +5381,22 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     // ✅ FIXED — totalSites now counts EVERY face in the system (from mediaDetails),
     // matching the global onboarding count rather than just the rental-active count.
-    const totalFacesAgg = await Media.aggregate([
-      { $unwind: "$mediaDetails" },
-      { $count: "count" },
+    // ✅ SPEED — the three counts are independent → run together (same results)
+    const [totalFacesAgg, siteCount, activeCountAgg] = await Promise.all([
+      Media.aggregate([
+        { $unwind: "$mediaDetails" },
+        { $count: "count" },
+      ]),
+      // ✅ FIXED — siteCount now counts EVERY unique document (Site) in onboarding.
+      Media.countDocuments({}),
+      // ✅ ADDED — activeCount specifically for status: 1 faces (rental-active).
+      Media.aggregate([
+        { $unwind: "$mediaDetails" },
+        { $match: { "mediaDetails.status": 1 } },
+        { $count: "count" },
+      ]),
     ]);
     const totalSites = totalFacesAgg[0]?.count || 0;
-
-    // ✅ FIXED — siteCount now counts EVERY unique document (Site) in onboarding.
-    const siteCount = await Media.countDocuments({});
-
-    // ✅ ADDED — activeCount specifically for status: 1 faces (rental-active).
-    const activeCountAgg = await Media.aggregate([
-      { $unwind: "$mediaDetails" },
-      { $match: { "mediaDetails.status": 1 } },
-      { $count: "count" },
-    ]);
     const activeCount = activeCountAgg[0]?.count || 0;
 
     // ✅ ADDED — before computing any stats/list data, sweep every
@@ -5360,37 +5410,10 @@ exports.getRentalDueListWithStats = async (req, res) => {
   // processing it. Saving a copy loaded at the start of the sweep wrote
   // stale rentalPayment back over changes made meanwhile (e.g. a CMD
   // billing date revert approval or a manual media edit).
-  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 }).select("_id").lean();
-// const sweepDebugLog = [];
-for (const { _id: sweepSiteId } of activeSitesForSweep) {
-  const siteDoc = await Media.findById(sweepSiteId);
-  if (!siteDoc) continue;
-  const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
-  const result = await generateMissedEntriesForMedia(siteDoc, "");
-  const generatedCount = result?.generatedEntries?.length || 0;
-
-  // ✅ CHANGED — save even when generatedCount is 0, so a freshly
-  // seeded nextBillingDate (via ensureNextBillingDateSeed inside
-  // generateMissedEntriesForMedia) isn't lost. Without this, the seed
-  // would be discarded every request and rentalDue would NEVER catch
-  // up on sites whose seed date is still in the future.
-  if (generatedCount > 0 || siteDoc.isModified()) {
-    await siteDoc.save({ timestamps: false });
-  }
-
-  // sweepDebugLog.push({
-  //   mediaId: siteDoc._id,
-  //   mediaName: siteDoc.mediaDetails?.[0]?.mediaName || "Unknown",
-  //   generatedCount,
-  //   latestDueMonth: siteDoc.rentalDue?.length
-  //     ? siteDoc.rentalDue[siteDoc.rentalDue.length - 1]?.dueMonth
-  //     : null,
-  //   // ✅ ADDED — makes the exact root cause visible in the response
-  //   // itself next time this happens, instead of having to guess.
-  //   nextBillingDateWasSeededThisRequest:
-  //     !hadNextBillingDateBefore && !!siteDoc.rentalPayment?.nextBillingDate,
-  // });
-}
+  // ✅ SPEED — one shared sweep: calls arriving together wait for the SAME
+  // sweep, and a sweep finished within the last 5 minutes is reused (see
+  // runSharedRentalDueSweep). The per-site steps are unchanged.
+  await runSharedRentalDueSweep();
 
     const monthOrCondition = {
       $or: [
