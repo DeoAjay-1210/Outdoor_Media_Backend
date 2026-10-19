@@ -134,6 +134,26 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // ✅ NEW — cycle-based mail status for this entry's approval mail
     mailSent: { type: Boolean, default: false },
 
+    // ✅ NEW — "Save as Draft" (POST /admin/rental-due-save-draft): values kept
+    // aside without approving / changing the bill. Cleared (isDraft 0) when the
+    // bill is saved with /admin/rental-due-save.
+    draft: {
+      isDraft: { type: Number, enum: [0, 1], default: 0 }, // 0 = no draft, 1 = draft saved
+      campaignName: { type: String, trim: true, default: "" },
+      reason: { type: String, trim: true, default: "" },
+      withGst: { type: Number, default: null },
+      gstApplicableFlag: { type: Number, default: null },
+      pastgstApplicableFlag: { type: Number, default: null },
+      proofOfCampaign: { type: mongoose.Schema.Types.Mixed, default: null },
+      invoice: { type: mongoose.Schema.Types.Mixed, default: null },
+      savedBy: {
+        userId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        userName: { type: String, trim: true, default: "" },
+        role: { type: Number, default: null },
+      },
+      savedAt: { type: Date, default: null },
+    },
+
     // ✅ NEW — CMD-only appraisal hold for THIS bill (POST /admin/appraisal-hold).
     // hold 1 → the CMD approval mail is sent at the rent WITHOUT this month's
     // appraisal and without the appraisal block. Ledger / rent are unchanged.

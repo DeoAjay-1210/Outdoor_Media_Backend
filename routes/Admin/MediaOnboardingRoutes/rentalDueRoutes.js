@@ -22,6 +22,8 @@ const {
 } = require("../../../controllers/Admin/MediaOnboardingController/AppraisalHoldController");
 // ✅ NEW — TDS hold API (own controller)
 const { setTdsHold, getTdsHoldRemarks } = require("../../../controllers/Admin/MediaOnboardingController/TdsHoldController");
+// ✅ NEW — rental due "Save as Draft" (own controller)
+const { saveRentalDueDraft } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueDraftController");
 const { getRentalDueHistory } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueHistoryController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
@@ -49,6 +51,19 @@ router.post(
     next();
   },
   saveRentalDue,
+);
+
+// ✅ NEW — Save as Draft: same body / files as /rental-due-save, stored as the
+// bill's draft only (no approval, no status change, no notification / mail)
+router.post(
+  "/rental-due-save-draft",
+  protect,
+  upload.any(),
+  (req, res, next) => {
+    req.processFile = processFile;
+    next();
+  },
+  saveRentalDueDraft,
 );
 
 // ✅ NEW — campaignName / reason / proofOfCampaign / invoice change history (body: mediaId, pageNumber, count)

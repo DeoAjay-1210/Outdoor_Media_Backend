@@ -27,6 +27,7 @@ const {
 } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
 const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
+const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -2069,6 +2070,8 @@ async function processSingleRentalDueInternal({
   if (reason) entry.reason = reason;
   if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
   if (invoice) entry.invoice = invoice;
+  // ✅ NEW — saved for real → its "Save as Draft" values are cleared
+  if (entry.draft && Number(entry.draft.isDraft) === 1) entry.draft = { isDraft: 0 };
 
   // ✅ AUTO-INFER gstApplicableFlag
   let resolvedUpdateFlag = gstApplicableFlag !== undefined ? Number(gstApplicableFlag) : Number(entry.gstApplicableFlag || 0);
@@ -5975,6 +5978,8 @@ const details = (item.mediaDetails || []).map((d) => ({
               : {}),
             // ✅ NEW — TDS hold status of this site's landowners (always present)
             tdsHold: buildTdsHoldSummary(item.landOwners),
+            // ✅ NEW — "Save as Draft" values ({ isDraft: 0 } when none)
+            draft: formatDraft(entry.draft),
           });
         });
       });
