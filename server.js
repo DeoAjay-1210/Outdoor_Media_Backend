@@ -67,6 +67,14 @@ const runPurgeCmdNotifications = async () => {
 };
 runPurgeCmdNotifications();
 
+// One-time / repeatable fix: overdue rows of single-bill multi-face sites store
+// the whole bill (site rent + GST), not one face's share. Only changed rows are
+// written; once fixed, later restarts change nothing.
+const { fixSingleBillOverdueAmounts } = require("./controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+fixSingleBillOverdueAmounts()
+  .then((r) => r.fixed && console.log(`[fixSingleBillOverdueAmounts] fixed=${r.fixed} of ${r.checked}`))
+  .catch((err) => console.error("[fixSingleBillOverdueAmounts] failed:", err.message));
+
 // One-time backfill: landowners without bankAccounts[] get their current
 // bank details as the primary account (no-op once every owner has one)
 const { seedLandOwnerBankAccounts } = require("./controllers/Admin/landOwnerMasterController/landOwnerMasterController");

@@ -720,7 +720,7 @@ const MediaSchema = new mongoose.Schema(
         // (POST /admin/tds-hold): 1 → tdsAmount stays 0 until released
         tdsHold: {
           type: Number,
-          enum: [0, 1], // 0 = not held, 1 = TDS on hold
+          enum: [0, 1], // 0 = on hold, 1 = released
           default: 0,
         },
         tdsHoldDetail: {
@@ -925,7 +925,7 @@ const MediaSchema = new mongoose.Schema(
       // update API) skip re-applying it. 0 = normal.
       appraisalHold: {
         type: Number,
-        enum: [0, 1], // 0 = not Hold, 1 = Hold
+        enum: [0, 1], // 0 = On Hold, 1 = Released
         default: 0,
       },
       // ✅ NEW — when the CMD hold switched applicable 1 → 0, and when the

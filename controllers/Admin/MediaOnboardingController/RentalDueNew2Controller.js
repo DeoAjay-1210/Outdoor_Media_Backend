@@ -565,9 +565,16 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     const entryGst = Number(entry.gstAmount || 0);
     const siteGst = Number(media.rentalPayment?.gstAmount || 0);
     const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-    const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+    let resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-    const baseAmount = Number(entry.netPayable || 0);
+    let baseAmount = Number(entry.netPayable || 0);
+    // ✅ NEW — single-bill multi-face site: the row is ONE per site per month,
+    // so it stores the whole bill (site rent / GST), not this face's share
+    const siteBill = siteBillForOverdue(media, entry.dueDate);
+    if (siteBill) {
+      resolvedGst = siteBill.gst;
+      baseAmount = Number(entry.withGst) === 2 ? siteBill.rent + siteBill.gst : siteBill.rent;
+    }
     const isGstApplicable = resolvedGst > 0;
 
     const mDetails = (media.mediaDetails || []).map(d => ({
@@ -3148,6 +3155,88 @@ exports.verifyAgreementDoc = async (req, res) => {
 /**
  * ✅ UPDATED — Dedicated API for OverDue History List with Summary and calculated overdue days
  */
+// ✅ NEW — response only: an overdue row is ONE per site per month, but its
+// stored amount comes from a single face's bill (site rent split by sqft). For
+// a SINGLE-bill site with several faces the row stands for the whole bill, so
+// rent / GST are taken from the site's cycle summary for the row's month
+// (same amounts as rental-due-list / dashboard). Separate-bill and single-face
+// rows keep their stored amounts. Returns Map(recordId → { rent, gst }).
+// whole-bill { rent, gst } of a SINGLE-bill multi-face site for a month, or null
+function siteBillForOverdue(media, dueDate) {
+  if (!media || !dueDate) return null;
+  const activeFaces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
+  const isSingleBillMultiFace = activeFaces.length > 1 && activeFaces.every((d) => Number(d.siteBillMode) !== 2);
+  if (!isSingleBillMultiFace) return null;
+  const d = new Date(dueDate);
+  if (Number.isNaN(d.getTime())) return null;
+  try {
+    const plain = typeof media.toObject === "function" ? media.toObject() : media;
+    const s = getOverallSummaryForCycle(plain, { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 }) || {};
+    const rent = Math.round(Number(s.currentMonthRentalAmount || 0));
+    const gst = Math.round(Number(s.currentMonthGstAmount || 0));
+    return rent > 0 ? { rent, gst } : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function siteBillAmountsForOverdueRows(records) {
+  const result = new Map();
+  const mediaIds = [
+    ...new Set(
+      (records || [])
+        .map((r) => String(r.mediaId?._id || r.mediaId || ""))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  if (!mediaIds.length) return result;
+  const medias = await Media.find({ _id: { $in: mediaIds } })
+    .select("mediaDetails rentalPayment landOwners rentalDue ledger ledgerHistory gstBalanceHistory gstApplicableFlag appraisal")
+    .lean();
+  const mediaById = new Map(medias.map((m) => [String(m._id), m]));
+  for (const r of records) {
+    const bill = siteBillForOverdue(mediaById.get(String(r.mediaId?._id || r.mediaId || "")), r.dueDate);
+    if (bill) result.set(String(r._id), bill);
+  }
+  return result;
+}
+
+// ✅ NEW — one-time / repeatable fix of EXISTING overdue rows: single-bill
+// multi-face sites get the whole bill stored (overDueAmount = rent, or
+// rent + GST when withGst is 2 "direct"; gstAmount = site GST). Only rows whose
+// amounts differ are written. Run at startup from server.js. Never throws.
+async function fixSingleBillOverdueAmounts() {
+  const result = { checked: 0, fixed: 0 };
+  try {
+    const rows = await OverDueHistory.find({ mediaId: { $ne: null } })
+      .select("mediaId dueDate overDueAmount gstAmount withGst")
+      .lean();
+    const amounts = await siteBillAmountsForOverdueRows(rows);
+    result.checked = rows.length;
+    const ops = [];
+    for (const r of rows) {
+      const bill = amounts.get(String(r._id));
+      if (!bill) continue;
+      const overDueAmount = Number(r.withGst) === 2 ? bill.rent + bill.gst : bill.rent;
+      if (Number(r.overDueAmount) === overDueAmount && Number(r.gstAmount) === bill.gst) continue;
+      ops.push({
+        updateOne: {
+          filter: { _id: r._id },
+          update: { $set: { overDueAmount, gstAmount: bill.gst, isGstApplicable: bill.gst > 0 } },
+        },
+      });
+    }
+    if (ops.length) {
+      const res = await OverDueHistory.bulkWrite(ops);
+      result.fixed = res.modifiedCount || 0;
+    }
+  } catch (err) {
+    console.error("[fixSingleBillOverdueAmounts] failed:", err.message);
+  }
+  return result;
+}
+exports.fixSingleBillOverdueAmounts = fixSingleBillOverdueAmounts;
+
 exports.getOverDueHistoryList = async (req, res) => {
   try {
     // Sweep active sites and sync overdue entries FIRST
@@ -3490,6 +3579,21 @@ exports.getOverDueHistoryList = async (req, res) => {
       totalOverdueAmount: 0
     };
 
+    // ✅ NEW — totalOverdueAmount with the same single-bill site amounts as the rows
+    {
+      const summaryRows = await OverDueHistory.find(summaryFilter)
+        .select("mediaId dueDate overDueAmount gstAmount withGst")
+        .lean();
+      const siteAmounts = await siteBillAmountsForOverdueRows(summaryRows);
+      if (siteAmounts.size) {
+        summary.totalOverdueAmount = summaryRows.reduce((sum, r) => {
+          const site = siteAmounts.get(String(r._id));
+          if (site) return sum + site.rent + site.gst;
+          return sum + (Number(r.withGst) === 2 ? Number(r.overDueAmount || 0) : Number(r.overDueAmount || 0) + Number(r.gstAmount || 0));
+        }, 0);
+      }
+    }
+
     // 2) Data Fetch (Uses Full Filter & Chronological Sorting)
     const [history, totalCount] = await Promise.all([
       OverDueHistory.find(listFilter)
@@ -3500,6 +3604,9 @@ exports.getOverDueHistoryList = async (req, res) => {
         .lean(),
       OverDueHistory.countDocuments(listFilter)
     ]);
+
+    // ✅ NEW — whole-bill amounts for single-bill multi-face sites (see helper)
+    const rowSiteAmounts = await siteBillAmountsForOverdueRows(history);
 
     // 3) Enrichment for UI
     const enrichedHistory = history.map(item => {
@@ -3571,8 +3678,16 @@ exports.getOverDueHistoryList = async (req, res) => {
         }
 
         const isDirect = withGst === 2;
-        const rentAmount = isDirect ? Math.max((item.overDueAmount || 0) - (item.gstAmount || 0), 0) : (item.overDueAmount || 0);
-        const totalAmount = isDirect ? (item.overDueAmount || 0) : (item.overDueAmount || 0) + (item.gstAmount || 0);
+        let rentAmount = isDirect ? Math.max((item.overDueAmount || 0) - (item.gstAmount || 0), 0) : (item.overDueAmount || 0);
+        let totalAmount = isDirect ? (item.overDueAmount || 0) : (item.overDueAmount || 0) + (item.gstAmount || 0);
+        // ✅ NEW — single-bill multi-face site: the whole bill (site rent + GST)
+        const siteBill = rowSiteAmounts.get(String(item._id));
+        let rowGstAmount = item.gstAmount;
+        if (siteBill) {
+          rentAmount = siteBill.rent;
+          rowGstAmount = siteBill.gst;
+          totalAmount = siteBill.rent + siteBill.gst;
+        }
 
         const isOwnerApproved = !!(item.ownerApprovedAt || item.approvedDate || Number(item.status) === 3);
         const resolvedApprovedDate = item.approvedDate || item.ownerApprovedAt || null;
@@ -3587,6 +3702,7 @@ exports.getOverDueHistoryList = async (req, res) => {
             landOwners,
             landOwnerName: mainLandOwnerName,
             rentAmount,
+            gstAmount: rowGstAmount, // ✅ NEW — site GST for single-bill multi-face rows
             overDueAmount: totalAmount,
             totalAmount: totalAmount,
             approvedDate: resolvedApprovedDate,
@@ -3841,11 +3957,17 @@ role: userTypeNum,
         const entryGst = targetEntry ? Number(targetEntry.gstAmount || 0) : 0;
         const siteGst = Number(media.rentalPayment?.gstAmount || 0);
         const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-        const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+        let resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-        const baseAmount = targetEntry
+        let baseAmount = targetEntry
           ? Number(targetEntry.netPayable || targetEntry.baseAmount || 0)
           : Number(media.rentalPayment?.totalRentalAmount || 0);
+        // ✅ NEW — single-bill multi-face site: store the whole bill (one row per site / month)
+        const remarkSiteBill = siteBillForOverdue(media, targetEntry ? targetEntry.dueDate : null);
+        if (remarkSiteBill) {
+          resolvedGst = remarkSiteBill.gst;
+          baseAmount = Number(targetEntry?.withGst) === 2 ? remarkSiteBill.rent + remarkSiteBill.gst : remarkSiteBill.rent;
+        }
 
         const mDetails = (media.mediaDetails || []).map((d) => ({
           mediaCode: d.mediaCode,
@@ -4868,7 +4990,7 @@ function buildTdsHoldSummary(landOwners) {
       landOwnerId: o._id,
       landOwnerMasterId: o.landOwnerMasterId || null,
       landOwnerName: o.name || "",
-      tdsHold: held ? 1 : 0,
+      tdsHold: held ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
       holdStatus: held ? "On Hold" : "Released",
       tdsPercentage: Number(o.tdsPercentage || 0),
       tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
@@ -4881,8 +5003,9 @@ function buildTdsHoldSummary(landOwners) {
       releaseReason: t.releaseReason || "",
     };
   });
-  const holdCount = list.filter((x) => x.tdsHold === 1).length;
-  return { hold: holdCount > 0 ? 1 : 0, holdCount, landOwners: list };
+  const holdCount = list.filter((x) => x.holdStatus === "On Hold").length;
+  // ✅ CHANGED — API value: hold 0 = a landowner's TDS is on hold, 1 = none held
+  return { hold: holdCount > 0 ? 0 : 1, holdCount, landOwners: list };
 }
 
 // ✅ NEW — response only: each landOwners[].linkedSites[] item gets the bank
@@ -5963,7 +6086,7 @@ const details = (item.mediaDetails || []).map((d) => ({
             ...(entry.appraisalHold
               ? {
                   appraisalHold: {
-                    hold: Number(entry.appraisalHold.hold) === 1 ? 1 : 0,
+                    hold: Number(entry.appraisalHold.hold) === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
                     appraisalAmount: Number(entry.appraisalHold.appraisalAmount || 0),
                     rentWithAppraisal: Number(entry.appraisalHold.rentWithAppraisal || 0),
                     rentWithoutAppraisal: Number(entry.appraisalHold.rentWithoutAppraisal || 0),

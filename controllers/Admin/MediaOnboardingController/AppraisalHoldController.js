@@ -64,7 +64,7 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
   if (!mongoose.Types.ObjectId.isValid(String(mediaId || "")) || !mongoose.Types.ObjectId.isValid(String(rentalDueId || ""))) {
     return fail(400, "Valid mediaId and rentalDueId are required");
   }
-  if (![0, 1].includes(hold)) return fail(400, "appraisalHold must be 1 (hold) or 0 (release)");
+  if (![0, 1].includes(hold)) return fail(400, "appraisalHold must be 0 (hold) or 1 (release)");
 
   const media = await Media.findById(mediaId).select("rentalDue appraisal rentalPayment landOwners").lean();
   if (!media) return fail(404, "Media not found");
@@ -244,7 +244,7 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
       mediaId: media._id,
       rentalDueId: entry._id,
       dueMonth: entry.dueMonth || "",
-      appraisalHold: hold,
+      appraisalHold: hold === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = held, 1 = released
       rentWithAppraisal: holdData.rentWithAppraisal || 0,
       appraisalAmount: holdData.appraisalAmount || 0,
       rentWithoutAppraisal: holdData.rentWithoutAppraisal || 0,
@@ -304,13 +304,24 @@ function parseAppraisalHoldItems(body) {
   }));
 }
 
+// ✅ CHANGED — API value: appraisalHold 0 = HOLD, 1 = RELEASE (not hold).
+// Converted here to the internal / stored value (1 = held, 0 = not held),
+// which the save hook, applyDueAppraisals and syncBillingCycles rely on.
+const apiToInternalHold = (v) => {
+  if (v === undefined || v === null || v === "") return NaN;
+  const n = Number(v);
+  return n === 0 ? 1 : n === 1 ? 0 : NaN;
+};
+// internal / stored value → API value (0 = held, 1 = not held)
+const internalToApiHold = (v) => (Number(v) === 1 ? 0 : 1);
+
 exports.setAppraisalHold = async (req, res) => {
   try {
     if (Number(req.user?.userType) !== ROLE.OWNER) {
       return errorResponse(res, "Only CMD can hold the appraisal amount", null, 403);
     }
     const body = { ...(req.query || {}), ...(req.body || {}) };
-    const defaultHold = Number(body.appraisalHold);
+    const defaultHold = apiToInternalHold(body.appraisalHold);
     const defaultRemark = typeof body.remark === "string" ? body.remark.trim() : "";
     const items = parseAppraisalHoldItems(body);
 
@@ -330,7 +341,7 @@ exports.setAppraisalHold = async (req, res) => {
     if (items.length === 0) return errorResponse(res, "No bills sent", null, 400);
     const results = [];
     for (const item of items) {
-      const hold = item.appraisalHold !== undefined && item.appraisalHold !== "" ? Number(item.appraisalHold) : defaultHold;
+      const hold = item.appraisalHold !== undefined && item.appraisalHold !== "" ? apiToInternalHold(item.appraisalHold) : defaultHold;
       const remark = typeof item.remark === "string" && item.remark.trim() ? item.remark.trim() : defaultRemark;
       const r = await processAppraisalHold({ mediaId: item.mediaId, rentalDueId: item.rentalDueId, hold, remark, user: req.user });
       results.push(r.success ? { success: true, message: r.message, ...r.data } : { success: false, statusCode: r.statusCode, message: r.message, mediaId: r.mediaId, rentalDueId: r.rentalDueId });
@@ -380,7 +391,7 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
           dueMonth: e.dueMonth || "",
           dueDate: e.dueDate || null,
           approvalStatus: e.approvalStatus ?? null,
-          hold: Number(h.hold) === 1 ? 1 : 0,
+          hold: internalToApiHold(h.hold), // ✅ CHANGED — 0 = on hold, 1 = released
           holdStatus: Number(h.hold) === 1 ? "On Hold" : "Released",
           appraisalAmount: Number(h.appraisalAmount || 0),
           rentWithAppraisal: Number(h.rentWithAppraisal || 0),
@@ -402,7 +413,7 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
       // ✅ NEW — the site's appraisal applicable (0 while the appraisal is held)
       appraisalApplicable: Number(media.appraisal?.applicable) === 1 ? 1 : 0,
       totalCount: holds.length,
-      onHoldCount: holds.filter((h) => h.hold === 1).length,
+      onHoldCount: holds.filter((h) => h.holdStatus === "On Hold").length,
       holds,
     });
   } catch (err) {

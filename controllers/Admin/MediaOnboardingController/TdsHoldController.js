@@ -35,7 +35,7 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
   if (!mongoose.Types.ObjectId.isValid(String(mediaId || "")) || !mongoose.Types.ObjectId.isValid(String(landOwnerId || ""))) {
     return fail(400, "Valid mediaId and landOwnerId are required");
   }
-  if (![0, 1].includes(hold)) return fail(400, "tdsHold must be 1 (hold) or 0 (release)");
+  if (![0, 1].includes(hold)) return fail(400, "tdsHold must be 0 (hold) or 1 (release)");
 
   const media = await Media.findById(mediaId).select("landOwners").lean();
   if (!media) return fail(404, "Media not found");
@@ -94,7 +94,7 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
       landOwnerId: owner._id,
       landOwnerMasterId: owner.landOwnerMasterId || null,
       landOwnerName: owner.name || "",
-      tdsHold: hold,
+      tdsHold: hold === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = held, 1 = released
       tdsPercentage: Number(owner.tdsPercentage || 0),
       tdsAmountBeforeHold: Number(detail.tdsAmountBeforeHold || 0),
       tdsAmount,
@@ -131,13 +131,24 @@ function parseTdsHoldItems(body) {
   }));
 }
 
+// ✅ CHANGED — API value: tdsHold 0 = HOLD, 1 = RELEASE (not hold), same as
+// appraisalHold. Converted to the stored value (1 = held, 0 = not held), which
+// the save hook relies on to keep a held landowner's TDS at 0.
+const apiToInternalHold = (v) => {
+  if (v === undefined || v === null || v === "") return NaN;
+  const n = Number(v);
+  return n === 0 ? 1 : n === 1 ? 0 : NaN;
+};
+// stored value → API value (0 = held, 1 = not held)
+const internalToApiHold = (v) => (Number(v) === 1 ? 0 : 1);
+
 const setTdsHold = async (req, res) => {
   try {
     if (Number(req.user?.userType) !== ROLE.OWNER) {
       return errorResponse(res, "Only CMD can hold TDS", null, 403);
     }
     const body = { ...(req.query || {}), ...(req.body || {}) };
-    const defaultHold = Number(body.tdsHold);
+    const defaultHold = apiToInternalHold(body.tdsHold);
     const defaultRemark = typeof body.remark === "string" ? body.remark.trim() : "";
     const items = parseTdsHoldItems(body);
 
@@ -149,7 +160,7 @@ const setTdsHold = async (req, res) => {
     if (items.length === 0) return errorResponse(res, "No landowners sent", null, 400);
     const results = [];
     for (const item of items) {
-      const hold = item.tdsHold !== undefined && item.tdsHold !== "" ? Number(item.tdsHold) : defaultHold;
+      const hold = item.tdsHold !== undefined && item.tdsHold !== "" ? apiToInternalHold(item.tdsHold) : defaultHold;
       const remark = typeof item.remark === "string" && item.remark.trim() ? item.remark.trim() : defaultRemark;
       const r = await processTdsHold({ mediaId: item.mediaId, landOwnerId: item.landOwnerId, hold, remark, user: req.user });
       results.push(
@@ -188,7 +199,7 @@ function buildTdsHoldList(media, landOwnerId = "") {
         landOwnerName: o.name || "",
         tdsApplicable: Number(o.tdsApplicable) === 1 ? 1 : 0,
         tdsPercentage: Number(o.tdsPercentage || 0),
-        hold: held ? 1 : 0,
+        hold: held ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
         holdStatus: held ? "On Hold" : "Released",
         tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
         tdsAmount: Number(o.tdsAmount || 0),
@@ -236,7 +247,7 @@ const getTdsHoldRemarks = async (req, res) => {
       tdsApplicable: Number(o.tdsApplicable) === 1 ? 1 : 0,
       tdsPercentage: Number(o.tdsPercentage || 0),
       tdsAmount: Number(o.tdsAmount || 0),
-      tdsHold: Number(o.tdsHold) === 1 ? 1 : 0,
+      tdsHold: internalToApiHold(o.tdsHold), // ✅ CHANGED — 0 = on hold, 1 = not held
     }));
     return successResponse(res, "TDS hold remarks fetched successfully", {
       mediaId: media._id,
@@ -245,7 +256,7 @@ const getTdsHoldRemarks = async (req, res) => {
       tdsApplicable: landOwners.some((o) => o.tdsApplicable === 1) ? 1 : 0, // 1 = any landowner has TDS
       landOwners,
       totalCount: holds.length,
-      onHoldCount: holds.filter((h) => h.hold === 1).length,
+      onHoldCount: holds.filter((h) => h.holdStatus === "On Hold").length,
       holds,
     });
   } catch (err) {
