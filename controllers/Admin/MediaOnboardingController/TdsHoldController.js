@@ -179,8 +179,9 @@ const internalToApiHold = (v) => (Number(v) === 1 ? 0 : 1);
 
 const setTdsHold = async (req, res) => {
   try {
-    if (Number(req.user?.userType) !== ROLE.OWNER) {
-      return errorResponse(res, "Only CMD can hold TDS", null, 403);
+    // ✅ CHANGED — Rental Executive, Rental Manager and CMD (was CMD only)
+    if (![ROLE.STAFF, ROLE.TEAM_LEAD, ROLE.OWNER].includes(Number(req.user?.userType))) {
+      return errorResponse(res, "Only Rental Executive, Rental Manager or CMD can hold TDS", null, 403);
     }
     const body = { ...(req.query || {}), ...(req.body || {}) };
     const defaultHold = apiToInternalHold(body.tdsHold);
