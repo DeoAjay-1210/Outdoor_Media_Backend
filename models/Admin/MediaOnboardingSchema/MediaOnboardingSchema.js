@@ -725,6 +725,10 @@ const MediaSchema = new mongoose.Schema(
         },
         tdsHoldDetail: {
           tdsAmountBeforeHold: { type: Number, default: 0 },
+          // ✅ NEW — tdsApplicable / tdsPercentage before the hold set
+          // tdsApplicable to 0 (restored on release)
+          tdsApplicableBefore: { type: Number, default: null },
+          tdsPercentageBefore: { type: Number, default: null },
           remark: { type: String, trim: true, default: "" },
           heldBy: { type: String, trim: true, default: "" },
           heldByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },

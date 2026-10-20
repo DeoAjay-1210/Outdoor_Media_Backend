@@ -53,16 +53,27 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
   let tdsAmount;
 
   if (hold === 1) {
-    if (Number(owner.tdsApplicable || 0) !== 1) {
-      return fail(400, `TDS is not applicable for ${name} — nothing to hold`);
-    }
     if (isHeld) {
-      // already held → only the remark changes
+      // already held → only the remark changes (checked BEFORE "not applicable",
+      // since a held landowner now shows tdsApplicable 0)
       detail = { ...existing, remark: remark || existing.remark || "" };
+      // ✅ NEW — an older hold (before tdsApplicable followed the hold) gets
+      // tdsApplicable 0 now, with the values to restore saved
+      if (Number(owner.tdsApplicable || 0) === 1) {
+        detail.tdsApplicableBefore = 1;
+        detail.tdsPercentageBefore = Number(owner.tdsPercentage || 0);
+        $set["landOwners.$[o].tdsApplicable"] = 0;
+      }
       tdsAmount = 0;
     } else {
+      if (Number(owner.tdsApplicable || 0) !== 1) {
+        return fail(400, `TDS is not applicable for ${name} — nothing to hold`);
+      }
       detail = {
         tdsAmountBeforeHold: Number(owner.tdsAmount || 0) || computeOwnerTds(owner),
+        // ✅ NEW — restored on release
+        tdsApplicableBefore: 1,
+        tdsPercentageBefore: Number(owner.tdsPercentage || 0),
         remark,
         heldBy: userName,
         heldByUserId: toObjectId(user?.userId),
@@ -72,12 +83,28 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
         releaseReason: "",
       };
       tdsAmount = 0;
+      // ✅ NEW — the site's landowner shows TDS not applicable while held
+      $set["landOwners.$[o].tdsApplicable"] = 0;
     }
     $set["landOwners.$[o].tdsHold"] = 1;
     $set["landOwners.$[o].tdsAmount"] = 0;
   } else {
     detail = { ...existing, releasedBy: userName, releasedAt: nowIST(), releaseReason: remark || "" };
-    tdsAmount = computeOwnerTds(owner); // current share / online amounts
+    // ✅ NEW — put back tdsApplicable / tdsPercentage the hold switched off
+    // (older holds saved nothing → left as they are)
+    const restoreApplicable = isHeld && Number(existing.tdsApplicableBefore) === 1;
+    const ownerAfter = restoreApplicable
+      ? {
+          ...owner,
+          tdsApplicable: 1,
+          tdsPercentage: Number(existing.tdsPercentageBefore) || Number(owner.tdsPercentage || 0),
+        }
+      : owner;
+    if (restoreApplicable) {
+      $set["landOwners.$[o].tdsApplicable"] = 1;
+      $set["landOwners.$[o].tdsPercentage"] = ownerAfter.tdsPercentage;
+    }
+    tdsAmount = computeOwnerTds(ownerAfter); // current share / online amounts
     $set["landOwners.$[o].tdsHold"] = 0;
     $set["landOwners.$[o].tdsAmount"] = tdsAmount;
   }
@@ -95,7 +122,15 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
       landOwnerMasterId: owner.landOwnerMasterId || null,
       landOwnerName: owner.name || "",
       tdsHold: hold === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = held, 1 = released
-      tdsPercentage: Number(owner.tdsPercentage || 0),
+      // ✅ NEW — the landowner's tdsApplicable after this call (0 while held)
+      tdsApplicable:
+        $set["landOwners.$[o].tdsApplicable"] !== undefined
+          ? $set["landOwners.$[o].tdsApplicable"]
+          : Number(owner.tdsApplicable) === 1 ? 1 : 0,
+      tdsPercentage:
+        $set["landOwners.$[o].tdsPercentage"] !== undefined
+          ? $set["landOwners.$[o].tdsPercentage"]
+          : Number(owner.tdsPercentage || 0),
       tdsAmountBeforeHold: Number(detail.tdsAmountBeforeHold || 0),
       tdsAmount,
       remark: detail.remark || "",
