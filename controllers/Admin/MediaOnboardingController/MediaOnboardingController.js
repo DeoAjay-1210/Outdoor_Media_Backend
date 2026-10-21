@@ -1907,11 +1907,18 @@ async function releaseAppraisalHoldsAfterReapply(mediaId, userName) {
     const heldBills = (fresh?.rentalDue || []).filter((e) => Number(e.appraisalHold?.hold) === 1);
     for (const bill of heldBills) {
       const h = bill.appraisalHold || {};
+      const releasedAt = nowIST();
+      // ✅ NEW — this automatic release is added to the hold / release list
+      // lazy require: avoids a circular import
+      const { buildAppraisalHoldHistory } = require("./AppraisalHoldController");
+      const history = buildAppraisalHoldHistory(h);
+      history.push({ action: "release", reason: "Appraisal re-applied from media onboarding", by: userName || "", byUserId: null, at: releasedAt });
       const $set = {
         "rentalDue.$[e].appraisalHold.hold": 0,
         "rentalDue.$[e].appraisalHold.releasedBy": userName || "",
-        "rentalDue.$[e].appraisalHold.releasedAt": nowIST(),
+        "rentalDue.$[e].appraisalHold.releasedAt": releasedAt,
         "rentalDue.$[e].appraisalHold.releaseReason": "Appraisal re-applied from media onboarding",
+        "rentalDue.$[e].appraisalHold.history": history,
       };
       const before = h.siteReduced ? h.amountsSnapshot?.before?.entry : null;
       const after = h.siteReduced ? h.amountsSnapshot?.after?.entry : null;
@@ -2488,8 +2495,33 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
             (o.landOwnerMasterId && x.landOwnerMasterId && String(x.landOwnerMasterId) === String(o.landOwnerMasterId)),
         );
         if (prev && Number(prev.tdsHold) === 1) {
-          o.tdsHold = 1;
-          o.tdsHoldDetail = typeof prev.tdsHoldDetail?.toObject === "function" ? prev.tdsHoldDetail.toObject() : prev.tdsHoldDetail;
+          const prevDetail =
+            typeof prev.tdsHoldDetail?.toObject === "function" ? prev.tdsHoldDetail.toObject() : prev.tdsHoldDetail || {};
+          // ✅ NEW — TDS switched back ON here (tdsApplicable 0 → 1) while held →
+          // the hold ends and the save hook calculates tdsAmount again
+          if (Number(prev.tdsApplicable) !== 1 && Number(o.tdsApplicable) === 1) {
+            const releasedAt = nowIST();
+            // ✅ NEW — this automatic release is added to the hold / release list
+            // lazy require: avoids a circular import
+            const { buildTdsHoldHistory } = require("./TdsHoldController");
+            const history = buildTdsHoldHistory(prevDetail);
+            history.push({ action: "release", reason: "TDS re-applied from media onboarding", by: userName || "", byUserId: null, at: releasedAt });
+            o.tdsHold = 0;
+            o.tdsHoldDetail = {
+              ...prevDetail,
+              releasedBy: userName || "",
+              releasedAt,
+              releaseReason: "TDS re-applied from media onboarding",
+              history,
+            };
+          } else {
+            o.tdsHold = 1;
+            o.tdsHoldDetail = prevDetail;
+          }
+        } else if (prev && prev.tdsHoldDetail && prev.tdsHoldDetail.heldAt && !o.tdsHoldDetail) {
+          // ✅ NEW — released earlier: keep its hold / release remarks on a site edit
+          o.tdsHoldDetail =
+            typeof prev.tdsHoldDetail.toObject === "function" ? prev.tdsHoldDetail.toObject() : prev.tdsHoldDetail;
         }
       });
     }

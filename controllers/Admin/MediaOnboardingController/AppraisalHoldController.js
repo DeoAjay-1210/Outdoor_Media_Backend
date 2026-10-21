@@ -58,6 +58,21 @@ const scaleNums = (values, ratio) =>
   Object.fromEntries(Object.entries(values).map(([k, v]) => [k, Math.round(v * ratio)]));
 const sumOwners = (list, field) => (list || []).reduce((s, o) => s + Number(o[field] || 0), 0);
 
+// a bill's hold / release list (oldest first). Bills without the stored list
+// get it built from their latest hold + release fields.
+function buildAppraisalHoldHistory(h) {
+  if (!h) return [];
+  if (Array.isArray(h.history) && h.history.length) return h.history.map((e) => ({ ...e }));
+  const events = [];
+  if (h.heldAt) {
+    events.push({ action: "hold", reason: h.remark || "", by: h.heldBy || "", byUserId: h.heldByUserId || null, at: h.heldAt });
+  }
+  if (h.releasedAt) {
+    events.push({ action: "release", reason: h.releaseReason || "", by: h.releasedBy || "", byUserId: null, at: h.releasedAt });
+  }
+  return events.sort((a, b) => new Date(a.at || 0) - new Date(b.at || 0));
+}
+
 // one bill → { success, statusCode, message, data }. Never throws for a business error.
 async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }) {
   const fail = (statusCode, message) => ({ success: false, statusCode, message, mediaId: mediaId || null, rentalDueId: rentalDueId || null });
@@ -230,6 +245,22 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
     }
   }
 
+  // ✅ NEW — every hold / release with its reason is kept (oldest first)
+  {
+    const wasHeld = Number(existingHold.hold) === 1;
+    const history = buildAppraisalHoldHistory(existingHold);
+    const addEvent = hold === 1 ? !wasHeld || !!remark : true; // re-hold without a new remark adds nothing
+    if (addEvent) {
+      history.push({
+        action: hold === 1 ? "hold" : "release",
+        reason: remark || (hold === 1 ? holdData.remark || "" : ""),
+        by: userName,
+        byUserId: mongoose.Types.ObjectId.isValid(String(user?.userId || "")) ? new mongoose.Types.ObjectId(String(user.userId)) : null,
+        at: nowIST(),
+      });
+    }
+    holdData.history = history;
+  }
   $set["rentalDue.$[e].appraisalHold"] = holdData;
   // direct $set — no media.save(), so no pre-save recalculation runs
   const update = Object.keys($pull).length ? { $set, $pull } : { $set };
@@ -315,6 +346,7 @@ const apiToInternalHold = (v) => {
 // internal / stored value → API value (0 = held, 1 = not held)
 const internalToApiHold = (v) => (Number(v) === 1 ? 0 : 1);
 
+
 exports.setAppraisalHold = async (req, res) => {
   try {
     // ✅ CHANGED — Rental Executive, Rental Manager and CMD (was CMD only)
@@ -362,6 +394,8 @@ exports.setAppraisalHold = async (req, res) => {
 // appraisal-held (current hold or released), with its remark — newest first.
 // rentalDueId (optional) → just that bill.
 // ─────────────────────────────────────────────────────────────
+exports.buildAppraisalHoldHistory = buildAppraisalHoldHistory; // used by media onboarding auto-release
+
 exports.getAppraisalHoldRemarks = async (req, res) => {
   try {
     const params = { ...(req.query || {}), ...(req.body || {}) };
@@ -378,13 +412,16 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
     if (!media) return errorResponse(res, "Media not found", null, 404);
 
     const faces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
-    const holds = (media.rentalDue || [])
+    const heldBills = (media.rentalDue || [])
       .filter((e) => e.appraisalHold && (e.appraisalHold.heldAt || Number(e.appraisalHold.hold) === 1))
-      .filter((e) => !rentalDueId || String(e._id) === rentalDueId)
-      .map((e) => {
+      .filter((e) => !rentalDueId || String(e._id) === rentalDueId);
+
+    // ✅ CHANGED — one row per hold / release action (its own remark + status), newest first
+    const holds = heldBills
+      .flatMap((e) => {
         const h = e.appraisalHold || {};
         const face = (media.mediaDetails || []).find((d) => String(d._id) === String(e.mediaDetailId));
-        return {
+        const base = {
           rentalDueId: e._id,
           mediaDetailId: e.mediaDetailId || null,
           mediaCode: face?.mediaCode || faces.map((d) => d.mediaCode).filter(Boolean).join(" / "),
@@ -392,20 +429,23 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
           dueMonth: e.dueMonth || "",
           dueDate: e.dueDate || null,
           approvalStatus: e.approvalStatus ?? null,
-          hold: internalToApiHold(h.hold), // ✅ CHANGED — 0 = on hold, 1 = released
-          holdStatus: Number(h.hold) === 1 ? "On Hold" : "Released",
           appraisalAmount: Number(h.appraisalAmount || 0),
           rentWithAppraisal: Number(h.rentWithAppraisal || 0),
           rentWithoutAppraisal: Number(h.rentWithoutAppraisal || 0),
-          remark: h.remark || "",
-          heldBy: h.heldBy || "",
-          heldAt: h.heldAt || null,
-          releasedBy: h.releasedBy || "",
-          releasedAt: h.releasedAt || null,
-          releaseReason: h.releaseReason || "", // ✅ NEW — entered on release
         };
+        return buildAppraisalHoldHistory(h).map((ev) => {
+          const isHold = ev.action === "hold";
+          return {
+            ...base,
+            hold: isHold ? 0 : 1, // 0 = on hold, 1 = released
+            holdStatus: isHold ? "On Hold" : "Released",
+            remark: ev.reason || "",
+            by: ev.by || "",
+            at: ev.at || null,
+          };
+        });
       })
-      .sort((a, b) => new Date(b.heldAt || 0) - new Date(a.heldAt || 0));
+      .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
 
     return successResponse(res, "Appraisal hold remarks fetched successfully", {
       mediaId: media._id,
@@ -414,7 +454,8 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
       // ✅ NEW — the site's appraisal applicable (0 while the appraisal is held)
       appraisalApplicable: Number(media.appraisal?.applicable) === 1 ? 1 : 0,
       totalCount: holds.length,
-      onHoldCount: holds.filter((h) => h.holdStatus === "On Hold").length,
+      // bills currently on hold
+      onHoldCount: heldBills.filter((e) => Number(e.appraisalHold?.hold) === 1).length,
       holds,
     });
   } catch (err) {

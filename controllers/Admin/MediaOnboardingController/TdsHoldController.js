@@ -29,6 +29,21 @@ function computeOwnerTds(owner) {
 const toObjectId = (id) =>
   mongoose.Types.ObjectId.isValid(String(id || "")) ? new mongoose.Types.ObjectId(String(id)) : null;
 
+// ✅ NEW — a landowner's TDS hold / release list (oldest first). Holds without
+// the stored list get it built from their latest hold + release fields.
+function buildTdsHoldHistory(t) {
+  if (!t) return [];
+  if (Array.isArray(t.history) && t.history.length) return t.history.map((e) => ({ ...e }));
+  const events = [];
+  if (t.heldAt) {
+    events.push({ action: "hold", reason: t.remark || "", by: t.heldBy || "", byUserId: t.heldByUserId || null, at: t.heldAt });
+  }
+  if (t.releasedAt) {
+    events.push({ action: "release", reason: t.releaseReason || "", by: t.releasedBy || "", byUserId: null, at: t.releasedAt });
+  }
+  return events.sort((a, b) => new Date(a.at || 0) - new Date(b.at || 0));
+}
+
 // one landowner → { success, statusCode, message, data }. Never throws for a business error.
 async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
   const fail = (statusCode, message) => ({ success: false, statusCode, message, mediaId: mediaId || null, landOwnerId: landOwnerId || null });
@@ -107,6 +122,21 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
     tdsAmount = computeOwnerTds(ownerAfter); // current share / online amounts
     $set["landOwners.$[o].tdsHold"] = 0;
     $set["landOwners.$[o].tdsAmount"] = tdsAmount;
+  }
+  // ✅ NEW — every hold / release with its reason is kept (oldest first)
+  {
+    const history = buildTdsHoldHistory(existing);
+    const addEvent = hold === 1 ? !isHeld || !!remark : true; // re-hold without a new remark adds nothing
+    if (addEvent) {
+      history.push({
+        action: hold === 1 ? "hold" : "release",
+        reason: remark || "",
+        by: userName,
+        byUserId: toObjectId(user?.userId),
+        at: nowIST(),
+      });
+    }
+    detail.history = history;
   }
   $set["landOwners.$[o].tdsHoldDetail"] = detail;
 
@@ -226,28 +256,31 @@ function buildTdsHoldList(media, landOwnerId = "") {
     .filter(
       (o) => !landOwnerId || String(o._id) === String(landOwnerId) || String(o.landOwnerMasterId || "") === String(landOwnerId),
     )
-    .map((o) => {
+    // ✅ CHANGED — one row per hold / release action (its own remark + status)
+    .flatMap((o) => {
       const t = o.tdsHoldDetail || {};
-      const held = Number(o.tdsHold) === 1;
-      return {
+      const base = {
         landOwnerId: o._id,
         landOwnerMasterId: o.landOwnerMasterId || null,
         landOwnerName: o.name || "",
         tdsApplicable: Number(o.tdsApplicable) === 1 ? 1 : 0,
         tdsPercentage: Number(o.tdsPercentage || 0),
-        hold: held ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
-        holdStatus: held ? "On Hold" : "Released",
         tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
         tdsAmount: Number(o.tdsAmount || 0),
-        remark: t.remark || "",
-        heldBy: t.heldBy || "",
-        heldAt: t.heldAt || null,
-        releasedBy: t.releasedBy || "",
-        releasedAt: t.releasedAt || null,
-        releaseReason: t.releaseReason || "",
       };
+      return buildTdsHoldHistory(t).map((ev) => {
+        const isHold = ev.action === "hold";
+        return {
+          ...base,
+          hold: isHold ? 0 : 1, // 0 = on hold, 1 = released
+          holdStatus: isHold ? "On Hold" : "Released",
+          remark: ev.reason || "",
+          by: ev.by || "",
+          at: ev.at || null,
+        };
+      });
     })
-    .sort((a, b) => new Date(b.heldAt || 0) - new Date(a.heldAt || 0));
+    .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -292,7 +325,8 @@ const getTdsHoldRemarks = async (req, res) => {
       tdsApplicable: landOwners.some((o) => o.tdsApplicable === 1) ? 1 : 0, // 1 = any landowner has TDS
       landOwners,
       totalCount: holds.length,
-      onHoldCount: holds.filter((h) => h.holdStatus === "On Hold").length,
+      // landowners currently on hold
+      onHoldCount: siteOwners.filter((o) => Number(o.tdsHold) === 1).length,
       holds,
     });
   } catch (err) {
@@ -300,4 +334,4 @@ const getTdsHoldRemarks = async (req, res) => {
   }
 };
 
-module.exports = { setTdsHold, buildTdsHoldList, getTdsHoldRemarks };
+module.exports = { setTdsHold, buildTdsHoldList, getTdsHoldRemarks, buildTdsHoldHistory };

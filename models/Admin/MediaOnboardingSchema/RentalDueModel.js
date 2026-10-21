@@ -169,6 +169,9 @@ const rentalDueEntrySchema = new mongoose.Schema(
       releasedBy: { type: String, trim: true, default: "" },
       releasedAt: { type: Date, default: null },
       releaseReason: { type: String, trim: true, default: "" }, // ✅ NEW — e.g. re-applied from media onboarding
+      // ✅ NEW — every hold / release with its reason, oldest first (never deleted)
+      // [{ action: "hold" | "release", reason, by, byUserId, at }]
+      history: { type: [mongoose.Schema.Types.Mixed], default: undefined },
       // ✅ NEW — site amounts reduced by THIS hold (restored on release):
       // { before: {...}, after: {...} } — rentalPayment + landOwners + this bill
       siteReduced: { type: Boolean, default: false },

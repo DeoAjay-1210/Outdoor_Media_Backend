@@ -736,6 +736,9 @@ const MediaSchema = new mongoose.Schema(
           releasedBy: { type: String, trim: true, default: "" },
           releasedAt: { type: Date, default: null },
           releaseReason: { type: String, trim: true, default: "" },
+          // ✅ NEW — every hold / release with its reason, oldest first (never deleted)
+          // [{ action: "hold" | "release", reason, by, byUserId, at }]
+          history: { type: [mongoose.Schema.Types.Mixed], default: undefined },
         },
         gstApplicable: {
           type: Number,
