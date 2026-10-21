@@ -5918,7 +5918,26 @@ if (Number(isPastPending) === 1) {
           : !lastBillPaidIsFutureMonth && isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
             ? new Date(item.rentalPayment.lastBillPaidDate)
             : null;
-      const selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+      let selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+      // ✅ NEW — the selected month's cycle is the site's lastBillPaidDate itself
+      // (already paid — e.g. entered at media onboarding, no bill this month) →
+      // lastBillPaidDate is that date, nextBillingDate the site's next bill and
+      // no current bill date.
+      if (
+        selectedCycleBillDates &&
+        !currentMonthEntry?.dueDate &&
+        !isInSelectedMonth(item.rentalPayment?.nextBillingDate) &&
+        !lastBillPaidIsFutureMonth &&
+        isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
+      ) {
+        const siteNext = item.rentalPayment?.nextBillingDate ? new Date(item.rentalPayment.nextBillingDate) : null;
+        selectedCycleBillDates = {
+          ...selectedCycleBillDates,
+          lastBillPaidDate: new Date(item.rentalPayment.lastBillPaidDate),
+          nextBillingDate: siteNext && siteNext > lastBillPaid ? siteNext : selectedCycleBillDates.nextBillingDate,
+          currentBillDate: "",
+        };
+      }
       // ✅ FIXED — after a forward move, the cycle right after this one may
       // fall on/before the future lastBillPaidDate and will never be billed;
       // the real next bill is the site's nextBillingDate.
