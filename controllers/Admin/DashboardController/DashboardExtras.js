@@ -781,22 +781,23 @@ function computeOverdueDetails(docs, range, filters) {
   computeRentalDueStats(applyGst(docs, filters.gst), {
     year: range.last.year, month: range.last.month, targetRole: null,
     faceFilter: role ? (entry) => roleStatus(entry, role, { pendingAtRoleOnly: true }).isOpen : null,
-    onFace: ({ media, entry, amount, state, past, cycleLabel, cycleDate }) => {
+    onFace: ({ media, entry, amount, state, past, cycleLabel, cycleDate, gstShare }) => {
       if (state !== "overdue") return;
       const id = String(media._id);
       if (!sites.has(id)) sites.set(id, { media, months: new Map() });
       const label = cycleLabel || entry?.dueMonth || "";
       const due = entry?.dueDate ? new Date(entry.dueDate) : cycleDate ? new Date(cycleDate) : new Date(Date.UTC(range.last.year, range.last.month - 1, 1));
       const m = sites.get(id).months;
-      if (!m.has(label)) m.set(label, { month: label, dueDate: due, amount: 0, past: !!past });
+      if (!m.has(label)) m.set(label, { month: label, dueDate: due, amount: 0, gst: 0, past: !!past });
       m.get(label).amount += amount;
+      m.get(label).gst += gstShare || 0;
     },
   });
   const rows = [];
   let total = 0;
   for (const [id, { media, months }] of sites) {
     const breakdown = [...months.values()]
-      .map((x) => ({ month: x.month, dueDate: x.dueDate, days: Math.max(Math.floor((today - x.dueDate) / 86400000), 0), amount: Math.round(x.amount) }))
+      .map((x) => ({ month: x.month, dueDate: x.dueDate, days: Math.max(Math.floor((today - x.dueDate) / 86400000), 0), gstAmount: Math.round(x.gst), rentAmount: Math.round(x.amount) - Math.round(x.gst), amount: Math.round(x.amount) }))
       .sort((a, b) => a.dueDate - b.dueDate);
     if (!breakdown.length) continue;
     const amount = breakdown.reduce((t, x) => t + x.amount, 0);

@@ -67,6 +67,14 @@ const runPurgeCmdNotifications = async () => {
 };
 runPurgeCmdNotifications();
 
+// One-time / repeatable fix: overdue rows of single-bill multi-face sites store
+// the whole bill (site rent + GST), not one face's share. Only changed rows are
+// written; once fixed, later restarts change nothing.
+const { fixSingleBillOverdueAmounts } = require("./controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+fixSingleBillOverdueAmounts()
+  .then((r) => r.fixed && console.log(`[fixSingleBillOverdueAmounts] fixed=${r.fixed} of ${r.checked}`))
+  .catch((err) => console.error("[fixSingleBillOverdueAmounts] failed:", err.message));
+
 // One-time backfill: landowners without bankAccounts[] get their current
 // bank details as the primary account (no-op once every owner has one)
 const { seedLandOwnerBankAccounts } = require("./controllers/Admin/landOwnerMasterController/landOwnerMasterController");
@@ -79,6 +87,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/public", express.static(path.join(__dirname, "public")));
+// In-app update APK download (only .apk files from release/apk)
+app.use("/release/apk", (req, res, next) => (/^\/[\w.-]+\.apk$/i.test(req.path) ? next() : res.sendStatus(404)), express.static(path.join(__dirname, "release", "apk"), { index: false }));
 // Admin route
 app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
@@ -90,7 +100,7 @@ app.use("/admin", dashboardRoutes);
 app.use("/admin", cmdNotificationRoutes);
 app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", appUpdateRoutes);
-// Auto-publish a new public/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
+// Auto-publish a new release/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
 if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
 app.use('/gstdetails', gstDetailRoutes);
 

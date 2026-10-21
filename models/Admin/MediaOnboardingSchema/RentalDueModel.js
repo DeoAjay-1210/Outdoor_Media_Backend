@@ -134,6 +134,52 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // ✅ NEW — cycle-based mail status for this entry's approval mail
     mailSent: { type: Boolean, default: false },
 
+    // ✅ NEW — "Save as Draft" (POST /admin/rental-due-save-draft): values kept
+    // aside without approving / changing the bill. Cleared (isDraft 0) when the
+    // bill is saved with /admin/rental-due-save.
+    draft: {
+      isDraft: { type: Number, enum: [0, 1], default: 0 }, // 0 = no draft, 1 = draft saved
+      campaignName: { type: String, trim: true, default: "" },
+      reason: { type: String, trim: true, default: "" },
+      withGst: { type: Number, default: null },
+      gstApplicableFlag: { type: Number, default: null },
+      pastgstApplicableFlag: { type: Number, default: null },
+      proofOfCampaign: { type: mongoose.Schema.Types.Mixed, default: null },
+      invoice: { type: mongoose.Schema.Types.Mixed, default: null },
+      savedBy: {
+        userId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        userName: { type: String, trim: true, default: "" },
+        role: { type: Number, default: null },
+      },
+      savedAt: { type: Date, default: null },
+    },
+
+    // ✅ NEW — CMD-only appraisal hold for THIS bill (POST /admin/appraisal-hold).
+    // hold 1 → the CMD approval mail is sent at the rent WITHOUT this month's
+    // appraisal and without the appraisal block. Ledger / rent are unchanged.
+    appraisalHold: {
+      hold: { type: Number, enum: [0, 1], default: 0 }, // 0 = no hold, 1 = appraisal amount on hold
+      appraisalAmount: { type: Number, default: 0 },
+      rentWithAppraisal: { type: Number, default: 0 },
+      rentWithoutAppraisal: { type: Number, default: 0 },
+      remark: { type: String, trim: true, default: "" },
+      heldBy: { type: String, trim: true, default: "" },
+      heldByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      heldAt: { type: Date, default: null },
+      releasedBy: { type: String, trim: true, default: "" },
+      releasedAt: { type: Date, default: null },
+      releaseReason: { type: String, trim: true, default: "" }, // ✅ NEW — e.g. re-applied from media onboarding
+      // ✅ NEW — every hold / release with its reason, oldest first (never deleted)
+      // [{ action: "hold" | "release", reason, by, byUserId, at }]
+      history: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+      // ✅ NEW — site amounts reduced by THIS hold (restored on release):
+      // { before: {...}, after: {...} } — rentalPayment + landOwners + this bill
+      siteReduced: { type: Boolean, default: false },
+      // ✅ NEW — site appraisal.applicable before the hold (restored on release)
+      appraisalApplicableBefore: { type: Number, default: null },
+      amountsSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+    },
+
     // ✅ NEW — identifies which face this entry belongs to (Separate Bill mode)
     mediaDetailId: { type: mongoose.Schema.Types.ObjectId, default: null },
 

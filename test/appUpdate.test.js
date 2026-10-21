@@ -64,7 +64,7 @@ test("valid release returns metadata with download URL", async () => {
   assert.equal(body.data.minimumVersionCode, 1);
   assert.equal(body.data.sha256, apkSha);
   assert.equal(body.data.forceUpdate, false);
-  assert.match(body.data.apkUrl, /\/public\/apk\/app-release-1\.0\.1-2\.apk$/);
+  assert.match(body.data.apkUrl, /\/release\/apk\/app-release-1\.0\.1-2\.apk\?v=2$/);
 });
 
 test("APP_UPDATE_PUBLIC_BASE_URL is used for the APK URL (reverse proxy sub-path)", async () => {
@@ -72,7 +72,7 @@ test("APP_UPDATE_PUBLIC_BASE_URL is used for the APK URL (reverse proxy sub-path
   writeMeta(goodMeta());
   const { body } = await get();
   delete process.env.APP_UPDATE_PUBLIC_BASE_URL;
-  assert.equal(body.data.apkUrl, "https://example.com/ooh-rms/api/public/apk/app-release-1.0.1-2.apk");
+  assert.equal(body.data.apkUrl, "https://example.com/ooh-rms/api/release/apk/app-release-1.0.1-2.apk?v=2");
 });
 
 test("forceUpdate is passed through", async () => {
@@ -219,7 +219,8 @@ test("auto-publish: waits for a stable file, publishes, then ignores the same fi
   const meta = JSON.parse(fs.readFileSync(rf, "utf8"));
   assert.equal(meta.latestVersion, "1.2.0");
   assert.equal(meta.versionCode, 4);
-  assert.ok(fs.existsSync(path.join(dir, "app-release-1.2.0-4.apk")));
+  assert.equal(meta.apkFile, "app-release.apk"); // served in place, no copy
+  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith(".apk")), ["app-release.apk"]);
   assert.equal(await pub.check(), "idle");
 
   // lower versionCode dropped → not published, previous release kept
@@ -235,10 +236,9 @@ test("auto-publish: waits for a stable file, publishes, then ignores the same fi
   assert.equal(JSON.parse(fs.readFileSync(rf, "utf8")).versionCode, 4);
 });
 
-test("auto-publish: recovers when the metadata points to an APK missing on the server", async () => {
+test("auto-publish: republishes when the metadata points to an APK missing on the server", async () => {
   const { createApkAutoPublisher } = require("../utils/apkAutoPublish");
   const watch = path.join(tmp, "heal-watch");
-  const served = path.join(tmp, "heal-served");
   fs.mkdirSync(watch);
   const rf = path.join(tmp, "heal-release.json");
   const quiet = { log: () => {}, error: () => {} };
@@ -246,23 +246,14 @@ test("auto-publish: recovers when the metadata points to an APK missing on the s
   fs.writeFileSync(path.join(watch, "app-release.apk"), bytes);
   const sha = crypto.createHash("sha256").update(bytes).digest("hex");
 
-  // 1) metadata committed from another machine: same APK, served copy missing → restored
+  // metadata from another machine: same versionCode/APK but a file name that is not here
   fs.writeFileSync(rf, JSON.stringify({ enabled: true, packageName: "com.outdoormedia.app", latestVersion: "1.0.1", versionCode: 2,
     apkFile: "app-release-1.0.1-2.apk", sha256: sha, apkSize: bytes.length }));
-  const pub = createApkAutoPublisher({ watchDir: watch, apkDir: served, releaseFile: rf, log: quiet });
+  const pub = createApkAutoPublisher({ watchDir: watch, releaseFile: rf, log: quiet });
   await pub.check();
-  assert.equal(await pub.check(), "restored");
-  assert.ok(fs.existsSync(path.join(served, "app-release-1.0.1-2.apk")));
-
-  // 2) served copy deleted later → noticed again and restored
-  fs.rmSync(path.join(served, "app-release-1.0.1-2.apk"));
-  assert.equal(await pub.check(), "restored");
-
-  // 3) metadata with same versionCode but a different (missing) APK → republished from release/apk
-  fs.writeFileSync(rf, JSON.stringify({ enabled: true, packageName: "com.outdoormedia.app", latestVersion: "1.0.1", versionCode: 2,
-    apkFile: "app-release-other.apk", sha256: "0".repeat(64), apkSize: 1 }));
-  const pub2 = createApkAutoPublisher({ watchDir: watch, apkDir: served, releaseFile: rf, log: quiet });
-  await pub2.check();
-  assert.equal(await pub2.check(), "published");
-  assert.equal(JSON.parse(fs.readFileSync(rf, "utf8")).sha256, sha);
+  assert.equal(await pub.check(), "published");
+  const meta = JSON.parse(fs.readFileSync(rf, "utf8"));
+  assert.equal(meta.apkFile, "app-release.apk");
+  assert.equal(meta.sha256, sha);
+  assert.equal(await pub.check(), "idle");
 });
