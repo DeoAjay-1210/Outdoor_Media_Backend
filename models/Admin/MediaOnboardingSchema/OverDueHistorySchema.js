@@ -85,6 +85,7 @@ const overDueHistorySchema = new mongoose.Schema(
         // Edit History & Restrictions
         isEdited: { type: Boolean, default: false },
         editedAt: { type: Date, default: null },
+        editedAtIst: { type: Boolean, default: undefined }, // ✅ NEW — true = editedAt saved in IST (same as addedAt)
         editedBy: { type: String, default: "" },
         originalRemarks: { type: String, default: "" },
         editHistory: [
@@ -93,6 +94,7 @@ const overDueHistorySchema = new mongoose.Schema(
             updatedRemarks: { type: String },
             editedBy: { type: String },
             editedAt: { type: Date, default: Date.now },
+            istTime: { type: Boolean, default: undefined }, // ✅ NEW — true = editedAt saved in IST (same as addedAt)
           },
         ],
 
@@ -114,6 +116,8 @@ const overDueHistorySchema = new mongoose.Schema(
             userId: { type: String },
             userName: { type: String },
             deliveredAt: { type: Date, default: Date.now },
+            userType: { type: Number, default: null }, // ✅ NEW — reader's role (from the token)
+            istTime: { type: Boolean, default: undefined }, // ✅ NEW — true = deliveredAt saved in IST (same as addedAt)
           },
         ],
         readBy: [
@@ -121,6 +125,8 @@ const overDueHistorySchema = new mongoose.Schema(
             userId: { type: String },
             userName: { type: String },
             readAt: { type: Date, default: Date.now },
+            userType: { type: Number, default: null }, // ✅ NEW — reader's role (from the token)
+            istTime: { type: Boolean, default: undefined }, // ✅ NEW — true = readAt saved in IST (same as addedAt)
           },
         ],
 

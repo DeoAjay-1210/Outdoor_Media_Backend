@@ -28,6 +28,7 @@ const {
 const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
+const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -3896,15 +3897,19 @@ exports.overDueRemark = async (req, res) => {
       // Sync any active overdue entries for this media first
       await syncAllOverdueEntriesForMedia(media, userName);
       const userTypeNum = Number(req.user?.userType) || null;
+      const remarkAddedAt = nowIST();
       const newRemark = {
         mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
         landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
         remarks: trimmedRemarks,
         addedBy: userName,
-        addedAt: nowIST(),
+        addedAt: remarkAddedAt,
         userType: userTypeNum,
         role: userTypeNum,
         readByRoles: userTypeNum ? [userTypeNum] : [],
+        // ✅ NEW — delivered on send to every user of the other roles
+        // (RE → RM + CMD, RM → RE + CMD, CMD → RE + RM)
+        deliveredTo: await overdueRemarkReceivers(userTypeNum, req.user?._id || req.user?.userId || req.user?.id, remarkAddedAt),
         attachments,
         voiceMessage: voiceMessageObj,
         replyTo: replyToObj,
@@ -4232,6 +4237,7 @@ records.forEach((rec) => {
       // ✅ NEW — send this to /admin/cmd-notifications/read; null for the
       // adding role's own remark (no notification to read)
       r.notificationId = !!viewerRole && rNum === viewerRole ? null : recNotificationId;
+      istRemarkEditTimes(r); // ✅ NEW — editedAt in IST, same as addedAt
     });
   }
 });
@@ -6578,325 +6584,3 @@ const details = (item.mediaDetails || []).map((d) => ({
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// CHAT ENHANCEMENTS: EDIT, DELETE, UNDO, PIN, READ RECEIPTS, MSG INFO, EDIT HISTORY
-// ─────────────────────────────────────────────────────────────
-
-exports.editOverdueRemark = async (req, res) => {
-  try {
-    const { remarkId, newRemarks } = req.body;
-    const userName = req.user?.userName || "User";
-    const userType = Number(req.user?.userType);
-
-    if (!remarkId || !newRemarks || !newRemarks.trim()) {
-      return res.status(400).json({ success: false, message: "Remark ID and new remarks are required" });
-    }
-
-    const record = await OverDueHistory.findOne({ "overDueRemarks._id": remarkId });
-    if (!record) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    const remark = record.overDueRemarks.id(remarkId);
-    if (!remark) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    // Check ownership unless CMD
-    if (remark.addedBy !== userName && userType !== 3) {
-      return res.status(403).json({ success: false, message: "You can only edit your own messages" });
-    }
-
-    // Check 2-hour window (7200000 ms)
-    const addedAtMs = new Date(remark.addedAt).getTime();
-    if (Date.now() - addedAtMs > 2 * 60 * 60 * 1000) {
-      return res.status(400).json({ success: false, message: "Editing window expired (2 hours max)" });
-    }
-
-    remark.originalRemarks = remark.originalRemarks || remark.remarks;
-    remark.editHistory.push({
-      previousRemarks: remark.remarks,
-      updatedRemarks: newRemarks.trim(),
-      editedBy: userName,
-      editedAt: new Date(),
-    });
-
-    remark.remarks = newRemarks.trim();
-    remark.isEdited = true;
-    remark.editedAt = new Date();
-    remark.editedBy = userName;
-
-    await record.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Remark edited successfully",
-      data: remark,
-    });
-  } catch (err) {
-    console.error("editOverdueRemark error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};
-
-exports.deleteOverdueRemark = async (req, res) => {
-  try {
-    const { remarkId } = req.body;
-    const userName = req.user?.userName || "User";
-    const userType = Number(req.user?.userType);
-
-    if (!remarkId) {
-      return res.status(400).json({ success: false, message: "Remark ID is required" });
-    }
-
-    const record = await OverDueHistory.findOne({ "overDueRemarks._id": remarkId });
-    if (!record) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    const remark = record.overDueRemarks.id(remarkId);
-    if (!remark) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    if (remark.addedBy !== userName && userType !== 3) {
-      return res.status(403).json({ success: false, message: "You can only delete your own messages" });
-    }
-
-    remark.isDeleted = true;
-    remark.deletedAt = new Date();
-    remark.deletedBy = userName;
-    remark.undoUntil = new Date(Date.now() + 15000); // 15 seconds undo window
-
-    await record.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Remark deleted successfully",
-      data: { remarkId, undoUntil: remark.undoUntil },
-    });
-  } catch (err) {
-    console.error("deleteOverdueRemark error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};
-
-exports.undoDeleteOverdueRemark = async (req, res) => {
-  try {
-    const { remarkId } = req.body;
-    if (!remarkId) {
-      return res.status(400).json({ success: false, message: "Remark ID is required" });
-    }
-
-    const record = await OverDueHistory.findOne({ "overDueRemarks._id": remarkId });
-    if (!record) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    const remark = record.overDueRemarks.id(remarkId);
-    if (!remark || !remark.isDeleted) {
-      return res.status(400).json({ success: false, message: "Message is not deleted" });
-    }
-
-    if (remark.undoUntil && new Date(remark.undoUntil).getTime() < Date.now()) {
-      return res.status(400).json({ success: false, message: "Undo window has expired" });
-    }
-
-    remark.isDeleted = false;
-    remark.deletedAt = null;
-    remark.deletedBy = "";
-    remark.undoUntil = null;
-
-    await record.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "Message restored successfully",
-      data: remark,
-    });
-  } catch (err) {
-    console.error("undoDeleteOverdueRemark error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};
-
-exports.pinOverdueRemark = async (req, res) => {
-  try {
-    const { remarkId, duration } = req.body; // '24h', '7d', '30d', 'unpin'
-    const userName = req.user?.userName || "User";
-
-    if (!remarkId) {
-      return res.status(400).json({ success: false, message: "Remark ID is required" });
-    }
-
-    const record = await OverDueHistory.findOne({ "overDueRemarks._id": remarkId });
-    if (!record) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    const remark = record.overDueRemarks.id(remarkId);
-    if (!remark) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    if (duration === "unpin") {
-      remark.isPinned = false;
-      remark.pinExpiresAt = null;
-      remark.pinnedBy = "";
-    } else {
-      let durationMs = 24 * 60 * 60 * 1000;
-      if (duration === "7d") durationMs = 7 * 24 * 60 * 60 * 1000;
-      if (duration === "30d") durationMs = 30 * 24 * 60 * 60 * 1000;
-
-      // Unpin any previously pinned remarks for this record
-      record.overDueRemarks.forEach((r) => {
-        if (r._id.toString() !== String(remarkId)) r.isPinned = false;
-      });
-
-      remark.isPinned = true;
-      remark.pinnedAt = new Date();
-      remark.pinnedBy = userName;
-      remark.pinExpiresAt = new Date(Date.now() + durationMs);
-    }
-
-    await record.save();
-
-    return res.status(200).json({
-      success: true,
-      message: duration === "unpin" ? "Unpinned successfully" : "Pinned successfully",
-      data: remark,
-    });
-  } catch (err) {
-    console.error("pinOverdueRemark error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};
-
-exports.markOverdueRemarkRead = async (req, res) => {
-  try {
-    const { remarkId, mediaId } = req.body;
-    const userId = String(req.user?._id || req.user?.userId || req.user?.id || "");
-    const userName = req.user?.userName || "User";
-    const userType = Number(req.user?.userType);
-
-    const query = {};
-    if (remarkId) query["overDueRemarks._id"] = remarkId;
-    else if (mediaId) query.mediaId = mediaId;
-
-    const records = await OverDueHistory.find(query);
-    let updatedCount = 0;
-
-    for (const record of records) {
-      let changed = false;
-      record.overDueRemarks.forEach((r) => {
-        if (!remarkId || r._id.toString() === String(remarkId)) {
-          if (userId && !r.deliveredTo.some((d) => d.userId === userId)) {
-            r.deliveredTo.push({ userId, userName, deliveredAt: new Date() });
-            changed = true;
-          }
-          if (userId && !r.readBy.some((rd) => rd.userId === userId)) {
-            r.readBy.push({ userId, userName, readAt: new Date() });
-            changed = true;
-          }
-          if (userType && (!Array.isArray(r.readByRoles) || !r.readByRoles.includes(userType))) {
-            r.readByRoles = r.readByRoles || [];
-            r.readByRoles.push(userType);
-            changed = true;
-          }
-          updatedCount++;
-        }
-      });
-      if (changed) await record.save();
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Read status updated",
-      data: { updatedCount },
-    });
-  } catch (err) {
-    console.error("markOverdueRemarkRead error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};
-
-exports.getMessageInfo = async (req, res) => {
-  try {
-    const remarkId = req.query.remarkId || req.body?.remarkId;
-    if (!remarkId) {
-      return res.status(400).json({ success: false, message: "Remark ID is required" });
-    }
-
-    const record = await OverDueHistory.findOne({ "overDueRemarks._id": remarkId }).lean();
-    if (!record) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    const remark = record.overDueRemarks.find((r) => r._id.toString() === String(remarkId));
-    if (!remark) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Message info fetched",
-      data: {
-        remarkId: remark._id,
-        remarks: remark.remarks,
-        addedBy: remark.addedBy,
-        addedAt: remark.addedAt,
-        deliveredTo: remark.deliveredTo || [],
-        readBy: remark.readBy || [],
-        isEdited: remark.isEdited || false,
-        editedAt: remark.editedAt || null,
-        isPinned: remark.isPinned || false,
-        pinExpiresAt: remark.pinExpiresAt || null,
-        attachments: remark.attachments || [],
-        voiceMessage: remark.voiceMessage || null,
-      },
-    });
-  } catch (err) {
-    console.error("getMessageInfo error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};
-
-exports.getEditHistory = async (req, res) => {
-  try {
-    const userType = Number(req.user?.userType);
-    if (userType !== 3) {
-      return res.status(403).json({ success: false, message: "Access denied. CMD permission required." });
-    }
-
-    const remarkId = req.query.remarkId || req.body?.remarkId;
-    if (!remarkId) {
-      return res.status(400).json({ success: false, message: "Remark ID is required" });
-    }
-
-    const record = await OverDueHistory.findOne({ "overDueRemarks._id": remarkId }).lean();
-    if (!record) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    const remark = record.overDueRemarks.find((r) => r._id.toString() === String(remarkId));
-    if (!remark) {
-      return res.status(404).json({ success: false, message: "Remark not found" });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Edit history fetched",
-      data: {
-        remarkId: remark._id,
-        currentRemarks: remark.remarks,
-        originalRemarks: remark.originalRemarks || remark.remarks,
-        editedBy: remark.editedBy,
-        editedAt: remark.editedAt,
-        editHistory: remark.editHistory || [],
-      },
-    });
-  } catch (err) {
-    console.error("getEditHistory error:", err);
-    return res.status(500).json({ success: false, message: "Server error", error: err.message });
-  }
-};

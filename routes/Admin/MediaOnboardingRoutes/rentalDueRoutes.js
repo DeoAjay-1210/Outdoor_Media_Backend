@@ -14,14 +14,17 @@ const {
   getOverDueHistoryList,
   overDueRemark,
   getOverDueRemarks,
+} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+// ✅ NEW — overdue remark chat APIs (own controller)
+const {
   editOverdueRemark,
   deleteOverdueRemark,
   undoDeleteOverdueRemark,
   pinOverdueRemark,
   markOverdueRemarkRead,
   getMessageInfo,
-  getEditHistory
-} = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+  getEditHistory,
+} = require("../../../controllers/Admin/MediaOnboardingController/OverdueRemarkChatController");
 // ✅ NEW — appraisal hold APIs (own controller)
 const {
   setAppraisalHold,
