@@ -15,12 +15,17 @@ const RentalOOHExcelRoutes = require("./routes/Admin/MediaOnboardingRoutes/Renta
 const gstDetailRoutes = require('./routes/Admin/GstDetailRoutes/gstDetailRoutes');
 const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/landOwnerMasterRoutes");
 const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
+const reportAnalyticsRoutes = require("./routes/Admin/ReportAnalyticsRoutes/ReportAnalyticsRoutes");
 const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
 const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
 const appUpdateRoutes = require("./routes/Admin/AppUpdateRoutes/AppUpdateRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
+// SKIP_STARTUP_MAINTENANCE=true skips the five database maintenance routines below
+// (startup run AND their cron schedules). Default (unset/false): unchanged behaviour.
+const SKIP_STARTUP_MAINTENANCE = require("./utils/startupFlags").skipStartupMaintenance();
+if (SKIP_STARTUP_MAINTENANCE) console.log("[startup] SKIP_STARTUP_MAINTENANCE is on: billing sync, appraisal apply, notification purge, bank-account seed and overdue fix are disabled");
 connectDB();
-(async () => {
+if (!SKIP_STARTUP_MAINTENANCE) (async () => {
   try {
     const result = await Media.syncBillingCycles();
     // console.log(`[syncBillingCycles startup] checked=${result.checked} updated=${result.updated}`);
@@ -29,7 +34,7 @@ connectDB();
   }
 })();
 
-cron.schedule("5 0 * * *", async () => {
+if (!SKIP_STARTUP_MAINTENANCE) cron.schedule("5 0 * * *", async () => {
   try {
     const result = await Media.syncBillingCycles();
     console.log(`[syncBillingCycles] checked=${result.checked} updated=${result.updated}`);
@@ -49,8 +54,10 @@ const runApplyDueAppraisals = async () => {
     console.error("[applyDueAppraisals] failed:", err.message);
   }
 };
-runApplyDueAppraisals();
-cron.schedule("10 0 * * *", runApplyDueAppraisals);
+if (!SKIP_STARTUP_MAINTENANCE) {
+  runApplyDueAppraisals();
+  cron.schedule("10 0 * * *", runApplyDueAppraisals);
+}
 
 // Delete Executive / Manager / CMD notifications read more than
 // CMD_NOTIFICATION_READ_RETENTION_MINUTES (.env, default 1 day) ago;
@@ -65,23 +72,23 @@ const runPurgeCmdNotifications = async () => {
     console.error("[purgeOldCmdNotifications] failed:", err.message);
   }
 };
-runPurgeCmdNotifications();
+if (!SKIP_STARTUP_MAINTENANCE) runPurgeCmdNotifications();
 
 // One-time / repeatable fix: overdue rows of single-bill multi-face sites store
 // the whole bill (site rent + GST), not one face's share. Only changed rows are
 // written; once fixed, later restarts change nothing.
 const { fixSingleBillOverdueAmounts } = require("./controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
-fixSingleBillOverdueAmounts()
+if (!SKIP_STARTUP_MAINTENANCE) fixSingleBillOverdueAmounts()
   .then((r) => r.fixed && console.log(`[fixSingleBillOverdueAmounts] fixed=${r.fixed} of ${r.checked}`))
   .catch((err) => console.error("[fixSingleBillOverdueAmounts] failed:", err.message));
 
 // One-time backfill: landowners without bankAccounts[] get their current
 // bank details as the primary account (no-op once every owner has one)
 const { seedLandOwnerBankAccounts } = require("./controllers/Admin/landOwnerMasterController/landOwnerMasterController");
-seedLandOwnerBankAccounts()
+if (!SKIP_STARTUP_MAINTENANCE) seedLandOwnerBankAccounts()
   .then((r) => r.seeded && console.log(`[seedLandOwnerBankAccounts] seeded=${r.seeded}`))
   .catch((err) => console.error("[seedLandOwnerBankAccounts] failed:", err.message));
-cron.schedule(process.env.CMD_NOTIFICATION_PURGE_CRON || "15 * * * *", runPurgeCmdNotifications);
+if (!SKIP_STARTUP_MAINTENANCE) cron.schedule(process.env.CMD_NOTIFICATION_PURGE_CRON || "15 * * * *", runPurgeCmdNotifications);
 const app = express();
 
 app.use(cors());
@@ -97,6 +104,7 @@ app.use("/admin", RentalDue);
 app.use("/admin", RentalOOHExcelRoutes);
 app.use("/admin", LandownerMasterRoutes);
 app.use("/admin", dashboardRoutes);
+app.use("/admin", reportAnalyticsRoutes);
 app.use("/admin", cmdNotificationRoutes);
 app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", appUpdateRoutes);
