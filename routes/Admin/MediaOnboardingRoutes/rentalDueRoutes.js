@@ -97,8 +97,22 @@ router.post("/tds-hold", protect, setTdsHold);
 // ✅ NEW — read only (any role): a site's TDS holds + remarks (separate API)
 // ?mediaId=...&landOwnerId=... (landOwnerId optional)
 router.get("/tds-hold-remarks", protect, getTdsHoldRemarks);
-router.post("/overdue-remark", protect, overDueRemark);
-router.post("/overdue-remark", protect, overdueRemarksUploader.upload.any(), overDueRemark);
+router.post(
+  "/overdue-remark",
+  protect,
+  (req, res, next) => {
+    overdueRemarksUploader.upload.any()(req, res, (err) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({ success: false, message: "File size exceeds 3MB limit." });
+        }
+        return res.status(400).json({ success: false, message: err.message || "File upload error" });
+      }
+      next();
+    });
+  },
+  overDueRemark
+);
 
 // ✅ CHAT ENHANCEMENT ENDPOINTS
 router.put("/overdue-remark/edit", protect, editOverdueRemark);

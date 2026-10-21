@@ -81,8 +81,19 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
     });
   }
 
+  const ALLOWED_EXTENSIONS = new Set([
+    ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp",
+    ".doc", ".docx", ".txt", ".rtf", ".xls", ".xlsx", ".csv", ".ppt", ".pptx",
+    ".mp3", ".wav", ".ogg", ".m4a", ".aac"
+  ]);
+
   const fileFilter = (req, file, cb) => {
-    cb(null, true);
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ALLOWED_EXTENSIONS.has(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Allowed: PDFs, Images, Documents, and Audio files only."));
+    }
   };
 
   // ── Local storage engine ─────────────────────────────────
@@ -145,7 +156,7 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
   const upload = multer({
     storage: STORAGE_TYPE === "space" ? spacesStorageEngine : localStorageEngine,
     fileFilter,
-    limits: { fileSize: 10 * 1024 * 1024 },
+    limits: { fileSize: 3 * 1024 * 1024 }, // 3 MB limit
   });
 
   // ── Get file URL ─────────────────────────────────────────

@@ -3867,6 +3867,16 @@ exports.overDueRemark = async (req, res) => {
     if (req.body.voiceMessage) {
       try {
         voiceMessageObj = typeof req.body.voiceMessage === 'string' ? JSON.parse(req.body.voiceMessage) : req.body.voiceMessage;
+        if (voiceMessageObj && !voiceMessageObj.audioUrl && attachments.length > 0) {
+          const audioAttIndex = attachments.findIndex(a => a.mimeType?.startsWith('audio/') || a.fileName?.includes('voice_recording'));
+          if (audioAttIndex !== -1) {
+            voiceMessageObj.audioUrl = attachments[audioAttIndex].fileUrl;
+            attachments.splice(audioAttIndex, 1);
+          } else {
+            voiceMessageObj.audioUrl = attachments[0].fileUrl;
+            attachments.splice(0, 1);
+          }
+        }
       } catch (e) {}
     }
 
