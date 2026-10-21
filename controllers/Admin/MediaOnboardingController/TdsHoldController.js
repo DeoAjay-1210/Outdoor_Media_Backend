@@ -50,7 +50,7 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
   if (!mongoose.Types.ObjectId.isValid(String(mediaId || "")) || !mongoose.Types.ObjectId.isValid(String(landOwnerId || ""))) {
     return fail(400, "Valid mediaId and landOwnerId are required");
   }
-  if (![0, 1].includes(hold)) return fail(400, "tdsHold must be 0 (hold) or 1 (release)");
+  if (![0, 1].includes(hold)) return fail(400, "tdsHold must be 1 (hold) or 0 (release)");
 
   const media = await Media.findById(mediaId).select("landOwners").lean();
   if (!media) return fail(404, "Media not found");
@@ -151,7 +151,7 @@ async function processTdsHold({ mediaId, landOwnerId, hold, remark, user }) {
       landOwnerId: owner._id,
       landOwnerMasterId: owner.landOwnerMasterId || null,
       landOwnerName: owner.name || "",
-      tdsHold: hold === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = held, 1 = released
+      tdsHold: internalToApiHold(hold), // ✅ CHANGED — API value: 1 = held, 0 = released
       // ✅ NEW — the landowner's tdsApplicable after this call (0 while held)
       tdsApplicable:
         $set["landOwners.$[o].tdsApplicable"] !== undefined
@@ -196,16 +196,16 @@ function parseTdsHoldItems(body) {
   }));
 }
 
-// ✅ CHANGED — API value: tdsHold 0 = HOLD, 1 = RELEASE (not hold), same as
-// appraisalHold. Converted to the stored value (1 = held, 0 = not held), which
+// ✅ CHANGED — API value: tdsHold 1 = HOLD, 0 = RELEASE (TDS only — appraisalHold
+// stays 0 = hold). Same as the stored value (1 = held, 0 = not held), which
 // the save hook relies on to keep a held landowner's TDS at 0.
 const apiToInternalHold = (v) => {
   if (v === undefined || v === null || v === "") return NaN;
   const n = Number(v);
-  return n === 0 ? 1 : n === 1 ? 0 : NaN;
+  return n === 1 ? 1 : n === 0 ? 0 : NaN;
 };
-// stored value → API value (0 = held, 1 = not held)
-const internalToApiHold = (v) => (Number(v) === 1 ? 0 : 1);
+// stored value → API value (1 = held, 0 = not held)
+const internalToApiHold = (v) => (Number(v) === 1 ? 1 : 0);
 
 const setTdsHold = async (req, res) => {
   try {
@@ -272,7 +272,7 @@ function buildTdsHoldList(media, landOwnerId = "") {
         const isHold = ev.action === "hold";
         return {
           ...base,
-          hold: isHold ? 0 : 1, // 0 = on hold, 1 = released
+          hold: isHold ? 1 : 0, // 1 = on hold, 0 = released
           holdStatus: isHold ? "On Hold" : "Released",
           remark: ev.reason || "",
           by: ev.by || "",
@@ -316,7 +316,7 @@ const getTdsHoldRemarks = async (req, res) => {
       tdsApplicable: Number(o.tdsApplicable) === 1 ? 1 : 0,
       tdsPercentage: Number(o.tdsPercentage || 0),
       tdsAmount: Number(o.tdsAmount || 0),
-      tdsHold: internalToApiHold(o.tdsHold), // ✅ CHANGED — 0 = on hold, 1 = not held
+      tdsHold: internalToApiHold(o.tdsHold), // ✅ CHANGED — 1 = on hold, 0 = not held
     }));
     return successResponse(res, "TDS hold remarks fetched successfully", {
       mediaId: media._id,

@@ -720,7 +720,7 @@ const MediaSchema = new mongoose.Schema(
         // (POST /admin/tds-hold): 1 → tdsAmount stays 0 until released
         tdsHold: {
           type: Number,
-          enum: [0, 1], // 0 = on hold, 1 = released
+          enum: [0, 1], // 0 = released, 1 = on hold
           default: 0,
         },
         tdsHoldDetail: {

@@ -5063,7 +5063,7 @@ function buildTdsHoldSummary(landOwners) {
       landOwnerId: o._id,
       landOwnerMasterId: o.landOwnerMasterId || null,
       landOwnerName: o.name || "",
-      tdsHold: held ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
+      tdsHold: held ? 1 : 0, // ✅ CHANGED — API value: 1 = on hold, 0 = released
       holdStatus: held ? "On Hold" : "Released",
       tdsPercentage: Number(o.tdsPercentage || 0),
       tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
@@ -5077,8 +5077,8 @@ function buildTdsHoldSummary(landOwners) {
     };
   });
   const holdCount = list.filter((x) => x.holdStatus === "On Hold").length;
-  // ✅ CHANGED — API value: hold 0 = a landowner's TDS is on hold, 1 = none held
-  return { hold: holdCount > 0 ? 0 : 1, holdCount, landOwners: list };
+  // ✅ CHANGED — API value: hold 1 = a landowner's TDS is on hold, 0 = none held
+  return { hold: holdCount > 0 ? 1 : 0, holdCount, landOwners: list };
 }
 
 // ✅ NEW — response only: each landOwners[].linkedSites[] item gets the bank
