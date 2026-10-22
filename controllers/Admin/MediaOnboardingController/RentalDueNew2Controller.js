@@ -3843,11 +3843,19 @@ exports.overDueRemark = async (req, res) => {
     const userName = req.user?.userName || "Admin";
     const savedResults = [];
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    // ✅ CHANGED — same base URL as the other uploads (.env LOCAL_BASE_URL,
+    // e.g. http://localhost:5000) instead of the request's host IP
+    const baseUrl = String(process.env.LOCAL_BASE_URL || "http://localhost:5000").trim().replace(/\/+$/, "");
+    // ✅ NEW — STORAGE_TYPE=space → the file is in DigitalOcean Spaces (CDN link),
+    // otherwise the local public/overdueRemarks folder
+    const remarkFileUrl = (file) =>
+      file.key
+        ? `${require("../../../middleware/dynamicFileUpload").CDN_BASE_URL}/${file.key}`
+        : `${baseUrl}/public/overdueRemarks/${file.filename}`;
     let attachments = [];
     if (req.files && Array.isArray(req.files)) {
       attachments = req.files.map(file => ({
-        fileUrl: `${baseUrl}/public/overdueRemarks/${file.filename}`,
+        fileUrl: remarkFileUrl(file),
         fileName: file.originalname,
         fileType: file.mimetype.startsWith('image/') ? 'image' : 'document',
         fileSize: file.size,
@@ -3855,7 +3863,7 @@ exports.overDueRemark = async (req, res) => {
       }));
     } else if (req.file) {
       attachments = [{
-        fileUrl: `${baseUrl}/public/overdueRemarks/${req.file.filename}`,
+        fileUrl: remarkFileUrl(req.file),
         fileName: req.file.originalname,
         fileType: req.file.mimetype.startsWith('image/') ? 'image' : 'document',
         fileSize: req.file.size,
@@ -4131,6 +4139,8 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         remark: trimmedRemarks,
         userType: Number(req.user?.userType),
         userName,
+        // ✅ NEW — Attachment line: file links + voice message link
+        attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
       });
 
       // ✅ NEW — overdue remark notification (read only): Executive's remark →

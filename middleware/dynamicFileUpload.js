@@ -32,6 +32,7 @@ const getMimeType = (fileName) => {
     ".ogg"  : "audio/ogg",
     ".aac"  : "audio/aac",
     ".m4a"  : "audio/mp4",
+    ".mp4"  : "audio/mp4",
     ".pdf"  : "application/pdf",
     ".xls"  : "application/vnd.ms-excel",
     ".xlsx" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -84,7 +85,7 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
   const ALLOWED_EXTENSIONS = new Set([
     ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp",
     ".doc", ".docx", ".txt", ".rtf", ".xls", ".xlsx", ".csv", ".ppt", ".pptx",
-    ".mp3", ".wav", ".ogg", ".m4a", ".aac"
+    ".mp3"
   ]);
 
   const fileFilter = (req, file, cb) => {

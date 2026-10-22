@@ -327,7 +327,7 @@ const OVERDUE_REMARK_ROUTES = {
   3: ["RENTAL_EXECUTIVE_URL", "RENTAL_MANAGER_URL"],
 };
 
-function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName }) {
+function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName, attachments = [] }) {
   const plain = typeof media?.toObject === "function" ? media.toObject() : media || {};
   const details = plain.mediaDetails || [];
   // remark for one face → that face; otherwise every active face of the site
@@ -350,11 +350,13 @@ function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth
     `*Landowner Name:* ${shownOwners.map((o) => o.name).filter(Boolean).join(", ") || "-"}`,
     `*Due Month:* ${dueMonth || "-"}`,
     `*Remark:* ${remark || "-"}`,
+    // ✅ NEW — attachment links (files + voice message)
+    `*Attachment:* ${(attachments || []).map((a) => a?.fileUrl || a?.audioUrl).filter(Boolean).join("\n") || "-"}`,
   ].join("\n");
 }
 
 // Built immediately, posted in the background; never throws.
-function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName }) {
+function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName, attachments = [] }) {
   if (!isGoogleChatEnabled() || !media) return;
   const envKeys = OVERDUE_REMARK_ROUTES[Number(userType)];
   if (!envKeys) return;
@@ -363,7 +365,7 @@ function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, 
 
   let text;
   try {
-    text = buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName });
+    text = buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName, attachments });
   } catch (err) {
     console.error("[GoogleChat] overdue remark message build failed:", err.message);
     return;
