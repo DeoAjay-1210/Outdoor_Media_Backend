@@ -8,9 +8,9 @@ const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/Med
 const { successResponse, errorResponse } = require("../../../utils/response");
 const RA = require("../../../utils/reportAnalytics");
 const Ledger = require("../MediaOnboardingController/LedgerNew2Controller");
-const { mediaAsOfDate } = require("../../../utils/appraisalRent");
+const { mediaAsOfDate, landOwnersAsOfDate } = require("../../../utils/appraisalRent");
 
-// The ledger's own (pure, read-only) helpers, reused for the period due / unpaid cards.
+// The ledger's own (pure, read-only) helpers — the Rental Master cycle calculation.
 const LEDGER_LIB = {
   getAllDueCycles: Ledger.getAllDueCycles,
   getOverallSummaryForCycle: Ledger.getOverallSummaryForCycle,
@@ -25,27 +25,85 @@ const allowedRole = (req) => ALLOWED_ROLES.includes(Number(req.user?.userType));
 
 const FACE = "mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaType mediaDetails.city";
 
+// Payments under Rental Master = the Rental Master cycle calculation: ledger rules need owner amounts,
+// paid-state rows, bill labels, billing anchors and appraisal history (no bank, PAN or contact fields).
+const RM_PAYMENTS = `${FACE} mediaDetails.status ledgerHistory ledger gstApplicableFlag appraisal.history rentalPayment.billingStartDate rentalPayment.lastBillPaidDate rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable rentalPayment.rentalOutstandingHistory rentalPayment.gstOutstandingHistory gstBalanceHistory.dueMonth gstBalanceHistory.gstAmount gstBalanceHistory.isPaid gstBalanceHistory.utrNumber gstBalanceHistory.ownerId gstBalanceHistory.landOwnerId rentalDue.dueDate rentalDue.dueMonth rentalDue.withGst rentalDue.approvalStatus rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.cashAmount landOwners.onlineAmount landOwners.shareAmount landOwners.gstApplicable landOwners.gstAmount landOwners.tdsAmount`;
+
+/**
+ * Field projection per chart and data source ("rentalMaster" | "ledger").
+ * `both` = the chart is the same for either source (not a ledger/Rental Master record).
+ * A missing source means the combination is NOT SUPPORTED: no query is run and the
+ * response says so (with the reason) instead of returning misleading zeros.
+ */
 const SELECT = {
   filters: `${FACE} createdAt`,
-  // payments also feeds the due/unpaid cards: ledger rules need owner amounts, ledger rows, bill labels,
-  // billing anchors and appraisal history (no names, bank, PAN or contact fields are read)
-  payments: `${FACE} mediaDetails.status ledgerHistory ledger gstApplicableFlag appraisal.history rentalPayment.billingStartDate rentalPayment.lastBillPaidDate rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable rentalPayment.rentalOutstandingHistory rentalPayment.gstOutstandingHistory gstBalanceHistory.dueMonth gstBalanceHistory.gstAmount gstBalanceHistory.isPaid gstBalanceHistory.utrNumber gstBalanceHistory.ownerId gstBalanceHistory.landOwnerId rentalDue.dueDate rentalDue.dueMonth rentalDue.withGst rentalDue.approvalStatus rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.cashAmount landOwners.onlineAmount landOwners.shareAmount landOwners.gstApplicable landOwners.gstAmount landOwners.tdsAmount`,
-  media: `${FACE} createdAt`,
-  appraisal: `${FACE} appraisal`,
-  bills: `${FACE} rentalDue.dueDate rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.approvalStatus rentalDue.status`,
-  gst: `${FACE} gstBalanceHistory rentalPayment.gstOutstandingHistory rentalDue._id rentalDue.dueDate rentalDue.gstAmount rentalDue.gstAddedToBalance rentalDue.ownerGstAddedToBalance`,
-  tds: `${FACE} tdsBalanceHistory`,
+  payments: {
+    ledger: `${FACE} ledgerHistory`,
+    rentalMaster: RM_PAYMENTS,
+  },
+  media: { both: `${FACE} createdAt` },
+  appraisal: { rentalMaster: `${FACE} appraisal` },
+  bills: { rentalMaster: `${FACE} rentalDue.dueDate rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.approvalStatus rentalDue.status` },
+  // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
+  // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
+  gst: {
+    ledger: RM_PAYMENTS,
+    rentalMaster: `${FACE} rentalDue.dueDate rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory`,
+  },
+  tds: {
+    ledger: `${FACE} tdsBalanceHistory`,
+    rentalMaster: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount appraisal.history`,
+  },
+};
+
+const UNSUPPORTED = {
+  appraisal: { ledger: "Ledger records hold payments only; appraisals are Rental Master records (appraisal history)." },
+  bills: { ledger: "Ledger records hold payments only; generated bills are Rental Master records (rentalDue)." },
+};
+
+const COMPUTE = {
+  payments: {
+    ledger: (d, f) => RA.computePayments(d, f),
+    rentalMaster: (d, f) => RA.computeRentalMasterPayments(d, f, LEDGER_LIB),
+  },
+  media: { both: (d, f) => RA.computeMedia(d, f) },
+  appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f) },
+  bills: { rentalMaster: (d, f) => RA.computeBills(d, f) },
+  gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
+  tds: {
+    ledger: (d, f) => RA.computeTds(d, f),
+    rentalMaster: (d, f) => RA.computeTdsRentalMaster(d, f, { landOwnersAsOfDate }),
+  },
 };
 
 const load = (select) => MediaOnboarding.find({}).select(select).maxTimeMS(25000).lean();
 
-const makeHandler = (selectKey, compute, message) => async (req, res) => {
+/** Which projection/aggregation serves a chart for a source; null when unsupported. */
+const resolve = (chart, source) => {
+  const key = SELECT[chart].both ? "both" : source;
+  return SELECT[chart][key] ? { select: SELECT[chart][key], compute: COMPUTE[chart][key], sourceIndependent: key === "both" } : null;
+};
+
+const makeHandler = (chart, message) => async (req, res) => {
   try {
     if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
     const parsed = RA.parseFilters({ ...(req.query || {}), ...(req.body || {}) });
     if (parsed.error) return errorResponse(res, parsed.error, null, 400);
-    const docs = await load(SELECT[selectKey]);
-    return successResponse(res, message, compute(docs, parsed.filters));
+    const f = parsed.filters;
+    const route = resolve(chart, f.source);
+    if (!route) {
+      return successResponse(res, message, {
+        filters: { source: f.source },
+        supported: false,
+        reason: UNSUPPORTED[chart]?.[f.source] || "Not available for this data source.",
+        buckets: [],
+        summary: {},
+        meta: {},
+      });
+    }
+    const docs = await load(route.select);
+    const data = route.compute(docs, f);
+    return successResponse(res, message, { ...data, supported: true, sourceIndependent: route.sourceIndependent });
   } catch (error) {
     return errorResponse(res, "Failed to build analytics", error.message, 500);
   }
@@ -63,12 +121,14 @@ const getFilterOptions = async (req, res) => {
 
 module.exports = {
   ALLOWED_ROLES,
+  SELECT, // field projection per chart and source — the data sources named on the charts
   allowedRole,
   getFilterOptions,
-  getPaymentAnalytics: makeHandler("payments", (d, f) => RA.withPeriodDue(RA.computePayments(d, f), d, f, LEDGER_LIB), "Payment analytics fetched"),
-  getMediaAnalytics: makeHandler("media", RA.computeMedia, "Media analytics fetched"),
-  getAppraisalAnalytics: makeHandler("appraisal", (d, f) => RA.computeAppraisal(d, f), "Appraisal analytics fetched"),
-  getBillAnalytics: makeHandler("bills", RA.computeBills, "Upcoming bill analytics fetched"),
-  getGstAnalytics: makeHandler("gst", (d, f) => RA.computeGst(d, f), "GST analytics fetched"),
-  getTdsAnalytics: makeHandler("tds", RA.computeTds, "TDS analytics fetched"),
+  resolve,
+  getPaymentAnalytics: makeHandler("payments", "Payment analytics fetched"),
+  getMediaAnalytics: makeHandler("media", "Media analytics fetched"),
+  getAppraisalAnalytics: makeHandler("appraisal", "Appraisal analytics fetched"),
+  getBillAnalytics: makeHandler("bills", "Upcoming bill analytics fetched"),
+  getGstAnalytics: makeHandler("gst", "GST analytics fetched"),
+  getTdsAnalytics: makeHandler("tds", "TDS analytics fetched"),
 };
