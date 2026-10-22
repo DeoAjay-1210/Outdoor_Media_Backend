@@ -7,8 +7,6 @@ const mongoose = require("mongoose");
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 const { nowIST } = require("../../../utils/updatedAt");
 
-// ✅ NEW — response only: editedAt saved earlier in UTC gets +5:30 so it
-// matches addedAt (IST). Entries saved in IST are flagged and left as they are.
 const EDIT_IST_MS = 330 * 60000;
 function istRemarkEditTimes(remark) {
   if (!remark) return remark;
@@ -24,19 +22,19 @@ function istRemarkEditTimes(remark) {
   return remark;
 }
 
-// ✅ NEW — overdue remark receivers: Rental Executive (1), Rental Manager (2)
-// and CMD (3), except the sender's own role and the sender.
-// Sender role unknown (older remarks) → any other user, as before.
 const OVERDUE_REMARK_ROLES = [1, 2, 3];
-function isOverdueRemarkRecipient(remark, userId, userType) {
-  if (userId && remark?.addedByUserId && String(remark.addedByUserId) === String(userId)) return false;
+function isOverdueRemarkRecipient(remark, userId, userName, userType) {
+  if (userName && remark?.addedBy && remark.addedBy.trim().toLowerCase() === userName.trim().toLowerCase()) {
+    return false;
+  }
+  if (userId && remark?.addedByUserId && String(remark.addedByUserId) === String(userId)) {
+    return false;
+  }
   const senderRole = Number(remark?.role || remark?.userType || 0);
   if (!senderRole) return true;
   return OVERDUE_REMARK_ROLES.includes(Number(userType)) && Number(userType) !== senderRole;
 }
 
-// ✅ NEW — every user of the receiving roles → deliveredTo entries.
-// Sender role unknown → [] (older behaviour: delivered when read).
 async function overdueRemarkReceivers(senderRole, senderUserId, at) {
   const role = Number(senderRole || 0);
   if (!OVERDUE_REMARK_ROLES.includes(role)) return [];
@@ -71,12 +69,10 @@ class OverdueRemarkChatController {
         return res.status(404).json({ success: false, message: "Remark not found" });
       }
 
-      // Check ownership unless CMD
       if (remark.addedBy !== userName && userType !== 3) {
         return res.status(403).json({ success: false, message: "You can only edit your own messages" });
       }
 
-      // Check 2-hour window (7200000 ms)
       const addedAtMs = new Date(remark.addedAt).getTime();
       if (Date.now() - addedAtMs > 2 * 60 * 60 * 1000) {
         return res.status(400).json({ success: false, message: "Editing window expired (2 hours max)" });
@@ -137,7 +133,7 @@ class OverdueRemarkChatController {
       remark.isDeleted = true;
       remark.deletedAt = new Date();
       remark.deletedBy = userName;
-      remark.undoUntil = new Date(Date.now() + 15000); // 15 seconds undo window
+      remark.undoUntil = new Date(Date.now() + 15000);
 
       await record.save();
 
@@ -260,12 +256,12 @@ class OverdueRemarkChatController {
         let changed = false;
         record.overDueRemarks.forEach((r) => {
           if (!remarkId || r._id.toString() === String(remarkId)) {
-            const isRecipient = isOverdueRemarkRecipient(r, userId, userType);
-            if (isRecipient && userId && !r.deliveredTo.some((d) => d.userId === userId)) {
+            const isRecipient = isOverdueRemarkRecipient(r, userId, userName, userType);
+            if (isRecipient && userId && !r.deliveredTo.some((d) => String(d.userId) === userId)) {
               r.deliveredTo.push({ userId, userName, deliveredAt: nowIST(), userType: userType || null, istTime: true });
               changed = true;
             }
-            if (isRecipient && userId && !r.readBy.some((rd) => rd.userId === userId)) {
+            if (isRecipient && userId && !r.readBy.some((rd) => String(rd.userId) === userId || rd.userName === userName)) {
               r.readBy.push({ userId, userName, readAt: nowIST(), userType: userType || null, istTime: true });
               changed = true;
             }
@@ -321,7 +317,7 @@ class OverdueRemarkChatController {
         users.forEach((u) => roleById.set(String(u._id), Number(u.userType)));
       }
       const receivers = (list) =>
-        list.filter((d) => isOverdueRemarkRecipient(remark, d?.userId, Number(d?.userType || roleById.get(String(d?.userId)) || 0)));
+        list.filter((d) => isOverdueRemarkRecipient(remark, d?.userId, d?.userName, Number(d?.userType || roleById.get(String(d?.userId)) || 0)));
       remark.deliveredTo = receivers(delivered);
       remark.readBy = receivers(read);
 

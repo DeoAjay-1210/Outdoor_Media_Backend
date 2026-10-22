@@ -4184,13 +4184,11 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         remark: trimmedRemarks,
         userType: Number(req.user?.userType),
         userName,
-        // ✅ NEW — Attachment line: file links + voice message link
         attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
+        replyTo: replyToObj,
       });
 
-      // ✅ NEW — overdue remark notification (read only): Executive's remark →
-      // Manager + CMD, Manager's remark → Executive + CMD, CMD's remark →
-      // Executive + Manager
+      // ✅ NEW — overdue remark notification (read only)
       await createOverdueRemarkNotification({
         media,
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
@@ -4200,6 +4198,8 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         userType: Number(req.user?.userType),
         userId: req.user?.userId,
         userName,
+        attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
+        replyTo: replyToObj,
       });
     }
 
