@@ -1151,7 +1151,7 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
       const attLabels = attachments.map((a) => {
         if (!a) return "";
         if (a.audioUrl || a.mimeType?.startsWith("audio/") || a.fileName?.includes("voice")) {
-          return "🎙 Voice Message";
+          return "Voice Message"; // ✅ CHANGED — no icon
         }
         if (a.fileType === "image" || a.mimeType?.startsWith("image/") || /\.(png|jpg|jpeg|webp|gif)$/i.test(a.fileName || "")) {
           return `🖼 ${a.fileName || "Image"}`;

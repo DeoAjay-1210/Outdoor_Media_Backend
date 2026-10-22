@@ -353,8 +353,7 @@ function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth
     attachments.forEach((a) => {
       if (!a) return;
       if (a.audioUrl || a.mimeType?.startsWith('audio/') || a.fileName?.includes('voice')) {
-        const dur = a.duration ? ` (${a.duration}s)` : "";
-        attLines.push(`🎙 *Voice Message${dur}:* ${a.audioUrl || a.fileUrl || ""}`);
+        attLines.push(`*Voice Message:* ${a.audioUrl || a.fileUrl || ""}`); // ✅ CHANGED — no icon / duration
       } else if (a.fileType === 'image' || a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|webp|gif)$/i.test(a.fileName || '')) {
         attLines.push(`🖼 *Image (${a.fileName || 'Photo'}):* ${a.fileUrl || ""}`);
       } else if (a.fileType === 'pdf' || a.mimeType === 'application/pdf' || /\.pdf$/i.test(a.fileName || '')) {
