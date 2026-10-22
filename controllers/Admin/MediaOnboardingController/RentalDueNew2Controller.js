@@ -3981,14 +3981,7 @@ exports.overDueRemark = async (req, res) => {
       const OverdueByCMD = calcDiffDays(ownerApprovedAt);
 
       const query = { mediaId: media._id };
-      if (rId && mongoose.Types.ObjectId.isValid(rId)) {
-        query.rentalDueId = new mongoose.Types.ObjectId(rId);
-      }
-
       let overdueRecords = await OverDueHistory.find(query);
-      if (overdueRecords.length === 0 && rId && mongoose.Types.ObjectId.isValid(rId)) {
-        overdueRecords = await OverDueHistory.find({ mediaId: media._id });
-      }
 
       if (overdueRecords.length > 0) {
         for (const record of overdueRecords) {
@@ -4176,16 +4169,10 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
 exports.getOverDueRemarks = async (req, res) => {
   try {
     const mediaIdParam = req.query.mediaId || req.body?.mediaId;
-    const rentalDueIdParam = req.query.rentalDueId || req.body?.rentalDueId;
 
     let mediaIds = [];
     if (mediaIdParam) {
       mediaIds = Array.isArray(mediaIdParam) ? mediaIdParam : String(mediaIdParam).split(",").map(id => id.trim());
-    }
-
-    let rentalDueIds = [];
-    if (rentalDueIdParam) {
-      rentalDueIds = Array.isArray(rentalDueIdParam) ? rentalDueIdParam : String(rentalDueIdParam).split(",").map(id => id.trim());
     }
 
     const query = {};
@@ -4196,14 +4183,48 @@ exports.getOverDueRemarks = async (req, res) => {
       }
     }
 
-    if (rentalDueIds.length > 0) {
-      const validRentalDueIds = rentalDueIds.filter(id => mongoose.Types.ObjectId.isValid(id));
-      if (validRentalDueIds.length > 0) {
-        query.rentalDueId = { $in: validRentalDueIds.map(id => new mongoose.Types.ObjectId(id)) };
+    const rawRecords = await OverDueHistory.find(query).lean();
+
+    // Aggregate overDueRemarks across all months and years for each site (mediaId)
+    const mediaRemarksMap = new Map();
+    for (const rec of rawRecords) {
+      const mIdStr = String(rec.mediaId);
+      if (!mediaRemarksMap.has(mIdStr)) {
+        mediaRemarksMap.set(mIdStr, {
+          primaryRecord: rec,
+          allRemarks: []
+        });
+      }
+      if (Array.isArray(rec.overDueRemarks)) {
+        mediaRemarksMap.get(mIdStr).allRemarks.push(...rec.overDueRemarks);
       }
     }
 
-    const records = await OverDueHistory.find(query).lean();
+    for (const [mIdStr, group] of mediaRemarksMap.entries()) {
+      const seenIds = new Set();
+      const uniqueRemarks = [];
+      for (const r of group.allRemarks) {
+        const rId = r._id ? String(r._id) : JSON.stringify(r);
+        if (!seenIds.has(rId)) {
+          seenIds.add(rId);
+          uniqueRemarks.push(r);
+        }
+      }
+      uniqueRemarks.sort((a, b) => new Date(a.addedAt || 0) - new Date(b.addedAt || 0));
+      group.primaryRecord.overDueRemarks = uniqueRemarks;
+    }
+
+    const consolidatedRecords = [];
+    const seenMediaIds = new Set();
+    for (const rec of rawRecords) {
+      const mIdStr = String(rec.mediaId);
+      if (!seenMediaIds.has(mIdStr)) {
+        seenMediaIds.add(mIdStr);
+        consolidatedRecords.push(mediaRemarksMap.get(mIdStr).primaryRecord);
+      }
+    }
+
+    const records = consolidatedRecords.length > 0 ? consolidatedRecords : rawRecords;
     // ✅ NEW — isRead per remark for the logged-in role (from the token)
     const viewerRole = Number(req.user?.userType) || null;
     // ✅ NEW — the logged-in role's overdueRemark notification for each record
