@@ -15,6 +15,16 @@ const {
   overDueRemark,
   getOverDueRemarks,
 } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueNew2Controller");
+// ✅ NEW — overdue remark chat APIs (own controller)
+const {
+  editOverdueRemark,
+  deleteOverdueRemark,
+  undoDeleteOverdueRemark,
+  pinOverdueRemark,
+  markOverdueRemarkRead,
+  getMessageInfo,
+  getEditHistory,
+} = require("../../../controllers/Admin/MediaOnboardingController/OverdueRemarkChatController");
 // ✅ NEW — appraisal hold APIs (own controller)
 const {
   setAppraisalHold,
@@ -34,6 +44,7 @@ const { upload, processFile } = createUploader("rentalDueProofs", {
   proofOfCampaign: "rentalDueProofs",
   invoice: "invoice",
 });
+const overdueRemarksUploader = createUploader("overdueRemarks");
 
 
 // STATS
@@ -86,6 +97,30 @@ router.post("/tds-hold", protect, setTdsHold);
 // ✅ NEW — read only (any role): a site's TDS holds + remarks (separate API)
 // ?mediaId=...&landOwnerId=... (landOwnerId optional)
 router.get("/tds-hold-remarks", protect, getTdsHoldRemarks);
-router.post("/overdue-remark", protect, overDueRemark);
+router.post(
+  "/overdue-remark",
+  protect,
+  (req, res, next) => {
+    overdueRemarksUploader.upload.any()(req, res, (err) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({ success: false, message: "File size exceeds 3MB limit." });
+        }
+        return res.status(400).json({ success: false, message: err.message || "File upload error" });
+      }
+      next();
+    });
+  },
+  overDueRemark
+);
+
+// ✅ CHAT ENHANCEMENT ENDPOINTS
+router.put("/overdue-remark/edit", protect, editOverdueRemark);
+router.post("/overdue-remark/delete", protect, deleteOverdueRemark);
+router.post("/overdue-remark/undo-delete", protect, undoDeleteOverdueRemark);
+router.post("/overdue-remark/pin", protect, pinOverdueRemark);
+router.post("/overdue-remark/read-receipt", protect, markOverdueRemarkRead);
+router.get("/overdue-remark/message-info", protect, getMessageInfo);
+router.get("/overdue-remark/edit-history", protect, getEditHistory);
 
 module.exports = router;

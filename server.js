@@ -113,7 +113,7 @@ if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish
 app.use('/gstdetails', gstDetailRoutes);
 
 app.get("/", (req, res) => {
-  res.send("API Running");
+  res.send("API Running #1");
 });
 
 const PORT = process.env.PORT || 5000;
@@ -137,8 +137,6 @@ app.use(cors({
     "https://adinntech.in/ooh-bills/api",
     "https://adinntech.in/",
     "https://adinntech.in"
-    
-
   ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]

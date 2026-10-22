@@ -327,14 +327,12 @@ const OVERDUE_REMARK_ROUTES = {
   3: ["RENTAL_EXECUTIVE_URL", "RENTAL_MANAGER_URL"],
 };
 
-function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName }) {
+function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName, attachments = [], replyTo = null }) {
   const plain = typeof media?.toObject === "function" ? media.toObject() : media || {};
   const details = plain.mediaDetails || [];
-  // remark for one face → that face; otherwise every active face of the site
   const face = mediaDetailId ? details.find((d) => String(d._id) === String(mediaDetailId)) : null;
   const activeFaces = details.filter((d) => Number(d.status) === 1);
   const shownFaces = face ? [face] : activeFaces.length ? activeFaces : details;
-  // remark for one landowner (landOwners[]._id or landOwnerMasterId) → that one; otherwise all
   const owners = plain.landOwners || [];
   const owner = landOwnerId
     ? owners.find(
@@ -343,18 +341,47 @@ function buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth
     : null;
   const shownOwners = owner ? [owner] : owners;
 
-  return [
+  let replyContext = "";
+  if (replyTo && (replyTo.addedBy || replyTo.remarks)) {
+    const replySender = replyTo.addedBy || "User";
+    const replyText = replyTo.remarks || "Attachment";
+    replyContext = `*Replying to:* ${replySender} ("${replyText}")`;
+  }
+
+  const attLines = [];
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    attachments.forEach((a) => {
+      if (!a) return;
+      if (a.audioUrl || a.mimeType?.startsWith('audio/') || a.fileName?.includes('voice')) {
+        attLines.push(`*Voice Message:* ${a.audioUrl || a.fileUrl || ""}`); // ✅ CHANGED — no icon / duration
+      } else if (a.fileType === 'image' || a.mimeType?.startsWith('image/') || /\.(png|jpg|jpeg|webp|gif)$/i.test(a.fileName || '')) {
+        attLines.push(`🖼 *Image (${a.fileName || 'Photo'}):* ${a.fileUrl || ""}`);
+      } else if (a.fileType === 'pdf' || a.mimeType === 'application/pdf' || /\.pdf$/i.test(a.fileName || '')) {
+        attLines.push(`📄 *PDF (${a.fileName || 'Document'}):* ${a.fileUrl || ""}`);
+      } else if (a.fileUrl) {
+        attLines.push(`📁 *Document (${a.fileName || 'File'}):* ${a.fileUrl}`);
+      }
+    });
+  }
+
+  const lines = [
     `*Overdue Remark Added* — by ${ROLE_LABEL[Number(userType)] || "User"}${userName ? ` (${userName})` : ""}`,
     `*Site Name:* ${shownFaces.map((d) => d.mediaName).filter(Boolean).join(", ") || "-"}`,
     `*Site Code:* ${shownFaces.map((d) => d.mediaCode).filter(Boolean).join(", ") || "-"}`,
     `*Landowner Name:* ${shownOwners.map((o) => o.name).filter(Boolean).join(", ") || "-"}`,
     `*Due Month:* ${dueMonth || "-"}`,
-    `*Remark:* ${remark || "-"}`,
-  ].join("\n");
+    replyContext,
+    `*Remark:* ${remark || (attLines.length ? "Attachment uploaded" : "-")}`,
+  ].filter(Boolean);
+
+  if (attLines.length > 0) {
+    lines.push(`*Attachments:*\n${attLines.join("\n")}`);
+  }
+
+  return lines.join("\n");
 }
 
-// Built immediately, posted in the background; never throws.
-function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName }) {
+function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName, attachments = [], replyTo = null }) {
   if (!isGoogleChatEnabled() || !media) return;
   const envKeys = OVERDUE_REMARK_ROUTES[Number(userType)];
   if (!envKeys) return;
@@ -363,7 +390,7 @@ function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, 
 
   let text;
   try {
-    text = buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName });
+    text = buildOverdueRemarkMessage({ media, mediaDetailId, landOwnerId, dueMonth, remark, userType, userName, attachments, replyTo });
   } catch (err) {
     console.error("[GoogleChat] overdue remark message build failed:", err.message);
     return;

@@ -69,13 +69,85 @@ const overDueHistorySchema = new mongoose.Schema(
         landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null },
         remarks: { type: String, trim: true },
         addedBy: { type: String, trim: true },
+        addedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
         addedAt: { type: Date, default: Date.now },
         userType: { type: Number, default: null },
-role: { type: Number, default: null },
-        // ✅ NEW — roles that have read this remark (1 RE, 2 RM, 3 CMD); starts
-        // with the adding role. Not set on remarks saved before this existed →
-        // those count as read for everyone.
+        role: { type: Number, default: null },
         readByRoles: { type: [Number], default: undefined },
+
+        // Reply Reference
+        replyTo: {
+          messageId: { type: String, default: null },
+          remarks: { type: String, default: "" },
+          addedBy: { type: String, default: "" },
+        },
+
+        // Edit History & Restrictions
+        isEdited: { type: Boolean, default: false },
+        editedAt: { type: Date, default: null },
+        editedAtIst: { type: Boolean, default: undefined }, // ✅ NEW — true = editedAt saved in IST (same as addedAt)
+        editedBy: { type: String, default: "" },
+        originalRemarks: { type: String, default: "" },
+        editHistory: [
+          {
+            previousRemarks: { type: String },
+            updatedRemarks: { type: String },
+            editedBy: { type: String },
+            editedAt: { type: Date, default: Date.now },
+            istTime: { type: Boolean, default: undefined }, // ✅ NEW — true = editedAt saved in IST (same as addedAt)
+          },
+        ],
+
+        // Deletion & Reversion
+        isDeleted: { type: Boolean, default: false },
+        deletedAt: { type: Date, default: null },
+        deletedBy: { type: String, default: "" },
+        undoUntil: { type: Date, default: null },
+
+        // Pinning
+        isPinned: { type: Boolean, default: false },
+        pinnedAt: { type: Date, default: null },
+        pinnedBy: { type: String, default: "" },
+        pinExpiresAt: { type: Date, default: null },
+
+        // Delivery & Read Receipts
+        deliveredTo: [
+          {
+            userId: { type: String },
+            userName: { type: String },
+            deliveredAt: { type: Date, default: Date.now },
+            userType: { type: Number, default: null }, // ✅ NEW — reader's role (from the token)
+            istTime: { type: Boolean, default: undefined }, // ✅ NEW — true = deliveredAt saved in IST (same as addedAt)
+          },
+        ],
+        readBy: [
+          {
+            userId: { type: String },
+            userName: { type: String },
+            readAt: { type: Date, default: Date.now },
+            userType: { type: Number, default: null }, // ✅ NEW — reader's role (from the token)
+            istTime: { type: Boolean, default: undefined }, // ✅ NEW — true = readAt saved in IST (same as addedAt)
+          },
+        ],
+
+        // Attachments
+        attachments: [
+          {
+            fileUrl: { type: String },
+            fileName: { type: String },
+            fileType: { type: String },
+            fileSize: { type: Number, default: 0 },
+            mimeType: { type: String },
+            caption: { type: String, default: "" },
+          },
+        ],
+
+        // Voice Message
+        voiceMessage: {
+          audioUrl: { type: String, default: null },
+          duration: { type: Number, default: 0 },
+          mimeType: { type: String, default: "" },
+        },
       },
     ],
     updatedBy: { type: String },

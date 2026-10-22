@@ -1124,11 +1124,11 @@ const sendCmdReminder = async (req, res) => {
 // CMD (read only); see OVERDUE_REMARK_NOTIFY_TARGETS.
 // ONE row per site per month per receiver: a new remark updates it,
 // increments remarkCount and makes it unread again. Never throws.
-async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, mediaDetailId, remark, userType, userId, userName }) {
+async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, mediaDetailId, remark, userType, userId, userName, attachments = [], replyTo = null }) {
   try {
     const role = Number(userType);
     const targets = OVERDUE_REMARK_NOTIFY_TARGETS[role] || [];
-    if (!media?._id || !remark || targets.length === 0) return null;
+    if (!media?._id || targets.length === 0) return null;
 
     const month = dueMonth || "";
     const details = media.mediaDetails || [];
@@ -1139,10 +1139,52 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
         ? activeFaces
         : details;
     const owners = media.landOwners || [];
+
+    let displayRemark = remark || "";
+    if (replyTo && (replyTo.addedBy || replyTo.remarks)) {
+      const replySender = replyTo.addedBy || "User";
+      const replyText = replyTo.remarks || "Attachment";
+      displayRemark = `[Replying to ${replySender}: "${replyText}"] ${displayRemark}`.trim();
+    }
+
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      const attLabels = attachments.map((a) => {
+        if (!a) return "";
+        if (a.audioUrl || a.mimeType?.startsWith("audio/") || a.fileName?.includes("voice")) {
+          return "Voice Message"; // ✅ CHANGED — no icon
+        }
+        if (a.fileType === "image" || a.mimeType?.startsWith("image/") || /\.(png|jpg|jpeg|webp|gif)$/i.test(a.fileName || "")) {
+          return `🖼 ${a.fileName || "Image"}`;
+        }
+        if (a.fileType === "pdf" || a.mimeType === "application/pdf" || /\.pdf$/i.test(a.fileName || "")) {
+          return `📄 ${a.fileName || "PDF"}`;
+        }
+        return `📁 ${a.fileName || "Document"}`;
+      }).filter(Boolean);
+
+      if (attLabels.length > 0) {
+        displayRemark = displayRemark ? `${displayRemark} (${attLabels.join(", ")})` : attLabels.join(", ");
+      }
+    }
+
     const message = `${ROLE_LABEL[role]} ${userName || ""} added an overdue remark${month ? ` for ${month}` : ""}`
       .replace(/\s+/g, " ")
       .trim();
     const now = nowIST();
+
+    const isCombined = faces.length > 1 || details.length > 1;
+    let siteCode = "";
+    if (isCombined) {
+      siteCode = "Combined Sites";
+    } else if (faces.length === 1 && faces[0].mediaCode) {
+      siteCode = faces[0].mediaCode;
+    } else {
+      siteCode = media.mediaCode || "SITE";
+    }
+
+    const siteName = isCombined
+      ? "Combined Sites"
+      : (faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "Site");
 
     for (const targetRole of targets) {
       const dedupeKey = `overdueRemark:media:${String(media._id)}:${month}:to:${targetRole}`;
@@ -1155,10 +1197,10 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
             rentalDueId: toObjectId(rentalDueId),
             landOwnerName: owners.map((o) => o.name).filter(Boolean).join(", "),
             landOwnerMasterIds: owners.map((o) => toObjectId(o.landOwnerMasterId)).filter(Boolean),
-            siteName: faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "",
-            siteCode: faces.map((d) => d.mediaCode).filter(Boolean).join(" / ") || media.mediaCode || "",
+            siteName: siteName,
+            siteCode: siteCode,
             message,
-            remarks: remark,
+            remarks: displayRemark || "Overdue remark updated",
             remarkedBy: userName || "",
             remarkedByRole: role,
             remarkedByUserId: toObjectId(userId),

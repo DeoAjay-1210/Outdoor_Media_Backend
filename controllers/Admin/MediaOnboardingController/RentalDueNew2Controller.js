@@ -28,6 +28,7 @@ const {
 const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
+const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -3215,7 +3216,17 @@ async function siteBillAmountsForOverdueRows(records) {
     ),
   ];
   if (!mediaIds.length) return result;
-  const medias = await Media.find({ _id: { $in: mediaIds } })
+  // ✅ SPEED — only single-bill multi-face sites get a site bill (see
+  // siteBillForOverdue), so the heavy fields are loaded for those sites only
+  const faceDocs = await Media.find({ _id: { $in: mediaIds } }).select("mediaDetails.status mediaDetails.siteBillMode").lean();
+  const billSiteIds = faceDocs
+    .filter((m) => {
+      const active = (m.mediaDetails || []).filter((d) => Number(d.status) === 1);
+      return active.length > 1 && active.every((d) => Number(d.siteBillMode) !== 2);
+    })
+    .map((m) => m._id);
+  if (!billSiteIds.length) return result;
+  const medias = await Media.find({ _id: { $in: billSiteIds } })
     .select("mediaDetails rentalPayment landOwners rentalDue ledger ledgerHistory gstBalanceHistory gstApplicableFlag appraisal")
     .lean();
   const mediaById = new Map(medias.map((m) => [String(m._id), m]));
@@ -3262,15 +3273,50 @@ async function fixSingleBillOverdueAmounts() {
 }
 exports.fixSingleBillOverdueAmounts = fixSingleBillOverdueAmounts;
 
+// ─────────────────────────────────────────────────────────────
+// ✅ SPEED — shared overdue sweep for /admin/overdue-history-list.
+// Same steps as before (sync every active site's overdue rows → remove
+// duplicates → fill landowners). Calls arriving while a sweep runs share it.
+// Only the first call after a server start waits for it; later calls answer
+// right away and, when the last sweep is older than OVERDUE_SWEEP_REUSE_MS
+// (.env, default 5 min), start a fresh sweep in the background.
+// ─────────────────────────────────────────────────────────────
+const OVERDUE_SWEEP_REUSE_MS = Number(process.env.OVERDUE_SWEEP_REUSE_MS) || 5 * 60 * 1000;
+let overdueSweepInFlight = null;
+let overdueSweepFinishedAt = 0;
+
+async function sweepOverdueHistory() {
+  const activeSites = await Media.find({ "mediaDetails.status": 1 });
+  // 5 sites at a time, each site's rows loaded once (same result)
+  await syncOverdueEntriesForSites(activeSites, "");
+  await cleanupDuplicateOverDueHistoryRecords();
+  await ensureOverDueHistoryLandOwnersPopulated();
+}
+
+function startOverdueSweep() {
+  if (!overdueSweepInFlight) {
+    overdueSweepInFlight = sweepOverdueHistory()
+      .then(() => {
+        overdueSweepFinishedAt = Date.now();
+      })
+      .catch((err) => console.error("overdue sweep error:", err.message))
+      .finally(() => {
+        overdueSweepInFlight = null;
+      });
+  }
+  return overdueSweepInFlight;
+}
+
+async function runSharedOverdueSweep() {
+  if (!overdueSweepFinishedAt) return startOverdueSweep(); // first call: wait once
+  if (Date.now() - overdueSweepFinishedAt >= OVERDUE_SWEEP_REUSE_MS) startOverdueSweep(); // refresh in background
+}
+
 exports.getOverDueHistoryList = async (req, res) => {
   try {
-    // Sweep active sites and sync overdue entries FIRST
-    const activeSites = await Media.find({ "mediaDetails.status": 1 });
-    // ✅ CHANGED — 5 sites at a time, each site's rows loaded once (same result)
-    await syncOverdueEntriesForSites(activeSites, "");
-
-    await cleanupDuplicateOverDueHistoryRecords();
-    await ensureOverDueHistoryLandOwnersPopulated();
+    // ✅ CHANGED — shared sweep (see runSharedOverdueSweep) instead of a full
+    // sweep on every call
+    await runSharedOverdueSweep();
 
     const {
       pageNumber = 1,
@@ -3842,36 +3888,94 @@ exports.overDueRemark = async (req, res) => {
     const userName = req.user?.userName || "Admin";
     const savedResults = [];
 
+    // ✅ CHANGED — same base URL as the other uploads (.env LOCAL_BASE_URL,
+    // e.g. http://localhost:5000) instead of the request's host IP
+    const baseUrl = String(process.env.LOCAL_BASE_URL || "http://localhost:5000").trim().replace(/\/+$/, "");
+    // ✅ NEW — STORAGE_TYPE=space → the file is in DigitalOcean Spaces (CDN link),
+    // otherwise the local public/overdueRemarks folder
+    const remarkFileUrl = (file) =>
+      file.key
+        ? `${require("../../../middleware/dynamicFileUpload").CDN_BASE_URL}/${file.key}`
+        : `${baseUrl}/public/overdueRemarks/${file.filename}`;
+    let attachments = [];
+    if (req.files && Array.isArray(req.files)) {
+      attachments = req.files.map(file => ({
+        fileUrl: remarkFileUrl(file),
+        fileName: file.originalname,
+        fileType: file.mimetype.startsWith('image/') ? 'image' : 'document',
+        fileSize: file.size,
+        mimeType: file.mimetype,
+      }));
+    } else if (req.file) {
+      attachments = [{
+        fileUrl: remarkFileUrl(req.file),
+        fileName: req.file.originalname,
+        fileType: req.file.mimetype.startsWith('image/') ? 'image' : 'document',
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+      }];
+    }
+
+    let voiceMessageObj = null;
+    if (req.body.voiceMessage) {
+      try {
+        voiceMessageObj = typeof req.body.voiceMessage === 'string' ? JSON.parse(req.body.voiceMessage) : req.body.voiceMessage;
+        if (voiceMessageObj && !voiceMessageObj.audioUrl && attachments.length > 0) {
+          const audioAttIndex = attachments.findIndex(a => a.mimeType?.startsWith('audio/') || a.fileName?.includes('voice_recording'));
+          if (audioAttIndex !== -1) {
+            voiceMessageObj.audioUrl = attachments[audioAttIndex].fileUrl;
+            attachments.splice(audioAttIndex, 1);
+          } else {
+            voiceMessageObj.audioUrl = attachments[0].fileUrl;
+            attachments.splice(0, 1);
+          }
+        }
+      } catch (e) {}
+    }
+
+    let replyToObj = null;
+    if (req.body.replyTo) {
+      try {
+        replyToObj = typeof req.body.replyTo === 'string' ? JSON.parse(req.body.replyTo) : req.body.replyTo;
+      } catch (e) {}
+    }
+
     for (const item of entriesArray) {
       const mId = item.mediaId;
       const rId = item.rentalDueId;
       const mDetailId = item.mediaDetailId || item.mediaDetailsId;
       const lOwnerId = item.landOwnerId || item.landownerId;
-      const rem = item.remarks || remarks;
+      const rem = item.remarks || remarks || "";
 
-      if (!mId || !rem) continue;
+      if (!mId) continue;
       if (!mongoose.Types.ObjectId.isValid(mId)) continue;
 
       const trimmedRemarks = typeof rem === "string" ? rem.trim() : "";
-      if (!trimmedRemarks) continue;
+      const hasContent = trimmedRemarks || attachments.length > 0 || voiceMessageObj;
+      if (!hasContent) continue;
 
       const media = await Media.findById(mId);
       if (!media) continue;
 
       // Sync any active overdue entries for this media first
       await syncAllOverdueEntriesForMedia(media, userName);
-const userTypeNum = Number(req.user?.userType) || null;
+      const userTypeNum = Number(req.user?.userType) || null;
+      const remarkAddedAt = nowIST();
       const newRemark = {
         mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
         landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
         remarks: trimmedRemarks,
         addedBy: userName,
-        addedAt: nowIST(),
+        addedAt: remarkAddedAt,
         userType: userTypeNum,
-role: userTypeNum,
-        // ✅ NEW — read for the adding role; other roles read it via
-        // /admin/cmd-notifications/read (role-based isRead)
+        role: userTypeNum,
         readByRoles: userTypeNum ? [userTypeNum] : [],
+        // ✅ NEW — delivered on send to every user of the other roles
+        // (RE → RM + CMD, RM → RE + CMD, CMD → RE + RM)
+        deliveredTo: await overdueRemarkReceivers(userTypeNum, req.user?._id || req.user?.userId || req.user?.id, remarkAddedAt),
+        attachments,
+        voiceMessage: voiceMessageObj,
+        replyTo: replyToObj,
       };
 
       // Find matching rentalDue entry from media to populate full overdue details
@@ -4080,11 +4184,11 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         remark: trimmedRemarks,
         userType: Number(req.user?.userType),
         userName,
+        attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
+        replyTo: replyToObj,
       });
 
-      // ✅ NEW — overdue remark notification (read only): Executive's remark →
-      // Manager + CMD, Manager's remark → Executive + CMD, CMD's remark →
-      // Executive + Manager
+      // ✅ NEW — overdue remark notification (read only)
       await createOverdueRemarkNotification({
         media,
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
@@ -4094,6 +4198,8 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         userType: Number(req.user?.userType),
         userId: req.user?.userId,
         userName,
+        attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
+        replyTo: replyToObj,
       });
     }
 
@@ -4196,6 +4302,7 @@ records.forEach((rec) => {
       // ✅ NEW — send this to /admin/cmd-notifications/read; null for the
       // adding role's own remark (no notification to read)
       r.notificationId = !!viewerRole && rNum === viewerRole ? null : recNotificationId;
+      istRemarkEditTimes(r); // ✅ NEW — editedAt in IST, same as addedAt
     });
   }
 });
@@ -6541,3 +6648,4 @@ const details = (item.mediaDetails || []).map((d) => ({
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
+
