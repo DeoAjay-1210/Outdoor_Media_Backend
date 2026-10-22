@@ -3216,7 +3216,17 @@ async function siteBillAmountsForOverdueRows(records) {
     ),
   ];
   if (!mediaIds.length) return result;
-  const medias = await Media.find({ _id: { $in: mediaIds } })
+  // ✅ SPEED — only single-bill multi-face sites get a site bill (see
+  // siteBillForOverdue), so the heavy fields are loaded for those sites only
+  const faceDocs = await Media.find({ _id: { $in: mediaIds } }).select("mediaDetails.status mediaDetails.siteBillMode").lean();
+  const billSiteIds = faceDocs
+    .filter((m) => {
+      const active = (m.mediaDetails || []).filter((d) => Number(d.status) === 1);
+      return active.length > 1 && active.every((d) => Number(d.siteBillMode) !== 2);
+    })
+    .map((m) => m._id);
+  if (!billSiteIds.length) return result;
+  const medias = await Media.find({ _id: { $in: billSiteIds } })
     .select("mediaDetails rentalPayment landOwners rentalDue ledger ledgerHistory gstBalanceHistory gstApplicableFlag appraisal")
     .lean();
   const mediaById = new Map(medias.map((m) => [String(m._id), m]));
@@ -3263,15 +3273,50 @@ async function fixSingleBillOverdueAmounts() {
 }
 exports.fixSingleBillOverdueAmounts = fixSingleBillOverdueAmounts;
 
+// ─────────────────────────────────────────────────────────────
+// ✅ SPEED — shared overdue sweep for /admin/overdue-history-list.
+// Same steps as before (sync every active site's overdue rows → remove
+// duplicates → fill landowners). Calls arriving while a sweep runs share it.
+// Only the first call after a server start waits for it; later calls answer
+// right away and, when the last sweep is older than OVERDUE_SWEEP_REUSE_MS
+// (.env, default 5 min), start a fresh sweep in the background.
+// ─────────────────────────────────────────────────────────────
+const OVERDUE_SWEEP_REUSE_MS = Number(process.env.OVERDUE_SWEEP_REUSE_MS) || 5 * 60 * 1000;
+let overdueSweepInFlight = null;
+let overdueSweepFinishedAt = 0;
+
+async function sweepOverdueHistory() {
+  const activeSites = await Media.find({ "mediaDetails.status": 1 });
+  // 5 sites at a time, each site's rows loaded once (same result)
+  await syncOverdueEntriesForSites(activeSites, "");
+  await cleanupDuplicateOverDueHistoryRecords();
+  await ensureOverDueHistoryLandOwnersPopulated();
+}
+
+function startOverdueSweep() {
+  if (!overdueSweepInFlight) {
+    overdueSweepInFlight = sweepOverdueHistory()
+      .then(() => {
+        overdueSweepFinishedAt = Date.now();
+      })
+      .catch((err) => console.error("overdue sweep error:", err.message))
+      .finally(() => {
+        overdueSweepInFlight = null;
+      });
+  }
+  return overdueSweepInFlight;
+}
+
+async function runSharedOverdueSweep() {
+  if (!overdueSweepFinishedAt) return startOverdueSweep(); // first call: wait once
+  if (Date.now() - overdueSweepFinishedAt >= OVERDUE_SWEEP_REUSE_MS) startOverdueSweep(); // refresh in background
+}
+
 exports.getOverDueHistoryList = async (req, res) => {
   try {
-    // Sweep active sites and sync overdue entries FIRST
-    const activeSites = await Media.find({ "mediaDetails.status": 1 });
-    // ✅ CHANGED — 5 sites at a time, each site's rows loaded once (same result)
-    await syncOverdueEntriesForSites(activeSites, "");
-
-    await cleanupDuplicateOverDueHistoryRecords();
-    await ensureOverDueHistoryLandOwnersPopulated();
+    // ✅ CHANGED — shared sweep (see runSharedOverdueSweep) instead of a full
+    // sweep on every call
+    await runSharedOverdueSweep();
 
     const {
       pageNumber = 1,
