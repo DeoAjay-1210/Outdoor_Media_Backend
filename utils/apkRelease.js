@@ -1,6 +1,7 @@
 // Shared "publish an APK release" logic, used by scripts/publish-apk-release.js (manual)
 // and utils/apkAutoPublish.js (folder watcher). Writes config/appRelease.json (or APP_RELEASE_FILE)
-// atomically and copies the APK to public/apk under a versioned name (never overwrites a different file).
+// atomically. The APK is served from release/apk (no copy); an APK given from elsewhere is copied there
+// under a versioned name (never overwrites a different file).
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -8,7 +9,7 @@ const { validateRelease } = require("../controllers/Admin/AppUpdateController/Ap
 const { readApkManifest } = require("./apkManifest");
 
 const ROOT = path.join(__dirname, "..");
-const DEFAULT_APK_DIR = path.join(ROOT, "public", "apk");
+const DEFAULT_APK_DIR = path.join(ROOT, "release", "apk");
 const defaultReleaseFile = () => process.env.APP_RELEASE_FILE || path.join(ROOT, "config", "appRelease.json");
 const DEFAULT_MESSAGE = "A new version of the application is available. Please update to continue.";
 
@@ -77,7 +78,8 @@ const publishApk = async (options) => {
   const size = fs.statSync(apk).size;
   const hash = await sha256File(apk);
   const apkUrl = options.apkUrl || "";
-  const apkFile = apkUrl ? "" : `app-release-${inApk.versionName}-${inApk.versionCode}.apk`;
+  const inPlace = path.dirname(apk) === path.resolve(apkDir); // already in the served folder: no copy
+  const apkFile = apkUrl ? "" : inPlace ? path.basename(apk) : `app-release-${inApk.versionName}-${inApk.versionCode}.apk`;
   const meta = {
     enabled: true,
     packageName: inApk.packageName,
@@ -101,7 +103,7 @@ const publishApk = async (options) => {
   const result = { meta, apk, inApk, dest, releaseFile };
   if (options.dryRun) return result;
 
-  if (dest) {
+  if (dest && !inPlace) {
     await fs.promises.mkdir(apkDir, { recursive: true });
     if (fs.existsSync(dest)) {
       if ((await sha256File(dest)) !== hash) throw new Error(`${dest} already exists with different content; refusing to overwrite`);

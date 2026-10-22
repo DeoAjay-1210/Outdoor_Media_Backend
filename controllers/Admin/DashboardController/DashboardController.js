@@ -404,7 +404,7 @@ const DRAFT_AGREEMENTS_STATIC = { count: 0, amount: 0, isStatic: true }; // expl
 
 // roles 1/2/3 are the only valid userTypes; backend is the final authority
 // 1 Rental Executive, 2 Rental Manager, 3 CMD, 4 Other (✅ NEW — view only; dashboard v2 APIs are read-only)
-const allowedRole = (req) => [1, 2, 3, 4].includes(Number(req.user?.userType));
+const allowedRole = (req) => [1, 2, 3, 4, 5].includes(Number(req.user?.userType));
 
 const loadDocs = () => MediaOnboarding.find({}).lean();
 

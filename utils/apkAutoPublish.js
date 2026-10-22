@@ -1,6 +1,6 @@
 // Auto-publish: watches release/apk/app-release.apk (committed to git and deployed with the code)
 // and publishes it (same as scripts/publish-apk-release.js) once a new, complete file is there:
-// a versioned copy goes to public/apk (served for download) and config/appRelease.json is updated.
+// it is served from release/apk itself (no copy) and config/appRelease.json is updated.
 // Polling (not fs.watch)
 // so it also works on Docker volumes / network drives. Disable with APP_UPDATE_AUTO_PUBLISH=0.
 //
@@ -12,14 +12,14 @@
 // forceUpdate and release notes are not set automatically; use the script for those.
 const fs = require("fs");
 const path = require("path");
-const { publishApk, readRelease, sha256File, DEFAULT_APK_DIR, defaultReleaseFile } = require("./apkRelease");
+const { publishApk, readRelease, sha256File, defaultReleaseFile } = require("./apkRelease");
 
 const WATCHED_FILE = "app-release.apk";
 const DEFAULT_WATCH_DIR = path.join(__dirname, "..", "release", "apk");
 
 const createApkAutoPublisher = ({
   watchDir = DEFAULT_WATCH_DIR,
-  apkDir = DEFAULT_APK_DIR,
+  apkDir = watchDir,
   releaseFile = defaultReleaseFile(),
   log = console,
 } = {}) => {
@@ -33,7 +33,7 @@ const createApkAutoPublisher = ({
     release && release.apkFile && !release.apkUrl ? path.join(apkDir, path.basename(String(release.apkFile))) : null;
   const exists = (f) => fs.promises.access(f).then(() => true, () => false);
 
-  /** One check; returns "published", "restored", "skipped", "waiting" or "idle". */
+  /** One check; returns "published", "skipped", "waiting" or "idle". */
   const check = async () => {
     if (running) return "idle";
     running = true;
@@ -63,21 +63,9 @@ const createApkAutoPublisher = ({
       const brokenRelease = !!published && !(await exists(published)); // metadata points to a missing APK
       const sha = await sha256File(file);
 
-      if (previous && previous.sha256 === sha) {
-        if (!brokenRelease) return "idle";
-        // Same APK as published but its served copy is missing: restore it.
-        const tmp = `${published}.uploading`;
-        await fs.promises.mkdir(apkDir, { recursive: true });
-        await fs.promises.copyFile(file, tmp);
-        if ((await sha256File(tmp)) !== sha) {
-          await fs.promises.unlink(tmp);
-          log.error(`[app-update] could not restore ${path.basename(published)}: copy checksum mismatch`);
-          return "skipped";
-        }
-        await fs.promises.rename(tmp, published);
-        log.log(`[app-update] restored missing ${path.basename(published)} from ${WATCHED_FILE}`);
-        return "restored";
-      }
+      // Same APK already published and its file is there: nothing to do. If the metadata points to a
+      // missing file (e.g. deployed from another machine), republish this APK over it.
+      if (previous && previous.sha256 === sha && !brokenRelease) return "idle";
 
       try {
         const { meta } = await publishApk({

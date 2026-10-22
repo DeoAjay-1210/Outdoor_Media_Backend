@@ -14,6 +14,7 @@ const STAFF_REGISTER_PASSWORD = process.env.STAFF_REGISTER_PASSWORD;
 const TEAMHEAD_REGISTER_PASSWORD = process.env.TEAMHEAD_REGISTER_PASSWORD;
 const CMD_REGISTER_PASSWORD = process.env.CMD_REGISTER_PASSWORD || process.env.OWNER_REGISTER_PASSWORD;
 const OTHER_REGISTER_PASSWORD = process.env.OTHER_REGISTER_PASSWORD || process.env.Other_REGISTER_PASSWORD; // ✅ NEW — userType 4
+const ACCOUNTS_REGISTER_PASSWORD = process.env.ACCOUNTS_REGISTER_PASSWORD; // ✅ NEW — userType 5
 
 const STAFF_LOGIN_PIN = process.env.STAFF_LOGIN_PIN || "1234";
 const TEAMHEAD_LOGIN_PIN = process.env.TEAMHEAD_LOGIN_PIN || "1234";
@@ -21,19 +22,20 @@ const CMD_LOGIN_PIN = process.env.CMD_LOGIN_PIN || process.env.OWNER_LOGIN_PIN |
 
 // ============================================================
 // USER TYPE LABELS
-// 1 = Rental Executive | 2 = Rental Manager | 3 = CMD | 4 = Other
+// 1 = Rental Executive | 2 = Rental Manager | 3 = CMD | 4 = Other | 5 = Accounts
 // ============================================================
 const USER_TYPE_LABELS = {
   1: "Rental Executive",
   2: "Rental Manager",
   3: "CMD",
   4: "Other",
+  5: "Accounts", // ✅ NEW
 };
 
-// ✅ NEW — userType 4 (Other) can only register and log in
-const REGISTER_LOGIN_USER_TYPES = [1, 2, 3, 4];
+// ✅ NEW — userType 4 (Other) and 5 (Accounts) can only register and log in
+const REGISTER_LOGIN_USER_TYPES = [1, 2, 3, 4, 5];
 const REGISTER_LOGIN_USER_TYPE_MESSAGE =
-  "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD), 4 (Other)";
+  "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD), 4 (Other), 5 (Accounts)";
 
 // ============================================================
 // REGISTER USER (DIRECT - NO OTP/SMS)
@@ -95,6 +97,16 @@ const registerUser = async (req, res) => {
       }
       if (registerPassword !== OTHER_REGISTER_PASSWORD) {
         return errorResponse(res, "Invalid Other Role registration password", null, 400);
+      }
+    }
+
+    // ✅ NEW — userType 5 (Accounts)
+    if (typeNum === 5 && ACCOUNTS_REGISTER_PASSWORD) {
+      if (!registerPassword) {
+        return errorResponse(res, "Accounts registration password is required", null, 400);
+      }
+      if (registerPassword !== ACCOUNTS_REGISTER_PASSWORD) {
+        return errorResponse(res, "Invalid Accounts registration password", null, 400);
       }
     }
 

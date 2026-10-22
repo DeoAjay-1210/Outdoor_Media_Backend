@@ -49,6 +49,11 @@ router.post(
 );
 
 router.post("/media-list", protect, mediaList);
+// ✅ NEW — Excel download of all sites (Summary, All / Active / Inactive /
+// Agreement Expired sites, Land Owners). Optional filters: status, city, mediaType, search
+const { exportMediaExcel } = require("../../../controllers/Admin/MediaOnboardingController/MediaExportController");
+
+router.post("/media-export-excel", protect, exportMediaExcel);
 // ✅ NEW — permanently delete a media (body: { mediaId })
 router.post("/media-delete", protect, deleteMedia);
 router.post("/sync-billing-cycles", syncBillingCyclesNow);

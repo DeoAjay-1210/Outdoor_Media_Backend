@@ -27,6 +27,8 @@ const {
 } = require("../../../controllers/Admin/NotificationController/CmdNotificationController");
 const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
+const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
+const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
 // Manager (TEAM_LEAD) save only counts as an approval when that role's own
@@ -484,7 +486,10 @@ function markRoleVerified(media, entry, role, userName) {
 /**
  * ✅ NEW — maintain history of overdue entries before they are removed by approval.
  */
-async function saveOverDueHistoryIfApplicable(media, entry, userName) {
+// siteRows (✅ NEW, optional) = this site's overdue rows loaded once by
+// syncAllOverdueEntriesForMedia; the same 3 lookups then run in memory
+// instead of 1–3 database round trips per bill. Without it → database as before.
+async function saveOverDueHistoryIfApplicable(media, entry, userName, siteRows = null) {
   try {
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
@@ -530,27 +535,31 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       Number(media.rentalPayment?.status) === 3 ||
       (entry.dueDate && new Date(entry.dueDate) < today);
 
+    // ✅ NEW — same lookup, from the preloaded site rows when given
+    const findRow = (predicate, query) =>
+      siteRows ? Promise.resolve(siteRows.find(predicate) || null) : OverDueHistory.findOne(query);
+
     // Check for duplicate for this specific cycle/media
-    let existing = await OverDueHistory.findOne({
-      mediaId: media._id,
-      rentalDueId: entry._id,
-    });
+    let existing = await findRow(
+      (r) => r.rentalDueId && String(r.rentalDueId) === String(entry._id),
+      { mediaId: media._id, rentalDueId: entry._id },
+    );
 
     if (!existing && entry.dueMonth) {
-      existing = await OverDueHistory.findOne({
-        mediaId: media._id,
-        dueMonth: entry.dueMonth,
-      });
+      existing = await findRow(
+        (r) => r.dueMonth === entry.dueMonth,
+        { mediaId: media._id, dueMonth: entry.dueMonth },
+      );
       if (existing && !existing.rentalDueId) {
         existing.rentalDueId = entry._id;
       }
     }
 
     if (!existing) {
-      existing = await OverDueHistory.findOne({
-        mediaId: media._id,
-        $or: [{ rentalDueId: null }, { rentalDueId: { $exists: false } }],
-      });
+      existing = await findRow(
+        (r) => r.rentalDueId === null || r.rentalDueId === undefined,
+        { mediaId: media._id, $or: [{ rentalDueId: null }, { rentalDueId: { $exists: false } }] },
+      );
       if (existing) {
         existing.rentalDueId = entry._id;
         existing.dueMonth = entry.dueMonth;
@@ -564,9 +573,16 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
     const entryGst = Number(entry.gstAmount || 0);
     const siteGst = Number(media.rentalPayment?.gstAmount || 0);
     const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-    const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+    let resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-    const baseAmount = Number(entry.netPayable || 0);
+    let baseAmount = Number(entry.netPayable || 0);
+    // ✅ NEW — single-bill multi-face site: the row is ONE per site per month,
+    // so it stores the whole bill (site rent / GST), not this face's share
+    const siteBill = siteBillForOverdue(media, entry.dueDate);
+    if (siteBill) {
+      resolvedGst = siteBill.gst;
+      baseAmount = Number(entry.withGst) === 2 ? siteBill.rent + siteBill.gst : siteBill.rent;
+    }
     const isGstApplicable = resolvedGst > 0;
 
     const mDetails = (media.mediaDetails || []).map(d => ({
@@ -671,7 +687,7 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       return;
     }
 
-    await OverDueHistory.create({
+    const createdRow = await OverDueHistory.create({
       mediaId: media._id,
       mediaDetails: mDetails,
       landOwners: lOwners,
@@ -703,6 +719,8 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
       createdAt: nowIST(),
       updatedAt: nowIST(),
     });
+    // ✅ NEW — later bills of this site in the same sweep see the new row
+    if (siteRows && createdRow) siteRows.push(createdRow);
   } catch (err) {
     console.error("❌ Error saving OverDue History:", err.message);
   }
@@ -710,9 +728,25 @@ async function saveOverDueHistoryIfApplicable(media, entry, userName) {
 
 async function syncAllOverdueEntriesForMedia(media, userName = "System") {
   if (!media || !Array.isArray(media.rentalDue)) return;
+  // ✅ CHANGED — the site's overdue rows are loaded ONCE (same documents
+  // findOne returned, natural order) instead of 1–3 lookups per bill
+  const siteRows = await OverDueHistory.find({ mediaId: media._id });
   for (const entry of media.rentalDue) {
-    await saveOverDueHistoryIfApplicable(media, entry, userName);
+    await saveOverDueHistoryIfApplicable(media, entry, userName, siteRows);
   }
+}
+
+// ✅ NEW — sweep several sites at a time (each site only touches its own
+// overdue rows); same result as one by one, fewer waits on the database
+async function syncOverdueEntriesForSites(sites, userName = "", concurrency = 5) {
+  let next = 0;
+  const worker = async () => {
+    while (next < sites.length) {
+      const site = sites[next++];
+      await syncAllOverdueEntriesForMedia(site, userName);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, sites.length) }, worker));
 }
 
 async function cleanupDuplicateOverDueHistoryRecords() {
@@ -1047,6 +1081,52 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         ...item,
         media: mediaAsOfDate(item.media, item.entry?.dueDate),
       }));
+
+      // ✅ NEW — CMD appraisal hold (POST /admin/appraisal-hold): a held bill is
+      // mailed at the rent WITHOUT that month's appraisal (e.g. 52k → 50k);
+      // rent, site GST, owner amounts and the bill's own amounts are scaled
+      // the same way, and the appraisal block is not sent. Mail payload only.
+      sitesInGroupData = sitesInGroupData.map((item) => {
+        const held = item.entry?.appraisalHold;
+        const heldRent = Number(held?.rentWithoutAppraisal || 0);
+        const pricedRent = Number(item.media?.rentalPayment?.totalRentalAmount || 0);
+        if (Number(held?.hold) !== 1 || heldRent <= 0 || pricedRent <= 0) return item;
+        if (heldRent === pricedRent) {
+          // site amounts already reduced by the hold → only drop the appraisal block
+          const plain = typeof item.media.toObject === "function" ? item.media.toObject() : item.media;
+          return { ...item, media: { ...plain, appraisal: { ...(plain.appraisal || {}), applicable: 0 } } };
+        }
+        const ratio = heldRent / pricedRent;
+        const scale = (v) => (v === undefined || v === null ? v : Math.round(Number(v) * ratio));
+        const base = typeof item.media.toObject === "function" ? item.media.toObject() : item.media;
+        const rp = base.rentalPayment || {};
+        const entryPlain = typeof item.entry.toObject === "function" ? item.entry.toObject() : item.entry;
+        return {
+          ...item,
+          media: {
+            ...base,
+            rentalPayment: { ...rp, totalRentalAmount: heldRent, gstAmount: scale(rp.gstAmount), netPayable: scale(rp.netPayable) },
+            landOwners: (base.landOwners || []).map((o) => {
+              const op = typeof o.toObject === "function" ? o.toObject() : o;
+              return {
+                ...op,
+                shareAmount: scale(op.shareAmount),
+                cashAmount: scale(op.cashAmount),
+                onlineAmount: scale(op.onlineAmount),
+                gstAmount: scale(op.gstAmount),
+                tdsAmount: scale(op.tdsAmount),
+              };
+            }),
+            appraisal: { ...(base.appraisal || {}), applicable: 0 }, // → no appraisal block
+          },
+          entry: {
+            ...entryPlain,
+            netPayable: scale(entryPlain.netPayable),
+            baseAmount: scale(entryPlain.baseAmount),
+            gstAmount: scale(entryPlain.gstAmount),
+          },
+        };
+      });
 
       const buildAppraisalPayload = (siteAppraisal, siteEntry) => {
         if (!siteAppraisal || Number(siteAppraisal.applicable) !== 1) {
@@ -2023,6 +2103,8 @@ async function processSingleRentalDueInternal({
   if (reason) entry.reason = reason;
   if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
   if (invoice) entry.invoice = invoice;
+  // ✅ NEW — saved for real → its "Save as Draft" values are cleared
+  if (entry.draft && Number(entry.draft.isDraft) === 1) entry.draft = { isDraft: 0 };
 
   // ✅ AUTO-INFER gstApplicableFlag
   let resolvedUpdateFlag = gstApplicableFlag !== undefined ? Number(gstApplicableFlag) : Number(entry.gstApplicableFlag || 0);
@@ -3099,16 +3181,142 @@ exports.verifyAgreementDoc = async (req, res) => {
 /**
  * ✅ UPDATED — Dedicated API for OverDue History List with Summary and calculated overdue days
  */
+// ✅ NEW — response only: an overdue row is ONE per site per month, but its
+// stored amount comes from a single face's bill (site rent split by sqft). For
+// a SINGLE-bill site with several faces the row stands for the whole bill, so
+// rent / GST are taken from the site's cycle summary for the row's month
+// (same amounts as rental-due-list / dashboard). Separate-bill and single-face
+// rows keep their stored amounts. Returns Map(recordId → { rent, gst }).
+// whole-bill { rent, gst } of a SINGLE-bill multi-face site for a month, or null
+function siteBillForOverdue(media, dueDate) {
+  if (!media || !dueDate) return null;
+  const activeFaces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
+  const isSingleBillMultiFace = activeFaces.length > 1 && activeFaces.every((d) => Number(d.siteBillMode) !== 2);
+  if (!isSingleBillMultiFace) return null;
+  const d = new Date(dueDate);
+  if (Number.isNaN(d.getTime())) return null;
+  try {
+    const plain = typeof media.toObject === "function" ? media.toObject() : media;
+    const s = getOverallSummaryForCycle(plain, { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 }) || {};
+    const rent = Math.round(Number(s.currentMonthRentalAmount || 0));
+    const gst = Math.round(Number(s.currentMonthGstAmount || 0));
+    return rent > 0 ? { rent, gst } : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function siteBillAmountsForOverdueRows(records) {
+  const result = new Map();
+  const mediaIds = [
+    ...new Set(
+      (records || [])
+        .map((r) => String(r.mediaId?._id || r.mediaId || ""))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  ];
+  if (!mediaIds.length) return result;
+  // ✅ SPEED — only single-bill multi-face sites get a site bill (see
+  // siteBillForOverdue), so the heavy fields are loaded for those sites only
+  const faceDocs = await Media.find({ _id: { $in: mediaIds } }).select("mediaDetails.status mediaDetails.siteBillMode").lean();
+  const billSiteIds = faceDocs
+    .filter((m) => {
+      const active = (m.mediaDetails || []).filter((d) => Number(d.status) === 1);
+      return active.length > 1 && active.every((d) => Number(d.siteBillMode) !== 2);
+    })
+    .map((m) => m._id);
+  if (!billSiteIds.length) return result;
+  const medias = await Media.find({ _id: { $in: billSiteIds } })
+    .select("mediaDetails rentalPayment landOwners rentalDue ledger ledgerHistory gstBalanceHistory gstApplicableFlag appraisal")
+    .lean();
+  const mediaById = new Map(medias.map((m) => [String(m._id), m]));
+  for (const r of records) {
+    const bill = siteBillForOverdue(mediaById.get(String(r.mediaId?._id || r.mediaId || "")), r.dueDate);
+    if (bill) result.set(String(r._id), bill);
+  }
+  return result;
+}
+
+// ✅ NEW — one-time / repeatable fix of EXISTING overdue rows: single-bill
+// multi-face sites get the whole bill stored (overDueAmount = rent, or
+// rent + GST when withGst is 2 "direct"; gstAmount = site GST). Only rows whose
+// amounts differ are written. Run at startup from server.js. Never throws.
+async function fixSingleBillOverdueAmounts() {
+  const result = { checked: 0, fixed: 0 };
+  try {
+    const rows = await OverDueHistory.find({ mediaId: { $ne: null } })
+      .select("mediaId dueDate overDueAmount gstAmount withGst")
+      .lean();
+    const amounts = await siteBillAmountsForOverdueRows(rows);
+    result.checked = rows.length;
+    const ops = [];
+    for (const r of rows) {
+      const bill = amounts.get(String(r._id));
+      if (!bill) continue;
+      const overDueAmount = Number(r.withGst) === 2 ? bill.rent + bill.gst : bill.rent;
+      if (Number(r.overDueAmount) === overDueAmount && Number(r.gstAmount) === bill.gst) continue;
+      ops.push({
+        updateOne: {
+          filter: { _id: r._id },
+          update: { $set: { overDueAmount, gstAmount: bill.gst, isGstApplicable: bill.gst > 0 } },
+        },
+      });
+    }
+    if (ops.length) {
+      const res = await OverDueHistory.bulkWrite(ops);
+      result.fixed = res.modifiedCount || 0;
+    }
+  } catch (err) {
+    console.error("[fixSingleBillOverdueAmounts] failed:", err.message);
+  }
+  return result;
+}
+exports.fixSingleBillOverdueAmounts = fixSingleBillOverdueAmounts;
+
+// ─────────────────────────────────────────────────────────────
+// ✅ SPEED — shared overdue sweep for /admin/overdue-history-list.
+// Same steps as before (sync every active site's overdue rows → remove
+// duplicates → fill landowners). Calls arriving while a sweep runs share it.
+// Only the first call after a server start waits for it; later calls answer
+// right away and, when the last sweep is older than OVERDUE_SWEEP_REUSE_MS
+// (.env, default 5 min), start a fresh sweep in the background.
+// ─────────────────────────────────────────────────────────────
+const OVERDUE_SWEEP_REUSE_MS = Number(process.env.OVERDUE_SWEEP_REUSE_MS) || 5 * 60 * 1000;
+let overdueSweepInFlight = null;
+let overdueSweepFinishedAt = 0;
+
+async function sweepOverdueHistory() {
+  const activeSites = await Media.find({ "mediaDetails.status": 1 });
+  // 5 sites at a time, each site's rows loaded once (same result)
+  await syncOverdueEntriesForSites(activeSites, "");
+  await cleanupDuplicateOverDueHistoryRecords();
+  await ensureOverDueHistoryLandOwnersPopulated();
+}
+
+function startOverdueSweep() {
+  if (!overdueSweepInFlight) {
+    overdueSweepInFlight = sweepOverdueHistory()
+      .then(() => {
+        overdueSweepFinishedAt = Date.now();
+      })
+      .catch((err) => console.error("overdue sweep error:", err.message))
+      .finally(() => {
+        overdueSweepInFlight = null;
+      });
+  }
+  return overdueSweepInFlight;
+}
+
+async function runSharedOverdueSweep() {
+  if (!overdueSweepFinishedAt) return startOverdueSweep(); // first call: wait once
+  if (Date.now() - overdueSweepFinishedAt >= OVERDUE_SWEEP_REUSE_MS) startOverdueSweep(); // refresh in background
+}
+
 exports.getOverDueHistoryList = async (req, res) => {
   try {
-    // Sweep active sites and sync overdue entries FIRST
-    const activeSites = await Media.find({ "mediaDetails.status": 1 });
-    for (const siteDoc of activeSites) {
-      await syncAllOverdueEntriesForMedia(siteDoc, "");
-    }
-
-    await cleanupDuplicateOverDueHistoryRecords();
-    await ensureOverDueHistoryLandOwnersPopulated();
+    // ✅ CHANGED — shared sweep (see runSharedOverdueSweep) instead of a full
+    // sweep on every call
+    await runSharedOverdueSweep();
 
     const {
       pageNumber = 1,
@@ -3441,6 +3649,21 @@ exports.getOverDueHistoryList = async (req, res) => {
       totalOverdueAmount: 0
     };
 
+    // ✅ NEW — totalOverdueAmount with the same single-bill site amounts as the rows
+    {
+      const summaryRows = await OverDueHistory.find(summaryFilter)
+        .select("mediaId dueDate overDueAmount gstAmount withGst")
+        .lean();
+      const siteAmounts = await siteBillAmountsForOverdueRows(summaryRows);
+      if (siteAmounts.size) {
+        summary.totalOverdueAmount = summaryRows.reduce((sum, r) => {
+          const site = siteAmounts.get(String(r._id));
+          if (site) return sum + site.rent + site.gst;
+          return sum + (Number(r.withGst) === 2 ? Number(r.overDueAmount || 0) : Number(r.overDueAmount || 0) + Number(r.gstAmount || 0));
+        }, 0);
+      }
+    }
+
     // 2) Data Fetch (Uses Full Filter & Chronological Sorting)
     const [history, totalCount] = await Promise.all([
       OverDueHistory.find(listFilter)
@@ -3451,6 +3674,9 @@ exports.getOverDueHistoryList = async (req, res) => {
         .lean(),
       OverDueHistory.countDocuments(listFilter)
     ]);
+
+    // ✅ NEW — whole-bill amounts for single-bill multi-face sites (see helper)
+    const rowSiteAmounts = await siteBillAmountsForOverdueRows(history);
 
     // 3) Enrichment for UI
     const enrichedHistory = history.map(item => {
@@ -3522,8 +3748,16 @@ exports.getOverDueHistoryList = async (req, res) => {
         }
 
         const isDirect = withGst === 2;
-        const rentAmount = isDirect ? Math.max((item.overDueAmount || 0) - (item.gstAmount || 0), 0) : (item.overDueAmount || 0);
-        const totalAmount = isDirect ? (item.overDueAmount || 0) : (item.overDueAmount || 0) + (item.gstAmount || 0);
+        let rentAmount = isDirect ? Math.max((item.overDueAmount || 0) - (item.gstAmount || 0), 0) : (item.overDueAmount || 0);
+        let totalAmount = isDirect ? (item.overDueAmount || 0) : (item.overDueAmount || 0) + (item.gstAmount || 0);
+        // ✅ NEW — single-bill multi-face site: the whole bill (site rent + GST)
+        const siteBill = rowSiteAmounts.get(String(item._id));
+        let rowGstAmount = item.gstAmount;
+        if (siteBill) {
+          rentAmount = siteBill.rent;
+          rowGstAmount = siteBill.gst;
+          totalAmount = siteBill.rent + siteBill.gst;
+        }
 
         const isOwnerApproved = !!(item.ownerApprovedAt || item.approvedDate || Number(item.status) === 3);
         const resolvedApprovedDate = item.approvedDate || item.ownerApprovedAt || null;
@@ -3538,6 +3772,7 @@ exports.getOverDueHistoryList = async (req, res) => {
             landOwners,
             landOwnerName: mainLandOwnerName,
             rentAmount,
+            gstAmount: rowGstAmount, // ✅ NEW — site GST for single-bill multi-face rows
             overDueAmount: totalAmount,
             totalAmount: totalAmount,
             approvedDate: resolvedApprovedDate,
@@ -3653,36 +3888,94 @@ exports.overDueRemark = async (req, res) => {
     const userName = req.user?.userName || "Admin";
     const savedResults = [];
 
+    // ✅ CHANGED — same base URL as the other uploads (.env LOCAL_BASE_URL,
+    // e.g. http://localhost:5000) instead of the request's host IP
+    const baseUrl = String(process.env.LOCAL_BASE_URL || "http://localhost:5000").trim().replace(/\/+$/, "");
+    // ✅ NEW — STORAGE_TYPE=space → the file is in DigitalOcean Spaces (CDN link),
+    // otherwise the local public/overdueRemarks folder
+    const remarkFileUrl = (file) =>
+      file.key
+        ? `${require("../../../middleware/dynamicFileUpload").CDN_BASE_URL}/${file.key}`
+        : `${baseUrl}/public/overdueRemarks/${file.filename}`;
+    let attachments = [];
+    if (req.files && Array.isArray(req.files)) {
+      attachments = req.files.map(file => ({
+        fileUrl: remarkFileUrl(file),
+        fileName: file.originalname,
+        fileType: file.mimetype.startsWith('image/') ? 'image' : 'document',
+        fileSize: file.size,
+        mimeType: file.mimetype,
+      }));
+    } else if (req.file) {
+      attachments = [{
+        fileUrl: remarkFileUrl(req.file),
+        fileName: req.file.originalname,
+        fileType: req.file.mimetype.startsWith('image/') ? 'image' : 'document',
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype,
+      }];
+    }
+
+    let voiceMessageObj = null;
+    if (req.body.voiceMessage) {
+      try {
+        voiceMessageObj = typeof req.body.voiceMessage === 'string' ? JSON.parse(req.body.voiceMessage) : req.body.voiceMessage;
+        if (voiceMessageObj && !voiceMessageObj.audioUrl && attachments.length > 0) {
+          const audioAttIndex = attachments.findIndex(a => a.mimeType?.startsWith('audio/') || a.fileName?.includes('voice_recording'));
+          if (audioAttIndex !== -1) {
+            voiceMessageObj.audioUrl = attachments[audioAttIndex].fileUrl;
+            attachments.splice(audioAttIndex, 1);
+          } else {
+            voiceMessageObj.audioUrl = attachments[0].fileUrl;
+            attachments.splice(0, 1);
+          }
+        }
+      } catch (e) {}
+    }
+
+    let replyToObj = null;
+    if (req.body.replyTo) {
+      try {
+        replyToObj = typeof req.body.replyTo === 'string' ? JSON.parse(req.body.replyTo) : req.body.replyTo;
+      } catch (e) {}
+    }
+
     for (const item of entriesArray) {
       const mId = item.mediaId;
       const rId = item.rentalDueId;
       const mDetailId = item.mediaDetailId || item.mediaDetailsId;
       const lOwnerId = item.landOwnerId || item.landownerId;
-      const rem = item.remarks || remarks;
+      const rem = item.remarks || remarks || "";
 
-      if (!mId || !rem) continue;
+      if (!mId) continue;
       if (!mongoose.Types.ObjectId.isValid(mId)) continue;
 
       const trimmedRemarks = typeof rem === "string" ? rem.trim() : "";
-      if (!trimmedRemarks) continue;
+      const hasContent = trimmedRemarks || attachments.length > 0 || voiceMessageObj;
+      if (!hasContent) continue;
 
       const media = await Media.findById(mId);
       if (!media) continue;
 
       // Sync any active overdue entries for this media first
       await syncAllOverdueEntriesForMedia(media, userName);
-const userTypeNum = Number(req.user?.userType) || null;
+      const userTypeNum = Number(req.user?.userType) || null;
+      const remarkAddedAt = nowIST();
       const newRemark = {
         mediaDetailId: mDetailId && mongoose.Types.ObjectId.isValid(mDetailId) ? new mongoose.Types.ObjectId(mDetailId) : null,
         landOwnerId: lOwnerId && mongoose.Types.ObjectId.isValid(lOwnerId) ? new mongoose.Types.ObjectId(lOwnerId) : null,
         remarks: trimmedRemarks,
         addedBy: userName,
-        addedAt: nowIST(),
+        addedAt: remarkAddedAt,
         userType: userTypeNum,
-role: userTypeNum,
-        // ✅ NEW — read for the adding role; other roles read it via
-        // /admin/cmd-notifications/read (role-based isRead)
+        role: userTypeNum,
         readByRoles: userTypeNum ? [userTypeNum] : [],
+        // ✅ NEW — delivered on send to every user of the other roles
+        // (RE → RM + CMD, RM → RE + CMD, CMD → RE + RM)
+        deliveredTo: await overdueRemarkReceivers(userTypeNum, req.user?._id || req.user?.userId || req.user?.id, remarkAddedAt),
+        attachments,
+        voiceMessage: voiceMessageObj,
+        replyTo: replyToObj,
       };
 
       // Find matching rentalDue entry from media to populate full overdue details
@@ -3792,11 +4085,17 @@ role: userTypeNum,
         const entryGst = targetEntry ? Number(targetEntry.gstAmount || 0) : 0;
         const siteGst = Number(media.rentalPayment?.gstAmount || 0);
         const ownerGst = (media.landOwners || []).filter(o => Number(o.gstApplicable) === 1).reduce((sum, o) => sum + Number(o.gstAmount || 0), 0);
-        const resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
+        let resolvedGst = entryGst > 0 ? entryGst : (siteGst > 0 ? siteGst : ownerGst);
 
-        const baseAmount = targetEntry
+        let baseAmount = targetEntry
           ? Number(targetEntry.netPayable || targetEntry.baseAmount || 0)
           : Number(media.rentalPayment?.totalRentalAmount || 0);
+        // ✅ NEW — single-bill multi-face site: store the whole bill (one row per site / month)
+        const remarkSiteBill = siteBillForOverdue(media, targetEntry ? targetEntry.dueDate : null);
+        if (remarkSiteBill) {
+          resolvedGst = remarkSiteBill.gst;
+          baseAmount = Number(targetEntry?.withGst) === 2 ? remarkSiteBill.rent + remarkSiteBill.gst : remarkSiteBill.rent;
+        }
 
         const mDetails = (media.mediaDetails || []).map((d) => ({
           mediaCode: d.mediaCode,
@@ -3885,11 +4184,11 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         remark: trimmedRemarks,
         userType: Number(req.user?.userType),
         userName,
+        attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
+        replyTo: replyToObj,
       });
 
-      // ✅ NEW — overdue remark notification (read only): Executive's remark →
-      // Manager + CMD, Manager's remark → Executive + CMD, CMD's remark →
-      // Executive + Manager
+      // ✅ NEW — overdue remark notification (read only)
       await createOverdueRemarkNotification({
         media,
         dueMonth: targetEntry ? targetEntry.dueMonth : getDueMonthLabel(media.rentalPayment?.nextBillingDate || new Date()),
@@ -3899,6 +4198,8 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
         userType: Number(req.user?.userType),
         userId: req.user?.userId,
         userName,
+        attachments: [...(attachments || []), ...(voiceMessageObj?.audioUrl ? [voiceMessageObj] : [])],
+        replyTo: replyToObj,
       });
     }
 
@@ -4001,6 +4302,7 @@ records.forEach((rec) => {
       // ✅ NEW — send this to /admin/cmd-notifications/read; null for the
       // adding role's own remark (no notification to read)
       r.notificationId = !!viewerRole && rNum === viewerRole ? null : recNotificationId;
+      istRemarkEditTimes(r); // ✅ NEW — editedAt in IST, same as addedAt
     });
   }
 });
@@ -4807,6 +5109,85 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   );
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
+// ─────────────────────────────────────────────────────────────
+// ✅ SPEED — shared site sweep for /admin/rental-due-list.
+// Same per-site steps as before (fresh re-read → catch up missed bills →
+// save if changed), 5 sites at a time. Calls arriving while a sweep runs
+// wait for THAT sweep (no second one); a sweep finished within
+// RENTAL_DUE_SWEEP_REUSE_MS (5 min) is reused, so the list answers quickly.
+// ─────────────────────────────────────────────────────────────
+const RENTAL_DUE_SWEEP_REUSE_MS = 5 * 60 * 1000;
+let rentalDueSweepInFlight = null;
+let rentalDueSweepFinishedAt = 0;
+
+async function sweepRentalDueSites() {
+  // load only ids up front and re-read each site right before processing it
+  // (saving a copy loaded at the start would write stale rentalPayment back)
+  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 }).select("_id").lean();
+  const sweepOneSite = async (sweepSiteId) => {
+    const siteDoc = await Media.findById(sweepSiteId);
+    if (!siteDoc) return;
+    const result = await generateMissedEntriesForMedia(siteDoc, "");
+    const generatedCount = result?.generatedEntries?.length || 0;
+    // save even when generatedCount is 0, so a freshly seeded nextBillingDate
+    // (ensureNextBillingDateSeed inside generateMissedEntriesForMedia) isn't lost
+    if (generatedCount > 0 || siteDoc.isModified()) {
+      await siteDoc.save({ timestamps: false });
+    }
+  };
+  let nextSweepIdx = 0;
+  const sweepWorker = async () => {
+    while (nextSweepIdx < activeSitesForSweep.length) {
+      const { _id: sweepSiteId } = activeSitesForSweep[nextSweepIdx++];
+      await sweepOneSite(sweepSiteId);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(5, activeSitesForSweep.length) }, sweepWorker));
+}
+
+async function runSharedRentalDueSweep() {
+  if (rentalDueSweepInFlight) return rentalDueSweepInFlight; // join the running sweep
+  if (Date.now() - rentalDueSweepFinishedAt < RENTAL_DUE_SWEEP_REUSE_MS) return; // recent sweep reused
+  rentalDueSweepInFlight = sweepRentalDueSites()
+    .then(() => {
+      rentalDueSweepFinishedAt = Date.now();
+    })
+    .finally(() => {
+      rentalDueSweepInFlight = null;
+    });
+  return rentalDueSweepInFlight;
+}
+
+// ✅ NEW — response only: TDS hold status of a site's landowners
+// (POST /admin/tds-hold), shown on every bill of the site in rentalDueEntries[].
+// hold 1 = any landowner held now; landOwners[] = those ever held.
+function buildTdsHoldSummary(landOwners) {
+  const everHeld = (landOwners || []).filter((o) => o && o.tdsHoldDetail && o.tdsHoldDetail.heldAt);
+  const list = everHeld.map((o) => {
+    const t = o.tdsHoldDetail || {};
+    const held = Number(o.tdsHold) === 1;
+    return {
+      landOwnerId: o._id,
+      landOwnerMasterId: o.landOwnerMasterId || null,
+      landOwnerName: o.name || "",
+      tdsHold: held ? 1 : 0, // ✅ CHANGED — API value: 1 = on hold, 0 = released
+      holdStatus: held ? "On Hold" : "Released",
+      tdsPercentage: Number(o.tdsPercentage || 0),
+      tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+      tdsAmount: Number(o.tdsAmount || 0),
+      remark: t.remark || "",
+      heldBy: t.heldBy || "",
+      heldAt: t.heldAt || null,
+      releasedBy: t.releasedBy || "",
+      releasedAt: t.releasedAt || null,
+      releaseReason: t.releaseReason || "",
+    };
+  });
+  const holdCount = list.filter((x) => x.holdStatus === "On Hold").length;
+  // ✅ CHANGED — API value: hold 1 = a landowner's TDS is on hold, 0 = none held
+  return { hold: holdCount > 0 ? 1 : 0, holdCount, landOwners: list };
+}
+
 // ✅ NEW — response only: each landOwners[].linkedSites[] item gets the bank
 // details that linked site pays to (that site's own landowner row), same as
 // /admin/ledger-list. One batched read; never changes stored data or amounts.
@@ -5107,21 +5488,22 @@ exports.getRentalDueListWithStats = async (req, res) => {
 
     // ✅ FIXED — totalSites now counts EVERY face in the system (from mediaDetails),
     // matching the global onboarding count rather than just the rental-active count.
-    const totalFacesAgg = await Media.aggregate([
-      { $unwind: "$mediaDetails" },
-      { $count: "count" },
+    // ✅ SPEED — the three counts are independent → run together (same results)
+    const [totalFacesAgg, siteCount, activeCountAgg] = await Promise.all([
+      Media.aggregate([
+        { $unwind: "$mediaDetails" },
+        { $count: "count" },
+      ]),
+      // ✅ FIXED — siteCount now counts EVERY unique document (Site) in onboarding.
+      Media.countDocuments({}),
+      // ✅ ADDED — activeCount specifically for status: 1 faces (rental-active).
+      Media.aggregate([
+        { $unwind: "$mediaDetails" },
+        { $match: { "mediaDetails.status": 1 } },
+        { $count: "count" },
+      ]),
     ]);
     const totalSites = totalFacesAgg[0]?.count || 0;
-
-    // ✅ FIXED — siteCount now counts EVERY unique document (Site) in onboarding.
-    const siteCount = await Media.countDocuments({});
-
-    // ✅ ADDED — activeCount specifically for status: 1 faces (rental-active).
-    const activeCountAgg = await Media.aggregate([
-      { $unwind: "$mediaDetails" },
-      { $match: { "mediaDetails.status": 1 } },
-      { $count: "count" },
-    ]);
     const activeCount = activeCountAgg[0]?.count || 0;
 
     // ✅ ADDED — before computing any stats/list data, sweep every
@@ -5135,37 +5517,10 @@ exports.getRentalDueListWithStats = async (req, res) => {
   // processing it. Saving a copy loaded at the start of the sweep wrote
   // stale rentalPayment back over changes made meanwhile (e.g. a CMD
   // billing date revert approval or a manual media edit).
-  const activeSitesForSweep = await Media.find({ "mediaDetails.status": 1 }).select("_id").lean();
-// const sweepDebugLog = [];
-for (const { _id: sweepSiteId } of activeSitesForSweep) {
-  const siteDoc = await Media.findById(sweepSiteId);
-  if (!siteDoc) continue;
-  const hadNextBillingDateBefore = !!siteDoc.rentalPayment?.nextBillingDate; // ✅ ADDED
-  const result = await generateMissedEntriesForMedia(siteDoc, "");
-  const generatedCount = result?.generatedEntries?.length || 0;
-
-  // ✅ CHANGED — save even when generatedCount is 0, so a freshly
-  // seeded nextBillingDate (via ensureNextBillingDateSeed inside
-  // generateMissedEntriesForMedia) isn't lost. Without this, the seed
-  // would be discarded every request and rentalDue would NEVER catch
-  // up on sites whose seed date is still in the future.
-  if (generatedCount > 0 || siteDoc.isModified()) {
-    await siteDoc.save({ timestamps: false });
-  }
-
-  // sweepDebugLog.push({
-  //   mediaId: siteDoc._id,
-  //   mediaName: siteDoc.mediaDetails?.[0]?.mediaName || "Unknown",
-  //   generatedCount,
-  //   latestDueMonth: siteDoc.rentalDue?.length
-  //     ? siteDoc.rentalDue[siteDoc.rentalDue.length - 1]?.dueMonth
-  //     : null,
-  //   // ✅ ADDED — makes the exact root cause visible in the response
-  //   // itself next time this happens, instead of having to guess.
-  //   nextBillingDateWasSeededThisRequest:
-  //     !hadNextBillingDateBefore && !!siteDoc.rentalPayment?.nextBillingDate,
-  // });
-}
+  // ✅ SPEED — one shared sweep: calls arriving together wait for the SAME
+  // sweep, and a sweep finished within the last 5 minutes is reused (see
+  // runSharedRentalDueSweep). The per-site steps are unchanged.
+  await runSharedRentalDueSweep();
 
     const monthOrCondition = {
       $or: [
@@ -5670,7 +6025,26 @@ if (Number(isPastPending) === 1) {
           : !lastBillPaidIsFutureMonth && isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
             ? new Date(item.rentalPayment.lastBillPaidDate)
             : null;
-      const selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+      let selectedCycleBillDates = selectedCycleDate ? cycleBillDates(selectedCycleDate) : null;
+      // ✅ NEW — the selected month's cycle is the site's lastBillPaidDate itself
+      // (already paid — e.g. entered at media onboarding, no bill this month) →
+      // lastBillPaidDate is that date, nextBillingDate the site's next bill and
+      // no current bill date.
+      if (
+        selectedCycleBillDates &&
+        !currentMonthEntry?.dueDate &&
+        !isInSelectedMonth(item.rentalPayment?.nextBillingDate) &&
+        !lastBillPaidIsFutureMonth &&
+        isInSelectedMonth(item.rentalPayment?.lastBillPaidDate)
+      ) {
+        const siteNext = item.rentalPayment?.nextBillingDate ? new Date(item.rentalPayment.nextBillingDate) : null;
+        selectedCycleBillDates = {
+          ...selectedCycleBillDates,
+          lastBillPaidDate: new Date(item.rentalPayment.lastBillPaidDate),
+          nextBillingDate: siteNext && siteNext > lastBillPaid ? siteNext : selectedCycleBillDates.nextBillingDate,
+          currentBillDate: "",
+        };
+      }
       // ✅ FIXED — after a forward move, the cycle right after this one may
       // fall on/before the future lastBillPaidDate and will never be billed;
       // the real next bill is the site's nextBillingDate.
@@ -5879,6 +6253,29 @@ const details = (item.mediaDetails || []).map((d) => ({
             ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),
             // ✅ NEW — this entry's month-wise amounts (new object)
             monthWiseAmount: monthWiseAmountFor(entry),
+            // ✅ NEW — appraisal hold, display fields only (internal restore data
+            // — amountsSnapshot, siteReduced, appraisalApplicableBefore,
+            // heldByUserId — is not sent)
+            ...(entry.appraisalHold
+              ? {
+                  appraisalHold: {
+                    hold: Number(entry.appraisalHold.hold) === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
+                    appraisalAmount: Number(entry.appraisalHold.appraisalAmount || 0),
+                    rentWithAppraisal: Number(entry.appraisalHold.rentWithAppraisal || 0),
+                    rentWithoutAppraisal: Number(entry.appraisalHold.rentWithoutAppraisal || 0),
+                    remark: entry.appraisalHold.remark || "",
+                    heldBy: entry.appraisalHold.heldBy || "",
+                    heldAt: entry.appraisalHold.heldAt || null,
+                    releasedBy: entry.appraisalHold.releasedBy || "",
+                    releasedAt: entry.appraisalHold.releasedAt || null,
+                    releaseReason: entry.appraisalHold.releaseReason || "",
+                  },
+                }
+              : {}),
+            // ✅ NEW — TDS hold status of this site's landowners (always present)
+            tdsHold: buildTdsHoldSummary(item.landOwners),
+            // ✅ NEW — "Save as Draft" values ({ isDraft: 0 } when none)
+            draft: formatDraft(entry.draft),
           });
         });
       });
@@ -6251,3 +6648,4 @@ const details = (item.mediaDetails || []).map((d) => ({
       .json({ success: false, message: "Server error", error: err.message });
   }
 };
+

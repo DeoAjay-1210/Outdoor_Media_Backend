@@ -1897,6 +1897,43 @@ const detectInitialGstApplicableFlag = (mediaData) => {
   return rentalGstApplicable || anyOwnerGstApplicable ? 2 : 0;
 };
 // This is for Media Onboarding Save
+// ✅ NEW — appraisal switched back ON in media onboarding while CMD-held:
+// every held bill of the site is marked released (hold 0, who / when / why)
+// and its own amounts go back to what they were before the hold. The site
+// rent is re-applied by the normal appraisal logic of the same save.
+// Direct $set per bill — runs after the save. Never throws.
+async function releaseAppraisalHoldsAfterReapply(mediaId, userName) {
+  try {
+    const fresh = await MediaOnboarding.findById(mediaId).select("rentalDue").lean();
+    const heldBills = (fresh?.rentalDue || []).filter((e) => Number(e.appraisalHold?.hold) === 1);
+    for (const bill of heldBills) {
+      const h = bill.appraisalHold || {};
+      const releasedAt = nowIST();
+      // ✅ NEW — this automatic release is added to the hold / release list
+      // lazy require: avoids a circular import
+      const { buildAppraisalHoldHistory } = require("./AppraisalHoldController");
+      const history = buildAppraisalHoldHistory(h);
+      history.push({ action: "release", reason: "Appraisal re-applied from media onboarding", by: userName || "", byUserId: null, at: releasedAt });
+      const $set = {
+        "rentalDue.$[e].appraisalHold.hold": 0,
+        "rentalDue.$[e].appraisalHold.releasedBy": userName || "",
+        "rentalDue.$[e].appraisalHold.releasedAt": releasedAt,
+        "rentalDue.$[e].appraisalHold.releaseReason": "Appraisal re-applied from media onboarding",
+        "rentalDue.$[e].appraisalHold.history": history,
+      };
+      const before = h.siteReduced ? h.amountsSnapshot?.before?.entry : null;
+      const after = h.siteReduced ? h.amountsSnapshot?.after?.entry : null;
+      Object.keys(before || {}).forEach((k) => {
+        // only a value still at the held amount goes back
+        if (Number(bill[k]) === Number(after?.[k])) $set[`rentalDue.$[e].${k}`] = Number(before[k]);
+      });
+      await MediaOnboarding.updateOne({ _id: mediaId }, { $set }, { arrayFilters: [{ "e._id": bill._id }], timestamps: false });
+    }
+  } catch (err) {
+    console.error("[appraisalHold] release after re-apply failed:", err.message);
+  }
+}
+
 const mediaOnboarding = async (req, res) => {
   try {
     const { id } = req.body;
@@ -2444,6 +2481,75 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         return errorResponse(res, appraisalCheck.message, null, 400);
     }
 
+    // ✅ NEW — keep the CMD appraisal hold flag (POST /admin/appraisal-hold)
+    // when a site edit sends appraisal without it — otherwise the save would
+    // reset it to 0 and the pre-save hook would re-apply the held appraisal.
+    // ✅ NEW — keep each landowner's CMD TDS hold (POST /admin/tds-hold) when a
+    // site edit sends landOwners without it — otherwise the save would reset
+    // tdsHold to 0 and the save hook would put the TDS back.
+    if (Array.isArray(mediaData.landOwners) && Array.isArray(existingMediaForValidation?.landOwners)) {
+      mediaData.landOwners.forEach((o) => {
+        if (!o || (o.tdsHold !== undefined && o.tdsHold !== "")) return;
+        const prev = existingMediaForValidation.landOwners.find(
+          (x) =>
+            (o._id && String(x._id) === String(o._id)) ||
+            (o.landOwnerMasterId && x.landOwnerMasterId && String(x.landOwnerMasterId) === String(o.landOwnerMasterId)),
+        );
+        if (prev && Number(prev.tdsHold) === 1) {
+          const prevDetail =
+            typeof prev.tdsHoldDetail?.toObject === "function" ? prev.tdsHoldDetail.toObject() : prev.tdsHoldDetail || {};
+          // ✅ NEW — TDS switched back ON here (tdsApplicable 0 → 1) while held →
+          // the hold ends and the save hook calculates tdsAmount again
+          if (Number(prev.tdsApplicable) !== 1 && Number(o.tdsApplicable) === 1) {
+            const releasedAt = nowIST();
+            // ✅ NEW — this automatic release is added to the hold / release list
+            // lazy require: avoids a circular import
+            const { buildTdsHoldHistory } = require("./TdsHoldController");
+            const history = buildTdsHoldHistory(prevDetail);
+            history.push({ action: "release", reason: "TDS re-applied from media onboarding", by: userName || "", byUserId: null, at: releasedAt });
+            o.tdsHold = 0;
+            o.tdsHoldDetail = {
+              ...prevDetail,
+              releasedBy: userName || "",
+              releasedAt,
+              releaseReason: "TDS re-applied from media onboarding",
+              history,
+            };
+          } else {
+            o.tdsHold = 1;
+            o.tdsHoldDetail = prevDetail;
+          }
+        } else if (prev && prev.tdsHoldDetail && prev.tdsHoldDetail.heldAt && !o.tdsHoldDetail) {
+          // ✅ NEW — released earlier: keep its hold / release remarks on a site edit
+          o.tdsHoldDetail =
+            typeof prev.tdsHoldDetail.toObject === "function" ? prev.tdsHoldDetail.toObject() : prev.tdsHoldDetail;
+        }
+      });
+    }
+
+    // ✅ NEW — appraisal switched back ON here (applicable 0 → 1) while held →
+    // the hold ends: appraisalHold 0 (release date stored); the held bills are
+    // marked released after the save (releaseAppraisalHoldsAfterReapply).
+    let appraisalReappliedFromHold = false;
+    if (
+      mediaData.appraisal &&
+      typeof mediaData.appraisal === "object" &&
+      Number(existingMediaForValidation?.appraisal?.appraisalHold) === 1 &&
+      Number(existingMediaForValidation?.appraisal?.applicable) !== 1 &&
+      Number(mediaData.appraisal.applicable) === 1
+    ) {
+      mediaData.appraisal.appraisalHold = 0;
+      mediaData.appraisal.appraisalReleaseDate = nowIST();
+      appraisalReappliedFromHold = true;
+    } else if (
+      mediaData.appraisal &&
+      typeof mediaData.appraisal === "object" &&
+      (mediaData.appraisal.appraisalHold === undefined || mediaData.appraisal.appraisalHold === "") &&
+      Number(existingMediaForValidation?.appraisal?.appraisalHold) === 1
+    ) {
+      mediaData.appraisal.appraisalHold = 1;
+    }
+
     // ✅ NEW — landOwners[].bankAccountId → copy the chosen bank account's
     // details onto the owner. Runs before ANY save, so an invalid id
     // returns 400 with nothing written. No id sent → old flow unchanged.
@@ -2908,6 +3014,10 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       media.updatedAt = nowIST();
       await media.save({ timestamps: false });
       await generateMissedEntriesForMedia(media, userName);
+      // ✅ NEW — appraisal re-applied from media onboarding → held bills released
+      if (appraisalReappliedFromHold) {
+        await releaseAppraisalHoldsAfterReapply(media._id, userName);
+      }
       media = (await MediaOnboarding.findById(media._id)).toObject({ virtuals: true });
       if (media.landOwners && Array.isArray(media.landOwners)) {
         for (const savedOwner of media.landOwners) {
@@ -3896,9 +4006,81 @@ if (landOwnerMasterId) {
         item.location = item.mediaDetails[0]?.location;
         item.siteBillMode = item.mediaDetails[0]?.siteBillMode;
       }
+      // ✅ NEW — response only: CMD appraisal holds / releases (POST
+      // /admin/appraisal-hold) shown in rentalAmountHistory with their date
+      // time and reason. Stored rent history is not changed.
+      const appraisalHoldEvents = [];
+      (item.rentalDue || []).forEach((e) => {
+        const h = e.appraisalHold;
+        if (!h || !h.heldAt) return;
+        appraisalHoldEvents.push({
+          amount: Number(h.rentWithoutAppraisal || 0),
+          updatedBy: h.heldBy || "CMD",
+          updatedAt: h.heldAt,
+          type: "appraisalHold",
+          reason: h.remark || "",
+          dueMonth: e.dueMonth || "",
+          appraisalAmount: Number(h.appraisalAmount || 0),
+          rentWithAppraisal: Number(h.rentWithAppraisal || 0),
+          holdStatus: Number(h.hold) === 1 ? "On Hold" : "Released",
+        });
+        if (Number(h.hold) !== 1 && h.releasedAt) {
+          appraisalHoldEvents.push({
+            amount: Number(h.rentWithAppraisal || 0),
+            updatedBy: h.releasedBy || "CMD",
+            updatedAt: h.releasedAt,
+            type: "appraisalHoldReleased",
+            reason: h.releaseReason || "", // ✅ CHANGED — the reason entered on release
+            dueMonth: e.dueMonth || "",
+            appraisalAmount: Number(h.appraisalAmount || 0),
+            rentWithAppraisal: Number(h.rentWithAppraisal || 0),
+            holdStatus: "Released",
+          });
+        }
+      });
+      // ✅ NEW — CMD TDS holds / releases (POST /admin/tds-hold) per landowner,
+      // with the reason entered (response only)
+      (item.landOwners || []).forEach((o) => {
+        const t = o.tdsHoldDetail;
+        if (!t || !t.heldAt) return;
+        const siteRent = Number(item.rentalPayment?.totalRentalAmount || 0);
+        appraisalHoldEvents.push({
+          amount: siteRent,
+          updatedBy: t.heldBy || "CMD",
+          updatedAt: t.heldAt,
+          type: "tdsHold",
+          reason: t.remark || "",
+          landOwnerId: o._id,
+          landOwnerName: o.name || "",
+          tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+          tdsAmount: 0,
+          holdStatus: Number(o.tdsHold) === 1 ? "On Hold" : "Released",
+        });
+        if (Number(o.tdsHold) !== 1 && t.releasedAt) {
+          appraisalHoldEvents.push({
+            amount: siteRent,
+            updatedBy: t.releasedBy || "CMD",
+            updatedAt: t.releasedAt,
+            type: "tdsHoldReleased",
+            reason: t.releaseReason || "",
+            landOwnerId: o._id,
+            landOwnerName: o.name || "",
+            tdsAmountBeforeHold: Number(t.tdsAmountBeforeHold || 0),
+            tdsAmount: Number(o.tdsAmount || 0),
+            holdStatus: "Released",
+          });
+        }
+      });
+      if (appraisalHoldEvents.length) {
+        if (!item.rentalPayment) item.rentalPayment = {};
+        item.rentalPayment.rentalAmountHistory = [
+          ...(item.rentalPayment.rentalAmountHistory || []),
+          ...appraisalHoldEvents,
+        ];
+      }
       if (item.rentalPayment?.rentalAmountHistory) {
         item.rentalPayment.rentalAmountHistory.sort(
-          (a, b) => b.updatedAt - a.updatedAt
+          (a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0)
         );
       }
       // ✅ ADDED — ensure previousBillGenerateDate is present and CONSISTENT for display
