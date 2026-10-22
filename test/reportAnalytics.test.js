@@ -347,64 +347,63 @@ const mediaDocs = () => deepFreeze([
 const monthly = (r) => Object.fromEntries(r.buckets.filter((b) => b.total).map((b) => [b.key, b.total]));
 const reconciles = (r) => assert.equal(r.buckets.reduce((a, b) => a + b.total, 0), r.summary.total);
 
-test("media: one site with one face counts as one site", () => {
+test("media: one site with one face counts as one", () => {
   const r = RA.computeMedia(deepFreeze([site("1", [["Hoarding", "Chennai"]], { createdAt: at(2026, 5) })]), fy());
   assert.equal(r.summary.total, 1);
   assert.equal(bucket(r, "2026-06").total, 1);
 });
 
-test("media: multiple faces of the same type count the site once", () => {
+test("media: every face counts (the dashboard's unit); summary.sites is the distinct documents", () => {
   const r = RA.computeMedia(deepFreeze([site("2", [["Hoarding", "Chennai"], ["Hoarding", "Chennai"], ["Hoarding", "Chennai"]], { createdAt: at(2026, 5) })]), fy());
-  assert.equal(r.summary.total, 1);
-  assert.deepEqual(r.summary.byType, { Hoarding: 1 });
+  assert.equal(r.summary.total, 3);
+  assert.equal(r.summary.sites, 1);
+  assert.deepEqual(r.summary.byType, { Hoarding: 3 });
 });
 
-test("media: a mixed-media site counts once in the overall total", () => {
+test("media: a mixed-media site counts one per face and byType sums to the total", () => {
   const r = RA.computeMedia(deepFreeze([site("3", [["Hoarding", "Chennai"], ["Pole Board", "Chennai"]], { createdAt: at(2026, 6) })]), fy());
-  assert.equal(r.summary.total, 1);
-  assert.equal(bucket(r, "2026-07").total, 1);
+  assert.equal(r.summary.total, 2);
+  assert.equal(bucket(r, "2026-07").total, 2);
+  assert.deepEqual(r.summary.byType, { Hoarding: 1, "Pole Board": 1 });
 });
 
-test("media: a mixed-media site matches each applicable type filter once per result", () => {
+test("media: a media type filter counts only the matching faces of a mixed site", () => {
   const docs = deepFreeze([site("3", [["Hoarding", "Chennai"], ["Hoarding", "Chennai"], ["Pole Board", "Chennai"]], { createdAt: at(2026, 6) })]);
-  for (const mediaType of ["Hoarding", "Pole Board"]) {
-    const r = RA.computeMedia(docs, fy({ mediaType }));
-    assert.equal(r.summary.total, 1, mediaType);
-    assert.equal(bucket(r, "2026-07").total, 1, mediaType);
-    reconciles(r);
-  }
+  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Hoarding" })).summary.total, 2);
+  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Pole Board" })).summary.total, 1);
+  for (const mediaType of ["Hoarding", "Pole Board"]) reconciles(RA.computeMedia(docs, fy({ mediaType })));
   assert.equal(RA.computeMedia(docs, fy({ mediaType: "Unipole" })).summary.total, 0);
 });
 
 test("media: several sites in the same month are all counted", () => {
-  assert.equal(bucket(RA.computeMedia(mediaDocs(), fy()), "2026-06").total, 2); // sites 1 and 2
+  assert.equal(bucket(RA.computeMedia(mediaDocs(), fy()), "2026-06").total, 4); // sites 1 (1 face) and 2 (3 faces)
 });
 
 test("media: sites in different months land in the right buckets", () => {
-  assert.deepEqual(monthly(RA.computeMedia(mediaDocs(), fy())), { "2026-06": 2, "2026-07": 2, "2026-08": 1 });
+  assert.deepEqual(monthly(RA.computeMedia(mediaDocs(), fy())), { "2026-06": 4, "2026-07": 3, "2026-08": 2 });
 });
 
 test("media: monthly counts reconcile with summary.total (unfiltered and filtered)", () => {
   for (const body of [{}, { mediaType: "Hoarding" }, { mediaType: "Pole Board" }, { city: "Chennai" }, { mediaType: "Hoarding", city: "Madurai" }]) {
     reconciles(RA.computeMedia(mediaDocs(), fy(body)));
   }
-  assert.equal(RA.computeMedia(mediaDocs(), fy()).summary.total, 5);
+  assert.equal(RA.computeMedia(mediaDocs(), fy()).summary.total, 9);
 });
 
 test("media: media type and city filters work together on the same face", () => {
   const docs = mediaDocs();
-  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Hoarding" })).summary.total, 4); // sites 1,2,3,5
-  assert.equal(RA.computeMedia(docs, fy({ city: "Madurai" })).summary.total, 2); // sites 4,5
+  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Hoarding" })).summary.total, 6); // 1 + 3 + 1 + 1
+  assert.equal(RA.computeMedia(docs, fy({ city: "Madurai" })).summary.total, 2); // site 4, site 5's Hoarding face
   assert.equal(RA.computeMedia(docs, fy({ mediaType: "Pole Board", city: "Madurai" })).summary.total, 1); // site 4 only
   assert.deepEqual(monthly(RA.computeMedia(docs, fy({ mediaType: "Pole Board", city: "Madurai" }))), { "2026-07": 1 });
-  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Hoarding", city: "Madurai" })).summary.total, 1); // site 5
+  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Hoarding", city: "Madurai" })).summary.total, 1); // site 5's face
 });
 
 test("media: sites outside the financial year or custom range are excluded", () => {
   const docs = mediaDocs();
   assert.equal(RA.computeMedia(docs, fy({ fy: 2025 })).summary.total, 1); // site 6 only (31 Mar 2026)
   const custom = RA.computeMedia(docs, RA.parseFilters({ startDate: "2026-07-01", endDate: "2026-07-31" }, NOW).filters);
-  assert.equal(custom.summary.total, 2);
+  assert.equal(custom.summary.total, 3);
   assert.equal(custom.buckets.length, 31);
   reconciles(custom);
 });
@@ -413,16 +412,42 @@ test("media: missing or invalid createdAt is reported, never given a date", () =
   const docs = mediaDocs();
   const r = RA.computeMedia(docs, fy());
   assert.equal(r.meta.sitesWithoutOnboardingDate, 2);
-  assert.equal(r.summary.total, 5);
+  assert.equal(r.meta.facesWithoutOnboardingDate, 2);
+  assert.equal(r.summary.total, 9);
   // metadata honours filters: both undated sites are Hoarding / Chennai
   assert.equal(RA.computeMedia(docs, fy({ mediaType: "Pole Board" })).meta.sitesWithoutOnboardingDate, 0);
   assert.equal(RA.computeMedia(docs, fy({ city: "Chennai" })).meta.sitesWithoutOnboardingDate, 2);
 });
 
-test("media: a site without faces counts once unfiltered and never under a filter", () => {
+test("media: a face-less document counts once (inactive) unfiltered and never under a media type / city filter", () => {
   const docs = deepFreeze([{ _id: "x", mediaDetails: [], createdAt: at(2026, 5) }]);
   assert.equal(RA.computeMedia(docs, fy()).summary.total, 1);
   assert.equal(RA.computeMedia(docs, fy({ mediaType: "Hoarding" })).summary.total, 0);
+  assert.equal(RA.computeMedia(docs, fy({ city: "Chennai" })).summary.total, 0);
+  assert.equal(RA.computeMedia(docs, fy({ siteStatus: "inactive" })).summary.total, 1);
+  assert.equal(RA.computeMedia(docs, fy({ siteStatus: "active" })).summary.total, 0);
+  assert.deepEqual(RA.computeMedia(docs, fy()).summary.byType, { Unspecified: 1 });
+});
+
+test("media: Active / Inactive / All count faces with the dashboard's rule (status 1 = active, else inactive)", () => {
+  const mk = (id, statuses, extra = {}) => ({ _id: id, createdAt: at(2026, 5), mediaDetails: statuses.map((st, i) => ({ _id: `${id}${i}`, mediaType: "Hoarding", city: "Chennai", status: st })), ...extra });
+  const docs = deepFreeze([mk("A", [1]), mk("AB", [2, 1, 3]), mk("I", [2]), mk("H", [3, 3]), { _id: "N", mediaDetails: [], createdAt: at(2026, 5) }, mk("U", [undefined, "1"])]);
+  const total = (siteStatus, extra = {}) => RA.computeMedia(docs, fy({ siteStatus, ...extra })).summary.total;
+  // faces: A 1 | AB 3 (1 active) | I 1 | H 2 | N (face-less) | U 2 (status "1" is active like Number(), undefined is not)
+  assert.deepEqual([total("active"), total("inactive"), total("all")], [3, 7, 10]);
+  assert.equal(total("active") + total("inactive"), total("all"));
+  assert.equal(RA.computeMedia(docs, fy()).summary.total, 10, "default (absent) is all");
+  // the status filter combines with media type / city and the buckets still reconcile
+  assert.deepEqual([total("active", { mediaType: "Hoarding" }), total("inactive", { mediaType: "Hoarding" })], [3, 6]);
+  assert.equal(total("active", { city: "Madurai" }), 0);
+  for (const s of ["active", "inactive", "all"]) reconciles(RA.computeMedia(docs, fy({ siteStatus: s })));
+  assert.equal(RA.computeMedia(docs, fy({ siteStatus: "all" })).summary.sites, 6);
+  assert.equal(RA.computeMedia(docs, fy({ siteStatus: "active" })).summary.sites, 3, "A, AB and U each have an active face");
+});
+
+test("media endpoint passes unfiltered documents (status is applied per face); other charts stay site-level", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../controllers/Admin/ReportAnalyticsController/ReportAnalyticsController.js"), "utf8");
+  assert.ok(src.includes('chart === "media" ? loaded : RA.applySiteStatus(loaded, f)'));
 });
 
 // ── Appraisal ─────────────────────────────────────────────────────────────
@@ -539,11 +564,11 @@ test("bills media-type filter uses the same per-bill type: matching faces of a m
   assert.equal(RA.computeBills(docs, fy({ city: "Madurai" })).summary.bills, 0);
 });
 
-test("bills: genuine site-level rows (no face / stale face id) keep site-level classification from ACTIVE faces", () => {
+test("bills: site-level rows keep site-level classification from ACTIVE faces; stale face rows are excluded", () => {
   const docs = deepFreeze([
     // no mediaDetailId on a multi-type site: genuinely site-level -> Mixed types, excluded from type filters
     { _id: "A", mediaDetails: [billFace("a1", "Hoarding"), billFace("a2", "Unipole")], rentalDue: [faceBill(null, 70)] },
-    // stale face id (face re-created) on a single-type site -> that type (the 52 real rows are all like this)
+    // stale face id (face re-created): excluded and reported, never classified (the 52 real rows are all like this)
     { _id: "B", mediaDetails: [billFace("b1", "Unipole"), billFace("b2", "Unipole")], rentalDue: [faceBill("gone", 30)] },
     // site-level row: the inactive Unipole face no longer makes it mixed
     { _id: "C", mediaDetails: [billFace("c1", "Hoarding"), billFace("c2", "Unipole", { status: 2 })], rentalDue: [faceBill(null, 20)] },
@@ -554,7 +579,6 @@ test("bills: genuine site-level rows (no face / stale face id) keep site-level c
   ]);
   assert.deepEqual(typeTotals(RA.computeBills(docs, fy())), {
     "Mixed types": { bills: 1, amount: 70 },
-    Unipole: { bills: 1, amount: 30 },
     Hoarding: { bills: 1, amount: 20 },
     Digital: { bills: 1, amount: 10 },
     "Wall Graphics": { bills: 1, amount: 5 },
@@ -562,6 +586,7 @@ test("bills: genuine site-level rows (no face / stale face id) keep site-level c
   const hoarding = RA.computeBills(docs, fy({ mediaType: "Hoarding" }));
   assert.equal(hoarding.summary.total, 20);
   assert.deepEqual(hoarding.meta.excludedMixedSites, { sites: 1, amount: 70 }); // only the genuinely mixed site-level row
+  assert.deepEqual(RA.computeBills(docs, fy()).meta.staleRowsExcluded, { bills: 1, amount: 30, sites: 1 });
   assert.equal(RA.billMediaType(docs[0], { mediaDetailId: "a2" }), "Unipole");
   assert.equal(RA.billMediaType(docs[0], {}), RA.MIXED);
   assert.equal(RA.billMediaType({ mediaDetails: [] }, {}), null);
@@ -578,7 +603,7 @@ test("media types are compared trimmed with inner spaces collapsed (case kept) �
   assert.equal(RA.computeBills(docs, fy({ mediaType: "  Wall  Hoarding" })).summary.total, 30);
   assert.equal(RA.computeBills(docs, fy({ mediaType: "Hoarding" })).summary.total, 0, "case is not merged");
   assert.deepEqual(RA.computeFilterOptions(docs, NOW).mediaTypes, ["hoarding", "Wall Hoarding"]);
-  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Wall Hoarding" })).summary.total, 1);
+  assert.equal(RA.computeMedia(docs, fy({ mediaType: "Wall Hoarding" })).summary.total, 2); // two faces of the site match (faces are counted)
 });
 
 // ── GST ───────────────────────────────────────────────────────────────────
@@ -883,7 +908,8 @@ test("data sources: each chart + source reads exactly the top-level fields its l
     },
     media: { both: ["createdAt", "mediaDetails"] },
     appraisal: { rentalMaster: ["appraisal", "mediaDetails"] },
-    bills: { rentalMaster: ["mediaDetails", "rentalDue"] },
+    // Outstanding payments: the Rental Master cycle calculation's fields (as Payments)
+    bills: { rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] },
     gst: {
       ledger: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
       rentalMaster: ["mediaDetails", "rentalDue", "rentalPayment"],
@@ -1055,6 +1081,422 @@ test("TDS Rental Master: date filters (calendar year, custom range) and media ty
   assert.deepEqual([...new Set(uni.buckets.flatMap((b) => b.deductions.map((d) => d.siteName)))], ["Site 3"]);
   const madurai = RA.computeTdsRentalMaster(docs, fy({ city: "Chennai" }), OWNERS);
   assert.deepEqual([...new Set(madurai.buckets.flatMap((b) => b.deductions.map((d) => d.siteName)))], ["Site 1"]);
+});
+
+// ── Generated bills: stale rows of deleted / replaced faces ──────────────
+// Rule: a row is stale when its mediaDetailId names no face of the site. Rows without a
+// mediaDetailId are site-level bills and always count. Rental Master ignores stale rows too.
+const staleSite = () => ({
+  _id: "ST",
+  mediaDetails: [billFace("cur1", "Hoarding"), billFace("cur2", "Unipole")],
+  rentalDue: [
+    // current faces, one per status
+    faceBill("cur1", 1000, { approvalStatus: 1 }),
+    faceBill("cur2", 2000, { approvalStatus: 3 }),
+    faceBill("cur1", 500, { approvalStatus: 2, dueDate: new Date(Date.UTC(2026, 9, 15)) }),
+    faceBill("cur2", 700, { approvalStatus: 4, dueDate: new Date(Date.UTC(2026, 9, 15)) }),
+    // left behind when the faces were re-created: same month, same amounts, old face ids
+    faceBill("old1", 1000, { approvalStatus: 1 }),
+    faceBill("old2", 2000, { approvalStatus: 1 }),
+    faceBill("old1", 500, { approvalStatus: 1, dueDate: new Date(Date.UTC(2026, 9, 15)) }),
+  ],
+});
+
+test("stale bills: rows of deleted / replaced faces are excluded from every output; current-face rows of every status count", () => {
+  const docs = deepFreeze([staleSite()]);
+  const r = RA.computeBills(docs, fy());
+  assert.equal(r.summary.bills, 4);
+  assert.equal(r.summary.total, 4200);
+  assert.equal(r.summary.sites, 1);
+  assert.deepEqual(r.summary.byStatus, {
+    Pending: { bills: 1, amount: 1000 },
+    Approved: { bills: 1, amount: 2000 },
+    "Partially approved": { bills: 1, amount: 500 },
+    Overdue: { bills: 1, amount: 700 },
+  });
+  assert.deepEqual(typeTotals(r), { Hoarding: { bills: 2, amount: 1500 }, Unipole: { bills: 2, amount: 2700 } });
+  assert.deepEqual(r.meta.staleRowsExcluded, { bills: 3, amount: 3500, sites: 1 });
+  // monthly buckets carry the same rows: Sep = 1000 + 2000, Oct = 500 + 700
+  assert.deepEqual([bucket(r, "2026-09").bills, bucket(r, "2026-09").total], [2, 3000]);
+  assert.deepEqual([bucket(r, "2026-10").bills, bucket(r, "2026-10").total], [2, 1200]);
+  // every summary reconciles with the buckets
+  assert.equal(r.buckets.reduce((x, b) => x + b.bills, 0), r.summary.bills);
+  assert.equal(r.buckets.reduce((x, b) => x + b.total, 0), r.summary.total);
+  for (const b of r.buckets) {
+    assert.equal(Object.values(b.byStatus).reduce((x, v) => x + v.bills, 0), b.bills, b.key);
+    assert.equal(Object.values(b.byType).reduce((x, v) => x + v.amount, 0), b.total, b.key);
+  }
+  assert.equal(RA.isStaleBill(docs[0], { mediaDetailId: "old1" }), true);
+  assert.equal(RA.isStaleBill(docs[0], { mediaDetailId: "cur1" }), false);
+  assert.equal(RA.isStaleBill(docs[0], { mediaDetailId: null }), false);
+});
+
+test("stale bills: site-level rows count; a site with no faces keeps its site-level rows; inactive faces are not stale", () => {
+  const docs = deepFreeze([
+    { _id: "SL", mediaDetails: [billFace("s1", "Hoarding"), billFace("s2", "Hoarding")], rentalDue: [faceBill(null, 900), faceBill(undefined, 100)] },
+    { _id: "NF", mediaDetails: [], rentalDue: [faceBill(null, 50), faceBill("ghost", 999)] },
+    { _id: "IN", mediaDetails: [billFace("i1", "Unipole", { status: 2 })], rentalDue: [faceBill("i1", 40)] },
+  ]);
+  const r = RA.computeBills(docs, fy());
+  assert.equal(r.summary.total, 900 + 100 + 50 + 40);
+  assert.equal(r.summary.bills, 4);
+  assert.equal(r.summary.sites, 3);
+  assert.deepEqual(r.meta.staleRowsExcluded, { bills: 1, amount: 999, sites: 1 });
+  assert.deepEqual(typeTotals(r), { Hoarding: { bills: 2, amount: 1000 }, Unspecified: { bills: 1, amount: 50 }, Unipole: { bills: 1, amount: 40 } });
+});
+
+test("stale bills: date range, city, media type, site status and source keep their behaviour and never count stale rows", () => {
+  const madurai = { _id: "MD", mediaDetails: [billFace("m1", "Hoarding", { city: "Madurai" })], rentalDue: [faceBill("m1", 300), faceBill("mOld", 300)] };
+  const docs = deepFreeze([staleSite(), madurai]);
+  const bills = (body) => RA.computeBills(RA.applySiteStatus(docs, fy(body)), fy(body));
+  // date range: only October -> the Oct current rows; the Oct stale row is reported for that range
+  const oct = RA.parseFilters({ startDate: "2026-10-01", endDate: "2026-10-31", siteStatus: "all" }, NOW).filters;
+  const ro = RA.computeBills(docs, oct);
+  assert.deepEqual([ro.summary.bills, ro.summary.total], [2, 1200]);
+  assert.deepEqual(ro.meta.staleRowsExcluded, { bills: 1, amount: 500, sites: 1 });
+  // city (site-level) and media type (per bill)
+  assert.equal(bills({ city: "Madurai" }).summary.total, 300);
+  assert.equal(bills({ city: "Chennai" }).summary.total, 4200);
+  assert.equal(bills({ mediaType: "Hoarding" }).summary.total, 1500 + 300);
+  assert.equal(bills({ mediaType: "Unipole" }).summary.total, 2700);
+  // site status: both sites are active; "inactive" leaves nothing, "all" = "active"
+  assert.equal(bills({ siteStatus: "active" }).summary.total, 4500);
+  assert.equal(bills({ siteStatus: "inactive" }).summary.total, 0);
+  assert.equal(bills({ siteStatus: "all" }).summary.total, 4500);
+  // source: bills exist only under Rental Master (Ledger is "not supported", unchanged)
+  assert.equal(C.resolve("bills", "ledger"), null);
+  assert.equal(bills({ source: "rentalMaster" }).summary.total, 4500);
+});
+
+// Apply a MongoDB inclusion projection ("a.b c") to a plain document the way the server does:
+// only listed paths survive; inside arrays of sub-documents only the listed sub-fields survive —
+// a nested _id is NOT kept unless listed (only the top-level _id is).
+const projectLikeMongo = (doc, select) => {
+  const paths = select.split(/\s+/).filter(Boolean).map((p) => p.split("."));
+  const pick = (value, rest) => {
+    if (Array.isArray(value)) return value.map((v) => pick(v, rest));
+    if (!rest.length || value === null || typeof value !== "object" || value instanceof Date) return value;
+    return value;
+  };
+  const build = (src, groups) => {
+    if (Array.isArray(src)) return src.map((v) => build(v, groups));
+    if (src === null || typeof src !== "object" || src instanceof Date) return src;
+    const out = {};
+    for (const [key, subs] of groups) {
+      if (!(key in src)) continue;
+      out[key] = subs.some((s) => s.length === 0) ? pick(src[key], []) : build(src[key], group(subs));
+    }
+    return out;
+  };
+  const group = (ps) => {
+    const m = new Map();
+    for (const [head, ...rest] of ps) m.set(head, [...(m.get(head) || []), rest]);
+    return m;
+  };
+  return { _id: doc._id, ...build(doc, group(paths)) };
+};
+
+test("live projection: the outstanding-payments query loads every field the cycle calculation and stale detection need (regression)", () => {
+  const docs = [
+    { ...dsite("LP1", 10000, { start: D(2026, 7), ledgerHistory: paidHist("LP1", "October") }), rentalDue: [faceBill("LP1-f", 10000, { dueDate: D(2026, 9) }), faceBill("gone", 10000, { dueDate: D(2026, 9) })] },
+    withGstRp(dsite("LP2", 20000, { start: D(2026, 7) }), 3600),
+  ];
+  const projected = deepFreeze(docs.map((d) => projectLikeMongo(d, C.SELECT.bills.rentalMaster)));
+  assert.ok(projected[0].mediaDetails.every((fc) => fc._id), "mediaDetails._id must be projected");
+  assert.ok(projected[0].rentalDue.every((b) => b.mediaDetailId), "rentalDue.mediaDetailId must be projected");
+  const f = fy();
+  const full = RA.computeOutstanding(deepFreeze(docs), f, LIB, NOW);
+  const live = RA.computeOutstanding(projected, f, LIB, NOW);
+  assert.deepEqual(live.summary, full.summary);
+  assert.deepEqual(live.buckets, full.buckets);
+  assert.equal(live.meta.staleRowsIgnored, 1);
+  assert.ok(live.summary.total.amount > 0);
+});
+
+// ── Stored bills by timing (computeBills: upcoming / due today / overdue / past approved) ──
+// NOW = 21 Oct 2026 (an IST-wall-clock Date, like nowIST()); "today" is that calendar day.
+const dueOn = (y, m, d) => new Date(Date.UTC(y, m - 1, d));
+const upcomingDocs = () => deepFreeze([
+  {
+    _id: "U",
+    mediaDetails: [billFace("u1", "Hoarding")],
+    rentalDue: [
+      faceBill("u1", 100, { dueDate: dueOn(2026, 10, 20), approvalStatus: 1 }), // yesterday, not approved -> overdue
+      faceBill("u1", 110, { dueDate: dueOn(2026, 10, 20), approvalStatus: 3 }), // yesterday, approved -> past, not overdue
+      faceBill("u1", 120, { dueDate: dueOn(2026, 10, 21), approvalStatus: 1 }), // today -> neither
+      faceBill("u1", 1180, { dueDate: dueOn(2026, 10, 22), approvalStatus: 1, gstAmount: 180 }), // tomorrow -> upcoming
+      faceBill("u1", 500, { dueDate: dueOn(2026, 11, 30), approvalStatus: 2 }), // upcoming, partially approved
+      faceBill("u1", 700, { dueDate: dueOn(2026, 12, 31), approvalStatus: 3, gstAmount: 100 }), // upcoming, last day of the year
+      faceBill("u1", 900, { dueDate: dueOn(2027, 1, 1), approvalStatus: 1 }), // after the calendar year
+      faceBill("u1", 50, { dueDate: dueOn(2025, 12, 31), approvalStatus: 1 }), // before the calendar year
+    ],
+  },
+  { _id: "V", mediaDetails: [billFace("v1", "Unipole", { city: "Madurai" })], rentalDue: [faceBill("v1", 300, { dueDate: dueOn(2026, 11, 15), approvalStatus: 1 })] },
+  // a stale row (face re-created) and a legitimate site-level row
+  { _id: "W", mediaDetails: [billFace("w1", "Hoarding")], rentalDue: [faceBill("gone", 999, { dueDate: dueOn(2026, 11, 10) }), faceBill(null, 400, { dueDate: dueOn(2026, 12, 1), approvalStatus: 1 })] },
+]);
+const billsAt = (body, now = NOW) => RA.computeBills(upcomingDocs(), RA.parseFilters({ source: "rentalMaster", ...body }, NOW).filters, now);
+const CY = { startDate: "2026-01-01", endDate: "2026-12-31" };
+
+test("stored bills by timing: only bills due AFTER today are upcoming; due today and past bills are separated; overdue = past and not approved", () => {
+  const r = billsAt(CY);
+  assert.equal(r.today, "2026-10-21");
+  const up = r.summary.upcoming;
+  assert.deepEqual([up.bills, up.total, up.gst, up.sites], [5, 1180 + 500 + 700 + 300 + 400, 280, 3]);
+  assert.deepEqual([r.summary.dueToday.bills, r.summary.dueToday.total], [1, 120]);
+  assert.deepEqual([r.summary.overdue.bills, r.summary.overdue.total], [1, 100]);
+  assert.deepEqual([r.summary.pastApproved.bills, r.summary.pastApproved.total], [1, 110]);
+  assert.equal(r.summary.bills, 8);
+  assert.equal(r.summary.bills, up.bills + r.summary.dueToday.bills + r.summary.overdue.bills + r.summary.pastApproved.bills);
+  assert.equal(r.summary.total, up.total + r.summary.dueToday.total + r.summary.overdue.total + r.summary.pastApproved.total);
+  assert.deepEqual(r.meta.staleRowsExcluded, { bills: 1, amount: 999, sites: 1 }, "stale rows never count");
+  assert.equal(r.buckets.reduce((x, b) => x + b.upcoming.bills, 0), up.bills);
+  assert.equal(r.buckets.reduce((x, b) => x + b.upcoming.total, 0), up.total);
+  assert.deepEqual(bucket(r, "2026-10").upcoming.bills, 1, "October: only the bill due tomorrow");
+  assert.deepEqual([bucket(r, "2026-10").bills, bucket(r, "2026-10").upcoming.total], [4, 1180]);
+  for (const k of ["2026-01", "2026-09"]) assert.deepEqual([bucket(r, k).upcoming.bills, bucket(r, k).upcoming.total], [0, 0], `${k} empty -> zeros`);
+});
+
+test("stored bills by timing: status and media-type breakdowns use the same upcoming rows", () => {
+  const up = billsAt(CY).summary.upcoming;
+  assert.deepEqual(up.byStatus, {
+    Pending: { bills: 3, amount: 1180 + 300 + 400 },
+    "Partially approved": { bills: 1, amount: 500 },
+    Approved: { bills: 1, amount: 700 },
+  });
+  assert.deepEqual(up.byType, { Hoarding: { bills: 4, amount: 1180 + 500 + 700 + 400 }, Unipole: { bills: 1, amount: 300 } });
+  const sum = (o, k) => Object.values(o).reduce((x, v) => x + v[k], 0);
+  assert.equal(sum(up.byStatus, "bills"), up.bills);
+  assert.equal(sum(up.byType, "amount"), up.total);
+  for (const b of billsAt(CY).buckets) {
+    assert.equal(sum(b.upcoming.byStatus, "bills"), b.upcoming.bills, b.key);
+    assert.equal(sum(b.upcoming.byType, "amount"), b.upcoming.total, b.key);
+  }
+});
+
+test("stored bills by timing: inclusive range boundaries; month, calendar year, financial year and custom ranges", () => {
+  const n = (body) => billsAt(body).summary.upcoming.bills;
+  assert.equal(n({ startDate: "2026-10-22", endDate: "2026-11-30" }), 3, "both boundary days included");
+  assert.equal(n({ startDate: "2026-10-23", endDate: "2026-11-29" }), 1, "just inside excludes both boundary bills");
+  assert.equal(n({ startDate: "2026-10-01", endDate: "2026-10-31" }), 1, "a single month");
+  assert.equal(n(CY), 5);
+  assert.equal(n({ fy: 2026 }), 6, "FY Apr 2026 – Mar 2027 adds 1 Jan 2027");
+  assert.equal(n({ startDate: "2027-01-01", endDate: "2027-12-31" }), 1, "next calendar year");
+  const past = billsAt({ fy: 2025 });
+  assert.deepEqual([past.summary.upcoming.bills, past.summary.upcoming.total], [0, 0]);
+  assert.deepEqual([past.summary.overdue.bills, past.summary.overdue.total], [1, 50]);
+  assert.ok(past.buckets.every((b) => b.upcoming.bills === 0 && b.upcoming.total === 0));
+  assert.notEqual(n({ startDate: "2026-12-01", endDate: "2026-12-31" }), n(CY));
+});
+
+test("stored bills by timing: 'today' moves with the clock (a bill due today is not upcoming, the day after it is overdue)", () => {
+  const at = (y, m, d) => billsAt(CY, new Date(Date.UTC(y, m - 1, d, 15, 30)));
+  const nov30 = at(2026, 11, 30);
+  assert.equal(nov30.today, "2026-11-30");
+  assert.deepEqual([nov30.summary.dueToday.bills, nov30.summary.dueToday.total], [1, 500]);
+  assert.deepEqual([nov30.summary.upcoming.bills, nov30.summary.upcoming.total], [2, 700 + 400]);
+  const dec1 = at(2026, 12, 1);
+  assert.equal(dec1.summary.overdue.bills, 5, "20 Oct, 21 Oct, 22 Oct, 15 Nov (pending) and 30 Nov (only partially approved) — all before today and not fully approved");
+  assert.equal(dec1.summary.pastApproved.bills, 1, "20 Oct approved: past its due date but not overdue");
+});
+
+test("stored bills by timing: city, media type, site status and source filters apply to the upcoming rows", () => {
+  const n = (body) => billsAt({ ...CY, ...body }).summary.upcoming;
+  assert.deepEqual([n({ city: "Madurai" }).bills, n({ city: "Madurai" }).total], [1, 300]);
+  assert.deepEqual([n({ mediaType: "Unipole" }).bills, n({ mediaType: "Hoarding" }).bills], [1, 4]);
+  const f = (st) => RA.parseFilters({ ...CY, siteStatus: st }, NOW).filters;
+  assert.equal(RA.computeBills(RA.applySiteStatus(upcomingDocs(), f("active")), f("active"), NOW).summary.upcoming.bills, 5);
+  assert.equal(RA.computeBills(RA.applySiteStatus(upcomingDocs(), f("inactive")), f("inactive"), NOW).summary.upcoming.bills, 0);
+  assert.equal(C.resolve("bills", "ledger"), null, "Ledger source stays 'not supported'");
+});
+
+// ── Outstanding payments (site × billing-month cycles, Rental Master / Ledger calculation) ──
+// NOW = 21 Oct 2026. dsite(id, rent, { start }) bills monthly from the month after `start` (day 10).
+const outAt = (docs, body = {}, now = NOW) => RA.computeOutstanding(deepFreeze(docs), RA.parseFilters({ startDate: "2026-01-01", endDate: "2026-12-31", ...body }, NOW).filters, LIB, now);
+const sumCats = (r, k) => ["upcoming", "dueToday", "overdue"].reduce((x, c) => x + r.summary[c][k], 0);
+const owner2 = (id, amt) => ({ _id: `${id}-o2`, paymentCategory: 2, onlineAmount: amt, shareAmount: amt });
+
+test("outstanding: unpaid cycles by due date — overdue before today, upcoming after; one unit per site × month", () => {
+  const r = outAt([dsite("A", 10000, { start: D(2026, 7) })]); // cycles 10 Sep, 10 Oct, 10 Nov, 10 Dec
+  assert.equal(r.unit, "siteCycle");
+  assert.deepEqual([r.summary.overdue.cycles, r.summary.overdue.amount], [2, 20000]);
+  assert.deepEqual([r.summary.upcoming.cycles, r.summary.upcoming.amount], [2, 20000]);
+  assert.deepEqual([r.summary.dueToday.cycles, r.summary.dueToday.amount], [0, 0]);
+  assert.deepEqual(r.summary.total, { cycles: 4, sites: 1, amount: 40000 });
+  assert.equal(r.summary.upcoming.notYetBilled, 2, "Nov / Dec have no bill row yet (the ledger computes them from the schedule)");
+  assert.deepEqual([bucket(r, "2026-09").overdue.amount, bucket(r, "2026-11").upcoming.amount, bucket(r, "2026-05").total.amount], [10000, 10000, 0]);
+});
+
+test("outstanding: a paid landlord share settles its cycle; with two landlords only the unpaid share remains", () => {
+  const paidOct = dsite("P", 10000, { start: D(2026, 7), ledgerHistory: paidHist("P", "October", "2026", 10000) });
+  const r = outAt([paidOct]);
+  assert.equal(r.summary.total.cycles, 3, "October paid -> excluded");
+  assert.equal(r.meta.settledCycles, 1);
+  assert.equal(r.summary.overdue.amount, 10000, "only September is overdue");
+  const two = dsite("T", 10000, { start: D(2026, 7), owners: [ownerOnline("T", 6000), owner2("T", 4000)], ledgerHistory: paidHist("T", "October", "2026", 6000) });
+  const r2 = outAt([two], { startDate: "2026-10-01", endDate: "2026-10-31" });
+  assert.deepEqual([r2.summary.overdue.cycles, r2.summary.overdue.amount, r2.summary.overdue.rent], [1, 4000, 4000], "only the second landlord's 4,000 is still to be paid");
+});
+
+test("outstanding: held GST stays outstanding until released through the GST balance", () => {
+  const held = withGstRp(dsite("G", 10000, { start: D(2026, 7), ledgerHistory: paidHist("G", "October", "2026", 10000), rentalDue: [bill("October 2026", 1)] }), 1800);
+  const oct = { startDate: "2026-10-01", endDate: "2026-10-31" };
+  const r = outAt([held], oct);
+  assert.deepEqual([r.summary.overdue.rent, r.summary.overdue.gst, r.summary.overdue.amount], [0, 1800, 1800], "rent paid, GST still held");
+  const released = { ...held, gstBalanceHistory: [{ rentalDueId: "x", dueMonth: "October 2026", gstAmount: 1800, isPaid: true }] };
+  assert.equal(outAt([released], oct).summary.total.amount, 0, "released GST -> settled");
+  assert.equal(outAt([released], oct).meta.settledCycles, 1);
+});
+
+test("outstanding: approval status is not payment status", () => {
+  const oct = { startDate: "2026-10-01", endDate: "2026-10-31" };
+  const approvedUnpaid = dsite("AU", 10000, { start: D(2026, 7), rentalDue: [bill("October 2026", 0, { approvalStatus: 3 })] });
+  const pendingPaid = dsite("PP", 10000, { start: D(2026, 7), rentalDue: [bill("October 2026", 0, { approvalStatus: 1 })], ledgerHistory: paidHist("PP", "October", "2026", 10000) });
+  const r = outAt([approvedUnpaid, pendingPaid], oct);
+  assert.deepEqual([r.summary.overdue.cycles, r.summary.overdue.amount], [1, 10000], "approved but unpaid is outstanding; pending but paid is not");
+  assert.deepEqual(r.summary.overdue.byStatus, { Approved: { cycles: 1, amount: 10000 } });
+});
+
+test("outstanding: due today is its own category; the boundaries of the range are inclusive", () => {
+  const today = dsite("DT", 5000, { start: D(2026, 8, 21) }); // cycles 21 Oct (= today), 21 Nov, 21 Dec
+  const r = outAt([today]);
+  assert.deepEqual([r.summary.dueToday.cycles, r.summary.dueToday.amount], [1, 5000]);
+  assert.equal(r.today, "2026-10-21");
+  assert.equal(outAt([today], { startDate: "2026-10-21", endDate: "2026-10-21" }).summary.total.amount, 5000, "single-day range = today");
+  assert.equal(outAt([today], { startDate: "2026-10-22", endDate: "2026-11-21" }).summary.upcoming.cycles, 1, "21 Nov included (end), 21 Oct excluded (before start)");
+  assert.equal(outAt([today], { startDate: "2026-10-22", endDate: "2026-11-20" }).summary.total.cycles, 0, "nothing due inside");
+  const tomorrow = outAt([today], {}, new Date(Date.UTC(2026, 9, 22, 9)));
+  assert.deepEqual([tomorrow.summary.dueToday.cycles, tomorrow.summary.overdue.cycles], [0, 1], "the next day it is overdue");
+});
+
+test("outstanding: several face bills of one site count the site's cycle once; stale-only months add no cycle", () => {
+  const two = { ...dsite("MF", 20000, { start: D(2026, 7) }), mediaDetails: [face("MF"), { ...face("MF2"), _id: "MF-f2" }],
+    rentalDue: [faceBill("MF-f", 12000, { dueDate: D(2026, 9) }), faceBill("MF-f2", 8000, { dueDate: D(2026, 9) })] };
+  const r = outAt([two], { startDate: "2026-10-01", endDate: "2026-10-31" });
+  assert.deepEqual([r.summary.overdue.cycles, r.summary.overdue.sites, r.summary.overdue.amount], [1, 1, 20000]);
+  // quarterly site: a stale row in a month with no cycle must not create one
+  const q = { ...dsite("Q", 30000, { start: D(2026, 3) }), rentalDue: [faceBill("gone", 30000, { dueDate: D(2026, 8, 5) })] };
+  q.rentalPayment = { ...q.rentalPayment, paymentFrequency: 2 };
+  const rq = outAt([q]);
+  assert.deepEqual(rq.buckets.filter((b) => b.total.cycles).map((b) => b.key), ["2026-07", "2026-10"], "quarterly cycles only; no September cycle from the stale row");
+  assert.equal(rq.meta.staleRowsIgnored, 1);
+});
+
+test("outstanding: a site without a landlord is unallocated — never counted as paid, never in the total", () => {
+  const noOwner = dsite("NO", 131250, { start: D(2026, 7), owners: [] });
+  const r = outAt([noOwner, dsite("A", 10000, { start: D(2026, 7) })]);
+  assert.equal(r.summary.total.amount, 40000, "only the site with a landlord");
+  assert.deepEqual([r.summary.unallocated.cycles, r.summary.unallocated.sites, r.summary.unallocated.configuredRent], [4, 1, 4 * 131250]);
+  assert.ok(r.summary.unallocated.records.every((x) => x.reason === "no landlord" && x.siteId === "NO"));
+  assert.equal(r.meta.settledCycles, 0, "not counted as settled either");
+});
+
+test("outstanding: totals reconcile — categories, months, statuses, media types; filters keep their behaviour", () => {
+  const docs = [
+    dsite("A", 10000, { start: D(2026, 7) }),
+    { ...dsite("B", 6000, { start: D(2026, 8, 21) }), mediaDetails: [face("B", "Unipole", "Madurai")] },
+    dsite("C", 4000, { start: D(2026, 7), rentalDue: [bill("September 2026", 0, { dueDate: D(2026, 8), approvalStatus: 2 })] }),
+  ];
+  const r = outAt(docs);
+  assert.equal(r.summary.total.amount, sumCats(r, "amount"));
+  assert.equal(r.summary.total.cycles, sumCats(r, "cycles"));
+  assert.equal(r.summary.total.sites, 3);
+  assert.equal(r.buckets.reduce((x, b) => x + b.total.amount, 0), r.summary.total.amount);
+  for (const c of ["upcoming", "dueToday", "overdue"]) {
+    const s = r.summary[c];
+    assert.equal(Object.values(s.byStatus).reduce((x, v) => x + v.amount, 0), s.amount, `${c} by status`);
+    assert.equal(Object.values(s.byType).reduce((x, v) => x + v.cycles, 0), s.cycles, `${c} by type`);
+  }
+  assert.deepEqual(r.summary.overdue.byStatus["Partially approved"], { cycles: 1, amount: 4000 });
+  assert.ok(r.summary.upcoming.byStatus["Not billed yet"].cycles > 0);
+  // filters: city / media type (site level), site status, source
+  assert.equal(outAt(docs, { city: "Madurai" }).summary.total.sites, 1);
+  assert.equal(outAt(docs, { mediaType: "Unipole" }).summary.total.amount, outAt(docs, { city: "Madurai" }).summary.total.amount);
+  const fa = (st) => RA.parseFilters({ startDate: "2026-01-01", endDate: "2026-12-31", siteStatus: st }, NOW).filters;
+  assert.equal(RA.computeOutstanding(RA.applySiteStatus(deepFreeze(docs), fa("inactive")), fa("inactive"), LIB, NOW).summary.total.cycles, 0);
+  assert.equal(C.resolve("bills", "ledger"), null);
+  // an empty period is all zeros
+  const empty = outAt(docs, { startDate: "2025-01-01", endDate: "2025-12-31" });
+  assert.deepEqual(empty.summary.total, { cycles: 0, sites: 0, amount: 0 });
+  assert.ok(empty.buckets.every((b) => b.total.amount === 0));
+});
+
+test("outstanding: October 2026 reconciles with the Rental Master unpaid figure for the same cycles", () => {
+  const docs = octFixture(); // Rental Master: due 60,84,025, unpaid 58,30,025 for October
+  const r = outAt(docs, { startDate: "2026-10-01", endDate: "2026-10-31" });
+  const rm = RA.computePeriodDue(docs, RA.parseFilters(OCT, NOW).filters, LIB, NOW).due;
+  assert.equal(r.summary.total.amount, rm.unpaid);
+  assert.equal(r.summary.total.amount, 5830025);
+  assert.equal(r.summary.overdue.amount, 5830025, "all October cycles fall on the 10th, before 21 Oct");
+});
+
+test("outstanding export details: opt-in per-cycle rows (with their bill rows) that reconcile with the summary", () => {
+  const docs = [
+    { ...dsite("DX", 20000, { start: D(2026, 7) }), mediaDetails: [{ ...face("DX"), mediaCode: "DX-1" }, { ...face("DX2"), _id: "DX-f2", mediaCode: "DX-2" }],
+      rentalDue: [faceBill("DX-f", 12000, { dueDate: D(2026, 9), gstAmount: 0, netPayable: 12000 }), faceBill("DX-f2", 8000, { dueDate: D(2026, 9) }), faceBill("gone", 999, { dueDate: D(2026, 9) })] },
+    dsite("NO", 5000, { start: D(2026, 7), owners: [] }),
+  ];
+  const plain = outAt(docs);
+  assert.equal(plain.records, undefined, "no detail rows unless asked for (the UI does not ask)");
+  const r = outAt(docs, { details: true });
+  assert.equal(RA.parseFilters({ details: true }, NOW).filters.details, true);
+  assert.equal(r.records.length, r.summary.total.cycles, "one row per outstanding cycle");
+  assert.equal(r.records.reduce((x, c) => x + c.remaining, 0), r.summary.total.amount);
+  for (const c of ["upcoming", "dueToday", "overdue"]) {
+    assert.equal(r.records.filter((x) => x.category === c).reduce((a, x) => a + x.remaining, 0), r.summary[c].amount, c);
+  }
+  const oct = r.records.find((x) => x.month === "2026-10");
+  assert.deepEqual([oct.siteId, oct.dueDate, oct.category, oct.remaining, oct.status], ["DX", "2026-10-10", "overdue", 20000, "Approved"], "approved but unpaid: still outstanding");
+  assert.deepEqual(oct.bills.map((b) => [b.mediaCode, b.baseAmount]), [["DX-1", 12000], ["DX-2", 8000]], "current-face bill rows only (stale row left out)");
+  assert.ok(r.records.every((x) => x.siteId !== "NO"), "unallocated cycles stay in summary.unallocated, not in the detail rows");
+  // the live endpoint query carries every field the detail rows read
+  const live = RA.computeOutstanding(deepFreeze(docs.map((d) => projectLikeMongo(d, C.SELECT.bills.rentalMaster))), RA.parseFilters({ startDate: "2026-01-01", endDate: "2026-12-31", details: true }, NOW).filters, LIB, NOW);
+  assert.deepEqual(live.records, r.records);
+});
+
+// ── Site status filter ────────────────────────────────────────────────────
+const statusSite = (id, statuses, extra = {}) => ({
+  _id: id,
+  createdAt: new Date(Date.UTC(2026, 5, 1)),
+  mediaDetails: statuses.map((st, i) => ({ _id: `${id}-f${i}`, mediaType: "Hoarding", city: "Chennai", mediaName: `${id}${i}`, status: st })),
+  rentalDue: [{ dueDate: new Date(Date.UTC(2026, 8, 15)), baseAmount: 100, approvalStatus: 1 }],
+  ...extra,
+});
+
+test("site status: active = at least one face with status 1; inactive = none (inactive / hold / no faces); all = everything", () => {
+  assert.equal(RA.parseFilters({}, NOW).filters.siteStatus, "all", "absent -> all (unchanged API behaviour)");
+  for (const s of ["active", "inactive", "all"]) assert.equal(RA.parseFilters({ siteStatus: s }, NOW).filters.siteStatus, s);
+  for (const bad of ["Active", "on", 1, "hold"]) assert.match(RA.parseFilters({ siteStatus: bad }, NOW).error, /siteStatus must be/);
+  const docs = deepFreeze([
+    statusSite("A", [1]), statusSite("AB", [2, 1, 3]), // active
+    statusSite("I", [2]), statusSite("H", [3, 3]), statusSite("N", []), // inactive
+  ]);
+  const ids = (st) => RA.applySiteStatus(docs, fy({ siteStatus: st })).map((d) => d._id);
+  assert.deepEqual(ids("active"), ["A", "AB"]);
+  assert.deepEqual(ids("inactive"), ["I", "H", "N"]);
+  assert.deepEqual(ids("all"), ["A", "AB", "I", "H", "N"]);
+  assert.deepEqual(RA.applySiteStatus(docs, fy()).length, 5);
+  // the partition is exact: active + inactive = all, for any chart
+  const bills = (st) => RA.computeBills(RA.applySiteStatus(docs, fy({ siteStatus: st })), fy({ siteStatus: st }));
+  assert.equal(bills("active").summary.bills + bills("inactive").summary.bills, bills("all").summary.bills);
+  assert.deepEqual([bills("active").summary.bills, bills("inactive").summary.bills], [2, 3]);
+  assert.equal(bills("inactive").filters.siteStatus, "inactive", "echoed back");
+  // media counts faces (A 1, AB 3 of which 1 active, I 1, H 2, N face-less 1) on the unfiltered documents
+  const media = (st) => RA.computeMedia(docs, fy({ siteStatus: st })).summary.total;
+  assert.deepEqual([media("active"), media("inactive"), media("all")], [2, 6, 8]);
+});
+
+test("site status: every chart's projection loads face status; invalid values are a 400; unsupported answers echo it", async () => {
+  for (const [chart, bySource] of Object.entries(C.SELECT)) {
+    if (chart === "filters") continue;
+    for (const [src, sel] of Object.entries(bySource)) assert.match(sel, /mediaDetails\.status/, `${chart}/${src}`);
+  }
+  const bad = fakeRes();
+  await C.getBillAnalytics({ user: { userType: 1 }, body: { siteStatus: "sometimes" } }, bad);
+  assert.equal(bad.statusCode, 400);
+  const res = fakeRes();
+  await C.getBillAnalytics({ user: { userType: 1 }, body: { source: "ledger", siteStatus: "inactive" } }, res);
+  assert.deepEqual(res.body.data.filters, { source: "ledger", siteStatus: "inactive" });
 });
 
 // ── Robustness / read-only ────────────────────────────────────────────────

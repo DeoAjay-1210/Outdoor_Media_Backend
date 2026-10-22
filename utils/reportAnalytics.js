@@ -24,6 +24,12 @@ const MAX_SPAN_DAYS = 366 * 5;
 // ledger rows (ledgerHistory, gstBalanceHistory, tdsBalanceHistory).
 const SOURCES = ["rentalMaster", "ledger"];
 const DEFAULT_SOURCE = "rentalMaster";
+// Site status filter. A site is ACTIVE when at least one of its faces has
+// status 1 (the dashboard's / ledger's rule: find({ "mediaDetails.status": 1 }));
+// otherwise (faces inactive = 2 or on hold = 3, or no faces) it is INACTIVE.
+// "all" (the default when the parameter is absent) keeps every site, as before.
+const SITE_STATUSES = ["active", "inactive", "all"];
+const DEFAULT_SITE_STATUS = "all";
 const DAY_GRANULARITY_MAX_DAYS = 62;
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -98,6 +104,8 @@ const parseFilters = (input = {}, now = nowIST()) => {
   };
   const source = body.source === undefined || body.source === null || body.source === "" ? DEFAULT_SOURCE : body.source;
   if (!SOURCES.includes(source)) return { error: `source must be one of: ${SOURCES.join(", ")}` };
+  const siteStatus = body.siteStatus === undefined || body.siteStatus === null || body.siteStatus === "" ? DEFAULT_SITE_STATUS : body.siteStatus;
+  if (!SITE_STATUSES.includes(siteStatus)) return { error: `siteStatus must be one of: ${SITE_STATUSES.join(", ")}` };
   return {
     filters: {
       fy,
@@ -107,12 +115,16 @@ const parseFilters = (input = {}, now = nowIST()) => {
       mediaType: pick(body.mediaType, mediaTypeText),
       city: pick(body.city),
       source,
+      siteStatus,
+      // opt-in detail rows for the report export (same calculation, same filters)
+      details: body.details === true || body.details === "true",
     },
   };
 };
 
 const publicFilters = (f) => ({
   source: f.source || DEFAULT_SOURCE,
+  siteStatus: f.siteStatus || DEFAULT_SITE_STATUS,
   fy: f.fy,
   startDate: dayKeyOf(f.start),
   endDate: dayKeyOf(f.end),
@@ -201,6 +213,16 @@ const topList = (map, n = 5) =>
   [...map.values()].sort((a, b) => b.amount - a.amount).slice(0, n).map((x) => ({ name: x.name, amount: r2(x.amount) }));
 
 // ── Filter options ─────────────────────────────────────────────────────────
+
+/** Active site = at least one face with status 1 (see SITE_STATUSES). */
+const isActiveSite = (doc) => faceList(doc).some((fc) => num(fc.status) === 1);
+
+/** The sites selected by the site-status filter (applied before every chart). */
+const applySiteStatus = (docs, f) => {
+  const status = (f && f.siteStatus) || DEFAULT_SITE_STATUS;
+  if (status === "all") return docs;
+  return docs.filter((doc) => isActiveSite(doc) === (status === "active"));
+};
 
 /** Distinct, trimmed (case-preserving, NOT merged) face values. */
 const computeFilterOptions = (docs, now = nowIST()) => {
@@ -489,45 +511,59 @@ const withPeriodDue = (payments, docs, f, lib, now) => {
 // ── Chart 2 — Sites onboarded ──────────────────────────────────────────────
 
 /**
- * Counts distinct MediaOnboarding documents (sites) by MediaOnboarding.createdAt
- * (never invented). A site is counted once however many faces it has.
- * Filters: with a media type and/or city selected, a site is eligible when at
- * least one single face satisfies every selected filter (type AND city on the
- * same face). With no filter every site is eligible (even one with no faces).
- * `byType` is informational: distinct sites having a (matching) face of each
- * type; a mixed-type site appears under each of its types, so those numbers can
- * overlap and are NOT meant to sum to `total`. Chart values use `total`.
+ * Counts media FACES (MediaOnboarding.mediaDetails[]) by the parent document's
+ * createdAt — the same unit as the dashboard's totalSites / activeSites /
+ * inactiveSites (DashboardController: every face counts once; status 1 = active,
+ * anything else = inactive; a document with no faces counts once, as inactive).
+ * `createdAt` belongs to the site document, not to the face, so a face added to
+ * an existing site later is dated with the site's onboarding: the trend shows
+ * when site records were created, not when each face went live.
+ *
+ * Site status (active / inactive / all) is applied HERE per face, not per site
+ * (callers must pass the unfiltered documents). Media type / city filter faces:
+ * a face counts when it satisfies every selected filter itself; a face-less
+ * document never passes a media type / city filter.
+ * `byType` counts faces per media type ("Unspecified" when blank), so it sums to
+ * `total`. `summary.sites` is the number of distinct site documents behind the
+ * counted faces (informational).
  */
 const computeMedia = (docs, f) => {
   const buckets = buildBuckets(f, () => ({ total: 0, byType: {} }));
-  const meta = { sitesWithoutOnboardingDate: 0 };
+  const meta = { sitesWithoutOnboardingDate: 0, facesWithoutOnboardingDate: 0 };
   let total = 0;
   const byType = {};
+  const sites = new Set();
   const filtered = !!(f.mediaType || f.city);
+  const status = f.siteStatus || DEFAULT_SITE_STATUS;
   for (const doc of docs) {
     const faces = faceList(doc);
-    const matching = faces.filter((fc) => {
+    // a face-less document is one record, inactive (the dashboard's rule)
+    const items = faces.length ? faces : [null];
+    const counted = items.filter((fc) => {
+      if (fc === null) return !filtered && status !== "active";
       if (f.mediaType && mediaTypeText(fc.mediaType) !== f.mediaType) return false;
       if (f.city && text(fc.city) !== f.city) return false;
-      return true;
+      const active = num(fc.status) === 1;
+      return status === "all" || active === (status === "active");
     });
-    if (filtered && !matching.length) continue;
+    if (!counted.length) continue;
     const created = toDate(doc.createdAt);
-    if (!created) { meta.sitesWithoutOnboardingDate += 1; continue; }
+    if (!created) { meta.sitesWithoutOnboardingDate += 1; meta.facesWithoutOnboardingDate += counted.length; continue; }
     if (!inRange(created, f)) continue;
     const b = buckets.get(bucketKey(created, f.granularity));
     if (!b) continue;
-    b.total += 1;
-    total += 1;
-    const types = uniq((filtered ? matching : faces).map((fc) => mediaTypeText(fc.mediaType) || "Unspecified"));
-    for (const t of types.length ? types : ["Unspecified"]) {
+    sites.add(idOf(doc._id));
+    for (const fc of counted) {
+      const t = (fc && mediaTypeText(fc.mediaType)) || "Unspecified";
+      b.total += 1;
+      total += 1;
       b.byType[t] = (b.byType[t] || 0) + 1;
       byType[t] = (byType[t] || 0) + 1;
     }
   }
   const list = [...buckets].map(([key, b]) => ({ key, total: b.total, byType: b.byType }));
   const peak = list.reduce((m, b) => (b.total > (m?.total ?? 0) ? b : m), null);
-  return { filters: publicFilters(f), buckets: list, summary: { total, byType, peakKey: peak && peak.total ? peak.key : null }, meta };
+  return { filters: publicFilters(f), buckets: list, summary: { total, sites: sites.size, byType, peakKey: peak && peak.total ? peak.key : null }, meta };
 };
 
 // ── Chart 3 — Appraisal ────────────────────────────────────────────────────
@@ -600,9 +636,10 @@ const BILL_STATUS = { 1: "Pending", 2: "Partially approved", 3: "Approved", 4: "
  * siteBillForOverdue). So a row whose mediaDetailId matches a face takes THAT
  * face's type — whatever other types the site has, and even if the face is
  * inactive now (it was billed for that face).
- * Only a row without a face, or whose mediaDetailId matches no current face
- * (stale ids after a site edit), is classified at site level: the site's ACTIVE
- * faces (all faces if none is active), "mixed" when they disagree.
+ * A row without a face (site-level bill) is classified at site level: the
+ * site's ACTIVE faces (all faces if none is active), "mixed" when they
+ * disagree. (Rows whose face no longer exists are stale — isStaleBill — and are
+ * excluded by computeBills before any classification.)
  * @returns a media type string, MIXED or null (no type at all)
  */
 const billMediaType = (doc, bill) => {
@@ -616,6 +653,18 @@ const billMediaType = (doc, bill) => {
 };
 
 /**
+ * A bill row is STALE when it names a face (mediaDetailId) that no longer exists
+ * on the site — a face deleted or re-created with a new id during a site edit.
+ * Such rows are left behind when the face changes; the billing code then creates
+ * a row for the current face, so the old one only duplicates it. Rental Master
+ * (utils/rentalDueStats.js pickFaceEntry) already ignores them. Rows WITHOUT a
+ * mediaDetailId are site-level bills (they apply to every face) and are never
+ * stale; rows of a face that still exists but is inactive are not stale either.
+ */
+const isStaleBill = (doc, bill) =>
+  !!(bill && bill.mediaDetailId) && !faceList(doc).some((fc) => idOf(fc._id) === idOf(bill.mediaDetailId));
+
+/**
  * Source: rentalDue[] (bills that already exist). Verified in
  * RentalDueNew2Controller.computeGstSplit: baseAmount = rent + GST (gross),
  * gstAmount = the GST part, netPayable = amount payable to the owner now
@@ -624,12 +673,38 @@ const billMediaType = (doc, bill) => {
  * inferred. No bill is ever generated or updated.
  * Media type (byType and the media-type filter) is per bill — billMediaType;
  * the city filter stays site-level.
+ * Stale rows (isStaleBill) are excluded before everything else, so the total,
+ * counts, sites, monthly buckets and status / type breakdowns all use the same
+ * rows; those in the period are reported in meta.staleRowsExcluded.
+ *
+ * Timing (Upcoming Payments), against TODAY = the IST calendar day (nowIST, the
+ * same convention as the stored dueDates and as rentalDueStats' overdue rule):
+ *  upcoming — dueDate after today (from tomorrow on): buckets[].upcoming and
+ *             summary.upcoming, with the same fields and status / type breakdowns
+ *  dueToday — dueDate today: neither upcoming nor overdue yet
+ *  overdue  — dueDate before today AND not fully approved (approvalStatus ≠ 3) —
+ *             the Rental Master / dashboard overdue rule
+ *  past, approved — dueDate before today and approved: in the stored totals only
+ * The top-level bucket / summary fields stay "all stored bills in the period".
  */
-const computeBills = (docs, f) => {
-  const buckets = buildBuckets(f, () => ({ bills: 0, sites: new Set(), total: 0, gst: 0, payable: 0, byStatus: {}, byType: {} }));
+const computeBills = (docs, f, now = nowIST()) => {
+  const today = startOfUtcDay(now);
+  const tomorrow = new Date(today.getTime() + MS_DAY);
+  const mkPart = () => ({ bills: 0, sites: new Set(), total: 0, gst: 0, payable: 0, byStatus: {}, byType: {} });
+  const buckets = buildBuckets(f, () => ({ ...mkPart(), upcoming: mkPart() }));
   const excl = newExclusions();
   const meta = { billsWithoutAmount: 0, billsWithoutDueDate: 0 };
-  const sum = { bills: 0, sites: new Set(), total: 0, gst: 0, payable: 0, byStatus: {} };
+  const stale = { bills: 0, amount: 0, sites: new Set() };
+  const sum = mkPart();
+  const upcoming = mkPart();
+  const timing = { dueToday: mkPart(), overdue: mkPart(), pastApproved: mkPart() };
+  const add = (part, sid, status, tl, total, gst, payable) => {
+    part.bills += 1; part.sites.add(sid); part.total += total; part.gst += gst; part.payable += payable;
+    const st = (part.byStatus[status] ||= { bills: 0, amount: 0 });
+    st.bills += 1; st.amount += total;
+    const ty = (part.byType[tl] ||= { bills: 0, amount: 0 });
+    ty.bills += 1; ty.amount += total;
+  };
   for (const doc of docs) {
     const attr = siteAttr(doc);
     for (const bill of doc.rentalDue || []) {
@@ -638,6 +713,7 @@ const computeBills = (docs, f) => {
       if (!d) { meta.billsWithoutDueDate += 1; continue; }
       if (!inRange(d, f)) continue;
       const total = num(bill.baseAmount);
+      if (isStaleBill(doc, bill)) { stale.bills += 1; stale.amount += total; stale.sites.add(idOf(doc._id)); continue; }
       const type = billMediaType(doc, bill);
       if (f.mediaType) {
         if (type === MIXED) { excl.sites.add(idOf(doc._id)); excl.amount += total; continue; }
@@ -647,30 +723,45 @@ const computeBills = (docs, f) => {
       if (total <= 0) meta.billsWithoutAmount += 1;
       const b = buckets.get(bucketKey(d, f.granularity));
       if (!b) continue;
-      const status = BILL_STATUS[num(bill.approvalStatus ?? bill.status)] || "Unknown";
+      const approvalStatus = num(bill.approvalStatus ?? bill.status);
+      const status = BILL_STATUS[approvalStatus] || "Unknown";
       const gst = num(bill.gstAmount);
       const payable = num(bill.netPayable);
-      b.bills += 1; b.sites.add(idOf(doc._id)); b.total += total; b.gst += gst; b.payable += payable;
-      const s = (b.byStatus[status] ||= { bills: 0, amount: 0 });
-      s.bills += 1; s.amount += total;
+      const sid = idOf(doc._id);
       const tl = typeLabel({ mediaType: type });
-      const t = (b.byType[tl] ||= { bills: 0, amount: 0 });
-      t.bills += 1; t.amount += total;
-      sum.bills += 1; sum.sites.add(idOf(doc._id)); sum.total += total; sum.gst += gst; sum.payable += payable;
-      const ss = (sum.byStatus[status] ||= { bills: 0, amount: 0 });
-      ss.bills += 1; ss.amount += total;
+      add(b, sid, status, tl, total, gst, payable);
+      add(sum, sid, status, tl, total, gst, payable);
+      if (d >= tomorrow) {
+        add(b.upcoming, sid, status, tl, total, gst, payable);
+        add(upcoming, sid, status, tl, total, gst, payable);
+      } else if (d >= today) {
+        add(timing.dueToday, sid, status, tl, total, gst, payable);
+      } else if (approvalStatus !== 3) {
+        add(timing.overdue, sid, status, tl, total, gst, payable);
+      } else {
+        add(timing.pastApproved, sid, status, tl, total, gst, payable);
+      }
     }
   }
   const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { bills: v.bills, amount: r2(v.amount) }]));
-  const list = [...buckets].map(([key, b]) => ({
-    key, bills: b.bills, sites: b.sites.size, total: r2(b.total), gst: r2(b.gst), payable: r2(b.payable),
-    byStatus: round(b.byStatus), byType: round(b.byType),
-  }));
+  const fin = (p) => ({
+    bills: p.bills, sites: p.sites.size, total: r2(p.total), gst: r2(p.gst), payable: r2(p.payable),
+    byStatus: round(p.byStatus), byType: round(p.byType),
+  });
+  const list = [...buckets].map(([key, b]) => ({ key, ...fin(b), upcoming: fin(b.upcoming) }));
   return {
     filters: publicFilters(f),
+    today: dayKeyOf(today),
     buckets: list,
-    summary: { bills: sum.bills, sites: sum.sites.size, total: r2(sum.total), gst: r2(sum.gst), payable: r2(sum.payable), byStatus: round(sum.byStatus) },
-    meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
+    summary: {
+      // all stored bills in the period (any timing), as before
+      bills: sum.bills, sites: sum.sites.size, total: r2(sum.total), gst: r2(sum.gst), payable: r2(sum.payable), byStatus: round(sum.byStatus),
+      upcoming: fin(upcoming),
+      dueToday: fin(timing.dueToday),
+      overdue: fin(timing.overdue),
+      pastApproved: fin(timing.pastApproved),
+    },
+    meta: { ...meta, staleRowsExcluded: { bills: stale.bills, amount: r2(stale.amount), sites: stale.sites.size }, excludedMixedSites: exclusionMeta(excl) },
   };
 };
 
@@ -1020,6 +1111,155 @@ const computeTdsRentalMaster = (docs, filters, lib) => {
   };
 };
 
+/**
+ * Outstanding Payments — one unit per site × billing-month cycle (never per face
+ * bill, so several faces of a site never repeat its amount), from the existing
+ * Rental Master / Ledger cycle calculation:
+ *  - cycles: lib.getAllDueCycles (billing start + frequency, plus months of existing
+ *    bill rows) on the site WITHOUT its stale rows (isStaleBill), one per month;
+ *    the cycle date is the due date; only cycles due within [start, end] count
+ *  - remaining = getOverallSummaryForCycle(site, cycle month):
+ *      currentMonthRentPending  (unpaid landlord shares — the ledger's paid rule:
+ *                                a landlord + mode is paid once a ledger entry
+ *                                exists for that month; direct GST rides with rent)
+ *    + currentMonthGstPending   (held GST not yet released via gstBalanceHistory)
+ *    A cycle with remaining = 0 is settled and excluded. Approval status plays no part.
+ *  - category against TODAY (IST calendar day, nowIST — the stored-date convention):
+ *      upcoming = due after today · dueToday = due today · overdue = due before today
+ *    Overdue here is PAYMENT-based (remaining > 0), unlike the approval-based overdue
+ *    of Rental Master / the dashboard (not fully approved and past due).
+ *  - unallocated: a cycle of a site with no landlord (rent cannot be computed — the
+ *    ledger would report only GST) or no active face is NOT counted as paid or
+ *    outstanding; it is listed in summary.unallocated with the ledger's remaining
+ *    and the configured rent, outside the total.
+ *  - status of a cycle: the LEAST advanced approval status of its current-face bill
+ *    rows (fully approved only when every row is), "Not billed yet" without rows.
+ *  - media type / city: site-level (siteMatches; mixed sites leave filtered views,
+ *    as in the other money charts), because the unit is the site.
+ *  Opening balances (onboarding outstanding history) are not billing cycles and are
+ *  not included. Nothing is written.
+ * @param lib { getAllDueCycles, getOverallSummaryForCycle, mediaAsOfDate }
+ */
+const computeOutstanding = (docs, f, lib, now = nowIST()) => {
+  const today = startOfUtcDay(now);
+  const tomorrow = new Date(today.getTime() + MS_DAY);
+  const endYM = { year: f.end.getUTCFullYear(), month: f.end.getUTCMonth() + 1 };
+  const CATS = ["upcoming", "dueToday", "overdue"];
+  const mk = () => ({ cycles: 0, sites: new Set(), amount: 0, rent: 0, gst: 0, notYetBilled: 0, byStatus: {}, byType: {} });
+  const mkAll = () => Object.fromEntries(CATS.map((c) => [c, mk()]));
+  const buckets = buildBuckets(f, mkAll);
+  const totals = mkAll();
+  const excl = newExclusions();
+  const unallocated = { cycles: 0, sites: new Set(), ledgerRemaining: 0, configuredRent: 0, records: [] };
+  const meta = { cyclesChecked: 0, settledCycles: 0, staleRowsIgnored: 0 };
+  const records = f.details ? [] : null; // per-cycle rows for the export, only when asked for
+
+  for (const doc of docs) {
+    const faces = faceList(doc);
+    const rows = (doc.rentalDue || []).filter(Boolean);
+    const clean = { ...doc, rentalDue: rows.filter((b) => !isStaleBill(doc, b)) };
+    meta.staleRowsIgnored += rows.length - clean.rentalDue.length;
+    const attr = siteAttr(doc);
+    const sid = idOf(doc._id);
+    const seen = new Set();
+    let matched = null; // site filter decided once, only when the site has a cycle in range
+    for (const c of lib.getAllDueCycles(clean, endYM) || []) {
+      const d = toDate(c);
+      if (!d || !inRange(d, f)) continue;
+      const mkey = monthKeyOf(d);
+      if (seen.has(mkey)) continue;
+      seen.add(mkey);
+      if (matched === null) matched = siteMatches(doc, attr, f, excl, 0);
+      if (!matched) continue;
+      meta.cyclesChecked += 1;
+      const ym = { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
+      const s = lib.getOverallSummaryForCycle(clean, ym);
+      const rent = num(s.currentMonthRentPending);
+      const gst = num(s.currentMonthGstPending);
+      const noLandlord = !(doc.landOwners || []).length;
+      const noActiveFace = !faces.some((fc) => num(fc.status) === 1);
+      if (noLandlord || noActiveFace) {
+        const configured = num((lib.mediaAsOfDate(clean, d) || {}).rentalPayment?.totalRentalAmount);
+        unallocated.cycles += 1;
+        unallocated.sites.add(sid);
+        unallocated.ledgerRemaining += rent + gst;
+        unallocated.configuredRent += configured;
+        unallocated.records.push({
+          siteId: sid, siteName: siteName(doc), dueDate: dayKeyOf(d), month: mkey,
+          reason: noLandlord ? "no landlord" : "no active face", ledgerRemaining: r2(rent + gst), configuredRent: r2(configured),
+        });
+        continue;
+      }
+      const remaining = rent + gst;
+      if (remaining <= 0) { meta.settledCycles += 1; continue; }
+      const cat = d >= tomorrow ? "upcoming" : d >= today ? "dueToday" : "overdue";
+      const monthRows = clean.rentalDue.filter((b) => { const bd = toDate(b.dueDate); return bd && monthKeyOf(bd) === mkey; });
+      const status = monthRows.length
+        ? BILL_STATUS[Math.min(...monthRows.map((b) => num(b.approvalStatus ?? b.status) || 1))] || "Unknown"
+        : "Not billed yet";
+      const tl = typeLabel(attr);
+      if (records) {
+        const codeOf = (id) => (faces.find((fc) => idOf(fc._id) === idOf(id)) || {}).mediaCode || null;
+        records.push({
+          siteId: sid,
+          siteName: siteName(doc),
+          mediaCodes: uniq(faces.map((fc) => text(fc.mediaCode))),
+          city: attr.city === MIXED ? "Multiple cities" : attr.city || null,
+          mediaType: tl,
+          dueDate: dayKeyOf(d),
+          month: mkey,
+          category: cat,
+          status,
+          rent: r2(rent),
+          gst: r2(gst),
+          remaining: r2(remaining),
+          // the cycle's current-face bill rows (amounts as stored; the remaining comes from the ledger)
+          bills: monthRows.map((row) => ({
+            billId: idOf(row._id) || null,
+            mediaCode: row.mediaDetailId ? codeOf(row.mediaDetailId) : null,
+            siteLevel: !row.mediaDetailId,
+            dueDate: toDate(row.dueDate) ? dayKeyOf(toDate(row.dueDate)) : null,
+            dueMonth: text(row.dueMonth) || null,
+            baseAmount: r2(num(row.baseAmount)),
+            gstAmount: r2(num(row.gstAmount)),
+            netPayable: r2(num(row.netPayable)),
+            approvalStatus: BILL_STATUS[num(row.approvalStatus ?? row.status)] || "Unknown",
+          })),
+        });
+      }
+      const b = buckets.get(bucketKey(d, f.granularity));
+      for (const part of [b && b[cat], totals[cat]]) {
+        if (!part) continue;
+        part.cycles += 1; part.sites.add(sid); part.amount += remaining; part.rent += rent; part.gst += gst;
+        if (!monthRows.length) part.notYetBilled += 1;
+        const st = (part.byStatus[status] ||= { cycles: 0, amount: 0 });
+        st.cycles += 1; st.amount += remaining;
+        const ty = (part.byType[tl] ||= { cycles: 0, amount: 0 });
+        ty.cycles += 1; ty.amount += remaining;
+      }
+    }
+  }
+  const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { cycles: v.cycles, amount: r2(v.amount) }]));
+  const fin = (p) => ({ cycles: p.cycles, sites: p.sites.size, amount: r2(p.amount), rent: r2(p.rent), gst: r2(p.gst), notYetBilled: p.notYetBilled, byStatus: round(p.byStatus), byType: round(p.byType) });
+  const totalOf = (parts) => {
+    const sites = new Set(CATS.flatMap((c) => [...parts[c].sites]));
+    return { cycles: CATS.reduce((x, c) => x + parts[c].cycles, 0), sites: sites.size, amount: r2(CATS.reduce((x, c) => x + parts[c].amount, 0)) };
+  };
+  return {
+    filters: publicFilters(f),
+    today: dayKeyOf(today),
+    unit: "siteCycle",
+    buckets: [...buckets].map(([key, b]) => ({ key, ...Object.fromEntries(CATS.map((c) => [c, fin(b[c])])), total: totalOf(b) })),
+    summary: {
+      ...Object.fromEntries(CATS.map((c) => [c, fin(totals[c])])),
+      total: totalOf(totals),
+      unallocated: { cycles: unallocated.cycles, sites: unallocated.sites.size, ledgerRemaining: r2(unallocated.ledgerRemaining), configuredRent: r2(unallocated.configuredRent), records: unallocated.records },
+    },
+    ...(records ? { records: records.sort((a, z) => a.dueDate.localeCompare(z.dueDate) || a.siteName.localeCompare(z.siteName)) } : {}),
+    meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
+  };
+};
+
 module.exports = {
   MIXED,
   parseFilters,
@@ -1033,12 +1273,18 @@ module.exports = {
   computeMedia,
   computeAppraisal,
   computeBills,
+  computeOutstanding,
   computeGst,
   computeLedgerGst,
   computeTds,
   computeTdsRentalMaster,
   SOURCES,
   DEFAULT_SOURCE,
+  SITE_STATUSES,
+  DEFAULT_SITE_STATUS,
+  isActiveSite,
+  applySiteStatus,
   siteAttr,
   billMediaType,
+  isStaleBill,
 };

@@ -23,7 +23,8 @@ const LEDGER_LIB = {
 const ALLOWED_ROLES = [1, 2, 3, 4];
 const allowedRole = (req) => ALLOWED_ROLES.includes(Number(req.user?.userType));
 
-const FACE = "mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaType mediaDetails.city";
+// face fields every chart reads: names / type / city for filters and labels, status for the site-status filter
+const FACE = "mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaType mediaDetails.city mediaDetails.status";
 
 // Payments under Rental Master = the Rental Master cycle calculation: ledger rules need owner amounts,
 // paid-state rows, bill labels, billing anchors and appraisal history (no bank, PAN or contact fields).
@@ -43,7 +44,11 @@ const SELECT = {
   },
   media: { both: `${FACE} createdAt` },
   appraisal: { rentalMaster: `${FACE} appraisal` },
-  bills: { rentalMaster: `${FACE} rentalDue.dueDate rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.approvalStatus rentalDue.status` },
+  // Outstanding payments = the Rental Master / Ledger cycle calculation (same fields as Payments) plus
+  // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
+  // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
+  // (bill amounts feed the optional export detail rows, `details: true`)
+  bills: { rentalMaster: `${RM_PAYMENTS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable` },
   // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
   // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
   gst: {
@@ -58,7 +63,7 @@ const SELECT = {
 
 const UNSUPPORTED = {
   appraisal: { ledger: "Ledger records hold payments only; appraisals are Rental Master records (appraisal history)." },
-  bills: { ledger: "Ledger records hold payments only; generated bills are Rental Master records (rentalDue)." },
+  bills: { ledger: "Outstanding payments come from the Rental Master cycle calculation; the ledger alone has no bills to be paid." },
 };
 
 const COMPUTE = {
@@ -68,7 +73,7 @@ const COMPUTE = {
   },
   media: { both: (d, f) => RA.computeMedia(d, f) },
   appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f) },
-  bills: { rentalMaster: (d, f) => RA.computeBills(d, f) },
+  bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
   tds: {
     ledger: (d, f) => RA.computeTds(d, f),
@@ -93,7 +98,7 @@ const makeHandler = (chart, message) => async (req, res) => {
     const route = resolve(chart, f.source);
     if (!route) {
       return successResponse(res, message, {
-        filters: { source: f.source },
+        filters: { source: f.source, siteStatus: f.siteStatus },
         supported: false,
         reason: UNSUPPORTED[chart]?.[f.source] || "Not available for this data source.",
         buckets: [],
@@ -101,7 +106,10 @@ const makeHandler = (chart, message) => async (req, res) => {
         meta: {},
       });
     }
-    const docs = await load(route.select);
+    // site-status filter (active / inactive / all) narrows the sites before any chart is computed;
+    // the media chart counts faces like the dashboard, so it applies the status per face itself
+    const loaded = await load(route.select);
+    const docs = chart === "media" ? loaded : RA.applySiteStatus(loaded, f);
     const data = route.compute(docs, f);
     return successResponse(res, message, { ...data, supported: true, sourceIndependent: route.sourceIndependent });
   } catch (error) {

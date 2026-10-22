@@ -8,12 +8,15 @@ Read-only. Endpoints (all `POST`, JWT required, roles 1–4 only — role 5 and 
 | `/admin/report-analytics/payments` | 1 Payment analytics |
 | `/admin/report-analytics/media` | 2 Sites onboarded per month |
 | `/admin/report-analytics/appraisal` | 3 Appraisals |
-| `/admin/report-analytics/upcoming-bills` | 4 Generated bills |
+| `/admin/report-analytics/upcoming-bills` | 4 Outstanding payments (formerly "Upcoming payments" / "Generated bills") |
 | `/admin/report-analytics/gst` | 5 GST |
 | `/admin/report-analytics/tds` | 6 TDS |
 
-Request body: `{ source?: "rentalMaster" | "ledger", fy?: 2026, startDate?: "YYYY-MM-DD", endDate?: "YYYY-MM-DD", mediaType?, city? }`.
-`source` defaults to `rentalMaster`; any other value is a 400. A custom range wins over `fy`; with neither, the
+Request body: `{ source?: "rentalMaster" | "ledger", siteStatus?: "active" | "inactive" | "all", fy?: 2026, startDate?: "YYYY-MM-DD", endDate?: "YYYY-MM-DD", mediaType?, city? }`.
+`source` defaults to `rentalMaster`; any other value is a 400. `siteStatus` (`active` | `inactive` | `all`,
+default `all` when absent; the frontend sends `active` by default) keeps only active sites — at least one face with
+`mediaDetails.status === 1`, the dashboard's rule — or only the others (faces inactive / on hold), before any chart
+is computed (`applySiteStatus`); it is echoed in `filters.siteStatus` and the frontend refuses a response without it. A custom range wins over `fy`; with neither, the
 current financial year (1 Apr – 31 Mar) is used. Ranges of 62 days or fewer are bucketed by day, longer ones by
 month (`YYYY-MM`); Payments (Rental Master) and TDS are always monthly. Buckets are zero-filled. Max span 5 years.
 
@@ -98,20 +101,22 @@ are stored per face (below). Media types are compared trimmed with inner whitesp
 (`mediaTypeText`) — faces, bills, filter options and the filter value alike; case is kept, so `Hoarding` and
 `hoarding` are listed separately.
 
-**Sites onboarded** — counts distinct `MediaOnboarding` documents by `MediaOnboarding.createdAt`.
-- A site is counted once, however many faces (`mediaDetails[]`) it has; multiple faces never inflate
-  the total. (Note: dashboard v2 `totalSites` counts faces — a different unit.)
-- With no filter every site in the period is counted. With a media type and/or city selected, a site is
-  counted when at least one single face satisfies all selected filters (type **and** city on the same
-  face). A Hoarding + Pole Board site counts once overall, once under Hoarding and once under Pole Board.
-- Values are matched as exact trimmed strings; distinct stored values are not merged.
-- The monthly buckets and `summary.total` use the same filtered definition, so the buckets always add up
-  to `summary.total`. The frontend plots `buckets[].total` and shows `summary.total` in the card.
-- `byType` (per bucket and in `summary`) is informational: distinct sites having a face of each type
-  (restricted to matching faces when filtered). A mixed-type site appears under each of its types, so
-  these numbers can overlap and are not meant to sum to `total`.
-- Sites without a usable `createdAt` are never given a date; they are counted once each in
-  `meta.sitesWithoutOnboardingDate` (only sites that pass the media type / city filter).
+**Sites onboarded** — counts media **faces** (`mediaDetails[]`) by the parent `MediaOnboarding.createdAt`,
+the same unit as the dashboard's `totalSites` / `activeSites` / `inactiveSites`.
+- Every face counts once; `status` 1 = active, anything else = inactive. A document with no faces counts
+  once, as inactive (never under a media type / city filter).
+- Site status (Active / Inactive / All) is applied **per face** here (the endpoint passes unfiltered
+  documents). The other charts keep the site-level rule (a site is active when any face is active).
+- Media type / city: a face counts when it matches every selected filter itself.
+- Buckets and `summary.total` use the same definition, so they always add up. `summary.byType` counts
+  faces per type ("Unspecified" when blank) and sums to `total`. `summary.sites` (new) = distinct site
+  documents behind the counted faces.
+- **Limitation:** `createdAt` is a property of the site document, not of a face, so a face added later is
+  dated with the site's creation, and imported/back-filled records share the import date. The trend shows
+  when site records were created, not when faces went live.
+- Records without a usable `createdAt` are never given a date; they are reported in
+  `meta.sitesWithoutOnboardingDate` (documents) and `meta.facesWithoutOnboardingDate` (faces, new), only
+  those that pass the filters.
 
 **Appraisal** — `appraisal.history[]`. The onboarding/update code pre-schedules future rows
 (`autoScheduleFutureAppraisalEntries`), so *upcoming* = stored rows dated after today; nothing is projected.
@@ -122,7 +127,52 @@ if no hold date) are classified *On hold*, not given/upcoming. Sites with `appli
 held are skipped. Hold can also be recorded per bill (`AppraisalHoldController`); that bill-level state
 is not used here.
 
-**Generated bills** — `rentalDue[]`, by `dueDate`. Verified in `computeGstSplit`: `baseAmount` is the
+**Outstanding payments** (endpoint `upcoming-bills`, `computeOutstanding`) — one unit per **site × billing-month
+cycle** (several face bills never repeat a site's amount), from the Rental Master / Ledger cycle calculation:
+- cycles = `getAllDueCycles` on the site without its stale rows (`isStaleBill`), one per month; the cycle date is the
+  due date; only cycles due within [start, end] (inclusive) count. Future cycles come from the billing schedule —
+  `notYetBilled` counts those without a bill row.
+- remaining = `getOverallSummaryForCycle(site, month)`: `currentMonthRentPending` (landlord shares with no ledger
+  entry for that month + mode — the ledger's binary paid rule, `isOwnerModePaidForCycle`; direct GST rides with rent)
+  + `currentMonthGstPending` (held GST not yet released through `gstBalanceHistory`). remaining = 0 → settled,
+  excluded (`meta.settledCycles`), whatever the approval status.
+- category vs today (IST day): `upcoming` (after today) / `dueToday` / `overdue` (before today, remaining > 0). This
+  overdue is **payment-based**; the Rental Master / dashboard Overdue is approval-based (not fully approved, past due).
+- `summary.total` = upcoming + dueToday + overdue (amount, cycles; sites distinct across them).
+- `summary.unallocated`: cycles of sites with no landlord (rent not computable) or no active face — listed with the
+  ledger's remaining and the configured rent, **outside the total** until their treatment is decided.
+- status of a cycle = least advanced approval status of its current-face bill rows ("Not billed yet" without rows);
+  media type / city are site-level (mixed sites leave filtered views). Opening balances are not cycles: not included.
+- Reconciles with Rental Master: for a month, total + unallocated remaining (+ opening unpaid of that month) =
+  `computePeriodDue(...).due.unpaid`.
+- Export details (opt-in, `details: true` in the body — sent only by the page's Excel / PDF export): adds
+  `records[]`, one row per outstanding cycle of the total (site, media codes, city, media type, due date, month,
+  category, status, rent / gst / remaining) with its current-face bill rows (`bills[]`: bill id, media code,
+  due date, base / GST / net payable as stored, approval status). Same calculation and filters as the summary:
+  the remaining of the records adds up to `summary.total.amount`; stale rows are never listed. Without the flag
+  the response is unchanged.
+
+**Report export** (frontend, `analytics_export_*.dart`): Export (top right of the page) → Excel (.xlsx) or PDF.
+It re-fetches all six endpoints with the filters active at the click (outstanding with `details: true`) and
+writes every section in full — Summary (filters, generation date, key figures, data sources), outstanding cycles,
+monthly trend, status / media-type breakdowns, site and bill details, unallocated cycles, payments, sites
+onboarded, appraisals, GST, TDS and TDS lines. Nothing is recalculated: values are the API's; totals rows are
+SUMs of the rows shown, and non-additive columns (distinct sites) carry the API's figure. Excel has native charts
+bound to the sheet cells, ₹ Indian-grouped formats, frozen headers and filters; the PDF (landscape A4, repeated
+table headers, page numbers) writes amounts as "Rs." because the built-in PDF fonts have no ₹ glyph.
+Sections the chosen source does not support (Ledger: outstanding, appraisals) are left out and noted in Summary.
+
+`computeBills` (stored bill rows by timing — upcoming / dueToday / overdue / pastApproved) is kept and tested but no
+longer served. Its former panel showed `summary.upcoming` /
+`buckets[].upcoming`: stored bills whose `dueDate` is in the selected period **and after today** (today = the IST
+calendar day, `nowIST`, the convention of the stored due dates). Cards, donut (status / media type, count / amount),
+monthly chart and tooltips all use those rows. `summary.overdue` = due before today and not fully approved
+(`approvalStatus ≠ 3`, the Rental Master / dashboard rule in `rentalDueStats`) — its own card, never upcoming.
+`summary.dueToday` (neither upcoming nor overdue yet) and `summary.pastApproved` complete the partition; the
+top-level `summary` / bucket fields are still *all stored bills in the period* (= the four parts). The old "Overdue"
+card read stored `approvalStatus` 4, which no code sets.
+
+**Stored bills** — `rentalDue[]`, by `dueDate`. Verified in `computeGstSplit`: `baseAmount` is the
 **gross** (rent + GST), `gstAmount` the GST part, `netPayable` what is payable to the owner now (rent for
 `withGst` 0/1, rent + GST for 2). Statuses are the existing `approvalStatus` (1 Pending, 2 Partially
 approved, 3 Approved, 4 Overdue); no paid state is inferred. Nothing is generated.
@@ -130,8 +180,15 @@ approved, 3 Approved, 4 Overdue); no paid state is inferred. Nothing is generate
   separate-bill face has its own bill, and a single-bill multi-face site stores one row per face holding that
   face's sqft share of the site bill (`computeGstSplit(…, faceId, …)`, `siteBillForOverdue`). So a row takes the
   type of the face its `mediaDetailId` matches (also when that face is inactive now). Only a row without a face,
-  or whose `mediaDetailId` matches no current face (stale ids after a site edit), is classified at site level from
-  the site's **active** faces (all faces if none is active) — "Mixed types" only when those disagree.
+  is classified at site level from the site's **active** faces (all faces if none is active) — "Mixed types" only
+  when those disagree.
+- **Stale rows are excluded** (`isStaleBill`): a row whose `mediaDetailId` names no face of the site (face deleted
+  or re-created with a new id) only duplicates the row the billing code then creates for the current face; Rental
+  Master already ignores such rows (`rentalDueStats.pickFaceEntry`). They are dropped before every output (total,
+  counts, sites, buckets, status / type breakdowns) and reported in `meta.staleRowsExcluded` { bills, amount, sites }
+  for the period. Rows without a `mediaDetailId` are site-level bills and always count; rows of an existing but
+  inactive face are not stale. On the dev data: 52 such rows (all pending, each with a current-face row for the same
+  month; none referenced by ledger / GST / TDS records), 34 of them (₹11,06,534) in October 2026.
 - The media-type filter uses the same per-bill type, so a multi-type site's matching faces are included; only
   genuinely mixed site-level rows are excluded (`meta.excludedMixedSites`). City filtering stays site-level.
 - Previously every row of a multi-type site was "Mixed types" (on the dev data: one 12-face site, 24 rows —
