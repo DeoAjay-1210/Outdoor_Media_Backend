@@ -2481,6 +2481,20 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         return errorResponse(res, appraisalCheck.message, null, 400);
     }
 
+    // ✅ NEW — rentalPayment.billDate (5, 10, 15, 20, 25, 30). Not sent on an
+    // edit → the site's saved value is kept; never set → filled on save.
+    if (mediaData.rentalPayment && typeof mediaData.rentalPayment === "object") {
+      const rawBillDate = mediaData.rentalPayment.billDate;
+      if (rawBillDate !== undefined && rawBillDate !== null && rawBillDate !== "") {
+        if (![5, 10, 15, 20, 25, 30].includes(Number(rawBillDate))) {
+          return errorResponse(res, "billDate must be one of 5, 10, 15, 20, 25, 30", null, 400);
+        }
+        mediaData.rentalPayment.billDate = Number(rawBillDate);
+      } else if (existingMediaForValidation?.rentalPayment?.billDate) {
+        mediaData.rentalPayment.billDate = existingMediaForValidation.rentalPayment.billDate;
+      }
+    }
+
     // ✅ NEW — keep the CMD appraisal hold flag (POST /admin/appraisal-hold)
     // when a site edit sends appraisal without it — otherwise the save would
     // reset it to 0 and the pre-save hook would re-apply the held appraisal.

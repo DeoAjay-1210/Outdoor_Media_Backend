@@ -152,7 +152,10 @@ const finalizeOwnerBucket = (bucket) =>
  * @param {{year:number, month:number, targetRole?:number|null, trackLandOwners?:boolean}} opts  month is 1-12
  *   trackLandOwners (opt-in) → also returns stats.landOwners { dueThisMonth, approved, pending, overdue }
  */
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false }) {
+// ✅ NEW — opts.overdueFrom (opt-in, landowner/site-filter billDate filter):
+// (media, entry) → the date after which an open current-month due is overdue
+// (instead of entry.dueDate). Without it the rule is unchanged.
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null }) {
   const ownerBuckets = trackLandOwners
     ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
     : null;
@@ -242,9 +245,10 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         if (!isOpenOverall) continue;
 
         // overdue = open current-month due already past its due date (1 day after)
+        const overdueDate = overdueFrom ? overdueFrom(media, entry) : entry?.dueDate;
         const isOverdue =
-          Number(media.rentalPayment?.status) === 3 ||
-          (entry?.dueDate && new Date(entry.dueDate) < today);
+          (!overdueFrom && Number(media.rentalPayment?.status) === 3) ||
+          (overdueDate && new Date(overdueDate) < today);
         if (isOverdue) {
           overdueFaces.add(faceId);
           stats.overdueAmountTotal += faceAmount;
