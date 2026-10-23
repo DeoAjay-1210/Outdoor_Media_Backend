@@ -555,6 +555,9 @@ const MediaSchema = new mongoose.Schema(
         type: Date,
       },
       billingStartDate: { type: Date, default: null },
+      // ✅ NEW — bill date slot (5, 10, 15, 20, 25, 30) for overdue / site-filter.
+      // Not sent → 5. Bill generation does NOT use it.
+      billDate: { type: Number, enum: [5, 10, 15, 20, 25, 30], default: 5 },
       // tdsApplicable: {
       //   type: Number,
       //   enum: [0, 1],

@@ -2,6 +2,7 @@ const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/Lan
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { computeRentalDueStats, getFaceRoleStatus, roleStatus } = require("../../../utils/rentalDueStats");
+const { parseBillDateFilter, siteBillDate, billDateInMonth } = require("../../../utils/billDate"); // ✅ NEW — billDate filter
 const mongoose = require("mongoose");
 const {
   computeOutstandingSummary,
@@ -1102,10 +1103,26 @@ const buildResponsePayload = (savedOwner, owner, isNew) => {
   return data;
 };
 
+// ✅ NEW — transactions need a replica set / mongos (Atlas, Render). A local
+// standalone MongoDB rejects them ("Transaction numbers are only allowed on a
+// replica set member or mongos"), so there the save runs without one.
+// Checked once per connection.
+let transactionSupport = null;
+const supportsTransactions = async () => {
+  if (transactionSupport !== null) return transactionSupport;
+  try {
+    const hello = await mongoose.connection.db.admin().command({ hello: 1 });
+    transactionSupport = !!(hello.setName || hello.msg === "isdbgrid");
+  } catch (err) {
+    return true; // unknown → keep the old behaviour (use a transaction)
+  }
+  return transactionSupport;
+};
+
 const landOwnerSave = async (req, res) => {
   const session = await mongoose.startSession();
   try {
-    session.startTransaction();
+    if (await supportsTransactions()) session.startTransaction();
 
     const owner = req.body;
     const files = req.files || [];
@@ -1131,7 +1148,7 @@ const landOwnerSave = async (req, res) => {
 
     const savedOwner = await saveSingleLandOwner(owner, userName, session, incomingBankAccounts);
 
-    await session.commitTransaction();
+    if (session.inTransaction()) await session.commitTransaction();
 
     const message = isNew
       ? "LandOwner created successfully"
@@ -1145,7 +1162,7 @@ const landOwnerSave = async (req, res) => {
 
     return successResponse(res, message, responsePayload, isNew ? 201 : 200);
   } catch (error) {
-    await session.abortTransaction();
+    if (session.inTransaction()) await session.abortTransaction();
     return errorResponse(res, error.message, null, error.statusCode || 400);
   } finally {
     session.endSession();
@@ -3459,16 +3476,29 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // summary, so stale rows of removed faces / per-face rows holding the full
     // site rent no longer inflate overDue; an approved month is never overdue;
     // overdue starts 1 day after the due date (IST).
-    const rentalDueStats = computeRentalDueStats(summaryDocs, {
-      year: statsYear,
-      month: statsMonth,
-      targetRole,
-      trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
-      // ✅ NEW — roleType: pending = waiting on that role (Executive → Manager → CMD)
-      pendingAtRoleOnly: true,
-      // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
-      singleBillAsSite: true,
-    });
+    // ✅ NEW — billDate filter (5, 10, 15, 20, 25, 30): overDue / approved /
+    // pending (+ landowner counts) cover only those sites, and an open (not
+    // CMD-approved) bill is overdue once that month's bill date has passed.
+    // Not sent → exactly as before.
+    const billDateFilter = parseBillDateFilter(req.body?.billDate);
+    const rentalDueStats = computeRentalDueStats(
+      billDateFilter.length
+        ? summaryDocs.filter((m) => billDateFilter.includes(siteBillDate(m)))
+        : summaryDocs,
+      {
+        year: statsYear,
+        month: statsMonth,
+        targetRole,
+        trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
+        // ✅ NEW — roleType: pending = waiting on that role (Executive → Manager → CMD)
+        pendingAtRoleOnly: true,
+        // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
+        singleBillAsSite: true,
+        ...(billDateFilter.length
+          ? { overdueFrom: (m) => billDateInMonth(statsYear, statsMonth, siteBillDate(m)) }
+          : {}),
+      },
+    );
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
     const approvedAmountTotal = rentalDueStats.approvedAmountTotal;
