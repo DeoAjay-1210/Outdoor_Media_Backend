@@ -3500,6 +3500,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         pendingAtRoleOnly: true,
         // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
         singleBillAsSite: true,
+        // ✅ NEW — roleType: overDue = past-due bills waiting on that role
+        overdueByRole: true,
         ...(billDateFilter.length
           ? { overdueFrom: (m) => billDateInMonth(statsYear, statsMonth, siteBillDate(m)) }
           : {}),

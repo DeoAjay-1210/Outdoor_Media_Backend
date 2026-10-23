@@ -155,7 +155,11 @@ const finalizeOwnerBucket = (bucket) =>
 // ✅ NEW — opts.overdueFrom (opt-in, landowner/site-filter billDate filter):
 // (media, entry) → the date after which an open current-month due is overdue
 // (instead of entry.dueDate). Without it the rule is unchanged.
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null }) {
+// ✅ NEW — opts.overdueByRole (opt-in, landowner/site-filter only): with a
+// targetRole, overdue = past-due bills WAITING ON that role (same rule as
+// pending), current and past months. Without it overdue stays role independent.
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false }) {
+  const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   const ownerBuckets = trackLandOwners
     ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
     : null;
@@ -243,6 +247,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           trackOwner("pending", media, faceId, faceAmount);
         }
         if (!isOpenOverall) continue;
+        if (roleOverdue && !isOpen) continue; // ✅ NEW — not waiting on this role → not its overdue
 
         // overdue = open current-month due already past its due date (1 day after)
         const overdueDate = overdueFrom ? overdueFrom(media, entry) : entry?.dueDate;
