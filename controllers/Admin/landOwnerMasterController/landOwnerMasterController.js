@@ -2569,7 +2569,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
             isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
             hasCmdApprovalSite, // ✅ NEW
-            hasDueThisMonthSite, // ✅ NEW
+            // ✅ NEW — with roleType: only when this month's bill is waiting on that role
+            hasDueThisMonthSite: roleFaceFlags ? hasDueThisMonthSite && !!roleFlags?.pending : hasDueThisMonthSite,
           },
           ownersDetail: ownersOnThisSite.map((o) => {
             const pc = Number(o.paymentCategory || 1);
@@ -2759,7 +2760,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         let shouldInclude = false;
         if (includeDueThisMonth) {
-          if (isCurrent) {
+          // ✅ NEW — with roleType: only this month's bills waiting on that role
+          const dueWaitingOnRole =
+            !targetRole ||
+            (roleStatus(due, targetRole, { pendingAtRoleOnly: true }).isOpen && !!site.rentalStatus?.hasPendingSite);
+          if (isCurrent && dueWaitingOnRole) {
             if (hasOtherFilters) {
               shouldInclude = matchesOtherFilters;
             } else {
@@ -3502,6 +3507,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         singleBillAsSite: true,
         // ✅ NEW — roleType: overDue = past-due bills waiting on that role
         overdueByRole: true,
+        // ✅ NEW — roleType: dueThisMonth = this month's bills waiting on that role
+        dueThisMonthByRole: true,
         ...(billDateFilter.length
           ? { overdueFrom: (m) => billDateInMonth(statsYear, statsMonth, siteBillDate(m)) }
           : {}),

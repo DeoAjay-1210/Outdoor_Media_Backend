@@ -158,8 +158,11 @@ const finalizeOwnerBucket = (bucket) =>
 // ✅ NEW — opts.overdueByRole (opt-in, landowner/site-filter only): with a
 // targetRole, overdue = past-due bills WAITING ON that role (same rule as
 // pending), current and past months. Without it overdue stays role independent.
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false }) {
   const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
+  // ✅ NEW — opts.dueThisMonthByRole (opt-in, landowner/site-filter only): with a
+  // targetRole, dueThisMonth counts only this month's bills WAITING ON that role
+  const roleDueThisMonth = dueThisMonthByRole && targetRole !== null && targetRole !== undefined;
   const ownerBuckets = trackLandOwners
     ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
     : null;
@@ -215,12 +218,14 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         const entry = siteBillEntry !== undefined ? siteBillEntry : pickFaceEntry(currentMonthEntries, faceId);
         // optional caller filter (e.g. login role) — default: no filtering
         if (faceFilter && !faceFilter(entry, media, face)) continue;
-        stats.dueThisMonthCount += 1;
-        stats.dueThisMonthAmount += faceAmount;
-        trackOwner("dueThisMonth", media, faceId, faceAmount);
-
         // const entry = pickFaceEntry(currentMonthEntries, faceId);
         const { isApproved, isOpen } = roleStatus(entry, targetRole, { pendingAtRoleOnly });
+        // ✅ NEW — dueThisMonthByRole: only this month's bills waiting on that role
+        if (!roleDueThisMonth || isOpen) {
+          stats.dueThisMonthCount += 1;
+          stats.dueThisMonthAmount += faceAmount;
+          trackOwner("dueThisMonth", media, faceId, faceAmount);
+        }
         // overdue is role independent → always the overall approval status
         const isOpenOverall = roleStatus(entry, null).isOpen;
 
