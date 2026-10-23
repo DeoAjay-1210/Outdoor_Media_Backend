@@ -9,6 +9,7 @@ const { successResponse, errorResponse } = require("../../../utils/response");
 const RA = require("../../../utils/reportAnalytics");
 const Ledger = require("../MediaOnboardingController/LedgerNew2Controller");
 const { mediaAsOfDate, landOwnersAsOfDate } = require("../../../utils/appraisalRent");
+const { pendingRoleOf } = require("../DashboardController/DashboardExtras");
 
 // The ledger's own (pure, read-only) helpers — the Rental Master cycle calculation.
 const LEDGER_LIB = {
@@ -16,6 +17,7 @@ const LEDGER_LIB = {
   getOverallSummaryForCycle: Ledger.getOverallSummaryForCycle,
   resolveExpectedGstForCycle: Ledger.resolveExpectedGstForCycle,
   mediaAsOfDate,
+  pendingRoleOf, // the dashboard's approval-stage helper (which role a pending bill waits on)
 };
 
 // Roles 1-4 (Rental Executive, Rental Manager, CMD, Other/view-only).
@@ -52,7 +54,7 @@ const SELECT = {
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
   // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
   // (bill amounts feed the optional export detail rows, `details: true`)
-  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable` },
+  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status` },
   // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
   // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
   gst: {

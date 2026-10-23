@@ -1773,3 +1773,95 @@ test("Appraisal detail rows: one per counted entry, split given / upcoming / hel
   assert.ok(!r.records.some((x) => x.amount === 999), "the baseline (anchor) entry is not an appraisal");
   assert.equal(RA.computeAppraisal(docs, RA.parseFilters({ fy: 2026 }, NOW).filters, NOW).records, undefined);
 });
+
+// ── Outstanding payments: bill approvals (cards, stage ring, bar chart, popup rows) ──
+test("bill approvals: generated = approved + pending; past due ⊂ pending; stages from pendingRoleOf; rows reconcile", () => {
+  const due = (m, d) => new Date(Date.UTC(2026, m - 1, d));
+  const bill = (o) => ({ baseAmount: 1000, gstAmount: 100, withGst: 0, approvalStatus: 1, dueDate: due(9, 5), dueMonth: "September 2026", ...o });
+  const docs = [
+    {
+      _id: "s1",
+      mediaDetails: [{ _id: "f1", mediaType: "Hoarding", city: "Chennai", mediaName: "Anna", mediaCode: "ADN-1", status: 1 }],
+      landOwners: [{ name: "Asha" }],
+      rentalDue: [
+        bill({ _id: "b1", approvalStatus: 3 }), // approved
+        bill({ _id: "b2", approvalStatus: 1, approvalSteps: [{ role: 1, status: 1 }, { role: 2, status: 1 }, { role: 3, status: 1 }], currentPendingRole: 1 }), // pending at staff, past due
+        bill({ _id: "b3", approvalStatus: 2, approvalSteps: [{ role: 1, status: 2 }, { role: 2, status: 1 }, { role: 3, status: 1 }], dueDate: due(11, 5), baseAmount: 2000, gstAmount: 0, withGst: 2 }), // pending at manager, not yet due
+        bill({ _id: "b4", approvalStatus: 2, approvalSteps: [{ role: 1, status: 2 }, { role: 2, status: 2 }, { role: 3, status: 1 }], dueDate: due(9, 20), baseAmount: 500, gstAmount: 50 }), // pending at CMD, past due
+        bill({ _id: "b5", dueDate: due(2, 1) }), // outside the period (FY 2026-27)
+      ],
+    },
+    {
+      _id: "s2",
+      mediaDetails: [{ _id: "f2", mediaType: "Unipole", city: "Madurai", mediaName: "Bypass", mediaCode: "ADN-2", status: 1 }],
+      rentalDue: [bill({ _id: "b6", approvalStatus: 3, mediaDetailId: "gone" })], // stale face: ignored
+    },
+  ];
+  const lib = { pendingRoleOf: require("../controllers/Admin/DashboardController/DashboardExtras").pendingRoleOf };
+  const r = RA.computeBillApprovals(deepFreeze(docs), fy({ details: true }), lib, NOW);
+  const s = r.summary;
+  assert.deepEqual([s.generated.bills, s.generated.amount], [4, 4500]);
+  assert.deepEqual([s.approved.bills, s.approved.amount], [1, 1000]);
+  assert.deepEqual([s.pending.bills, s.pending.amount], [3, 3500]);
+  assert.equal(s.generated.bills, s.approved.bills + s.pending.bills, "every bill is approved or pending (once)");
+  assert.deepEqual([s.pastDue.bills, s.pastDue.amount], [2, 1500], "due before 21 Oct and not approved");
+  assert.deepEqual(s.pendingByStage.sales, { bills: 1, amount: 1000 });
+  assert.deepEqual(s.pendingByStage.manager, { bills: 1, amount: 2000 });
+  assert.deepEqual(s.pendingByStage.cmd, { bills: 1, amount: 500 });
+  assert.equal(s.pendingByStage.unknown.bills, 0);
+  // the bar buckets add up to the summary
+  assert.equal(r.buckets.reduce((a, b) => a + b.generated.bills, 0), s.generated.bills);
+  assert.equal(bucket(r, "2026-09").pastDue.bills, 2);
+  assert.equal(bucket(r, "2026-11").pending.bills, 1);
+  // popup rows: Rental + GST + Hold GST = Total; one row per bill; flags match the cards
+  assert.equal(r.records.length, 4);
+  assert.equal(r.records.reduce((a, x) => a + x.total, 0), s.generated.amount);
+  for (const x of r.records) assert.equal(r.records.length && Math.round((x.rental + x.gst + x.holdGst) * 100), Math.round(x.total * 100));
+  const direct = r.records.find((x) => x.billId === "b3");
+  assert.deepEqual([direct.rental, direct.gst, direct.holdGst], [2000, 0, 0]);
+  const hold = r.records.find((x) => x.billId === "b2");
+  assert.deepEqual([hold.rental, hold.gst, hold.holdGst, hold.city, hold.mediaCodes], [900, 0, 100, "Chennai", ["ADN-1"]]);
+  assert.equal(r.records.filter((x) => x.pastDue).length, s.pastDue.bills);
+  // media type / city filters narrow every figure
+  assert.equal(RA.computeBillApprovals(docs, fy({ mediaType: "Unipole" }), lib, NOW).summary.generated.bills, 0);
+  assert.equal(RA.computeBillApprovals(docs, fy({ city: "Chennai" }), lib, NOW).summary.generated.bills, 4);
+});
+
+test("payments detail rows: components (rental / direct GST / hold GST) reconcile with the cycle figures; paid sites = sites with something paid", () => {
+  const { due, records, buckets } = detailRange(octFixture(), OCT);
+  for (const r of records) {
+    assert.equal(Math.round((r.rentalDue + r.directGstDue + r.holdGstDue) * 100), Math.round((r.rentDue + r.gstDue) * 100), `${r.siteId} due components`);
+    assert.equal(Math.round((r.rentalUnpaid + r.directGstUnpaid + r.holdGstUnpaid) * 100), Math.round((r.rentUnpaid + r.gstUnpaid) * 100), `${r.siteId} unpaid components`);
+    assert.ok(r.rentalUnpaid >= 0 && r.directGstUnpaid >= 0 && r.holdGstUnpaid >= 0, "no negative remaining balance");
+    assert.ok(r.rentalUnpaid <= r.rentalDue + 0.01 && r.directGstUnpaid <= r.directGstDue + 0.01 && r.holdGstUnpaid <= r.holdGstDue + 0.01, "unpaid never exceeds the component's total");
+  }
+  const byId = Object.fromEntries(records.map((r) => [r.siteId, r]));
+  assert.deepEqual([byId.S3.rentalDue, byId.S3.directGstDue, byId.S3.holdGstDue], [583035, 56160, 0], "a direct-GST bill: the GST is its own component");
+  assert.deepEqual([byId.S2.directGstDue, byId.S2.holdGstDue], [0, 444830], "a hold-GST bill");
+  const paidSites = new Set(records.filter((r) => r.rentDue + r.gstDue - r.rentUnpaid - r.gstUnpaid > 0.005).map((r) => r.siteId));
+  assert.equal(due.paidSites, paidSites.size);
+  assert.equal(buckets.reduce((a, b) => a + b.paidSites, 0) >= due.paidSites, true);
+});
+
+test("GST Ledger cards: generated = paid + unpaid + hold, with distinct sites; hold and unpaid never overlap", () => {
+  const r = ledGst(gstLedgerFixture(), { startDate: "2026-01-01", endDate: "2026-12-31", details: true });
+  const c = r.summary.cards;
+  assert.equal(Math.round(c.generated.amount * 100), Math.round((c.paid.amount + c.unpaid.amount + c.hold.amount) * 100));
+  assert.equal(c.generated.amount, r.summary.due);
+  assert.equal(Math.round((c.unpaid.amount + c.hold.amount) * 100), Math.round(r.summary.remaining.amount * 100));
+  assert.equal(c.hold.amount, r.summary.parts.hold.remaining, "hold = the remaining of held GST");
+  assert.equal(r.buckets.reduce((a, b) => a + b.cards.generated.amount, 0).toFixed(2), c.generated.amount.toFixed(2));
+  const rows = r.records;
+  const holdSites = new Set(rows.filter((x) => x.kind === "hold" && x.remaining > 0).map((x) => x.siteId));
+  assert.equal(c.hold.sites, holdSites.size);
+  assert.equal(c.generated.sites, new Set(rows.map((x) => x.siteId)).size);
+});
+
+test("Ledger history contract: a provided landOwnerMasterId must be a non-empty array (clients omit it for a site view)", async () => {
+  const L = require("../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
+  const reply = () => { const r = { code: 0, body: null }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; return r; };
+  const res = reply();
+  await L.getLedgerHistory({ body: { mediaId: ["64f1a2b3c4d5e6f708091a01"], landOwnerMasterId: [], currentMonth: "09-2026" } }, res);
+  assert.equal(res.code, 400);
+  assert.match(JSON.stringify(res.body), /landOwnerMasterId must be a non-empty array when provided/);
+});
