@@ -30,6 +30,10 @@ const FACE = "mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaTy
 // paid-state rows, bill labels, billing anchors and appraisal history (no bank, PAN or contact fields).
 const RM_PAYMENTS = `${FACE} mediaDetails.status ledgerHistory ledger gstApplicableFlag appraisal.history rentalPayment.billingStartDate rentalPayment.lastBillPaidDate rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable rentalPayment.rentalOutstandingHistory rentalPayment.gstOutstandingHistory gstBalanceHistory.dueMonth gstBalanceHistory.gstAmount gstBalanceHistory.isPaid gstBalanceHistory.utrNumber gstBalanceHistory.ownerId gstBalanceHistory.landOwnerId rentalDue.dueDate rentalDue.dueMonth rentalDue.withGst rentalDue.approvalStatus rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.cashAmount landOwners.onlineAmount landOwners.shareAmount landOwners.gstApplicable landOwners.gstAmount landOwners.tdsAmount`;
 
+// the landlords' names (no bank, PAN or contact fields); the media codes come from mediaDetails, already read. Listed by the
+// payments / outstanding detail dialogs
+const DETAIL_IDS = "landOwners.name";
+
 /**
  * Field projection per chart and data source ("rentalMaster" | "ledger").
  * `both` = the chart is the same for either source (not a ledger/Rental Master record).
@@ -40,20 +44,21 @@ const SELECT = {
   filters: `${FACE} createdAt`,
   payments: {
     ledger: `${FACE} ledgerHistory`,
-    rentalMaster: RM_PAYMENTS,
+    rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS}`,
   },
   media: { both: `${FACE} createdAt` },
-  appraisal: { rentalMaster: `${FACE} appraisal` },
+  appraisal: { rentalMaster: `${FACE} appraisal ${DETAIL_IDS}` },
   // Outstanding payments = the Rental Master / Ledger cycle calculation (same fields as Payments) plus
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
   // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
   // (bill amounts feed the optional export detail rows, `details: true`)
-  bills: { rentalMaster: `${RM_PAYMENTS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable` },
+  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable` },
   // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
   // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
   gst: {
-    ledger: RM_PAYMENTS,
-    rentalMaster: `${FACE} rentalDue.dueDate rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory`,
+    ledger: `${RM_PAYMENTS} ${DETAIL_IDS}`,
+    // (the bill month and status label the optional per-bill detail rows)
+    rentalMaster: `${FACE} rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory ${DETAIL_IDS}`,
   },
   tds: {
     ledger: `${FACE} tdsBalanceHistory`,

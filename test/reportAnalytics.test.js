@@ -907,12 +907,12 @@ test("data sources: each chart + source reads exactly the top-level fields its l
       rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
     },
     media: { both: ["createdAt", "mediaDetails"] },
-    appraisal: { rentalMaster: ["appraisal", "mediaDetails"] },
+    appraisal: { rentalMaster: ["appraisal", "landOwners", "mediaDetails"] },
     // Outstanding payments: the Rental Master cycle calculation's fields (as Payments)
     bills: { rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] },
     gst: {
       ledger: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
-      rentalMaster: ["mediaDetails", "rentalDue", "rentalPayment"],
+      rentalMaster: ["landOwners", "mediaDetails", "rentalDue", "rentalPayment"],
     },
     tds: { ledger: ["mediaDetails", "tdsBalanceHistory"], rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"] },
   };
@@ -932,6 +932,16 @@ test("data sources: each chart + source reads exactly the top-level fields its l
   assert.equal(C.resolve("media", "rentalMaster").select, C.resolve("media", "ledger").select);
   assert.ok(!/gstBalanceHistory/.test(C.SELECT.gst.rentalMaster), "Rental Master GST never reads the GST balance ledger");
   for (const chart of ["payments", "gst", "tds"]) assert.notEqual(C.resolve(chart, "ledger").select, C.resolve(chart, "rentalMaster").select, chart);
+});
+
+test("detail dialogs: the Rental Master payments and outstanding reads add only the landlord name (media codes come from mediaDetails)", () => {
+  for (const sel of [C.SELECT.payments.rentalMaster, C.SELECT.bills.rentalMaster, C.SELECT.gst.rentalMaster, C.SELECT.gst.ledger, C.SELECT.appraisal.rentalMaster]) {
+    assert.match(sel, /mediaDetails\.mediaCode/, "the media code of each face");
+    assert.match(sel, /landOwners\.name/);
+    assert.doesNotMatch(sel, /siteCode|landlordCode/);
+    assert.doesNotMatch(sel, /panNumber|aadhar|bankName|ifsc|accountNumber|upiId|landOwners\.phone/);
+  }
+  assert.ok(!/landOwners/.test(C.SELECT.tds.ledger + C.SELECT.media.both), "the media and ledger-TDS charts read no landlord field");
 });
 
 test("data sources: each aggregation ignores records that are not its source", () => {
@@ -1574,4 +1584,192 @@ test("controller, routes and aggregation module contain no write operations", ()
     .join("\n");
   assert.doesNotMatch(src, /\.(save|updateOne|updateMany|findOneAndUpdate|findByIdAndUpdate|insertMany|deleteOne|deleteMany|bulkWrite|create|remove|replaceOne)\s*\(/);
   assert.doesNotMatch(src, /ensureRentalDueForCycles|generateMissedEntries|syncBillingCycles/);
+});
+
+// ── Detail dialogs: per-site rows behind the Payments and Outstanding figures ──────────────────────────────
+const detailRange = (docs, body) => RA.computePeriodDue(docs, RA.parseFilters({ details: true, ...body }, NOW).filters, LIB, NOW);
+const sumOf = (rows, k) => rows.reduce((a, r) => a + r[k], 0);
+
+test("payments detail rows: reconcile with the summary (to be paid, unpaid, paid) and carry the stored media codes and the landlord names", () => {
+  const withCodes = { S1: ["ADN-MEDIA-001"], S2: ["ADN-MEDIA-002", "ADN-MEDIA-003"] }; // S2 has two faces; S3 / S4 have none stored
+  const docs = octFixture().map((d) => ({
+    ...d,
+    mediaDetails: d.mediaDetails.map((f, i) => ({ ...f, mediaCode: withCodes[d._id]?.[i] })).concat((withCodes[d._id] || []).slice(d.mediaDetails.length).map((c) => ({ ...face(d._id), _id: `${d._id}-f2`, mediaCode: c }))),
+    landOwners: d.landOwners.map((o, i) => ({ ...o, name: `Owner ${d._id}${i}` })),
+  }));
+  const { due, records } = detailRange(docs, OCT);
+  assert.equal(records.length, 4, "one row per site and month");
+  assert.equal(sumOf(records, "rentDue") + sumOf(records, "gstDue"), due.toBePaid);
+  assert.equal(sumOf(records, "rentUnpaid") + sumOf(records, "gstUnpaid"), due.unpaid);
+  assert.equal(sumOf(records, "rentDue") + sumOf(records, "gstDue") - sumOf(records, "rentUnpaid") - sumOf(records, "gstUnpaid"), due.toBePaid - due.unpaid, "paid = to be paid - unpaid");
+  const byId = Object.fromEntries(records.map((r) => [r.siteId, r]));
+  assert.deepEqual([byId.S2.rentDue, byId.S2.gstDue], [2000000, 444830], "hold GST is the GST column");
+  assert.deepEqual([byId.S3.rentDue, byId.S3.gstDue], [583035, 56160], "direct GST is the GST column too");
+  assert.deepEqual([byId.S4.rentUnpaid, byId.S4.gstUnpaid], [0, 0], "S4 is fully paid");
+  assert.deepEqual(byId.S1.mediaCodes, ["ADN-MEDIA-001"], "the stored media code, exactly as stored");
+  assert.deepEqual(byId.S2.mediaCodes, ["ADN-MEDIA-002", "ADN-MEDIA-003"], "a site with two faces lists both");
+  assert.deepEqual(byId.S3.mediaCodes, [], "no media code stored: empty, never the document id");
+  assert.deepEqual(byId.S4.mediaCodes, []);
+  assert.deepEqual(byId.S3.landlords, [{ name: "Owner S30" }], "the landlord name only");
+  for (const r of records) {
+    assert.ok(!("siteCode" in r), "no site code");
+    assert.ok(!JSON.stringify(r.landlords).includes("master"), "no landlord id");
+    assert.ok(!JSON.stringify(r.mediaCodes).includes("S3-f"), "never an id in place of a code");
+  }
+  // sites / unpaid sites / fully paid sites agree with the summary cards
+  const sites = new Set(records.map((r) => r.siteId));
+  const unpaid = new Set(records.filter((r) => r.rentUnpaid + r.gstUnpaid > 0).map((r) => r.siteId));
+  assert.equal(sites.size, due.sites);
+  assert.equal(unpaid.size, due.unpaidSites);
+  assert.deepEqual([...sites].filter((s) => !unpaid.has(s)), ["S4"]);
+});
+
+test("payments detail rows: a site due in several months has one row per month that matches that month's bucket", () => {
+  const docs = [dsite("A", 10000, { start: D(2026, 3), siteCode: "A-1" }), dsite("B", 5000, { start: D(2026, 3), ledgerHistory: paidHist("B", "October", "2026", 5000) })];
+  const r = detailRange(docs, { fy: 2026 });
+  for (const b of r.buckets) {
+    const rows = r.records.filter((x) => x.month === b.key);
+    assert.equal(sumOf(rows, "rentDue") + sumOf(rows, "gstDue"), b.toBePaid, b.key);
+    assert.equal(sumOf(rows, "rentUnpaid") + sumOf(rows, "gstUnpaid"), b.unpaid, b.key);
+    assert.equal(new Set(rows.map((x) => x.siteId)).size, b.sites, `${b.key} sites`);
+    assert.equal(new Set(rows.filter((x) => x.rentUnpaid + x.gstUnpaid > 0).map((x) => x.siteId)).size, b.unpaidSites, `${b.key} unpaid sites`);
+  }
+  assert.ok(r.records.filter((x) => x.siteId === "A").length >= 3, "site A repeats across months");
+  assert.equal(sumOf(r.records, "rentDue") + sumOf(r.records, "gstDue"), r.due.toBePaid);
+});
+
+test("payments detail rows: opening balances are included (rent and GST columns) and only on request", () => {
+  const open = dsite("O", 10000, { start: D(2026, 7) });
+  open.rentalPayment.rentalOutstandingHistory = [{ dueMonth: "October 2026", baseRentOutstandingAmount: 900 }];
+  open.rentalPayment.gstOutstandingHistory = [{ dueMonth: "October 2026", gstOutStandingAmount: 160, isPaid: true }];
+  const r = detailRange([open], OCT);
+  assert.equal(sumOf(r.records, "rentDue") + sumOf(r.records, "gstDue"), r.due.toBePaid);
+  assert.equal(sumOf(r.records, "rentUnpaid") + sumOf(r.records, "gstUnpaid"), r.due.unpaid);
+  assert.equal(sumOf(r.records, "gstDue"), 160);
+  assert.equal(sumOf(r.records, "gstUnpaid"), 0, "a paid opening GST row is not unpaid");
+  assert.equal(dueRange([open], OCT).records, undefined, "no details flag: no rows");
+  const payments = RA.computeRentalMasterPayments([open], RA.parseFilters({ details: true, ...OCT }, NOW).filters, LIB, NOW);
+  assert.equal(payments.records.length, r.records.length);
+  assert.equal(RA.computeRentalMasterPayments([open], RA.parseFilters(OCT, NOW).filters, LIB, NOW).records, undefined);
+});
+
+test("outstanding records carry the stored media codes and the landlord names for the detail dialog", () => {
+  const two = { ...dsite("A", 10000, { start: D(2026, 7), owners: [{ ...ownerOnline("A", 6000), name: "Asha" }, { ...owner2("A", 4000), name: "Ravi" }] }) };
+  two.mediaDetails = [{ ...face("A"), mediaCode: "ADN-MEDIA-010" }, { ...face("A"), _id: "A-f2", mediaCode: "ADN-MEDIA-011" }];
+  const noCode = dsite("N", 10000, { start: D(2026, 7), owners: [{ ...ownerOnline("N", 10000), name: "Meena" }] });
+  const r = outAt([two, noCode], { details: true });
+  assert.ok(r.records.length > 0);
+  for (const rec of r.records.filter((x) => x.siteId === "A")) {
+    assert.deepEqual(rec.mediaCodes, ["ADN-MEDIA-010", "ADN-MEDIA-011"], "exactly as stored, one per face");
+    assert.deepEqual(rec.landlords, [{ name: "Asha" }, { name: "Ravi" }]);
+    assert.ok(!("siteCode" in rec));
+  }
+  for (const rec of r.records.filter((x) => x.siteId === "N")) {
+    assert.deepEqual(rec.mediaCodes, [], "no stored media code: empty, never the document id");
+    assert.deepEqual(rec.landlords, [{ name: "Meena" }]);
+  }
+  assert.equal(sumOf(r.records, "remaining"), sumCats(r, "amount"), "records add up to the category totals");
+  assert.equal(sumOf(r.records, "rent"), sumCats(r, "rent"));
+  assert.equal(sumOf(r.records, "gst"), sumCats(r, "gst"));
+  for (const c of ["upcoming", "dueToday", "overdue"]) {
+    assert.equal(sumOf(r.records.filter((x) => x.category === c), "remaining"), r.summary[c].amount, c);
+  }
+});
+
+// ── Detail rows behind the GST, Sites onboarded and Appraisals charts (opt-in: `details`) ─────────────────
+
+const named = (d, mediaCode) => ({ ...d, mediaDetails: d.mediaDetails.map((f) => ({ ...f, mediaCode })), landOwners: (d.landOwners || []).map((o, i) => ({ ...o, name: `Owner ${d._id}${i}` })) });
+const rmBills = (id, gst, extra = {}) => dsite(id, 10000, { start: D(2026, 3), rentalDue: gst, ...extra });
+const gstDetail = (docs, body = {}) => RA.computeGst(docs, RA.parseFilters({ details: true, startDate: "2026-01-01", endDate: "2026-12-31", ...body }, NOW).filters);
+
+test("GST (Rental Master) detail rows: one per bill GST / onboarding due, reconcile with each category and month", () => {
+  const docs = [
+    named(rmBills("G1", [
+      { _id: "b1", dueMonth: "August 2026", dueDate: D(2026, 7), approvalStatus: 3, withGst: 2, gstAmount: 1800 },
+      { _id: "b2", dueMonth: "September 2026", dueDate: D(2026, 8), approvalStatus: 1, withGst: 1, gstAmount: 900 },
+      { _id: "b3", dueMonth: "September 2026", dueDate: D(2026, 8), approvalStatus: 1, withGst: 0, gstAmount: 100 },
+    ]), "ADN-MEDIA-1"),
+    named(rmBills("G2", [{ _id: "b4", dueMonth: "September 2026", dueDate: D(2026, 8), approvalStatus: 3, withGst: 2, gstAmount: 500 }], {
+      rentalPayment: { billingStartDate: D(2026, 3), paymentFrequency: 1, totalRentalAmount: 10000, gstOutstandingHistory: [{ dueMonth: "September 2026", gstOutStandingAmount: 300, paymentBreakup: [{ amount: 50 }] }] },
+    }), "ADN-MEDIA-2"),
+  ];
+  const r = gstDetail(docs);
+  assert.ok(r.records.length > 0);
+  for (const c of ["direct", "hold", "unpaid"]) {
+    const rows = r.records.filter((x) => x.category === c);
+    assert.equal(sumOf(rows, "amount"), r.summary[c].amount, `${c} total`);
+    assert.equal(rows.length, r.summary[c].records, `${c} rows`);
+    assert.equal(new Set(rows.map((x) => x.siteId)).size, r.summary[c].sites, `${c} sites`);
+    for (const b of r.buckets) {
+      assert.equal(sumOf(rows.filter((x) => x.bucket === b.key), "amount"), b[c].amount, `${c} ${b.key}`);
+    }
+  }
+  const direct = r.records.filter((x) => x.category === "direct");
+  assert.deepEqual(direct.map((x) => x.mediaCodes), [["ADN-MEDIA-1"], ["ADN-MEDIA-2"]]);
+  assert.equal(direct[0].status, "Approved");
+  assert.equal(direct[0].billMonth, "August 2026");
+  assert.deepEqual(direct[0].landlords, [{ name: "Owner G10" }]);
+  const unpaid = r.records.find((x) => x.category === "unpaid");
+  assert.equal(unpaid.amount, 250, "onboarding due net of what was settled");
+  assert.equal(unpaid.status, "Onboarding due");
+  assert.equal(RA.computeGst(docs, RA.parseFilters({ startDate: "2026-01-01", endDate: "2026-12-31" }, NOW).filters).records, undefined, "no rows unless asked");
+});
+
+test("GST (Ledger) detail rows: per site cycle / opening row; paid and remaining rows reconcile with the summary", () => {
+  const docs = gstLedgerFixture().map((d) => named(d, "ADN-MEDIA-L"));
+  const r = RA.computeLedgerGst(docs, RA.parseFilters({ details: true, source: "ledger", fy: 2026 }, NOW).filters, LIB, NOW);
+  assert.ok(r.records.length > 0);
+  assert.equal(sumOf(r.records, "paid"), r.summary.paid.amount);
+  assert.equal(sumOf(r.records, "remaining"), r.summary.remaining.amount);
+  for (const b of r.buckets) {
+    const rows = r.records.filter((x) => x.bucket === b.key);
+    assert.equal(sumOf(rows, "paid"), b.paid.amount, `${b.key} paid`);
+    assert.equal(sumOf(rows, "remaining"), b.remaining.amount, `${b.key} remaining`);
+  }
+  for (const k of ["hold", "direct", "opening"]) {
+    assert.equal(sumOf(r.records.filter((x) => x.kind === k), "paid") + sumOf(r.records.filter((x) => x.kind === k), "remaining"), r.summary.parts[k].due, k);
+  }
+  for (const rec of r.records) assert.deepEqual(rec.mediaCodes, ["ADN-MEDIA-L"]);
+});
+
+test("Sites onboarded detail rows: one per counted face, with the stored media code, type, city and onboarding date", () => {
+  const docs = deepFreeze([
+    { ...site("M1", [["Hoarding", "Chennai", "Alpha"], ["Unipole", "Chennai", "Beta"]], { createdAt: at(2026, 5, 3) }), mediaDetails: [{ _id: "m1-a", mediaType: "Hoarding", city: "Chennai", mediaName: "Alpha", mediaCode: "ADN-MEDIA-001", status: 1 }, { _id: "m1-b", mediaType: "Unipole", city: "Chennai", mediaName: "Beta", status: 1 }] },
+    { ...site("M2", [["Hoarding", "Madurai", "Gamma"]], { createdAt: at(2026, 6, 9) }), mediaDetails: [{ _id: "m2-a", mediaType: "Hoarding", city: "Madurai", mediaName: "Gamma", mediaCode: "ADN-MEDIA-002", status: 1 }] },
+  ]);
+  const r = RA.computeMedia(docs, RA.parseFilters({ details: true, fy: 2026 }, NOW).filters);
+  assert.equal(r.records.length, r.summary.total, "one row per counted face");
+  for (const b of r.buckets) {
+    const rows = r.records.filter((x) => x.bucket === b.key);
+    assert.equal(rows.length, b.total, b.key);
+    for (const [t, n] of Object.entries(b.byType)) assert.equal(rows.filter((x) => x.mediaType === t).length, n, `${b.key} ${t}`);
+  }
+  const june = r.records.filter((x) => x.bucket === "2026-06");
+  assert.deepEqual(june.map((x) => [x.siteName, x.mediaCodes, x.mediaType, x.city, x.date]), [["Alpha", ["ADN-MEDIA-001"], "Hoarding", "Chennai", "2026-06-03"], ["Beta", [], "Unipole", "Chennai", "2026-06-03"]], "a face without a stored code lists none");
+  assert.equal(RA.computeMedia(docs, RA.parseFilters({ fy: 2026 }, NOW).filters).records, undefined);
+  const filtered = RA.computeMedia(docs, RA.parseFilters({ details: true, fy: 2026, mediaType: "Hoarding" }, NOW).filters);
+  assert.equal(filtered.records.length, filtered.summary.total);
+  assert.ok(filtered.records.every((x) => x.mediaType === "Hoarding"), "the media-type filter narrows the rows too");
+});
+
+test("Appraisal detail rows: one per counted entry, split given / upcoming / held, reconciling with each category", () => {
+  const entry = (date, amount, extra = {}) => ({ appraisalDate: date, appraisalAmount: amount, previousRent: 10000, newRent: 10000 + amount, type: 1, percentage: 5, ...extra });
+  const docs = deepFreeze([
+    named(site("A1", [["Hoarding", "Chennai", "Alpha"]], { landOwners: [{ _id: "A1-o" }], appraisal: appraisal([entry(at(2026, 5, 10), 500), entry(at(2026, 10, 10), 700, { type: 2 }), { isAnchorEntry: true, appraisalDate: at(2026, 4, 1), appraisalAmount: 999 }]) }), "ADN-MEDIA-A1"),
+    named(site("A2", [["Hoarding", "Chennai", "Beta"]], { appraisal: appraisal([entry(at(2026, 10, 15), 300)], { appraisalHold: 1, appraisalHoldDate: at(2026, 9, 1) }) }), "ADN-MEDIA-A2"),
+  ]);
+  const r = RA.computeAppraisal(docs, RA.parseFilters({ details: true, fy: 2026 }, NOW).filters, NOW);
+  assert.ok(r.records.length >= 3);
+  for (const k of ["given", "upcoming", "held"]) {
+    const rows = r.records.filter((x) => x.kind === k);
+    assert.equal(sumOf(rows, "amount"), r.summary[k].amount, `${k} amount`);
+    assert.equal(rows.length, r.summary[k].entries, `${k} entries`);
+    assert.equal(new Set(rows.map((x) => x.siteId)).size, r.summary[k].sites, `${k} sites`);
+    for (const b of r.buckets) assert.equal(sumOf(rows.filter((x) => x.bucket === b.key), "amount"), b[k].amount, `${k} ${b.key}`);
+  }
+  const given = r.records.find((x) => x.kind === "given");
+  assert.deepEqual([given.mediaCodes, given.landlords, given.date, given.previousRent, given.newRent, given.type, given.percentage], [["ADN-MEDIA-A1"], [{ name: "Owner A10" }], "2026-06-10", 10000, 10500, "percentage", 5]);
+  assert.equal(r.records.find((x) => x.type === "fixed").percentage, null);
+  assert.ok(!r.records.some((x) => x.amount === 999), "the baseline (anchor) entry is not an appraisal");
+  assert.equal(RA.computeAppraisal(docs, RA.parseFilters({ fy: 2026 }, NOW).filters, NOW).records, undefined);
 });
