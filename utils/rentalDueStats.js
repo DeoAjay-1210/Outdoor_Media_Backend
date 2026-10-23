@@ -152,7 +152,11 @@ const finalizeOwnerBucket = (bucket) =>
  * @param {{year:number, month:number, targetRole?:number|null, trackLandOwners?:boolean}} opts  month is 1-12
  *   trackLandOwners (opt-in) → also returns stats.landOwners { dueThisMonth, approved, pending, overdue }
  */
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false }) {
+// ✅ NEW — opts.overdueByRole (opt-in, landowner/site-filter only): with a
+// targetRole, overdue = past-due bills WAITING ON that role (same rule as
+// pending), current and past months. Without it overdue stays role independent.
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false }) {
+  const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   const ownerBuckets = trackLandOwners
     ? { dueThisMonth: new Map(), approved: new Map(), pending: new Map(), overdue: new Map() }
     : null;
@@ -240,6 +244,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           trackOwner("pending", media, faceId, faceAmount);
         }
         if (!isOpenOverall) continue;
+        if (roleOverdue && !isOpen) continue; // ✅ NEW — not waiting on this role → not its overdue
 
         // overdue = open current-month due already past its due date (1 day after)
         const isOverdue =
@@ -283,6 +288,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         if (faceFilter && !faceFilter(entry, media, face)) continue;
         const { isOpen } = roleStatus(entry, null); // overdue is role independent
         if (!isOpen) continue;
+        // ✅ NEW — overdueByRole: only past bills waiting on this role
+        if (roleOverdue && !roleStatus(entry, targetRole, { pendingAtRoleOnly }).isOpen) continue;
         overdueFaces.add(faceId);
         stats.overdueAmountTotal += pastFaceAmount;
         if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate, gstShare: Number(pastSummary.currentMonthGstAmount || 0) / faceCount });
@@ -311,7 +318,9 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
  * counts (approvedCount / pendingCount / overDue.siteCount).
  * @returns {Map<string, {approved:boolean, pending:boolean, overdue:boolean}>} keyed by face _id
  */
-function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false }) {
+function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false }) {
+  // ✅ NEW — overdueByRole: overdue only while waiting on targetRole (same as computeRentalDueStats)
+  const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   const result = new Map();
   const activeFacesList = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
   if (activeFacesList.length === 0) return result;
@@ -348,6 +357,7 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
       else if (isOpen) flags.pending = true;
       // overdue is role independent → overall approval status
       if (!roleStatus(entry, null).isOpen) continue;
+      if (roleOverdue && !isOpen) continue; // ✅ NEW — not waiting on this role
       if (Number(media.rentalPayment?.status) === 3 || (entry?.dueDate && new Date(entry.dueDate) < today)) {
         flags.overdue = true;
       }
@@ -375,7 +385,10 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
         : undefined;
     for (const face of activeFacesList) {
       const entry = pastSiteBillEntry !== undefined ? pastSiteBillEntry : pickFaceEntry(pastCycleEntries, String(face._id));
-      if (roleStatus(entry, null).isOpen) result.get(String(face._id)).overdue = true;
+      if (!roleStatus(entry, null).isOpen) continue;
+      // ✅ NEW — overdueByRole: only past bills waiting on this role
+      if (roleOverdue && !roleStatus(entry, targetRole, { pendingAtRoleOnly }).isOpen) continue;
+      result.get(String(face._id)).overdue = true;
     }
   }
 

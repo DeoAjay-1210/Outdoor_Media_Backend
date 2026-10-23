@@ -2496,7 +2496,7 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       // ✅ NEW — with roleType, approved / pending / overDue per face follow the
       // same role rule as the header counts (waiting on that role)
       const roleFaceFlags = targetRole
-        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true })
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, overdueByRole: true })
         : null;
       details.forEach((face) => {
         const faceId = String(face._id);
@@ -2697,17 +2697,23 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         let matchesApproved = due.approvalStatus === 3;
         let matchesPending = due.approvalStatus === 1 || due.approvalStatus === 2;
-        const matchesOverDue =
+        let matchesOverDue =
           due.approvalStatus === 4 ||
           (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) ||
           (isPast && isPending);
         // ✅ NEW — with roleType, approved / pending dues follow the role rule
         // (approved = role step approved; pending = waiting on that role — the
-        // earlier roles approved, this role not yet). overDue stays role independent.
+        // earlier roles approved, this role not yet).
         if (targetRole) {
           const { isApproved: roleApproved, isOpen: roleOpen } = roleStatus(due, targetRole, { pendingAtRoleOnly: true });
           matchesApproved = roleApproved;
           matchesPending = roleOpen;
+          // ✅ NEW — overDue also follows the role: only dues waiting on that role
+          // (e.g. CMD: Executive + Manager approved, CMD not yet)
+          // ✅ NEW — and only on sites counted in overDue.siteCount (same per-site
+          // rule as the header: a single bill site uses its most advanced bill,
+          // so a lagging face copy no longer brings the site / its landowner in)
+          matchesOverDue = matchesOverDue && roleOpen && !!site.rentalStatus?.isOverDueSite;
         }
         const matchesCmdApproval =
           (!due.mediaDetailId || String(due.mediaDetailId) === String(site.mediaDetailId)) &&
@@ -3468,6 +3474,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       pendingAtRoleOnly: true,
       // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
       singleBillAsSite: true,
+      // ✅ NEW — roleType: overDue = past-due bills waiting on that role
+      overdueByRole: true,
     });
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
