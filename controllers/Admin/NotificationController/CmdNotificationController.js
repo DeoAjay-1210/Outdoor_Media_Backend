@@ -4,6 +4,7 @@ const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/Med
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { nowIST } = require("../../../utils/updatedAt");
+const { sendOverdueRemarkPushNotification } = require("../../../utils/fcmService");
 
 // userType values (same as UserSchema)
 const USER_ROLE = { RENTAL_EXECUTIVE: 1, RENTAL_MANAGER: 2, CMD: 3 };
@@ -1221,6 +1222,38 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
         { upsert: true },
       );
     }
+
+    const latestHistory = await OverDueHistory.findOne({
+      mediaId: media._id,
+      ...(month ? { dueMonth: month } : {}),
+    }).sort({ updatedAt: -1 });
+
+    let remarkId = "";
+    if (latestHistory && Array.isArray(latestHistory.overDueRemarks) && latestHistory.overDueRemarks.length > 0) {
+      const latestRemark = latestHistory.overDueRemarks[latestHistory.overDueRemarks.length - 1];
+      remarkId = latestRemark?._id ? String(latestRemark._id) : "";
+      latestHistory.fcmNotifiedAt = now;
+      await latestHistory.save();
+    }
+
+    // Trigger FCM push notification to target roles (excluding author)
+    sendOverdueRemarkPushNotification({
+      media,
+      dueMonth: month,
+      rentalDueId,
+      mediaDetailId,
+      remark: displayRemark,
+      senderName: userName,
+      senderRoleName: ROLE_LABEL[role] || "User",
+      senderUserId: userId,
+      targetRoles: targets,
+      siteCode,
+      siteName,
+      remarkId,
+    }).catch((fcmErr) => {
+      console.error("[CmdNotification] FCM push error:", fcmErr?.message || fcmErr);
+    });
+
     return true;
   } catch (err) {
     if (err?.code !== 11000) {

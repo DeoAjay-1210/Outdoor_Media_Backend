@@ -150,6 +150,7 @@ const overDueHistorySchema = new mongoose.Schema(
         },
       },
     ],
+    fcmNotifiedAt: { type: Date, default: null },
     updatedBy: { type: String },
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
