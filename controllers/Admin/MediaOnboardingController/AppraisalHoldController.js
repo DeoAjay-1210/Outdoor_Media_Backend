@@ -58,6 +58,32 @@ const scaleNums = (values, ratio) =>
   Object.fromEntries(Object.entries(values).map(([k, v]) => [k, Math.round(v * ratio)]));
 const sumOwners = (list, field) => (list || []).reduce((s, o) => s + Number(o[field] || 0), 0);
 
+// ✅ NEW — the hold that applies to a bill: its own hold, or — for a later
+// month's bill that is not approved yet — the hold of an EARLIER month that is
+// still on hold (e.g. September held → October shows On Hold at 50k too).
+// The inherited copy carries heldDueMonth / heldRentalDueId of that bill.
+function effectiveAppraisalHold(media, entry) {
+  const own = entry?.appraisalHold;
+  if (own && Number(own.hold) === 1) return own;
+  if (!entry?.dueDate || Number(entry.approvalStatus) === 3) return own || null;
+  const entryKey = appraisalMonthKey(entry.dueDate);
+  const ownReleasedAt = own?.releasedAt ? new Date(own.releasedAt).getTime() : 0;
+  const held = (media?.rentalDue || [])
+    .filter(
+      (e) =>
+        e &&
+        String(e._id) !== String(entry._id) &&
+        Number(e.appraisalHold?.hold) === 1 &&
+        e.dueDate &&
+        appraisalMonthKey(e.dueDate) < entryKey &&
+        // a release recorded on this bill AFTER that hold ends it here
+        !(ownReleasedAt && ownReleasedAt > new Date(e.appraisalHold.heldAt || 0).getTime()),
+    )
+    .sort((a, b) => new Date(b.dueDate) - new Date(a.dueDate))[0];
+  if (!held) return own || null;
+  return { ...held.appraisalHold, heldDueMonth: held.dueMonth || "", heldRentalDueId: held._id };
+}
+
 // a bill's hold / release list (oldest first). Bills without the stored list
 // get it built from their latest hold + release fields.
 function buildAppraisalHoldHistory(h) {
@@ -85,7 +111,9 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
   if (!media) return fail(404, "Media not found");
   const entry = (media.rentalDue || []).find((e) => String(e._id) === String(rentalDueId));
   if (!entry) return fail(404, "Rental due entry not found");
-  if (Number(entry.approvalStatus) === 3) {
+  // ✅ CHANGED — only PUTTING a bill on hold needs it to be not yet approved;
+  // a held bill that got approved can still be released
+  if (hold === 1 && Number(entry.approvalStatus) === 3) {
     return fail(400, "This bill is already fully approved — hold must be set before CMD approval");
   }
 
@@ -96,6 +124,7 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
   const $set = {};
   const $pull = {}; // ✅ NEW — only used by the re-raised repair
   let holdData;
+  let appraisalDateShift = null; // ✅ NEW — release moved the appraisal date (response only)
 
   if (hold === 1) {
     // already on hold AND the site already reduced (by this hold or another) →
@@ -130,13 +159,8 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
         updatedBy: { $regex: "\\(Appraisal applied - " },
         updatedAt: { $gt: new Date(existingHold.heldAt || 0) },
       };
-      if (holdData.appraisalApplicableBefore === null || holdData.appraisalApplicableBefore === undefined) {
-        holdData.appraisalApplicableBefore = Number(media.appraisal?.applicable) === 1 ? 1 : 0;
-      }
-      if (Number(media.appraisal?.applicable) === 1) {
-        $set["appraisal.applicable"] = 0; // also stops the save hook re-applying it
-        $set["appraisal.appraisalHoldDate"] = nowIST();
-      }
+      // ✅ CHANGED — appraisal applicable stays 1 while held (appraisalHold 1
+      // already stops the save hook re-applying it)
     } else if (Number(existingHold.hold) === 1 && alreadyReduced) {
       holdData = { ...existingHold, remark: remark || existingHold.remark || "" };
     } else {
@@ -190,25 +214,91 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
         Object.entries(after.entry).forEach(([k, v]) => { $set[`rentalDue.$[e].${k}`] = v; });
         holdData.siteReduced = true;
         holdData.amountsSnapshot = { before, after };
+
+        // ✅ NEW — bills of LATER months already generated (e.g. October, when
+        // August–October were generated together), not held and not approved,
+        // still at the full amount → the held amount too (52k → 50k). The
+        // release puts them back (same exact-match rule).
+        const heldKey = entry.dueDate ? appraisalMonthKey(entry.dueDate) : null;
+        if (heldKey !== null) {
+          (media.rentalDue || []).forEach((e, i) => {
+            if (String(e._id) === String(entry._id)) return;
+            if (Number(e.appraisalHold?.hold) === 1 || Number(e.approvalStatus) === 3) return;
+            const k = e.dueDate ? appraisalMonthKey(e.dueDate) : null;
+            if (k === null || k <= heldKey) return;
+            Object.keys(after.entry).forEach((f) => {
+              if (isNum(e[f]) && Number(e[f]) === Number(before.entry[f]) && Number(e[f]) !== Number(after.entry[f])) {
+                $set[`rentalDue.${i}.${f}`] = Number(after.entry[f]);
+              }
+            });
+          });
+        }
       }
       // the existing auto-apply checks skip a held appraisal → rent stays reduced
       $set["appraisal.appraisalHold"] = 1;
-      // ✅ NEW — the site shows appraisal applicable 0 while held (date stored);
-      // the release turns it back to 1 only if this hold turned it off
-      holdData.appraisalApplicableBefore = Number(media.appraisal?.applicable) === 1 ? 1 : 0;
-      if (Number(media.appraisal?.applicable) === 1) {
-        $set["appraisal.applicable"] = 0;
-        $set["appraisal.appraisalHoldDate"] = holdData.heldAt || nowIST();
-      }
+      // ✅ CHANGED — appraisal applicable stays 1 in media onboarding while held
+      // (the hold date is still stored). An older hold that had switched it off
+      // keeps its value, so its release still turns it back to 1.
+      holdData.appraisalApplicableBefore = existingHold.appraisalApplicableBefore ?? null;
+      $set["appraisal.appraisalHoldDate"] = holdData.heldAt || nowIST();
     }
   } else {
     // ✅ NEW — the remark sent with the release is its own reason (releaseReason);
     // the hold's remark is kept as it was
     holdData = { ...existingHold, hold: 0, releasedBy: userName, releasedAt: nowIST(), releaseReason: remark || "" };
-    if (Number(existingHold.hold) === 1 && existingHold.siteReduced && existingHold.amountsSnapshot) {
+
+    // ✅ NEW — release sent on a bill that is NOT held (e.g. October) while
+    // another bill of the site is held (e.g. September, maybe approved already)
+    // → that site hold is released: site + this bill + later bills back to the
+    // full rent. The held bill is marked released too.
+    const heldBill =
+      Number(existingHold.hold) === 1
+        ? entry
+        : (media.rentalDue || [])
+            .filter((e) => String(e._id) !== String(entry._id) && Number(e.appraisalHold?.hold) === 1)
+            .sort(
+              (a, b) =>
+                (b.appraisalHold.siteReduced ? 1 : 0) - (a.appraisalHold.siteReduced ? 1 : 0) ||
+                new Date(b.dueDate || 0) - new Date(a.dueDate || 0),
+            )[0] || null;
+    const heldHold = heldBill?.appraisalHold || {};
+    const viaOtherBill = !!heldBill && String(heldBill._id) !== String(entry._id);
+    if (viaOtherBill) {
+      // this bill shows the appraisal it was released for
+      ["appraisalAmount", "rentWithAppraisal", "rentWithoutAppraisal"].forEach((k) => {
+        if (holdData[k] === undefined || !Number(holdData[k])) holdData[k] = heldHold[k];
+      });
+      const hIdx = media.rentalDue.findIndex((e) => String(e._id) === String(heldBill._id));
+      const heldHistory = buildAppraisalHoldHistory(heldHold);
+      heldHistory.push({
+        action: "release",
+        reason: remark || "",
+        by: userName,
+        byUserId: mongoose.Types.ObjectId.isValid(String(user?.userId || "")) ? new mongoose.Types.ObjectId(String(user.userId)) : null,
+        at: holdData.releasedAt,
+      });
+      $set[`rentalDue.${hIdx}.appraisalHold`] = {
+        ...heldHold,
+        hold: 0,
+        releasedBy: userName,
+        releasedAt: holdData.releasedAt,
+        releaseReason: remark || "",
+        history: heldHistory,
+      };
+    }
+
+    // ✅ NEW — released in a LATER month than the held appraisal (e.g. held
+    // August, released September) → the appraisal moves to the release month
+    // (see the date shift below); bills before it keep the held amount (50k)
+    const heldAppraisal = heldBill && Number(heldHold.hold) === 1 ? findAppraisalForBillMonth(media, heldBill) : null;
+    const releaseKey = appraisalMonthKey(holdData.releasedAt);
+    const fromKey = heldAppraisal ? appraisalMonthKey(heldAppraisal.appraisalDate) : null;
+    const shift = fromKey !== null && releaseKey !== null ? releaseKey - fromKey : 0;
+
+    if (heldBill && Number(heldHold.hold) === 1 && heldHold.siteReduced && heldHold.amountsSnapshot) {
       // ✅ NEW — restore what this hold reduced. A value still equal to what the
       // hold wrote goes back exactly; a value edited since is scaled back up.
-      const { before, after } = existingHold.amountsSnapshot;
+      const { before, after } = heldHold.amountsSnapshot;
       const upRatio =
         Number(after?.rentalPayment?.totalRentalAmount) > 0
           ? Number(before?.rentalPayment?.totalRentalAmount || 0) / Number(after.rentalPayment.totalRentalAmount)
@@ -229,16 +319,82 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
         if (!b) return; // landowner added after the hold → left as is
         Object.entries(restore(o, b, a)).forEach(([k, v]) => { $set[`landOwners.${i}.${k}`] = v; });
       });
-      Object.entries(restore(entry, before.entry, after.entry)).forEach(([k, v]) => { $set[`rentalDue.$[e].${k}`] = v; });
+      // the held bill itself — unless it was already approved at the held amount,
+      // or the appraisal moved past its month (shift) → it stays at 50k
+      if (Number(heldBill.approvalStatus) !== 3 && shift <= 0) {
+        const heldPath = viaOtherBill
+          ? `rentalDue.${media.rentalDue.findIndex((e) => String(e._id) === String(heldBill._id))}`
+          : "rentalDue.$[e]";
+        Object.entries(restore(heldBill, before.entry, after.entry)).forEach(([k, v]) => { $set[`${heldPath}.${k}`] = v; });
+      }
+
+      // ✅ NEW — bills of LATER months created while the site was on hold (e.g.
+      // November at 50k), not held themselves and not fully approved yet, get the
+      // full amounts back too (52k) — the appraisal is enabled again on release
+      const heldKey = heldBill.dueDate ? appraisalMonthKey(heldBill.dueDate) : null;
+      const afterEntry = after?.entry || {};
+      if (heldKey !== null && Object.keys(afterEntry).length) {
+        (media.rentalDue || []).forEach((e, i) => {
+          if (String(e._id) === String(heldBill._id)) return;
+          if (Number(e.appraisalHold?.hold) === 1 || Number(e.approvalStatus) === 3) return;
+          const k = e.dueDate ? appraisalMonthKey(e.dueDate) : null;
+          if (k === null || k <= heldKey) return;
+          if (shift > 0 && k < releaseKey) return; // ✅ NEW — before the moved appraisal month
+          // the bill this release was sent on is addressed by its array filter
+          const ePath = String(e._id) === String(entry._id) ? "rentalDue.$[e]" : `rentalDue.${i}`;
+          // only values still exactly at the held amount (e.g. 50000 → 52000)
+          Object.keys(afterEntry).forEach((f) => {
+            if (isNum(e[f]) && isNum(before.entry?.[f]) && Number(e[f]) === Number(afterEntry[f]) && Number(e[f]) !== Number(before.entry[f])) {
+              $set[`${ePath}.${f}`] = Number(before.entry[f]);
+            }
+          });
+        });
+      }
     }
+    // ✅ NEW — the appraisal takes effect in the RELEASE month: the held
+    // appraisal (e.g. 10.08.2026, held in August) and every later scheduled
+    // appraisal move forward by the same months (released in September →
+    // 10.09.2026, next 10.09.2027). lastAppraisalDate / nextAppraisalDate are
+    // recomputed from the shifted history.
+    if (heldBill && Number(heldHold.hold) === 1) {
+      if (shift > 0) {
+        const fromTime = new Date(heldAppraisal.appraisalDate).getTime();
+        const addMonths = (d, n) => {
+          const x = new Date(d);
+          const day = x.getUTCDate();
+          const lastDay = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + n + 1, 0)).getUTCDate();
+          return new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + n, Math.min(day, lastDay)));
+        };
+        const history = (media.appraisal?.history || []).map((h) =>
+          h && h.appraisalDate && !h.isAnchorEntry && new Date(h.appraisalDate).getTime() >= fromTime
+            ? { ...h, appraisalDate: addMonths(h.appraisalDate, shift), updatedBy: `${userName} (Appraisal hold released)`, updatedAt: nowIST() }
+            : h,
+        );
+        // lazy require: avoids a circular import
+        const { recomputeAppraisalSummary } = require("./MediaOnboardingController");
+        const summary = recomputeAppraisalSummary(
+          { ...(media.appraisal || {}), history },
+          Number(media.rentalPayment?.totalRentalAmount || 0),
+        );
+        $set["appraisal.history"] = history;
+        ["lastAppraisalDate", "nextAppraisalDate", "currentRent", "appraisalAmount", "totalAppraisalAmount"].forEach((k) => {
+          if (summary[k] !== undefined) $set[`appraisal.${k}`] = summary[k];
+        });
+        appraisalDateShift = { from: heldAppraisal.appraisalDate, to: summary.lastAppraisalDate || null, nextAppraisalDate: summary.nextAppraisalDate || null }; // ✅ NEW — response only
+      }
+    }
+
     const otherHeld = (media.rentalDue || []).some(
-      (e) => String(e._id) !== String(entry._id) && Number(e.appraisalHold?.hold) === 1,
+      (e) =>
+        String(e._id) !== String(entry._id) &&
+        String(e._id) !== String(heldBill?._id) && // ✅ NEW — released here too
+        Number(e.appraisalHold?.hold) === 1,
     );
     if (!otherHeld) {
       $set["appraisal.appraisalHold"] = 0;
       // ✅ NEW — appraisal applicable back to 1 (with the release date) when
       // the hold had switched it off
-      if (Number(existingHold.hold) === 1 && Number(existingHold.appraisalApplicableBefore) === 1) {
+      if (Number(heldHold.hold) === 1 && Number(heldHold.appraisalApplicableBefore) === 1) {
         $set["appraisal.applicable"] = 1;
         $set["appraisal.appraisalReleaseDate"] = holdData.releasedAt;
       }
@@ -263,8 +419,27 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
   }
   $set["rentalDue.$[e].appraisalHold"] = holdData;
   // direct $set — no media.save(), so no pre-save recalculation runs
+  // ✅ FIXED — MongoDB rejects one update that uses both "rentalDue.$[e].x" and
+  // "rentalDue.2.x" ("would create a conflict at 'rentalDue'"). Every
+  // rentalDue.<index> path is written through an array filter instead (the
+  // held bill's own index → $[e]).
+  const arrayFilters = [{ "e._id": entry._id }];
+  const entryIdx = (media.rentalDue || []).findIndex((x) => String(x._id) === String(entry._id));
+  const usedIdx = new Set();
+  Object.keys($set).forEach((path) => {
+    const mIdx = path.match(/^rentalDue\.(\d+)\.(.+)$/);
+    if (!mIdx) return;
+    const i = Number(mIdx[1]);
+    const id = i === entryIdx ? "e" : `r${i}`;
+    if (id !== "e" && !usedIdx.has(i)) {
+      usedIdx.add(i);
+      arrayFilters.push({ [`${id}._id`]: media.rentalDue[i]._id });
+    }
+    $set[`rentalDue.$[${id}].${mIdx[2]}`] = $set[path];
+    delete $set[path];
+  });
   const update = Object.keys($pull).length ? { $set, $pull } : { $set };
-  await Media.updateOne({ _id: media._id }, update, { arrayFilters: [{ "e._id": entry._id }], timestamps: false });
+  await Media.updateOne({ _id: media._id }, update, { arrayFilters, timestamps: false });
 
   const snapshot = holdData.amountsSnapshot;
   return {
@@ -280,6 +455,8 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user }
       appraisalAmount: holdData.appraisalAmount || 0,
       rentWithoutAppraisal: holdData.rentWithoutAppraisal || 0,
       approvalAmount: hold === 1 ? holdData.rentWithoutAppraisal : holdData.rentWithAppraisal || null,
+      // ✅ NEW — release: the appraisal now takes effect in the release month
+      appraisalDateShift,
       remark: holdData.remark || "",
       heldBy: holdData.heldBy || "",
       heldAt: holdData.heldAt || null,
@@ -395,6 +572,7 @@ exports.setAppraisalHold = async (req, res) => {
 // rentalDueId (optional) → just that bill.
 // ─────────────────────────────────────────────────────────────
 exports.buildAppraisalHoldHistory = buildAppraisalHoldHistory; // used by media onboarding auto-release
+exports.effectiveAppraisalHold = effectiveAppraisalHold; // ✅ NEW — rental-due-list + approval mail
 
 exports.getAppraisalHoldRemarks = async (req, res) => {
   try {
@@ -413,7 +591,16 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
 
     const faces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
     const heldBills = (media.rentalDue || [])
-      .filter((e) => e.appraisalHold && (e.appraisalHold.heldAt || Number(e.appraisalHold.hold) === 1))
+      // ✅ CHANGED — also a bill with only a release on record (released via
+      // that bill, e.g. October releasing September's hold)
+      .filter(
+        (e) =>
+          e.appraisalHold &&
+          (e.appraisalHold.heldAt ||
+            Number(e.appraisalHold.hold) === 1 ||
+            e.appraisalHold.releasedAt ||
+            (Array.isArray(e.appraisalHold.history) && e.appraisalHold.history.length)),
+      )
       .filter((e) => !rentalDueId || String(e._id) === rentalDueId);
 
     // ✅ CHANGED — one row per hold / release action (its own remark + status), newest first

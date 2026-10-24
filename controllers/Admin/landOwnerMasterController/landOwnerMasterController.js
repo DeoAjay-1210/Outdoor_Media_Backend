@@ -2,6 +2,7 @@ const LandOwnerMaster = require("../../../models/Admin/LandOwnerMasterSchema/Lan
 const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { computeRentalDueStats, getFaceRoleStatus, roleStatus } = require("../../../utils/rentalDueStats");
+const { parseBillDateFilter, siteBillDate, billDateInMonth } = require("../../../utils/billDate"); // ✅ NEW — billDate filter
 const mongoose = require("mongoose");
 const {
   computeOutstandingSummary,
@@ -1102,10 +1103,26 @@ const buildResponsePayload = (savedOwner, owner, isNew) => {
   return data;
 };
 
+// ✅ NEW — transactions need a replica set / mongos (Atlas, Render). A local
+// standalone MongoDB rejects them ("Transaction numbers are only allowed on a
+// replica set member or mongos"), so there the save runs without one.
+// Checked once per connection.
+let transactionSupport = null;
+const supportsTransactions = async () => {
+  if (transactionSupport !== null) return transactionSupport;
+  try {
+    const hello = await mongoose.connection.db.admin().command({ hello: 1 });
+    transactionSupport = !!(hello.setName || hello.msg === "isdbgrid");
+  } catch (err) {
+    return true; // unknown → keep the old behaviour (use a transaction)
+  }
+  return transactionSupport;
+};
+
 const landOwnerSave = async (req, res) => {
   const session = await mongoose.startSession();
   try {
-    session.startTransaction();
+    if (await supportsTransactions()) session.startTransaction();
 
     const owner = req.body;
     const files = req.files || [];
@@ -1131,7 +1148,7 @@ const landOwnerSave = async (req, res) => {
 
     const savedOwner = await saveSingleLandOwner(owner, userName, session, incomingBankAccounts);
 
-    await session.commitTransaction();
+    if (session.inTransaction()) await session.commitTransaction();
 
     const message = isNew
       ? "LandOwner created successfully"
@@ -1145,7 +1162,7 @@ const landOwnerSave = async (req, res) => {
 
     return successResponse(res, message, responsePayload, isNew ? 201 : 200);
   } catch (error) {
-    await session.abortTransaction();
+    if (session.inTransaction()) await session.abortTransaction();
     return errorResponse(res, error.message, null, error.statusCode || 400);
   } finally {
     session.endSession();
@@ -2545,6 +2562,9 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           updatedAt: siteLatestActivityAt,
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
+          // ✅ NEW — internal: the site's pre-onboarding GST outstanding rows
+          // (on its first listed face only, so they are not repeated per face)
+          _gstOutstanding: face === details[0] ? mediaDoc.rentalPayment?.gstOutstandingHistory || [] : [],
           // ✅ NEW — internal: single bill site (no face on separate bill)
           _isSingleBill: !(mediaDoc.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2),
           rentalStatus: {
@@ -2552,7 +2572,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
             isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
             hasCmdApprovalSite, // ✅ NEW
-            hasDueThisMonthSite, // ✅ NEW
+            // ✅ NEW — with roleType: only when this month's bill is waiting on that role
+            hasDueThisMonthSite: roleFaceFlags ? hasDueThisMonthSite && !!roleFlags?.pending : hasDueThisMonthSite,
           },
           ownersDetail: ownersOnThisSite.map((o) => {
             const pc = Number(o.paymentCategory || 1);
@@ -2742,7 +2763,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         let shouldInclude = false;
         if (includeDueThisMonth) {
-          if (isCurrent) {
+          // ✅ NEW — with roleType: only this month's bills waiting on that role
+          const dueWaitingOnRole =
+            !targetRole ||
+            (roleStatus(due, targetRole, { pendingAtRoleOnly: true }).isOpen && !!site.rentalStatus?.hasPendingSite);
+          if (isCurrent && dueWaitingOnRole) {
             if (hasOtherFilters) {
               shouldInclude = matchesOtherFilters;
             } else {
@@ -2782,6 +2807,42 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           }
         }
       });
+
+      // ✅ NEW — past GST pending that comes from the pre-onboarding GST
+      // outstanding rows (no bill for those months, e.g. "Jun 2026" 2000) is
+      // listed too, so the site is not dropped from pastGstPendingSites.
+      // Marked isGstOutstanding: true. A month that already has a bill listed
+      // keeps the bill.
+      if (includePastGstPendingSites || includePastGstPending) {
+        (site._gstOutstanding || []).forEach((row) => {
+          const amt = Number(row?.gstOutStandingAmount || 0);
+          const paid = row?.isPaid || (row?.utrNumber && String(row.utrNumber).trim() !== "");
+          if (amt <= 0 || paid) return;
+          const [mStr, yStr] = String(row.dueMonth || "").trim().split(/\s+/);
+          const mIdx = SITE_FILTER_MONTH_NAMES.findIndex(
+            (m) => m.slice(0, 3).toLowerCase() === String(mStr || "").slice(0, 3).toLowerCase(),
+          );
+          const year = Number(yStr);
+          if (mIdx === -1 || !year) return;
+          const isPastMonth = year < referenceYear || (year === referenceYear && mIdx < referenceMonthIdx);
+          if (!isPastMonth) return;
+          const label = `${SITE_FILTER_MONTH_NAMES[mIdx]} ${year}`;
+          if (duesMap.has(label)) return;
+          duesMap.set(label, {
+            dueMonth: label,
+            dueDate: new Date(Date.UTC(year, mIdx, 1)),
+            approvalStatus: null,
+            ownerApprovalDate: null,
+            netPayable: 0,
+            withGst: 1,
+            gstAmount: amt,
+            baseAmount: 0,
+            isPaidForRent: true,
+            isPaidForGst: false,
+            isGstOutstanding: true,
+          });
+        });
+      }
 
       const filteredDues = Array.from(duesMap.values()).sort((a, b) => {
         const dA = a.dueDate ? new Date(a.dueDate) : new Date(0);
@@ -3465,18 +3526,33 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // summary, so stale rows of removed faces / per-face rows holding the full
     // site rent no longer inflate overDue; an approved month is never overdue;
     // overdue starts 1 day after the due date (IST).
-    const rentalDueStats = computeRentalDueStats(summaryDocs, {
-      year: statsYear,
-      month: statsMonth,
-      targetRole,
-      trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
-      // ✅ NEW — roleType: pending = waiting on that role (Executive → Manager → CMD)
-      pendingAtRoleOnly: true,
-      // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
-      singleBillAsSite: true,
-      // ✅ NEW — roleType: overDue = past-due bills waiting on that role
-      overdueByRole: true,
-    });
+    // ✅ NEW — billDate filter (5, 10, 15, 20, 25, 30): overDue / approved /
+    // pending (+ landowner counts) cover only those sites, and an open (not
+    // CMD-approved) bill is overdue once that month's bill date has passed.
+    // Not sent → exactly as before.
+    const billDateFilter = parseBillDateFilter(req.body?.billDate);
+    const rentalDueStats = computeRentalDueStats(
+      billDateFilter.length
+        ? summaryDocs.filter((m) => billDateFilter.includes(siteBillDate(m)))
+        : summaryDocs,
+      {
+        year: statsYear,
+        month: statsMonth,
+        targetRole,
+        trackLandOwners: true, // ✅ NEW — landowner count + details per bucket
+        // ✅ NEW — roleType: pending = waiting on that role (Executive → Manager → CMD)
+        pendingAtRoleOnly: true,
+        // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
+        singleBillAsSite: true,
+        // ✅ NEW — roleType: overDue = past-due bills waiting on that role
+        overdueByRole: true,
+        // ✅ NEW — roleType: dueThisMonth = this month's bills waiting on that role
+        dueThisMonthByRole: true,
+        ...(billDateFilter.length
+          ? { overdueFrom: (m) => billDateInMonth(statsYear, statsMonth, siteBillDate(m)) }
+          : {}),
+      },
+    );
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
     const approvedCount = rentalDueStats.approvedCount;
     const approvedAmountTotal = rentalDueStats.approvedAmountTotal;

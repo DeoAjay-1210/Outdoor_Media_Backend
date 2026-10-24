@@ -494,14 +494,28 @@ const computeAppraisalAmount = (entry, previousRent) => {
   return 0;
 };
 
+// ✅ NEW — first month whose bill is NOT paid yet (month after lastBillPaidDate).
+// An appraisal in a PAST month from here on (e.g. last bill paid 12-07-2026,
+// appraisal in August) applies to the bills still to be generated for those
+// past months. null → no lastBillPaidDate (old behaviour).
+const billableFromMonthKey = (rentalPayment) => {
+  const k = rentalPayment?.lastBillPaidDate ? monthKey(rentalPayment.lastBillPaidDate) : null;
+  return k === null || Number.isNaN(k) ? null : k + 1;
+};
+
 const cascadeHistory = (
   history,
   baseRent,
   netPayable,
   rentActuallyChanged = false,
   appliedCurrentMonthAmount = null, // amount of this month's appraisal ALREADY included in the old rent
+  billableFromKey = null, // ✅ NEW — create flow only: past months from here on are applied like this month
 ) => {
   const currentMonth = thisMonthKey();
+  // ✅ NEW — a month whose appraisal is applied (bump): the current month, and
+  // with billableFromKey also the past months whose bills are still to come
+  const isBumpMonth = (k) =>
+    k === currentMonth || (billableFromKey !== null && k !== null && k >= billableFromKey && k < currentMonth);
   const sorted = (history || [])
     .filter((h) => h.appraisalDate)
     .sort((a, b) => new Date(a.appraisalDate) - new Date(b.appraisalDate));
@@ -542,7 +556,7 @@ const cascadeHistory = (
         const entryMonthKey = monthKey(entry.appraisalDate);
         entry.previousRent = prev;
         const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
-        if (isPastAnchor || entryMonthKey < currentMonth) {
+        if (isPastAnchor || (entryMonthKey < currentMonth && !isBumpMonth(entryMonthKey))) {
           entry.appraisalAmount = 0;
         } else {
           entry.appraisalAmount = computeAppraisalAmount(entry, prev);
@@ -554,7 +568,7 @@ const cascadeHistory = (
       // Re-baseline the current active checkpoint (latest due entry) to the new manual rent
       const latestDueEntry = sorted[latestDueIdx];
       const isCurrentMonthBump =
-        monthKey(latestDueEntry.appraisalDate) === currentMonth &&
+        isBumpMonth(monthKey(latestDueEntry.appraisalDate)) &&
         !latestDueEntry.isAnchorEntry;
 
       if (isCurrentMonthBump && appliedCurrentMonthAmount !== null) {
@@ -621,7 +635,7 @@ const cascadeHistory = (
         const entryMonthKey = monthKey(entry.appraisalDate);
         entry.previousRent = prev;
         const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
-        if (isPastAnchor || entryMonthKey < currentMonth) {
+        if (isPastAnchor || (entryMonthKey < currentMonth && !isBumpMonth(entryMonthKey))) {
           entry.appraisalAmount = 0;
         } else {
           entry.appraisalAmount = computeAppraisalAmount(entry, prev);
@@ -636,7 +650,7 @@ const cascadeHistory = (
       delete latestDueEntry._configEdited;
 
       if (
-        entryMonthKey === currentMonth &&
+        isBumpMonth(entryMonthKey) &&
         !configEdited &&
         Number(netPayable || 0) > 0 &&
         Number(latestDueEntry.newRent || 0) === Number(netPayable) &&
@@ -646,7 +660,7 @@ const cascadeHistory = (
         // (applied earlier, or rent manually adjusted after applying) — keep
         // it as-is so re-saving never adds the appraisal amount again.
         prev = latestDueEntry.newRent;
-      } else if (entryMonthKey === currentMonth) {
+      } else if (isBumpMonth(entryMonthKey)) {
         // ✅ FIXED — use the entry's own stored previousRent (the rent before
         // this month's bump) instead of the chained value. Past entries are
         // flattened to seedBaseRent, so the chain often equals the ORIGINAL
@@ -683,7 +697,7 @@ const cascadeHistory = (
         entry.previousRent = prev;
         const isPastAnchor = entry.isAnchorEntry && entryMonthKey < currentMonth;
 
-        if (isPastAnchor || entryMonthKey < currentMonth) {
+        if (isPastAnchor || (entryMonthKey < currentMonth && !isBumpMonth(entryMonthKey))) {
           entry.appraisalAmount = 0;
         } else {
           entry.appraisalAmount = computeAppraisalAmount(entry, prev);
@@ -944,9 +958,18 @@ const handleAppraisalLogic = async (
     // bumped by the percentage/fixedAmount — not left flat.
     // ✅ FIXED — a lastAppraisalDate in the CURRENT month is a real appraisal
     // event (bump applied), same as buildAppraisalScheduleFromAnchor does on update.
+    // ✅ NEW — past months whose bills are still to be generated (after the last
+    // paid bill, e.g. last bill 12-07-2026 → August, September, …): an appraisal
+    // there is applied to those bills, like a current-month appraisal
+    const billableFromKey = billableFromMonthKey(mediaData.rentalPayment);
+    const isBillablePastMonth = (d) => {
+      const k = d ? monthKey(d) : null;
+      return billableFromKey !== null && k !== null && k >= billableFromKey && k < currentMonth;
+    };
     const isAnchorSeed =
       !!manualLastAppraisalDate &&
-      monthKey(manualLastAppraisalDate) !== currentMonth;
+      monthKey(manualLastAppraisalDate) !== currentMonth &&
+      !isBillablePastMonth(manualLastAppraisalDate); // ✅ NEW
 
     appraisal.history = [];
     if (seedDate) {
@@ -968,7 +991,8 @@ const handleAppraisalLogic = async (
       if (!isAnchorSeed) {
         // ✅ NEW — no lastAppraisalDate given, so nextAppraisalDate is a
         // real, due appraisal event. We apply the bump if it's current month or in the future.
-        if (monthKey(seedDate) >= currentMonth) {
+        // ✅ NEW — also a past month whose bill is still to be generated
+        if (monthKey(seedDate) >= currentMonth || isBillablePastMonth(seedDate)) {
           seedEntry.appraisalAmount = computeAppraisalAmount(
             seedEntry,
             netPayable,
@@ -1003,6 +1027,8 @@ const handleAppraisalLogic = async (
         netPayable,
         netPayable,
         true,
+        null,
+        billableFromKey, // ✅ NEW — past months with bills still to come get their appraisal
       );
 
       const lastEntry = appraisal.history[appraisal.history.length - 1];
@@ -1651,9 +1677,18 @@ const applyAppraisalRentIfDuent = (
   // If rent was manually changed in this request, do not let a PAST appraisal
   // overwrite it. A CURRENT-month appraisal is still added on top of the new
   // manual rent (cascadeHistory already set newRent = manualRent + appraisalAmount).
+  // ✅ NEW — on CREATE, a past-month appraisal whose bills are still to be
+  // generated (after lastBillPaidDate) IS applied to the rent (e.g. 50k → 52k)
+  const billableFromKey = !existingMedia ? billableFromMonthKey(mediaData.rentalPayment) : null;
+  const isBillablePast =
+    billableFromKey !== null &&
+    !latestDueEntry.isAnchorEntry &&
+    Number(latestDueEntry.appraisalAmount || 0) > 0 &&
+    monthKey(latestDueEntry.appraisalDate) >= billableFromKey;
   if (
     rentActuallyChanged &&
-    monthKey(latestDueEntry.appraisalDate) !== currentMonth
+    monthKey(latestDueEntry.appraisalDate) !== currentMonth &&
+    !isBillablePast
   )
     return false;
   const appraisedRent = Number(latestDueEntry.newRent || 0);
@@ -2479,6 +2514,20 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
       );
       if (!appraisalCheck.valid)
         return errorResponse(res, appraisalCheck.message, null, 400);
+    }
+
+    // ✅ NEW — rentalPayment.billDate (5, 10, 15, 20, 25, 30). Not sent on an
+    // edit → the site's saved value is kept; never set → filled on save.
+    if (mediaData.rentalPayment && typeof mediaData.rentalPayment === "object") {
+      const rawBillDate = mediaData.rentalPayment.billDate;
+      if (rawBillDate !== undefined && rawBillDate !== null && rawBillDate !== "") {
+        if (![5, 10, 15, 20, 25, 30].includes(Number(rawBillDate))) {
+          return errorResponse(res, "billDate must be one of 5, 10, 15, 20, 25, 30", null, 400);
+        }
+        mediaData.rentalPayment.billDate = Number(rawBillDate);
+      } else if (existingMediaForValidation?.rentalPayment?.billDate) {
+        mediaData.rentalPayment.billDate = existingMediaForValidation.rentalPayment.billDate;
+      }
     }
 
     // ✅ NEW — keep the CMD appraisal hold flag (POST /admin/appraisal-hold)
@@ -4875,4 +4924,5 @@ module.exports = {
   syncBillingCyclesNow,
   applyDueAppraisals,
   deleteMedia, // ✅ NEW
+  recomputeAppraisalSummary, // ✅ NEW — used by the appraisal hold release (date shift)
 };
