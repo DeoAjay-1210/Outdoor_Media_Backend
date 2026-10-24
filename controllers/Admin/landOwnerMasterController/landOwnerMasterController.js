@@ -2562,6 +2562,9 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           updatedAt: siteLatestActivityAt,
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
+          // ✅ NEW — internal: the site's pre-onboarding GST outstanding rows
+          // (on its first listed face only, so they are not repeated per face)
+          _gstOutstanding: face === details[0] ? mediaDoc.rentalPayment?.gstOutstandingHistory || [] : [],
           // ✅ NEW — internal: single bill site (no face on separate bill)
           _isSingleBill: !(mediaDoc.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2),
           rentalStatus: {
@@ -2804,6 +2807,42 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           }
         }
       });
+
+      // ✅ NEW — past GST pending that comes from the pre-onboarding GST
+      // outstanding rows (no bill for those months, e.g. "Jun 2026" 2000) is
+      // listed too, so the site is not dropped from pastGstPendingSites.
+      // Marked isGstOutstanding: true. A month that already has a bill listed
+      // keeps the bill.
+      if (includePastGstPendingSites || includePastGstPending) {
+        (site._gstOutstanding || []).forEach((row) => {
+          const amt = Number(row?.gstOutStandingAmount || 0);
+          const paid = row?.isPaid || (row?.utrNumber && String(row.utrNumber).trim() !== "");
+          if (amt <= 0 || paid) return;
+          const [mStr, yStr] = String(row.dueMonth || "").trim().split(/\s+/);
+          const mIdx = SITE_FILTER_MONTH_NAMES.findIndex(
+            (m) => m.slice(0, 3).toLowerCase() === String(mStr || "").slice(0, 3).toLowerCase(),
+          );
+          const year = Number(yStr);
+          if (mIdx === -1 || !year) return;
+          const isPastMonth = year < referenceYear || (year === referenceYear && mIdx < referenceMonthIdx);
+          if (!isPastMonth) return;
+          const label = `${SITE_FILTER_MONTH_NAMES[mIdx]} ${year}`;
+          if (duesMap.has(label)) return;
+          duesMap.set(label, {
+            dueMonth: label,
+            dueDate: new Date(Date.UTC(year, mIdx, 1)),
+            approvalStatus: null,
+            ownerApprovalDate: null,
+            netPayable: 0,
+            withGst: 1,
+            gstAmount: amt,
+            baseAmount: 0,
+            isPaidForRent: true,
+            isPaidForGst: false,
+            isGstOutstanding: true,
+          });
+        });
+      }
 
       const filteredDues = Array.from(duesMap.values()).sort((a, b) => {
         const dA = a.dueDate ? new Date(a.dueDate) : new Date(0);

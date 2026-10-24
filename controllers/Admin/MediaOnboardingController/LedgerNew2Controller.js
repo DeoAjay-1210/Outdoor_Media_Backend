@@ -6634,6 +6634,11 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     splitCurGstTotal: 0, splitCurGstPaid: 0, splitCurGstRemaining: 0,
     splitPastRentTotal: 0, splitPastRentPaid: 0, splitPastRentRemaining: 0,
     splitPastGstTotal: 0, splitPastGstPaid: 0, splitPastGstRemaining: 0,
+    // ✅ NEW — GST split by the bill's choice: Hold (withGst 1) / Cannot Hold (withGst 2)
+    splitCurGstHoldTotal: 0, splitCurGstHoldPaid: 0, splitCurGstHoldRemaining: 0,
+    splitCurGstCannotHoldTotal: 0, splitCurGstCannotHoldPaid: 0, splitCurGstCannotHoldRemaining: 0,
+    splitPastGstHoldTotal: 0, splitPastGstHoldPaid: 0, splitPastGstHoldRemaining: 0,
+    splitPastGstCannotHoldTotal: 0, splitPastGstCannotHoldPaid: 0, splitPastGstCannotHoldRemaining: 0,
     currentMonthOverallDueAmount: 0,
     totalOutstanding: 0,
     hasTotalLedger: false,
@@ -6745,6 +6750,9 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
           if (isDirectGst && currentOwnerGst > 0) {
             result[`split${bucket}GstTotal`] += currentOwnerGst;
             result[`split${bucket}Gst${isPaid ? "Paid" : "Remaining"}`] += currentOwnerGst;
+            // ✅ NEW — withGst 2 (GST Cannot Hold): paid with the rent
+            result[`split${bucket}GstCannotHoldTotal`] += currentOwnerGst;
+            result[`split${bucket}GstCannotHold${isPaid ? "Paid" : "Remaining"}`] += currentOwnerGst;
           }
         }
 
@@ -6836,6 +6844,14 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
         result[`split${bucket}GstTotal`] += expectedGstPerCycle;
         result[`split${bucket}GstPaid`] += Math.min(paidAmountForCycle, expectedGstPerCycle);
         result[`split${bucket}GstRemaining`] += cyclePending;
+        // ✅ NEW — withGst 1 (GST Hold); withGst 0 (not decided yet) is in neither
+        // ✅ CHANGED — withGst 1 → GST Hold; withGst 0 (not marked as hold) →
+        // GST Cannot Hold, same as the overdue list treats it. Hold + Cannot
+        // Hold now always equals the GST total.
+        const gstKind = Number(effectiveWithGst) === 1 ? "Hold" : "CannotHold";
+        result[`split${bucket}Gst${gstKind}Total`] += expectedGstPerCycle;
+        result[`split${bucket}Gst${gstKind}Paid`] += Math.min(paidAmountForCycle, expectedGstPerCycle);
+        result[`split${bucket}Gst${gstKind}Remaining`] += cyclePending;
       }
       if (cyclePending > 0) {
         result.totalGstPendingAmount += cyclePending;
@@ -6955,6 +6971,11 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     curGstTotal: 0, curGstPaid: 0, curGstRemaining: 0,
     pastRentTotal: 0, pastRentPaid: 0, pastRentRemaining: 0,
     pastGstTotal: 0, pastGstPaid: 0, pastGstRemaining: 0,
+    // ✅ NEW — GST Hold / GST Cannot Hold
+    curGstHoldTotal: 0, curGstHoldPaid: 0, curGstHoldRemaining: 0,
+    curGstCannotHoldTotal: 0, curGstCannotHoldPaid: 0, curGstCannotHoldRemaining: 0,
+    pastGstHoldTotal: 0, pastGstHoldPaid: 0, pastGstHoldRemaining: 0,
+    pastGstCannotHoldTotal: 0, pastGstCannotHoldPaid: 0, pastGstCannotHoldRemaining: 0,
   };
   // pre-onboarding (legacy) outstanding rows, placed by their OWN dueMonth:
   // before the requested month → past, same month → current, later → not
@@ -6981,6 +7002,11 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
       const paid = row.isPaid || (row.utrNumber && String(row.utrNumber).trim() !== "");
       t[`${bucket}${kind}Total`] += amt;
       t[`${bucket}${kind}${paid ? "Paid" : "Remaining"}`] += amt;
+      if (kind === "Gst") {
+        // ✅ NEW — outstanding GST counts as Hold
+        t[`${bucket}GstHoldTotal`] += amt;
+        t[`${bucket}GstHold${paid ? "Paid" : "Remaining"}`] += amt;
+      }
     });
   };
 
@@ -6994,6 +7020,15 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     t.curGstTotal += s.splitCurGstTotal; t.curGstPaid += s.splitCurGstPaid; t.curGstRemaining += s.splitCurGstRemaining;
     t.pastRentTotal += s.splitPastRentTotal; t.pastRentPaid += s.splitPastRentPaid; t.pastRentRemaining += s.splitPastRentRemaining;
     t.pastGstTotal += s.splitPastGstTotal; t.pastGstPaid += s.splitPastGstPaid; t.pastGstRemaining += s.splitPastGstRemaining;
+    // ✅ NEW
+    ["cur", "past"].forEach((b) => {
+      const B = b === "cur" ? "Cur" : "Past";
+      ["Hold", "CannotHold"].forEach((kind) => {
+        ["Total", "Paid", "Remaining"].forEach((part) => {
+          t[`${b}Gst${kind}${part}`] += Number(s[`split${B}Gst${kind}${part}`] || 0);
+        });
+      });
+    });
   }
   const r = (n) => Math.floor(Number(n) || 0);
   return {
@@ -7009,6 +7044,20 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     newOverAllPastGstAmount: r(t.pastGstTotal),
     newPastGstAmountPaid: r(t.pastGstPaid),
     newPastGstRemaining: r(t.pastGstRemaining),
+    // ✅ NEW — GST split: Hold (withGst 1 + outstanding GST) / Cannot Hold
+    // (withGst 2), each Total / Paid / Remaining
+    newOverAllCurrentMonthGstHoldAmount: r(t.curGstHoldTotal),
+    newCurrentMonthGstHoldAmountPaid: r(t.curGstHoldPaid),
+    newCurrentMonthGstHoldRemaining: r(t.curGstHoldRemaining),
+    newOverAllCurrentMonthGstCannotHoldAmount: r(t.curGstCannotHoldTotal),
+    newCurrentMonthGstCannotHoldAmountPaid: r(t.curGstCannotHoldPaid),
+    newCurrentMonthGstCannotHoldRemaining: r(t.curGstCannotHoldRemaining),
+    newOverAllPastGstHoldAmount: r(t.pastGstHoldTotal),
+    newPastGstHoldAmountPaid: r(t.pastGstHoldPaid),
+    newPastGstHoldRemaining: r(t.pastGstHoldRemaining),
+    newOverAllPastGstCannotHoldAmount: r(t.pastGstCannotHoldTotal),
+    newPastGstCannotHoldAmountPaid: r(t.pastGstCannotHoldPaid),
+    newPastGstCannotHoldRemaining: r(t.pastGstCannotHoldRemaining),
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;

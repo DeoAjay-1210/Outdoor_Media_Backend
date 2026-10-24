@@ -28,6 +28,7 @@ const {
 const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
+const { effectiveAppraisalHold } = require("./AppraisalHoldController"); // ✅ NEW — hold shown on later bills too
 const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
@@ -1087,7 +1088,8 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       // rent, site GST, owner amounts and the bill's own amounts are scaled
       // the same way, and the appraisal block is not sent. Mail payload only.
       sitesInGroupData = sitesInGroupData.map((item) => {
-        const held = item.entry?.appraisalHold;
+        // ✅ CHANGED — also an earlier month's hold still on (later bill)
+        const held = effectiveAppraisalHold(item.media, item.entry);
         const heldRent = Number(held?.rentWithoutAppraisal || 0);
         const pricedRent = Number(item.media?.rentalPayment?.totalRentalAmount || 0);
         if (Number(held?.hold) !== 1 || heldRent <= 0 || pricedRent <= 0) return item;
@@ -6256,22 +6258,27 @@ const details = (item.mediaDetails || []).map((d) => ({
             // ✅ NEW — appraisal hold, display fields only (internal restore data
             // — amountsSnapshot, siteReduced, appraisalApplicableBefore,
             // heldByUserId — is not sent)
-            ...(entry.appraisalHold
-              ? {
-                  appraisalHold: {
-                    hold: Number(entry.appraisalHold.hold) === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
-                    appraisalAmount: Number(entry.appraisalHold.appraisalAmount || 0),
-                    rentWithAppraisal: Number(entry.appraisalHold.rentWithAppraisal || 0),
-                    rentWithoutAppraisal: Number(entry.appraisalHold.rentWithoutAppraisal || 0),
-                    remark: entry.appraisalHold.remark || "",
-                    heldBy: entry.appraisalHold.heldBy || "",
-                    heldAt: entry.appraisalHold.heldAt || null,
-                    releasedBy: entry.appraisalHold.releasedBy || "",
-                    releasedAt: entry.appraisalHold.releasedAt || null,
-                    releaseReason: entry.appraisalHold.releaseReason || "",
-                  },
-                }
-              : {}),
+            // ✅ CHANGED — a later month's bill also shows an earlier month's
+            // hold that is still on (e.g. September held → October On Hold)
+            ...((ah) =>
+              ah
+                ? {
+                    appraisalHold: {
+                      hold: Number(ah.hold) === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
+                      appraisalAmount: Number(ah.appraisalAmount || 0),
+                      rentWithAppraisal: Number(ah.rentWithAppraisal || 0),
+                      rentWithoutAppraisal: Number(ah.rentWithoutAppraisal || 0),
+                      remark: ah.remark || "",
+                      heldBy: ah.heldBy || "",
+                      heldAt: ah.heldAt || null,
+                      releasedBy: ah.releasedBy || "",
+                      releasedAt: ah.releasedAt || null,
+                      releaseReason: ah.releaseReason || "",
+                      // ✅ NEW — the month whose hold applies here ("" = this bill's own)
+                      heldDueMonth: ah.heldDueMonth || "",
+                    },
+                  }
+                : {})(effectiveAppraisalHold(item, entry)),
             // ✅ NEW — TDS hold status of this site's landowners (always present)
             tdsHold: buildTdsHoldSummary(item.landOwners),
             // ✅ NEW — "Save as Draft" values ({ isDraft: 0 } when none)
