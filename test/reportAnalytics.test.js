@@ -483,6 +483,83 @@ test("appraisal hold: entries from the hold date are 'held'; not-applicable site
   assert.equal(wide.meta.sitesNotApplicable, 1);
 });
 
+test("appraisal total = paid (given) + hold + upcoming, each entry counted once, sites distinct across them", () => {
+  const D1 = (y, m, d = 1) => new Date(Date.UTC(y, m, d));
+  const docs = deepFreeze([
+    // site 1: one given + one upcoming (a site in two categories is ONE site in the total)
+    site("1", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: D1(2026, 3), appraisalAmount: 1000 }, { appraisalDate: D1(2026, 11), appraisalAmount: 1100 }]) }),
+    // site 2: held from 5 Oct 2026 — its later entry is Hold, never Upcoming
+    site("2", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: D1(2026, 3), appraisalAmount: 200 }, { appraisalDate: D1(2026, 11), appraisalAmount: 300 }], { appraisalHold: 1, appraisalHoldDate: D1(2026, 9, 5) }) }),
+  ]);
+  const r = RA.computeAppraisal(docs, fy(), NOW);
+  const { given, held, upcoming, total } = r.summary;
+  assert.deepEqual([given.amount, held.amount, upcoming.amount], [1200, 300, 1100]);
+  assert.equal(total.amount, given.amount + held.amount + upcoming.amount);
+  assert.equal(total.entries, given.entries + held.entries + upcoming.entries);
+  assert.equal(total.sites, 2, "distinct sites, not 1 + 1 + 1 + ...");
+  assert.equal(r.buckets.reduce((a, b) => a + b.total.amount, 0), total.amount, "monthly buckets add up");
+  assert.equal(bucket(r, "2026-12").total.amount, bucket(r, "2026-12").upcoming.amount + bucket(r, "2026-12").held.amount);
+});
+
+// ── Agreements ───────────────────────────────────────────────────────────
+const agr = (start, end, extra = {}) => ({ startDate: new Date(Date.UTC(...start)), endDate: new Date(Date.UTC(...end)), reminderBeforeExpiry: 30, ...extra });
+const agreementsFixture = () => deepFreeze([
+  // A: renewed — the old version ended (its stored status is a stale "Active"), the current one is live, 100+ days from its end
+  site("A", [["Hoarding", "Chennai"]], { agreement: agr([2026, 3, 1], [2027, 2, 31]), agreementHistory: [agr([2025, 0, 1], [2025, 11, 31], { status: 1 }), agr([2026, 3, 1], [2027, 2, 31])] }),
+  // B: current agreement ended; an earlier-filed version claims a later period but is not the current one -> superseded, never live
+  site("B", [["Hoarding", "Chennai"]], { agreement: agr([2022, 0, 1], [2022, 11, 31]), agreementHistory: [agr([2022, 0, 1], [2022, 11, 31]), agr([2026, 6, 1], [2027, 6, 1])] }),
+  // C: live and inside its reminder window (ends 10 Nov, 30 days reminder) -> expiring soon (still live)
+  site("C", [["Unipole", "Madurai"]], { agreement: agr([2025, 10, 11], [2026, 10, 10]), agreementHistory: [agr([2025, 10, 11], [2026, 10, 10])] }),
+  // D: current agreement not started yet -> upcoming, not live
+  site("D", [["Hoarding", "Chennai"]], { agreement: agr([2026, 11, 1], [2027, 10, 30]), agreementHistory: [agr([2026, 11, 1], [2027, 10, 30])] }),
+  // E: a history entry without an end date cannot be classified; F: no agreement at all
+  site("E", [["Hoarding", "Chennai"]], { agreement: agr([2026, 0, 1], [2026, 11, 31]), agreementHistory: [{ startDate: new Date(Date.UTC(2024, 0, 1)) }, agr([2026, 0, 1], [2026, 11, 31])] }),
+  site("F", [["Hoarding", "Chennai"]], {}),
+]);
+
+test("agreements: classified by dates (never the stale stored status); total = live + expired + upcoming + superseded; the current agreement is not counted twice", () => {
+  const r = RA.computeAgreements(agreementsFixture(), fy({ details: true }), NOW);
+  const s = r.summary;
+  assert.equal(r.asOf, "2026-10-21");
+  assert.deepEqual([s.live.agreements, s.expired.agreements, s.upcoming.agreements, s.superseded.agreements], [3, 2, 1, 1]); // live: A, C, E; expired: A (old version), B; upcoming: D; superseded: B (later-filed, not current)
+  assert.equal(s.total.agreements, s.live.agreements + s.expired.agreements + s.upcoming.agreements + s.superseded.agreements);
+  assert.equal(r.records.length, s.total.agreements, "one record per distinct filed agreement");
+  const by = (id) => r.records.filter((x) => x.siteId === id);
+  assert.deepEqual(by("A").map((x) => x.state).sort(), ["expired", "live"], "the old version ended although its stored status says Active");
+  assert.deepEqual(by("B").map((x) => x.state).sort(), ["expired", "superseded"]);
+  assert.equal(by("D")[0].state, "upcoming");
+  assert.equal(by("C")[0].expiringSoon, true);
+  assert.equal(s.expiringSoon.agreements, 1);
+  assert.equal(r.meta.recordsWithoutDates, 1, "E's undated history entry is left out, not guessed");
+  assert.equal(r.meta.sitesWithoutAgreement, 1);
+  assert.equal(by("E").length, 1);
+});
+
+test("agreements: one monthly chart — per month every started agreement is expired / expiring / live exactly once; total = their sum; superseded never counted", () => {
+  const r = RA.computeAgreements(agreementsFixture(), fy({ details: true }), NOW); // FY 2026-27: Apr 2026 – Mar 2027
+  const m = (k) => r.buckets.find((b) => b.key === k);
+  const cnt = (b) => [b.total.agreements, b.live.agreements, b.expiring.agreements, b.expired.agreements];
+  // Apr 2026: started by 30 Apr: A-old (ended Dec 2025), A-cur (1 Apr 2026), B-cur (2022, ended Dec 2022), C (Nov 2025), E (1 Jan 2026) — D not yet, B's later version superseded
+  assert.deepEqual(cnt(m("2026-04")), [5, 3, 0, 2]); // live: A-cur, C, E; expired: A-old, B-cur
+  // Nov 2026: C ends 10 Nov -> expiring; D (current, starts 1 Dec) still not started
+  assert.deepEqual(cnt(m("2026-11")), [5, 2, 1, 2]);
+  // Dec 2026: D starts 1 Dec (live after Dec); E ends 31 Dec -> expiring; C expired
+  assert.deepEqual(cnt(m("2026-12")), [6, 2, 1, 3]);
+  for (const b of r.buckets) assert.equal(b.total.agreements, b.live.agreements + b.expiring.agreements + b.expired.agreements, b.key);
+  assert.equal(m("2027-03").expiring.agreements, 1, "A's current agreement ends 31 Mar 2027");
+  // the counts look back over every filed agreement: a period that starts later still sees the history
+  const later = RA.computeAgreements(agreementsFixture(), RA.parseFilters({ startDate: "2026-12-01", endDate: "2026-12-31" }, NOW).filters, NOW);
+  assert.deepEqual(cnt(later.buckets[0]), [6, 2, 1, 3]);
+  assert.equal(r.summary.total.agreements, 7, "cards cover every agreement of the matching sites whatever the period");
+});
+
+test("agreements: media type / city filters narrow the sites; a site without any agreement is skipped", () => {
+  const r = RA.computeAgreements(agreementsFixture(), fy({ city: "Madurai" }), NOW);
+  assert.equal(r.summary.total.agreements, 1);
+  assert.equal(r.summary.live.agreements, 1);
+  assert.equal(RA.computeAgreements(deepFreeze([site("Z", [["Hoarding", "Chennai"]], {})]), fy(), NOW).summary.total.agreements, 0);
+});
+
 // ── Bills ─────────────────────────────────────────────────────────────────
 test("bills: generated rentalDue only, grouped by dueDate, existing status meanings, no 'paid' inferred", () => {
   const docs = deepFreeze([site("1", [["Hoarding", "Chennai"]], { rentalDue: [
@@ -903,25 +980,27 @@ test("data sources: each chart + source reads exactly the top-level fields its l
   const roots = (sel) => [...new Set(sel.split(/\s+/).filter(Boolean).map((p) => p.split(".")[0]))].sort();
   const expected = {
     payments: {
-      ledger: ["ledgerHistory", "mediaDetails"],
+      ledger: ["ledgerHistory", "mediaDetails", "rentalPayment"], // rentalPayment = the payment-cycle column only
       rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
     },
-    media: { both: ["createdAt", "mediaDetails"] },
-    appraisal: { rentalMaster: ["appraisal", "landOwners", "mediaDetails"] },
+    media: { both: ["createdAt", "mediaDetails", "rentalPayment"] },
+    agreements: { both: ["agreement", "agreementHistory", "landOwners", "mediaDetails", "rentalPayment"] },
+    tdsStatus: { both: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment", "tdsBalanceHistory"] },
+    appraisal: { rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalPayment"] },
     // Outstanding payments: the Rental Master cycle calculation's fields (as Payments)
     bills: { rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] },
     gst: {
       ledger: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
       rentalMaster: ["landOwners", "mediaDetails", "rentalDue", "rentalPayment"],
     },
-    tds: { ledger: ["mediaDetails", "tdsBalanceHistory"], rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"] },
+    tds: { ledger: ["mediaDetails", "rentalPayment", "tdsBalanceHistory"], rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"] },
   };
   for (const [chart, bySource] of Object.entries(expected)) {
     assert.deepEqual(Object.keys(C.SELECT[chart]).sort(), Object.keys(bySource).sort(), chart);
     for (const [src, v] of Object.entries(bySource)) assert.deepEqual(roots(C.SELECT[chart][src]), v, `${chart}/${src}`);
   }
   assert.ok(C.SELECT.gst.rentalMaster.includes("rentalPayment.gstOutstandingHistory"));
-  assert.ok(!/rentalPayment\.(?!gstOutstandingHistory)/.test(C.SELECT.gst.rentalMaster), "GST reads only onboarding GST dues from rentalPayment");
+  assert.ok(!/rentalPayment\.(?!gstOutstandingHistory|paymentFrequency|customPaymentFrequency)/.test(C.SELECT.gst.rentalMaster), "GST reads only onboarding GST dues (and the payment-cycle label) from rentalPayment");
   assert.ok(!/tdsBalanceHistory/.test(C.SELECT.tds.rentalMaster), "Rental Master TDS never reads recorded deductions");
   assert.ok(!/landOwners/.test(C.SELECT.tds.ledger), "Ledger TDS never reads configured landowner TDS");
   assert.ok(/landOwners\.tdsApplicable/.test(C.SELECT.tds.rentalMaster) && /landOwners\.tdsHold/.test(C.SELECT.tds.rentalMaster));
@@ -1040,6 +1119,57 @@ const rmTdsSite = (id, extra = {}) => site(id, [["Hoarding", "Chennai", `Site ${
   ...extra,
 });
 const OWNERS = { landOwnersAsOfDate };
+
+// TDS Total / Paid / Upcoming: Rental Master's configured TDS of the stored bills + the Ledger's recorded deductions
+const tdsStatusSite = (id, extra = {}) => site(id, [["Hoarding", "Chennai", `Site ${id}`]], {
+  rentalPayment: { totalRentalAmount: 10000 },
+  appraisal: { history: [] },
+  landOwners: [
+    { _id: `${id}-a`, name: "Asha", tdsApplicable: 1, tdsAmount: 600 },
+    { _id: `${id}-b`, name: "Bala", tdsApplicable: 1, tdsAmount: 400 },
+    { _id: `${id}-h`, name: "Held", tdsApplicable: 1, tdsHold: 1, tdsAmount: 999 },
+    { _id: `${id}-n`, name: "None", tdsApplicable: 0, tdsAmount: 999 },
+  ],
+  rentalDue: ["Aug", "Sep", "Oct", "Nov", "Dec"].map((m, i) => ({ _id: `${id}-${m}`, dueMonth: `${["August", "September", "October", "November", "December"][i]} 2026`, dueDate: new Date(Date.UTC(2026, 7 + i, 5)), approvalStatus: 1 })),
+  tdsBalanceHistory: [
+    tdsRow({ landOwnerId: `${id}-a`, dueMonth: "August 2026", tdsAmount: 600, paidAmount: 600, utrNumber: "UTR-A", paidAt: new Date(Date.UTC(2026, 7, 20)) }),
+    tdsRow({ landOwnerId: `${id}-b`, dueMonth: "August 2026", tdsAmount: 400, paidAmount: 400, utrNumber: "UTR-B", paidAt: new Date(Date.UTC(2026, 7, 21)) }),
+    tdsRow({ landOwnerId: `${id}-a`, dueMonth: "July 2026", tdsAmount: 600, paidAmount: 600, utrNumber: "UTR-JUL", paidAt: new Date(Date.UTC(2026, 6, 20)) }), // no July bill is stored
+    tdsRow({ landOwnerId: `${id}-b`, dueMonth: "September 2026", tdsAmount: 400, isUtrEntry: false, paidAt: null }), // pending row: not a deduction
+  ],
+  ...extra,
+});
+const tdsStatus = (docs, body = {}) => RA.computeTdsStatus(docs, RA.parseFilters({ details: true, ...body }, NOW).filters, OWNERS, NOW);
+
+test("TDS status: total = paid + due + upcoming, each landlord-month once; paid only from a recorded deduction; upcoming only from a stored future bill", () => {
+  const r = tdsStatus(deepFreeze([tdsStatusSite("1")]), { fy: 2026 });
+  const s = r.summary;
+  assert.equal(r.asOf, "2026-10-21");
+  assert.deepEqual([s.paid.amount, s.due.amount, s.upcoming.amount], [1600, 2000, 2000], "paid: Aug 600 + 400 and the July deduction; due: Sep + Oct; upcoming: Nov + Dec");
+  assert.equal(s.total.amount, s.paid.amount + s.due.amount + s.upcoming.amount);
+  assert.equal(s.total.entries, s.paid.entries + s.due.entries + s.upcoming.entries);
+  assert.equal(s.total.sites, 1, "one site across every category");
+  assert.equal(r.records.length, s.total.entries);
+  assert.equal(r.meta.deductionsWithoutBill, 1);
+  assert.equal(r.meta.pendingDeductionRowsIgnored, 1, "a row without isUtrEntry is the ledger's pending TDS, not a deduction");
+  assert.ok(r.meta.heldOwnersSkipped > 0, "the held landlord is skipped, not counted");
+  const aug = r.records.filter((x) => x.billMonth === "August 2026");
+  assert.deepEqual(aug.map((x) => [x.ownerName, x.status, x.utrNumber]).sort(), [["Asha", "paid", "UTR-A"], ["Bala", "paid", "UTR-B"]]);
+  assert.equal(r.records.find((x) => x.billMonth === "November 2026").status, "upcoming");
+  const month = (k) => r.buckets.find((b) => b.key === k);
+  assert.equal(month("2026-11").upcoming.amount, 1000);
+  assert.equal(month("2026-07").paid.amount, 600, "the deduction without a bill sits in its bill month");
+  for (const b of r.buckets) assert.equal(b.total.amount, b.paid.amount + b.due.amount + b.upcoming.amount, b.key);
+});
+
+test("TDS status: no stored future bill = no upcoming TDS (nothing projected); media / city filters and the period apply", () => {
+  const noFuture = tdsStatusSite("2", { rentalDue: [{ _id: "x", dueMonth: "September 2026", dueDate: new Date(Date.UTC(2026, 8, 5)), approvalStatus: 3 }], tdsBalanceHistory: [] });
+  const r = tdsStatus(deepFreeze([noFuture]), { fy: 2026 });
+  assert.deepEqual([r.summary.upcoming.amount, r.summary.upcoming.sites, r.summary.due.amount, r.summary.paid.amount], [0, 0, 1000, 0]);
+  assert.equal(tdsStatus(deepFreeze([tdsStatusSite("3")]), { fy: 2026, city: "Madurai" }).summary.total.amount, 0);
+  const sepOnly = tdsStatus(deepFreeze([tdsStatusSite("4")]), { startDate: "2026-09-01", endDate: "2026-09-30" });
+  assert.deepEqual([sepOnly.summary.total.amount, sepOnly.summary.due.amount], [1000, 1000]);
+});
 
 test("TDS Rental Master: only TDS-applicable, non-held owners with a configured amount, once per generated bill month", () => {
   const docs = deepFreeze([rmTdsSite("1")]);
@@ -1849,12 +1979,76 @@ test("GST Ledger cards: generated = paid + unpaid + hold, with distinct sites; h
   assert.equal(Math.round(c.generated.amount * 100), Math.round((c.paid.amount + c.unpaid.amount + c.hold.amount) * 100));
   assert.equal(c.generated.amount, r.summary.due);
   assert.equal(Math.round((c.unpaid.amount + c.hold.amount) * 100), Math.round(r.summary.remaining.amount * 100));
-  assert.equal(c.hold.amount, r.summary.parts.hold.remaining, "hold = the remaining of held GST");
+  // no approved bill in this fixture: nothing is retained "after approval", the held GST waits in Pending Approval
+  assert.equal(c.hold.amount, 0);
+  assert.equal(c.unpaidPending.amount + c.unpaidLedger.amount, c.unpaid.amount, "unpaid = its two cases");
   assert.equal(r.buckets.reduce((a, b) => a + b.cards.generated.amount, 0).toFixed(2), c.generated.amount.toFixed(2));
   const rows = r.records;
-  const holdSites = new Set(rows.filter((x) => x.kind === "hold" && x.remaining > 0).map((x) => x.siteId));
+  const holdSites = new Set(rows.filter((x) => x.remainingAs === "hold").map((x) => x.siteId));
   assert.equal(c.hold.sites, holdSites.size);
   assert.equal(c.generated.sites, new Set(rows.map((x) => x.siteId)).size);
+});
+
+// GST cards by approval and ledger state (Pending Approval vs Ledger Entry, Hold after approval, released Hold)
+const gstStateFixture = () => {
+  const start = D(2026, 7); // billing from 10 Aug -> cycles Sep and Oct
+  const sepPaid = [{ rentalDueId: "h1", dueMonth: "September 2026", cycle: D(2026, 8), gstAmount: 1800, isPaid: true, ownerId: "H-o" }];
+  // H: held GST, bills approved: September released (receipt submitted -> paid), October retained
+  const h = withGstRp(dsite("H", 10000, { start, gstBalanceHistory: sepPaid, rentalDue: [bill("September 2026", 1, { approvalStatus: 3 }), bill("October 2026", 1, { approvalStatus: 3 })] }), 1800);
+  // P: held GST, October bill still awaiting approval (status 1; September partially approved is not approved either)
+  const pp = withGstRp(dsite("P", 10000, { start, rentalDue: [bill("September 2026", 1, { approvalStatus: 2 }), bill("October 2026", 1, { approvalStatus: 1 })] }), 1800);
+  // L: direct GST (withGst 2) on an approved October bill, owner GST 500, not paid: unpaid by the Ledger's balance
+  const l = dsite("L", 5000, { start, owners: [ownerOnline("L", 5000, { gstApplicable: 1, gstAmount: 500 })], rentalDue: [bill("October 2026", 2, { approvalStatus: 3 })] });
+  return deepFreeze([h, pp, l]);
+};
+
+test("GST by state: Pending Approval, Ledger Entry, Hold after approval and released Hold never overlap", () => {
+  const r = ledGst(gstStateFixture(), { startDate: "2026-09-01", endDate: "2026-10-31", details: true });
+  const c = r.summary.cards;
+  const amt = (k) => c[k].amount;
+  assert.equal(amt("hold"), 1800, "H's October only: approved and not yet released");
+  assert.equal(amt("paid"), 1800, "H's September: the release is the payment, so it leaves Hold");
+  assert.equal(amt("unpaidPending"), 3600 + 500, "P's September and October + L's September (owner GST held in a month without a direct bill, no approved bill)");
+  assert.equal(amt("unpaidLedger"), 500, "L's direct GST, approved but unpaid in the Ledger");
+  assert.equal(amt("unpaid"), amt("unpaidPending") + amt("unpaidLedger"));
+  assert.equal(amt("generated"), amt("paid") + amt("unpaid") + amt("hold"));
+  // each remaining amount sits in exactly one place: rows, cards and buckets agree
+  const rows = r.records.filter((x) => x.remaining > 0);
+  assert.ok(rows.every((x) => ["pending", "hold", "ledger"].includes(x.remainingAs)));
+  const sum = (as) => rows.filter((x) => x.remainingAs === as).reduce((a, x) => a + x.remaining, 0);
+  assert.deepEqual([sum("pending"), sum("hold"), sum("ledger")], [amt("unpaidPending"), amt("hold"), amt("unpaidLedger")]);
+  assert.equal(c.hold.sites, 1);
+  assert.equal(c.unpaidPending.sites, 2, "P and L");
+  assert.equal(c.unpaidLedger.sites, 1);
+  assert.equal(c.unpaid.sites, 2, "P and L");
+  assert.equal(r.buckets.reduce((a, b) => a + b.cards.hold.amount, 0), amt("hold"), "monthly buckets add up to the cards");
+  assert.equal(r.buckets.reduce((a, b) => a + b.cards.unpaidPending.amount + b.cards.unpaidLedger.amount, 0), amt("unpaid"));
+  // approval is not payment: approving a bill moves its GST from Pending Approval to Hold / Ledger Entry, never to Paid
+  assert.equal(r.records.filter((x) => x.siteId === "L").every((x) => x.paid === 0), true);
+});
+
+test("GST rows carry the cycle's stored approval status and steps (Pending Approval flow); none when no bill", () => {
+  const start = D(2026, 7);
+  const steps = [{ role: 1, status: 2, userName: "Asha", approvedAt: D(2026, 9, 12) }, { role: 2, status: 1 }, { role: 3, status: 1 }];
+  const p = withGstRp(dsite("Q", 10000, { start, rentalDue: [bill("October 2026", 1, { approvalStatus: 2, approvalSteps: steps })] }), 1800);
+  const r = ledGst(deepFreeze([p]), { startDate: "2026-10-01", endDate: "2026-10-31", details: true });
+  const row = r.records.find((x) => x.remainingAs === "pending");
+  assert.equal(row.approvalStatus, "Partially approved");
+  assert.deepEqual(row.approvalSteps.map((x) => [x.role, x.status, x.userName]), [[1, 2, "Asha"], [2, 1, null], [3, 1, null]]);
+  const none = ledGst(deepFreeze([withGstRp(dsite("N", 10000, { start }), 1800)]), { startDate: "2026-10-01", endDate: "2026-10-31", details: true });
+  assert.deepEqual([none.records[0].approvalStatus, none.records[0].approvalSteps], [null, []], "no bill, no invented status");
+});
+
+test("GST by state: onboarding GST dues are Ledger Entry unpaid; a settled one is paid", () => {
+  const start = D(2026, 8);
+  const d = dsite("O", 3000, { start, rentalPayment: { ...dsite("O", 3000, { start }).rentalPayment, gstOutstandingHistory: [
+    { dueMonth: "September 2026", gstOutStandingAmount: 700, isPaid: false },
+    { dueMonth: "October 2026", gstOutStandingAmount: 300, isPaid: false, utrNumber: "UTR-O" },
+  ] } });
+  const r = ledGst(deepFreeze([d]), { startDate: "2026-09-01", endDate: "2026-10-31" });
+  assert.equal(r.summary.cards.unpaidLedger.amount, 700);
+  assert.equal(r.summary.cards.unpaidPending.amount, 0);
+  assert.equal(r.summary.cards.paid.amount, 300);
 });
 
 test("Ledger history contract: a provided landOwnerMasterId must be a non-empty array (clients omit it for a site view)", async () => {

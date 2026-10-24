@@ -11,5 +11,7 @@ router.post("/report-analytics/appraisal", protect, C.getAppraisalAnalytics);
 router.post("/report-analytics/upcoming-bills", protect, C.getBillAnalytics);
 router.post("/report-analytics/gst", protect, C.getGstAnalytics);
 router.post("/report-analytics/tds", protect, C.getTdsAnalytics);
+router.post("/report-analytics/agreements", protect, C.getAgreementAnalytics);
+router.post("/report-analytics/tds-status", protect, C.getTdsStatusAnalytics);
 
 module.exports = router;

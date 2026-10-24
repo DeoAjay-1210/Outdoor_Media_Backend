@@ -32,6 +32,9 @@ const FACE = "mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaTy
 // paid-state rows, bill labels, billing anchors and appraisal history (no bank, PAN or contact fields).
 const RM_PAYMENTS = `${FACE} mediaDetails.status ledgerHistory ledger gstApplicableFlag appraisal.history rentalPayment.billingStartDate rentalPayment.lastBillPaidDate rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable rentalPayment.rentalOutstandingHistory rentalPayment.gstOutstandingHistory gstBalanceHistory.dueMonth gstBalanceHistory.gstAmount gstBalanceHistory.isPaid gstBalanceHistory.utrNumber gstBalanceHistory.ownerId gstBalanceHistory.landOwnerId rentalDue.dueDate rentalDue.dueMonth rentalDue.withGst rentalDue.approvalStatus rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.cashAmount landOwners.onlineAmount landOwners.shareAmount landOwners.gstApplicable landOwners.gstAmount landOwners.tdsAmount`;
 
+// the site's stored payment cycle (rentalPayment.paymentFrequency, + months when custom): the "Payment Cycle" column of the detail popups
+const CYCLE = "rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency";
+
 // the landlords' names (no bank, PAN or contact fields); the media codes come from mediaDetails, already read. Listed by the
 // payments / outstanding detail dialogs
 const DETAIL_IDS = "landOwners.name";
@@ -45,28 +48,34 @@ const DETAIL_IDS = "landOwners.name";
 const SELECT = {
   filters: `${FACE} createdAt`,
   payments: {
-    ledger: `${FACE} ledgerHistory`,
+    ledger: `${FACE} ledgerHistory ${CYCLE}`,
     rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS}`,
   },
-  media: { both: `${FACE} createdAt` },
-  appraisal: { rentalMaster: `${FACE} appraisal ${DETAIL_IDS}` },
+  media: { both: `${FACE} createdAt ${CYCLE}` },
+  // Agreements: the current agreement and every filed version (dates, reminder days, document type) + the site's payment cycle / landlords for the popup rows
+  agreements: { both: `${FACE} agreement.startDate agreement.endDate agreement.reminderBeforeExpiry agreement.agreementStatus agreementHistory.startDate agreementHistory.endDate agreementHistory.reminderBeforeExpiry agreementHistory.agreementStatus ${CYCLE} ${DETAIL_IDS}` },
+  appraisal: { rentalMaster: `${FACE} appraisal ${CYCLE} ${DETAIL_IDS}` },
   // Outstanding payments = the Rental Master / Ledger cycle calculation (same fields as Payments) plus
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
   // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
   // (bill amounts feed the optional export detail rows, `details: true`)
-  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status` },
+  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt` },
   // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
   // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
   gst: {
-    ledger: `${RM_PAYMENTS} ${DETAIL_IDS}`,
+    // (+ the bill's approval steps: the Pending Approval rows show who approved and who is pending)
+    ledger: `${RM_PAYMENTS} ${DETAIL_IDS} rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt`,
     // (the bill month and status label the optional per-bill detail rows)
-    rentalMaster: `${FACE} rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory ${DETAIL_IDS}`,
+    rentalMaster: `${FACE} rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory ${CYCLE} ${DETAIL_IDS}`,
   },
   tds: {
-    ledger: `${FACE} tdsBalanceHistory`,
-    rentalMaster: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount appraisal.history`,
+    ledger: `${FACE} tdsBalanceHistory ${CYCLE}`,
+    rentalMaster: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount ${CYCLE} appraisal.history`,
   },
 };
+
+// TDS Total / Paid / Upcoming: Rental Master's configured TDS of the generated bills + the Ledger's recorded deductions (source-independent)
+SELECT.tdsStatus = { both: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount appraisal.history tdsBalanceHistory ${CYCLE}` };
 
 const UNSUPPORTED = {
   appraisal: { ledger: "Ledger records hold payments only; appraisals are Rental Master records (appraisal history)." },
@@ -79,9 +88,11 @@ const COMPUTE = {
     rentalMaster: (d, f) => RA.computeRentalMasterPayments(d, f, LEDGER_LIB),
   },
   media: { both: (d, f) => RA.computeMedia(d, f) },
+  agreements: { both: (d, f) => RA.computeAgreements(d, f) },
   appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f) },
   bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
+  tdsStatus: { both: (d, f) => RA.computeTdsStatus(d, f, { landOwnersAsOfDate }) },
   tds: {
     ledger: (d, f) => RA.computeTds(d, f),
     rentalMaster: (d, f) => RA.computeTdsRentalMaster(d, f, { landOwnersAsOfDate }),
@@ -142,8 +153,10 @@ module.exports = {
   resolve,
   getPaymentAnalytics: makeHandler("payments", "Payment analytics fetched"),
   getMediaAnalytics: makeHandler("media", "Media analytics fetched"),
+  getAgreementAnalytics: makeHandler("agreements", "Agreement analytics fetched"),
   getAppraisalAnalytics: makeHandler("appraisal", "Appraisal analytics fetched"),
   getBillAnalytics: makeHandler("bills", "Upcoming bill analytics fetched"),
   getGstAnalytics: makeHandler("gst", "GST analytics fetched"),
   getTdsAnalytics: makeHandler("tds", "TDS analytics fetched"),
+  getTdsStatusAnalytics: makeHandler("tdsStatus", "TDS status analytics fetched"),
 };
