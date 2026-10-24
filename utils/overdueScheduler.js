@@ -90,7 +90,7 @@ function startOverdueScheduler() {
   cron.schedule(cronSchedule, async () => {
     await runOverduePushNotificationScheduler();
   });
-  console.log(`✅ [OverdueScheduler] Scheduled with pattern: "${cronSchedule}"`);
+  // console.log(`✅ [OverdueScheduler] Scheduled with pattern: "${cronSchedule}"`);
 }
 
 module.exports = {
