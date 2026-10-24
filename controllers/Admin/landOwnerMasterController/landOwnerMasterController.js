@@ -2513,7 +2513,7 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       // ✅ NEW — with roleType, approved / pending / overDue per face follow the
       // same role rule as the header counts (waiting on that role)
       const roleFaceFlags = targetRole
-        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true })
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, overdueByRole: true })
         : null;
       details.forEach((face) => {
         const faceId = String(face._id);
@@ -2562,6 +2562,9 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           updatedAt: siteLatestActivityAt,
           ownerIds: ownerIdsOnThisSite,
           _overallSummary: overallSummary,
+          // ✅ NEW — internal: the site's pre-onboarding GST outstanding rows
+          // (on its first listed face only, so they are not repeated per face)
+          _gstOutstanding: face === details[0] ? mediaDoc.rentalPayment?.gstOutstandingHistory || [] : [],
           // ✅ NEW — internal: single bill site (no face on separate bill)
           _isSingleBill: !(mediaDoc.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2),
           rentalStatus: {
@@ -2569,7 +2572,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
             isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
             hasCmdApprovalSite, // ✅ NEW
-            hasDueThisMonthSite, // ✅ NEW
+            // ✅ NEW — with roleType: only when this month's bill is waiting on that role
+            hasDueThisMonthSite: roleFaceFlags ? hasDueThisMonthSite && !!roleFlags?.pending : hasDueThisMonthSite,
           },
           ownersDetail: ownersOnThisSite.map((o) => {
             const pc = Number(o.paymentCategory || 1);
@@ -2714,17 +2718,23 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         let matchesApproved = due.approvalStatus === 3;
         let matchesPending = due.approvalStatus === 1 || due.approvalStatus === 2;
-        const matchesOverDue =
+        let matchesOverDue =
           due.approvalStatus === 4 ||
           (due.dueDate && new Date(due.dueDate) < today && due.approvalStatus !== 3) ||
           (isPast && isPending);
         // ✅ NEW — with roleType, approved / pending dues follow the role rule
         // (approved = role step approved; pending = waiting on that role — the
-        // earlier roles approved, this role not yet). overDue stays role independent.
+        // earlier roles approved, this role not yet).
         if (targetRole) {
           const { isApproved: roleApproved, isOpen: roleOpen } = roleStatus(due, targetRole, { pendingAtRoleOnly: true });
           matchesApproved = roleApproved;
           matchesPending = roleOpen;
+          // ✅ NEW — overDue also follows the role: only dues waiting on that role
+          // (e.g. CMD: Executive + Manager approved, CMD not yet)
+          // ✅ NEW — and only on sites counted in overDue.siteCount (same per-site
+          // rule as the header: a single bill site uses its most advanced bill,
+          // so a lagging face copy no longer brings the site / its landowner in)
+          matchesOverDue = matchesOverDue && roleOpen && !!site.rentalStatus?.isOverDueSite;
         }
         const matchesCmdApproval =
           (!due.mediaDetailId || String(due.mediaDetailId) === String(site.mediaDetailId)) &&
@@ -2753,7 +2763,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         let shouldInclude = false;
         if (includeDueThisMonth) {
-          if (isCurrent) {
+          // ✅ NEW — with roleType: only this month's bills waiting on that role
+          const dueWaitingOnRole =
+            !targetRole ||
+            (roleStatus(due, targetRole, { pendingAtRoleOnly: true }).isOpen && !!site.rentalStatus?.hasPendingSite);
+          if (isCurrent && dueWaitingOnRole) {
             if (hasOtherFilters) {
               shouldInclude = matchesOtherFilters;
             } else {
@@ -2793,6 +2807,42 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           }
         }
       });
+
+      // ✅ NEW — past GST pending that comes from the pre-onboarding GST
+      // outstanding rows (no bill for those months, e.g. "Jun 2026" 2000) is
+      // listed too, so the site is not dropped from pastGstPendingSites.
+      // Marked isGstOutstanding: true. A month that already has a bill listed
+      // keeps the bill.
+      if (includePastGstPendingSites || includePastGstPending) {
+        (site._gstOutstanding || []).forEach((row) => {
+          const amt = Number(row?.gstOutStandingAmount || 0);
+          const paid = row?.isPaid || (row?.utrNumber && String(row.utrNumber).trim() !== "");
+          if (amt <= 0 || paid) return;
+          const [mStr, yStr] = String(row.dueMonth || "").trim().split(/\s+/);
+          const mIdx = SITE_FILTER_MONTH_NAMES.findIndex(
+            (m) => m.slice(0, 3).toLowerCase() === String(mStr || "").slice(0, 3).toLowerCase(),
+          );
+          const year = Number(yStr);
+          if (mIdx === -1 || !year) return;
+          const isPastMonth = year < referenceYear || (year === referenceYear && mIdx < referenceMonthIdx);
+          if (!isPastMonth) return;
+          const label = `${SITE_FILTER_MONTH_NAMES[mIdx]} ${year}`;
+          if (duesMap.has(label)) return;
+          duesMap.set(label, {
+            dueMonth: label,
+            dueDate: new Date(Date.UTC(year, mIdx, 1)),
+            approvalStatus: null,
+            ownerApprovalDate: null,
+            netPayable: 0,
+            withGst: 1,
+            gstAmount: amt,
+            baseAmount: 0,
+            isPaidForRent: true,
+            isPaidForGst: false,
+            isGstOutstanding: true,
+          });
+        });
+      }
 
       const filteredDues = Array.from(duesMap.values()).sort((a, b) => {
         const dA = a.dueDate ? new Date(a.dueDate) : new Date(0);
@@ -3494,6 +3544,10 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         pendingAtRoleOnly: true,
         // ✅ NEW — a single-bill site's faces share one bill stage (same as dashboard/v2)
         singleBillAsSite: true,
+        // ✅ NEW — roleType: overDue = past-due bills waiting on that role
+        overdueByRole: true,
+        // ✅ NEW — roleType: dueThisMonth = this month's bills waiting on that role
+        dueThisMonthByRole: true,
         ...(billDateFilter.length
           ? { overdueFrom: (m) => billDateInMonth(statsYear, statsMonth, siteBillDate(m)) }
           : {}),
