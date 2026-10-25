@@ -10,7 +10,8 @@ Read-only. Endpoints (all `POST`, JWT required, roles 1–4 only — role 5 and 
 | `/admin/report-analytics/appraisal` | 3 Appraisals |
 | `/admin/report-analytics/upcoming-bills` | 4 Outstanding payments (formerly "Upcoming payments" / "Generated bills") |
 | `/admin/report-analytics/gst` | 5 GST |
-| `/admin/report-analytics/tds` | 6 TDS |
+| `/admin/report-analytics/tds` | Source-specific TDS (Rental Master or Ledger) |
+| `/admin/report-analytics/tds-status` | 6 TDS chart: source-specific totals, paid deductions and bill statuses |
 
 Request body: `{ source?: "rentalMaster" | "ledger", siteStatus?: "active" | "inactive" | "all", fy?: 2026, startDate?: "YYYY-MM-DD", endDate?: "YYYY-MM-DD", mediaType?, city? }`.
 `source` defaults to `rentalMaster`; any other value is a 400. `siteStatus` (`active` | `inactive` | `all`,
@@ -56,6 +57,16 @@ appraisal) with `tdsApplicable === 1`, not on a CMD TDS hold (`tdsHold === 1`), 
 hold and applicable owners without an amount are counted in `meta`, never computed from `tdsPercentage`.
 Limitation: Rental Master keeps only the *current* TDS settings, so older bills show today's applicability.
 This is TDS *applicable on bills*, not TDS *deducted* — that is the Ledger view.
+
+**TDS chart (`/tds-status`).** Total TDS and its monthly buckets, details, entries and site counts come from
+`computeTdsRentalMaster` (Rental Master generated bills, by bill due date). Paid TDS and its monthly buckets,
+details, entries and site counts come from `computeTds` (`tdsBalanceHistory`, by Ledger deduction date). Due and
+Upcoming remain the status calculation over stored Rental Master bills: upcoming is an unpaid configured TDS
+amount on a bill due after today; due is unpaid TDS due today or earlier. The chart does not project unstored
+bills. Since the independent series use their source's existing date rules, the monthly Paid series can fall in
+a different month from its corresponding bill, and Total need not equal the sum of the plotted status series.
+Filters (period, site status, media type and city) are applied to all three calculations before the response is
+built. The `/tds` endpoint remains the source-selectable Rental Master or Ledger detail/chart calculation.
 
 ### Data-source labels
 Each chart shows "Data source: …" (frontend `AnalyticsSources`, per source). They name the top-level fields
@@ -220,9 +231,13 @@ approved, 3 Approved, 4 Overdue); no paid state is inferred. Nothing is generate
 month, upserted, so each row is an individual deduction and never a running balance).
 - Only recorded deductions count: rows with `isUtrEntry` falsy are what the ledger treats as pending
   TDS and are skipped (`meta.pendingIgnored`).
-- Dated by `paidAt` (the entry date) → `date` → `cycle`. `tdsAmount` and `paidAmount` are the same figure
-  and are not summed. Rows are de-duplicated per owner + bill month (`dueMonth` normalised, so
-  `Jun 2026` = `June 2026`; latest wins).
+- Amount comes from `paidAmount`, falling back to `tdsAmount` for older rows; the two fields are never
+  summed. Dated by `paidAt` → `date`; `cycle` is the bill cycle, not the deduction date, and is not used
+  to place or filter a Paid TDS deduction. Rows are de-duplicated per landlord + bill month (`dueMonth`
+  normalised, so `Jun 2026` = `June 2026`; latest wins). Local `landOwners._id` and
+  `landOwnerMasterId` aliases resolve to the same landlord; a unique name is used only as a legacy
+  fallback. Rows with no deduction date are reported in `meta.recordsWithoutDate`, not assigned to a
+  bill-cycle month.
 - **Always bucketed by month**, whatever the range length (other charts switch to days for ≤ 62 days).
   Rows outside the selected range are excluded even inside a partially covered month.
 - Each bucket carries `deductions[]` — `{ id, date (YYYY-MM-DD), amount, billMonth, siteId, siteName,

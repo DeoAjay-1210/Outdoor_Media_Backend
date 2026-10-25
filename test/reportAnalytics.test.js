@@ -814,8 +814,11 @@ test("GST Ledger: sites without GST give an empty (all-zero) result, not an erro
 });
 
 // ── TDS ───────────────────────────────────────────────────────────────────
-test("TDS: tdsBalanceHistory only; tdsAmount not added to paidAmount; duplicates collapse; owner standing amounts ignored", () => {
-  const row = (o) => ({ landOwnerId: "o1", dueMonth: "June 2026", tdsAmount: 100, paidAmount: 100, isUtrEntry: true, paidAt: new Date(Date.UTC(2026, 5, 20)), ...o });
+test("TDS: use the paid amount from tdsBalanceHistory; duplicates collapse; owner standing amounts ignored", () => {
+  const row = (o) => {
+    const tdsAmount = o.tdsAmount ?? 100;
+    return { landOwnerId: "o1", dueMonth: "June 2026", isUtrEntry: true, paidAt: new Date(Date.UTC(2026, 5, 20)), ...o, tdsAmount, paidAmount: o.paidAmount ?? tdsAmount };
+  };
   const docs = deepFreeze([site("1", [["H", "C", "Alpha"]], {
     tdsBalanceHistory: [
       row({}),
@@ -835,10 +838,14 @@ test("TDS: tdsBalanceHistory only; tdsAmount not added to paidAmount; duplicates
   assert.equal(r.meta.recordsWithoutDate, 1);
 });
 
-const tdsRow = (o) => ({
-  landOwnerId: "o1", landOwnerName: "Ravi", dueMonth: "June 2026", tdsAmount: 100, paidAmount: 100,
-  isUtrEntry: true, utrNumber: "UTR1", paidAt: new Date(Date.UTC(2026, 5, 20, 10)), ...o,
-});
+const tdsRow = (o) => {
+  const tdsAmount = o.tdsAmount ?? 100;
+  return {
+    landOwnerId: "o1", landOwnerName: "Ravi", dueMonth: "June 2026",
+    isUtrEntry: true, utrNumber: "UTR1", paidAt: new Date(Date.UTC(2026, 5, 20, 10)),
+    ...o, tdsAmount, paidAmount: o.paidAmount ?? tdsAmount,
+  };
+};
 const tdsSum = (r) => r.buckets.reduce((s, b) => s + b.amount, 0);
 
 test("TDS: monthly aggregation in chronological order; buckets, breakdowns and summary agree", () => {
@@ -894,6 +901,150 @@ test("TDS: short custom ranges still plot months; breakdown never includes rows 
   assert.equal(f.granularity, "day");
 });
 
+test("TDS Ledger rows use paidAmount and deduction dates, and merge local/master owner aliases without losing sites", () => {
+  const docs = deepFreeze([site("paid-site", [["Hoarding", "Chennai", "Paid Site"]], {
+    landOwners: [{ _id: "owner-local", landOwnerMasterId: "owner-master", name: "Asha" }],
+    tdsBalanceHistory: [
+      tdsRow({ _id: "ledger-1", landOwnerId: "owner-master", landOwnerName: "Asha", dueMonth: "June 2026", tdsAmount: 40, paidAmount: 40, paidAt: D(2026, 5, 20), cycle: D(2026, 4, 5) }),
+      tdsRow({ _id: "ledger-2", landOwnerId: "owner-local", landOwnerName: "Asha", dueMonth: "Jun 2026", tdsAmount: 0, paidAmount: 75, paidAt: D(2026, 5, 22), cycle: D(2026, 4, 5) }),
+      tdsRow({ _id: "ledger-3", landOwnerId: null, landOwnerName: "ASHA", dueMonth: "June 2026", tdsAmount: 10, paidAmount: 80, paidAt: D(2026, 5, 23), cycle: D(2026, 4, 5) }),
+      tdsRow({ _id: "missing-date", landOwnerId: "unmatched", dueMonth: "June 2026", tdsAmount: 90, paidAmount: 90, paidAt: null, date: null, cycle: D(2026, 5, 24) }),
+      tdsRow({ _id: "outside-range", landOwnerId: "another-owner", dueMonth: "May 2026", tdsAmount: 100, paidAmount: 100, paidAt: D(2026, 6, 1), cycle: D(2026, 5, 5) }),
+    ],
+  })]);
+  const range = RA.parseFilters({ startDate: "2026-06-01", endDate: "2026-06-30" }, NOW).filters;
+  const result = RA.computeTds(docs, range);
+  assert.equal(result.summary.total, 80, "paidAmount is the recorded deduction amount");
+  assert.equal(result.summary.entries, 1);
+  assert.equal(result.summary.sites, 1);
+  assert.equal(result.summary.owners, 1);
+  assert.equal(bucket(result, "2026-06").amount, 80);
+  assert.deepEqual(bucket(result, "2026-06").deductions.map((row) => [row.date, row.amount, row.ownerName]), [["2026-06-23", 80, "ASHA"]]);
+  assert.equal(result.meta.duplicatesIgnored, 2, "local ID, master ID and unique-name legacy rows resolve to one owner-month");
+  assert.equal(result.meta.recordsWithoutDate, 1, "cycle is not used as a payment date");
+
+  const legacy = site("legacy-site", [["Hoarding", "Chennai", "Legacy Site"]], {
+    tdsBalanceHistory: [tdsRow({ tdsAmount: 25, paidAmount: 0 })],
+  });
+  assert.equal(RA.computeTds([legacy], fy()).summary.total, 25, "older rows without a paidAmount retain the stored tdsAmount fallback");
+
+  const ambiguousNames = site("ambiguous-site", [["Hoarding", "Chennai", "Ambiguous Site"]], {
+    landOwners: [{ name: "Shared Name" }, { name: "Shared Name" }],
+    tdsBalanceHistory: [
+      tdsRow({ _id: "first", landOwnerId: null, landOwnerName: "Shared Name", tdsAmount: 20, paidAmount: 20 }),
+      tdsRow({ _id: "second", landOwnerId: null, landOwnerName: "Shared Name", tdsAmount: 30, paidAmount: 30 }),
+    ],
+  });
+  const ambiguousResult = RA.computeTds([ambiguousNames], fy());
+  assert.deepEqual([ambiguousResult.summary.total, ambiguousResult.summary.entries, ambiguousResult.summary.owners], [50, 2, 2]);
+});
+
+test("TDS overview matches legacy master landlord IDs and keeps Paid in its Ledger deduction month", () => {
+  const doc = site("alias-site", [["Hoarding", "Chennai", "Alias Site"]], {
+    landOwners: [{ _id: "local-owner", landOwnerMasterId: "master-owner", name: "Asha", tdsApplicable: 1, tdsAmount: 90 }],
+    rentalPayment: { totalRentalAmount: 10000 },
+    appraisal: { history: [] },
+    rentalDue: [{ _id: "june-bill", dueMonth: "June 2026", dueDate: D(2026, 5, 5), approvalStatus: 3 }],
+    tdsBalanceHistory: [
+      tdsRow({ landOwnerId: "master-owner", landOwnerName: "Asha", dueMonth: "June 2026", tdsAmount: 75, paidAmount: 75, paidAt: D(2026, 6, 10), cycle: D(2026, 5, 5) }),
+    ],
+  });
+  const result = RA.computeTdsOverview(deepFreeze([doc]), fy({ details: true }), OWNERS, NOW);
+  assert.deepEqual(result.summary.total, { amount: 90, entries: 1, sites: 1 });
+  assert.deepEqual(result.summary.paid, { amount: 75, entries: 1, sites: 1 });
+  assert.equal(bucket(result, "2026-06").due.amount, 0, "the master-ID Ledger row marks this bill paid");
+  assert.deepEqual(bucket(result, "2026-06").paid, { amount: 0, entries: 0, sites: 0 });
+  assert.deepEqual(bucket(result, "2026-07").paid, { amount: 75, entries: 1, sites: 1 });
+  assert.deepEqual(result.sourceDetails.ledgerBuckets.find((b) => b.key === "2026-07").deductions.map((row) => row.amount), [75]);
+  assert.equal(result.meta.deductionsWithoutBill, 0);
+});
+
+test("TDS Paid: October Ledger payment of 6000 (09/10/2026) is in Paid card, chart, sites and detail rows; Total stays Rental Master", () => {
+  const OCT = { start: "2026-10-01", end: "2026-10-31", details: true };
+  const mk = (id, ledgerRow) => site(id, [["Hoarding", "Chennai", `Oct ${id}`]], {
+    landOwners: [{ _id: "lo-1", landOwnerMasterId: "master-1", name: "Ravi", tdsApplicable: 1, tdsAmount: 6000 }],
+    rentalPayment: { totalRentalAmount: 60000 },
+    appraisal: { history: [] },
+    rentalDue: [{ _id: "oct-bill", dueMonth: "October 2026", dueDate: D(2026, 9, 5), approvalStatus: 3 }],
+    tdsBalanceHistory: [ledgerRow],
+  });
+  const row = { _id: "t1", landOwnerId: "master-1", landOwnerName: "Ravi", dueMonth: "October 2026", cycle: D(2026, 9, 5), isUtrEntry: true, utrNumber: "UTR9", tdsAmount: 6000, paidAmount: 6000 };
+  const variants = {
+    paidAt: { ...row, paidAt: D(2026, 9, 9), date: D(2026, 9, 9) },
+    "date only (no paidAt)": { ...row, paidAt: null, date: D(2026, 9, 9) },
+    "day-first string date": { ...row, paidAt: null, date: "09/10/2026" },
+    "paidAmount missing": { ...row, paidAmount: 0, paidAt: D(2026, 9, 9) },
+  };
+  for (const [label, ledgerRow] of Object.entries(variants)) {
+    const docs = deepFreeze([mk("oct", ledgerRow)]);
+    const filters = RA.parseFilters(OCT, NOW).filters;
+    const r = RA.computeTdsOverview(docs, filters, OWNERS, NOW);
+    assert.deepEqual(r.summary.paid, { amount: 6000, entries: 1, sites: 1 }, label);
+    assert.deepEqual(bucket(r, "2026-10").paid, { amount: 6000, entries: 1, sites: 1 }, label);
+    assert.deepEqual(r.summary.total, { amount: 6000, entries: 1, sites: 1 }, `${label}: Total is Rental Master`);
+    const paidRows = r.records.filter((x) => x.status === "paid");
+    assert.deepEqual(paidRows.map((x) => [x.amount, x.paidAt, x.bucket, x.ownerName]), [[6000, "2026-10-09", "2026-10", "Ravi"]], label);
+    assert.equal(r.records.filter((x) => x.status === "due").length, 0, label);
+    assert.deepEqual(r.sourceDetails.ledgerBuckets.find((b) => b.key === "2026-10").deductions.map((x) => x.amount), [6000], label);
+  }
+  // paid on 9 Oct for a September bill: still October's Paid, and September gets nothing
+  const sepBill = deepFreeze([mk("sep", { ...row, dueMonth: "September 2026", paidAt: D(2026, 9, 9) })]);
+  const wide = RA.parseFilters({ start: "2026-09-01", end: "2026-10-31", details: true }, NOW).filters;
+  const rs = RA.computeTdsOverview(sepBill, wide, OWNERS, NOW);
+  assert.equal(bucket(rs, "2026-10").paid.amount, 6000);
+  assert.equal(bucket(rs, "2026-09").paid.amount, 0);
+  assert.equal(rs.records.filter((x) => x.status === "paid").length, 1);
+  // a pending (isUtrEntry false) row is not paid
+  const pending = RA.computeTdsOverview(deepFreeze([mk("p", { ...row, isUtrEntry: false, paidAt: null })]), RA.parseFilters(OCT, NOW).filters, OWNERS, NOW);
+  assert.equal(pending.summary.paid.amount, 0);
+});
+
+test("TDS Paid from the Ledger rent payment (no tdsBalanceHistory row): counted once, on the payment date, reconciled everywhere", () => {
+  const OCT = RA.parseFilters({ start: "2026-10-01", end: "2026-10-31", details: true }, NOW).filters;
+  const payment = { _id: "pay1", landOwnerId: "lo-1", landOwnerName: "Ravi", month: "October 2026", amount: 60000, paymentMode: "Online", utrNumber: "UTR1", status: 1, withGst: 0, isUtrEntry: false, date: new Date("2026-10-09T16:59:50.402Z") };
+  const mk = (id, over = {}, ownerOver = {}) => site(id, [["Hoarding", "Chennai", `R ${id}`]], {
+    landOwners: [{ _id: "lo-1", landOwnerMasterId: "m-1", name: "Ravi", paymentCategory: 2, tdsApplicable: 1, tdsAmount: 6000, ...ownerOver }],
+    rentalPayment: { totalRentalAmount: 60000 },
+    appraisal: { history: [] },
+    rentalDue: [{ _id: "b", dueMonth: "October 2026", dueDate: D(2026, 9, 1), approvalStatus: 3 }],
+    ledger: [payment],
+    ledgerHistory: [{ year: "2026", months: [{ month: "October", entries: [{ ...payment }] }] }], // the same payment, as the ledger keeps both
+    tdsBalanceHistory: [],
+    ...over,
+  });
+  const run = (docs) => RA.computeTdsOverview(deepFreeze(docs), OCT, OWNERS, NOW);
+
+  const r = run([mk("a")]);
+  assert.deepEqual(r.summary.paid, { amount: 6000, entries: 1, sites: 1 }, "ledger + ledgerHistory copies count once");
+  assert.deepEqual(bucket(r, "2026-10").paid, { amount: 6000, entries: 1, sites: 1 });
+  assert.deepEqual(r.summary.total, { amount: 6000, entries: 1, sites: 1 }, "Total stays Rental Master");
+  assert.deepEqual(r.summary.due, { amount: 0, entries: 0, sites: 0 }, "a paid bill is no longer due");
+  assert.deepEqual(r.records.filter((x) => x.status === "paid").map((x) => [x.amount, x.paidAt, x.ownerName]), [[6000, "2026-10-09", "Ravi"]]);
+  assert.equal(r.records.filter((x) => x.status === "due").length, 0);
+  assert.equal(RA.computeTds(deepFreeze([mk("a")]), OCT, OWNERS).summary.total, 6000);
+  assert.equal(RA.computeTds(deepFreeze([mk("a")]), OCT).summary.total, 0, "without the owner lib only stored rows count");
+
+  // a stored recorded row for the same landlord + month wins: no double count
+  const stored = run([mk("b", { tdsBalanceHistory: [{ landOwnerId: "lo-1", dueMonth: "October 2026", isUtrEntry: true, tdsAmount: 6000, paidAmount: 6000, paidAt: D(2026, 9, 12) }] })]);
+  assert.deepEqual(stored.summary.paid, { amount: 6000, entries: 1, sites: 1 });
+  assert.equal(stored.records.find((x) => x.status === "paid").paidAt, "2026-10-12");
+
+  // not deducted: TDS not applicable, on hold, Cash part of a split landlord, GST-only entry, pending entry, other landlord
+  for (const [label, docs] of Object.entries({
+    "not applicable": [mk("c", {}, { tdsApplicable: 0 })],
+    "on CMD hold": [mk("d", {}, { tdsHold: 1 })],
+    "split landlord, cash part": [mk("e", { ledger: [{ ...payment, paymentMode: "Cash" }], ledgerHistory: [] }, { paymentCategory: 3 })],
+    "GST-only entry": [mk("f", { ledger: [{ ...payment, isUtrEntry: true }], ledgerHistory: [] })],
+    "not saved (status 0)": [mk("g", { ledger: [{ ...payment, status: 0 }], ledgerHistory: [] })],
+    "another landlord": [mk("h", { ledger: [{ ...payment, landOwnerId: "other" }], ledgerHistory: [] })],
+  })) assert.equal(run(docs).summary.paid.amount, 0, label);
+
+  // paid in October for a September bill: October Paid, nothing in September
+  const sep = RA.computeTdsOverview(deepFreeze([mk("s", { ledger: [{ ...payment, month: "September 2026" }], ledgerHistory: [], rentalDue: [{ _id: "sb", dueMonth: "September 2026", dueDate: D(2026, 8, 1), approvalStatus: 3 }] })]), RA.parseFilters({ start: "2026-09-01", end: "2026-10-31", details: true }, NOW).filters, OWNERS, NOW);
+  assert.equal(bucket(sep, "2026-10").paid.amount, 6000);
+  assert.equal(bucket(sep, "2026-09").paid.amount, 0);
+});
+
 test("TDS: financial year, media type and city filters change chart, totals and breakdown together", () => {
   const docs = deepFreeze([
     site("1", [["Hoarding", "Chennai", "Alpha"]], { tdsBalanceHistory: [tdsRow({ tdsAmount: 100 }), tdsRow({ dueMonth: "May 2025", tdsAmount: 9, paidAt: new Date(Date.UTC(2025, 4, 2)) })] }),
@@ -938,14 +1089,15 @@ test("TDS: de-duplication — re-saved rows, month-label variants, pending rows 
   assert.equal(r.meta.pendingIgnored, 2);
 });
 
-test("TDS: rows are dated by paidAt, then date, then cycle", () => {
+test("TDS: rows are filtered by paidAt, then date; bill cycle is not a payment date", () => {
   const docs = deepFreeze([site("1", [["H", "C", "Alpha"]], { tdsBalanceHistory: [
     tdsRow({ dueMonth: "May 2026", paidAt: new Date(Date.UTC(2026, 7, 1)), date: new Date(Date.UTC(2026, 4, 1)), cycle: new Date(Date.UTC(2026, 4, 1)) }),
     tdsRow({ dueMonth: "June 2026", paidAt: null, date: "2026-09-02T00:00:00.000Z", cycle: new Date(Date.UTC(2026, 5, 1)) }),
     tdsRow({ dueMonth: "July 2026", paidAt: null, date: null, cycle: new Date(Date.UTC(2026, 9, 1)) }),
   ] })]);
   const r = RA.computeTds(docs, fy());
-  assert.deepEqual(r.buckets.filter((b) => b.amount).map((b) => [b.key, b.deductions[0].date]), [["2026-08", "2026-08-01"], ["2026-09", "2026-09-02"], ["2026-10", "2026-10-01"]]);
+  assert.deepEqual(r.buckets.filter((b) => b.amount).map((b) => [b.key, b.deductions[0].date]), [["2026-08", "2026-08-01"], ["2026-09", "2026-09-02"]]);
+  assert.equal(r.meta.recordsWithoutDate, 1);
 });
 
 // ── Calendar year (sent by the frontend as an inclusive custom range) ──────
@@ -985,7 +1137,7 @@ test("data sources: each chart + source reads exactly the top-level fields its l
     },
     media: { both: ["createdAt", "mediaDetails", "rentalPayment"] },
     agreements: { both: ["agreement", "agreementHistory", "landOwners", "mediaDetails", "rentalPayment"] },
-    tdsStatus: { both: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment", "tdsBalanceHistory"] },
+    tdsStatus: { both: ["appraisal", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment", "tdsBalanceHistory"] },
     appraisal: { rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalPayment"] },
     // Outstanding payments: the Rental Master cycle calculation's fields (as Payments)
     bills: { rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] },
@@ -993,7 +1145,7 @@ test("data sources: each chart + source reads exactly the top-level fields its l
       ledger: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
       rentalMaster: ["landOwners", "mediaDetails", "rentalDue", "rentalPayment"],
     },
-    tds: { ledger: ["mediaDetails", "rentalPayment", "tdsBalanceHistory"], rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"] },
+    tds: { ledger: ["appraisal", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalPayment", "tdsBalanceHistory"], rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"] },
   };
   for (const [chart, bySource] of Object.entries(expected)) {
     assert.deepEqual(Object.keys(C.SELECT[chart]).sort(), Object.keys(bySource).sort(), chart);
@@ -1002,7 +1154,8 @@ test("data sources: each chart + source reads exactly the top-level fields its l
   assert.ok(C.SELECT.gst.rentalMaster.includes("rentalPayment.gstOutstandingHistory"));
   assert.ok(!/rentalPayment\.(?!gstOutstandingHistory|paymentFrequency|customPaymentFrequency)/.test(C.SELECT.gst.rentalMaster), "GST reads only onboarding GST dues (and the payment-cycle label) from rentalPayment");
   assert.ok(!/tdsBalanceHistory/.test(C.SELECT.tds.rentalMaster), "Rental Master TDS never reads recorded deductions");
-  assert.ok(!/landOwners/.test(C.SELECT.tds.ledger), "Ledger TDS never reads configured landowner TDS");
+  assert.match(C.SELECT.tds.ledger, /landOwners\._id landOwners\.landOwnerMasterId landOwners\.name/);
+  assert.match(C.SELECT.tds.ledger, /landOwners\.tdsApplicable.*landOwners\.tdsAmount.*landOwners\.tdsHold/, "Ledger TDS prices the deduction recorded with a rent payment from the owner's TDS settings, as the Ledger does");
   assert.ok(/landOwners\.tdsApplicable/.test(C.SELECT.tds.rentalMaster) && /landOwners\.tdsHold/.test(C.SELECT.tds.rentalMaster));
   // which combinations exist at all
   assert.equal(C.resolve("appraisal", "ledger"), null);
@@ -1013,14 +1166,16 @@ test("data sources: each chart + source reads exactly the top-level fields its l
   for (const chart of ["payments", "gst", "tds"]) assert.notEqual(C.resolve(chart, "ledger").select, C.resolve(chart, "rentalMaster").select, chart);
 });
 
-test("detail dialogs: the Rental Master payments and outstanding reads add only the landlord name (media codes come from mediaDetails)", () => {
+test("detail projections include only landlord identity fields needed for analytics matching", () => {
   for (const sel of [C.SELECT.payments.rentalMaster, C.SELECT.bills.rentalMaster, C.SELECT.gst.rentalMaster, C.SELECT.gst.ledger, C.SELECT.appraisal.rentalMaster]) {
     assert.match(sel, /mediaDetails\.mediaCode/, "the media code of each face");
     assert.match(sel, /landOwners\.name/);
     assert.doesNotMatch(sel, /siteCode|landlordCode/);
     assert.doesNotMatch(sel, /panNumber|aadhar|bankName|ifsc|accountNumber|upiId|landOwners\.phone/);
   }
-  assert.ok(!/landOwners/.test(C.SELECT.tds.ledger + C.SELECT.media.both), "the media and ledger-TDS charts read no landlord field");
+  assert.match(C.SELECT.tds.ledger, /landOwners\._id landOwners\.landOwnerMasterId landOwners\.name/);
+  assert.ok(!/landOwners/.test(C.SELECT.media.both), "the media chart reads no landlord field");
+  assert.doesNotMatch(C.SELECT.tds.ledger, /panNumber|aadhar|bankName|ifsc|accountNumber|upiId|landOwners\.phone/);
 });
 
 test("data sources: each aggregation ignores records that are not its source", () => {
@@ -1169,6 +1324,52 @@ test("TDS status: no stored future bill = no upcoming TDS (nothing projected); m
   assert.equal(tdsStatus(deepFreeze([tdsStatusSite("3")]), { fy: 2026, city: "Madurai" }).summary.total.amount, 0);
   const sepOnly = tdsStatus(deepFreeze([tdsStatusSite("4")]), { startDate: "2026-09-01", endDate: "2026-09-30" });
   assert.deepEqual([sepOnly.summary.total.amount, sepOnly.summary.due.amount], [1000, 1000]);
+});
+
+test("TDS overview: Rental Master total and Ledger paid use their own date buckets, filters, and distinct site counts", () => {
+  const docs = deepFreeze([
+    tdsStatusSite("1", {
+      rentalDue: [
+        { _id: "sep", dueMonth: "September 2026", dueDate: D(2026, 8, 5), approvalStatus: 3 },
+        { _id: "nov", dueMonth: "November 2026", dueDate: D(2026, 10, 5), approvalStatus: 1 },
+      ],
+      tdsBalanceHistory: [
+        tdsRow({ landOwnerId: "1-a", dueMonth: "September 2026", tdsAmount: 700, paidAmount: 700, paidAt: D(2026, 9, 2) }),
+      ],
+    }),
+    site("2", [["Unipole", "Madurai", "Site 2"]], {
+      tdsBalanceHistory: [
+        tdsRow({ landOwnerId: "orphan", dueMonth: "October 2026", tdsAmount: 100, paidAmount: 100, paidAt: D(2026, 9, 5) }),
+      ],
+    }),
+  ]);
+  const filters = fy({ details: true });
+  const r = RA.computeTdsOverview(docs, filters, OWNERS, NOW);
+  assert.deepEqual(r.summary.total, { amount: 2000, entries: 4, sites: 1 });
+  assert.deepEqual(r.summary.paid, { amount: 800, entries: 2, sites: 2 });
+  assert.deepEqual(r.summary.upcoming, { amount: 1000, entries: 2, sites: 1 });
+  const month = (key) => r.buckets.find((b) => b.key === key);
+  assert.deepEqual(month("2026-09").total, { amount: 1000, entries: 2, sites: 1 });
+  assert.deepEqual(month("2026-09").paid, { amount: 0, entries: 0, sites: 0 });
+  assert.deepEqual(month("2026-10").paid, { amount: 800, entries: 2, sites: 2 }, "Ledger paid dates, including a paid deduction with no current bill");
+  assert.deepEqual(month("2026-11").total, { amount: 1000, entries: 2, sites: 1 });
+  assert.equal(month("2026-11").upcoming.amount, 1000);
+  assert.equal(
+    r.sourceDetails.rentalMasterBuckets.find((b) => b.key === "2026-09").deductions.reduce((sum, d) => sum + d.amount, 0),
+    1000,
+  );
+  assert.deepEqual(
+    r.sourceDetails.ledgerBuckets.find((b) => b.key === "2026-10").deductions.map((d) => d.amount).sort((a, b) => a - b),
+    [100, 700],
+  );
+  assert.equal(r.records.some((x) => x.status === "upcoming" && x.billMonth === "November 2026"), true);
+
+  const hoarding = RA.computeTdsOverview(docs, fy({ mediaType: "Hoarding" }), OWNERS, NOW);
+  assert.deepEqual(hoarding.summary.total, { amount: 2000, entries: 4, sites: 1 });
+  assert.deepEqual(hoarding.summary.paid, { amount: 700, entries: 1, sites: 1 });
+  const madurai = RA.computeTdsOverview(docs, fy({ city: "Madurai" }), OWNERS, NOW);
+  assert.deepEqual(madurai.summary.total, { amount: 0, entries: 0, sites: 0 });
+  assert.deepEqual(madurai.summary.paid, { amount: 100, entries: 1, sites: 1 });
 });
 
 test("TDS Rental Master: only TDS-applicable, non-held owners with a configured amount, once per generated bill month", () => {
@@ -1637,6 +1838,13 @@ test("site status: every chart's projection loads face status; invalid values ar
   const res = fakeRes();
   await C.getBillAnalytics({ user: { userType: 1 }, body: { source: "ledger", siteStatus: "inactive" } }, res);
   assert.deepEqual(res.body.data.filters, { source: "ledger", siteStatus: "inactive" });
+});
+
+test("TDS controller projections include landlord aliases needed to map Ledger rows", () => {
+  assert.match(C.SELECT.tds.ledger, /landOwners\._id/);
+  assert.match(C.SELECT.tds.ledger, /landOwners\.landOwnerMasterId/);
+  assert.match(C.SELECT.tdsStatus.both, /landOwners\._id/);
+  assert.match(C.SELECT.tdsStatus.both, /landOwners\.landOwnerMasterId/);
 });
 
 // ── Robustness / read-only ────────────────────────────────────────────────

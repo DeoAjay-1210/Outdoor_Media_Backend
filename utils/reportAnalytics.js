@@ -1182,6 +1182,133 @@ const computeGst = (docs, f) => {
 
 // ── Chart 6 — TDS ──────────────────────────────────────────────────────────
 
+// The Ledger shows and takes dates as dd/mm/yyyy; new Date("09/10/2026") would read that as 10 Sep, so such strings are parsed day-first.
+const toLedgerDate = (v) => {
+  const m = typeof v === "string" ? /^\s*(\d{1,2})[/-](\d{1,2})[/-](\d{4})\s*$/.exec(v) : null;
+  if (!m) return toDate(v);
+  const d = new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1])));
+  return d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[1]) ? d : null;
+};
+const tdsPaymentDate = (entry) => toLedgerDate(entry?.paidAt) || toLedgerDate(entry?.date);
+// isUtrEntry is a Boolean in the schema; tolerate the string/number forms older imports stored
+const isTdsRecorded = (entry) => {
+  const v = entry?.isUtrEntry;
+  return !(!v || v === "false" || v === "0" || v === 0);
+};
+/**
+ * The Ledger records a landlord's TDS deduction together with the rent payment: every rent ledger entry (ledger[] and
+ * ledgerHistory[]) shows the landlord's TDS beside the payment date, and the current Ledger screens write nothing to
+ * tdsBalanceHistory. So a saved rent payment (not GST-only, not virtual) for a TDS-applicable landlord is a recorded
+ * deduction of that landlord's TDS (as of the bill month; none while on a CMD TDS hold) on the payment date. For a
+ * Cash + Online split landlord the TDS comes off the Online part only (as in the Ledger screens), so only that payment counts.
+ * A stored tdsBalanceHistory row for the same landlord + bill month always wins, so nothing is counted twice.
+ * Returns tdsBalanceHistory-shaped rows: the stored ones plus the derived ones.
+ */
+const tdsRecordedRows = (doc, lib) => {
+  const stored = Array.isArray(doc.tdsBalanceHistory) ? doc.tdsBalanceHistory : [];
+  if (!lib || typeof lib.landOwnersAsOfDate !== "function") return stored;
+  const identity = tdsOwnerIdentity(doc);
+  const monthOf = (label, fallback) => parseMonthLabel(label) || fallback;
+  const covered = new Set();
+  stored.forEach((t, index) => {
+    if (!t || !isTdsRecorded(t)) return;
+    const bm = monthOf(t.dueMonth, toDate(t.cycle));
+    covered.add(`${identity.forEntry(t, index).key}|${bm ? monthKeyOf(bm) : text(t.dueMonth)}`);
+  });
+  const payments = [
+    ...(doc.ledger || []),
+    ...(doc.ledgerHistory || []).flatMap((y) => (y?.months || []).flatMap((mo) => (mo?.entries || []).map((e) => ({ ...e, month: e.month || `${mo.month} ${y.year}` })))),
+  ];
+  const derived = [];
+  for (const e of payments) {
+    if (!e || !e.paymentMode || e.isUtrEntry === true || e.isVirtual) continue;
+    if (e.status !== undefined && e.status !== null && num(e.status) !== 1) continue;
+    const paidOn = toLedgerDate(e.date);
+    if (!paidOn) continue;
+    const bm = monthOf(e.month || e.dueMonth, new Date(Date.UTC(paidOn.getUTCFullYear(), paidOn.getUTCMonth(), 1)));
+    const owners = lib.landOwnersAsOfDate(doc, bm) || [];
+    const ownerId = idOf(e.landOwnerId);
+    const owner = ownerId
+      ? owners.find((o) => idOf(o?._id) === ownerId || idOf(o?.landOwnerMasterId) === ownerId)
+      : owners.length === 1 ? owners[0] : null;
+    if (!owner || num(owner.tdsHold) === 1 || num(owner.tdsApplicable) !== 1) continue;
+    if (num(owner.paymentCategory) === 3 && e.paymentMode !== "Online") continue;
+    const amount = num(owner.tdsAmount);
+    if (amount <= 0) continue;
+    const row = {
+      _id: e._id ? `rent:${idOf(e._id)}` : undefined,
+      landOwnerId: owner._id, landOwnerName: owner.name,
+      dueMonth: `${MONTH_NAMES[bm.getUTCMonth()]} ${bm.getUTCFullYear()}`, cycle: bm,
+      isUtrEntry: true, tdsAmount: amount, paidAmount: amount, paidAt: paidOn, date: paidOn, utrNumber: text(e.utrNumber),
+    };
+    if (covered.has(`${identity.forEntry(row, 0).key}|${monthKeyOf(bm)}`)) continue;
+    derived.push(row);
+  }
+  return derived.length ? [...stored, ...derived] : stored;
+};
+
+const tdsPaidAmount = (entry) => num(entry?.paidAmount) || num(entry?.tdsAmount);
+const normalizeOwnerName = (name) => text(name).toLowerCase().replace(/\s+/g, " ");
+
+const tdsOwnerIdentity = (doc) => {
+  const owners = (Array.isArray(doc.landOwners) ? doc.landOwners : []).filter(Boolean);
+  const aliases = new Map();
+  const ambiguousAliases = new Set();
+  const names = new Map();
+  const ambiguousNames = new Set();
+  const ownerKeys = new Map();
+
+  const addAlias = (map, ambiguous, alias, key) => {
+    if (!alias || ambiguous.has(alias)) return;
+    const previous = map.get(alias);
+    if (previous && previous !== key) {
+      map.delete(alias);
+      ambiguous.add(alias);
+    } else {
+      map.set(alias, key);
+    }
+  };
+
+  owners.forEach((owner, index) => {
+    const localId = idOf(owner._id);
+    const masterId = idOf(owner.landOwnerMasterId);
+    const key = localId ? `owner:${localId}` : masterId ? `master:${masterId}` : `owner-index:${index}`;
+    ownerKeys.set(owner, key);
+    addAlias(aliases, ambiguousAliases, localId, key);
+    addAlias(aliases, ambiguousAliases, masterId, key);
+    addAlias(names, ambiguousNames, normalizeOwnerName(owner.name), key);
+  });
+
+  return {
+    ownerKey(owner) {
+      const localId = idOf(owner?._id);
+      const masterId = idOf(owner?.landOwnerMasterId);
+      const nameKey = normalizeOwnerName(owner?.name);
+      return ownerKeys.get(owner)
+        || aliases.get(localId)
+        || aliases.get(masterId)
+        || names.get(nameKey)
+        || (localId ? `owner:${localId}` : masterId ? `master:${masterId}` : "");
+    },
+    forEntry(entry, index) {
+      const ownerId = idOf(entry.landOwnerId);
+      const ownerName = text(entry.landOwnerName);
+      const nameKey = normalizeOwnerName(ownerName);
+      const key = aliases.get(ownerId)
+        || names.get(nameKey)
+        || (ownerId
+          ? `id:${ownerId}`
+          : nameKey && ambiguousNames.has(nameKey)
+            ? `ambiguous-name:${nameKey}:${idOf(entry._id) || index}`
+            : nameKey
+              ? `name:${nameKey}`
+              : `record:${idOf(entry._id) || index}`);
+      const owner = owners.find((candidate) => ownerKeys.get(candidate) === key);
+      return { key, ownerName: ownerName || text(owner?.name) || null };
+    },
+  };
+};
+
 /**
  * Source: tdsBalanceHistory[] — ledger-save (withTds=1) upserts ONE row per
  * owner + bill month holding the TDS deducted for that bill (tdsAmount ===
@@ -1191,14 +1318,17 @@ const computeGst = (docs, f) => {
  * - Only recorded deductions count: rows with isUtrEntry falsy are what the
  *   ledger itself treats as pending/unpaid TDS, so they are skipped (meta).
  * - De-duplicated per owner + bill month (dueMonth normalised, so "Jun 2026"
- *   and "June 2026" collide); latest paidAt/createdAt wins.
- * - Dated by paidAt (the entry date), fallback date, then cycle.
+ *   and "June 2026" collide); local and master owner IDs resolve to the same
+ *   site landlord, with a unique landlord name as a legacy fallback.
+ * - Uses paidAmount (the amount recorded as paid), falling back to tdsAmount
+ *   for older rows. Dated by paidAt, then date; cycle is the bill cycle, not
+ *   the deduction date, and is never used to filter Paid TDS.
  * - Always bucketed by MONTH, whatever the range length; rows outside the
  *   selected range (also inside a partially covered month) are excluded.
  * Each bucket carries `deductions[]` — the exact rows behind its amount — so a
  * month's breakdown always matches the chart under the same filters.
  */
-const computeTds = (docs, filters) => {
+const computeTds = (docs, filters, lib) => {
   const f = { ...filters, granularity: "month" };
   const buckets = buildBuckets(f, () => ({ amount: 0, sites: new Map(), owners: new Set(), deductions: [] }));
   const excl = newExclusions();
@@ -1213,33 +1343,36 @@ const computeTds = (docs, filters) => {
     const name = siteName(doc);
     const sid = idOf(doc._id);
     const codes = uniq(faceList(doc).map((fc) => text(fc.mediaCode)));
+    const ownerIdentity = tdsOwnerIdentity(doc);
     const seen = new Map();
-    for (const t of doc.tdsBalanceHistory || []) {
+    for (const [index, t] of tdsRecordedRows(doc, lib).entries()) {
       if (!t) continue;
-      if (!t.isUtrEntry || t.isUtrEntry === "false") { meta.pendingIgnored += 1; continue; }
+      if (!isTdsRecorded(t)) { meta.pendingIgnored += 1; continue; }
+      const identity = ownerIdentity.forEntry(t, index);
       const billMonth = parseMonthLabel(t.dueMonth) || toDate(t.cycle);
       const monthPart = billMonth ? monthKeyOf(billMonth) : text(t.dueMonth) || `row:${idOf(t._id)}`;
-      const key = `${idOf(t.landOwnerId)}|${monthPart}`;
+      const key = `${identity.key}|${monthPart}`;
       const prev = seen.get(key);
       if (prev) {
         meta.duplicatesIgnored += 1;
-        const pu = toDate(prev.paidAt || prev.createdAt)?.getTime() ?? 0;
-        const tu = toDate(t.paidAt || t.createdAt)?.getTime() ?? 0;
-        if (tu >= pu) seen.set(key, t);
+        const previous = prev.entry;
+        const previousDate = tdsPaymentDate(previous) || toDate(previous.createdAt);
+        const entryDate = tdsPaymentDate(t) || toDate(t.createdAt);
+        if ((entryDate?.getTime() ?? 0) >= (previousDate?.getTime() ?? 0)) seen.set(key, { entry: t, identity });
       } else {
-        seen.set(key, t);
+        seen.set(key, { entry: t, identity });
       }
     }
-    for (const t of seen.values()) {
-      const amount = num(t.tdsAmount);
+    for (const { entry: t, identity } of seen.values()) {
+      const amount = tdsPaidAmount(t);
       if (amount <= 0) continue;
-      const d = toDate(t.paidAt) || toDate(t.date) || toDate(t.cycle);
+      const d = tdsPaymentDate(t);
       if (!d) { meta.recordsWithoutDate += 1; continue; }
       if (!inRange(d, f)) continue;
       if (!siteMatches(doc, attr, f, excl, amount)) continue;
       const b = buckets.get(monthKeyOf(d));
       if (!b) continue;
-      const ownerKey = `${sid}|${idOf(t.landOwnerId) || text(t.landOwnerName)}`;
+      const ownerKey = `${sid}|${identity.key}`;
       b.amount += amount;
       const s = b.sites.get(sid) || { name, amount: 0 };
       s.amount += amount;
@@ -1256,7 +1389,7 @@ const computeTds = (docs, filters) => {
         mediaCodes: codes,
         mediaType: typeLabel(attr),
         city: cityLabel(attr),
-        ownerName: text(t.landOwnerName) || null,
+        ownerName: identity.ownerName,
         utrNumber: text(t.utrNumber) || null,
       });
       total += amount; entries += 1; allSites.add(sid); allOwners.add(ownerKey);
@@ -1381,7 +1514,7 @@ const computeTdsRentalMaster = (docs, filters, lib) => {
  *  - the landlord's TDS is the configured amount in Rental Master as of the due date (lib.landOwnersAsOfDate); only landlords with
  *    tdsApplicable = 1 and a configured amount count, those on a CMD TDS hold (tdsHold = 1) are skipped (reported in meta);
  *  - PAID = the Ledger recorded the deduction: a tdsBalanceHistory row with isUtrEntry for the same landlord and bill month (the key the
- *    ledger save upserts by; duplicates collapse, the latest paidAt wins). Such a unit counts the deducted amount, its UTR and paid date.
+ *    ledger save upserts by; duplicates collapse, the latest paidAt/date wins). Such a unit counts the deducted amount, its UTR and paid date.
  *    A recorded deduction whose bill month has no stored bill unit is still paid TDS (meta.deductionsWithoutBill), placed in its bill month;
  *  - otherwise UPCOMING when the bill's due date is after today (IST day) — a stored future bill, not a projection —, else DUE (due on or
  *    before today, no deduction recorded yet).
@@ -1406,19 +1539,23 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
     const name = siteName(doc);
     const sid = idOf(doc._id);
     const codes = uniq(faceList(doc).map((fc) => text(fc.mediaCode)));
+    const ownerIdentity = tdsOwnerIdentity(doc);
 
     // recorded deductions: landlord + bill month -> the latest row
     const ded = new Map();
-    for (const t of doc.tdsBalanceHistory || []) {
+    for (const [index, t] of tdsRecordedRows(doc, lib).entries()) {
       if (!t) continue;
-      if (!t.isUtrEntry || t.isUtrEntry === "false") { meta.pendingDeductionRowsIgnored += 1; continue; }
+      if (!isTdsRecorded(t)) { meta.pendingDeductionRowsIgnored += 1; continue; }
+      const identity = ownerIdentity.forEntry(t, index);
       const bm = parseMonthLabel(t.dueMonth) || toDate(t.cycle);
-      const key = `${idOf(t.landOwnerId)}|${bm ? monthKeyOf(bm) : text(t.dueMonth) || `row:${idOf(t._id)}`}`;
+      const key = `${identity.key}|${bm ? monthKeyOf(bm) : text(t.dueMonth) || `row:${idOf(t._id)}`}`;
       const prev = ded.get(key);
       if (prev) {
         meta.duplicateDeductionsIgnored += 1;
-        if ((toDate(t.paidAt || t.createdAt)?.getTime() ?? 0) >= (toDate(prev.paidAt || prev.createdAt)?.getTime() ?? 0)) ded.set(key, t);
-      } else ded.set(key, t);
+        const previousDate = tdsPaymentDate(prev.entry) || toDate(prev.entry.createdAt);
+        const entryDate = tdsPaymentDate(t) || toDate(t.createdAt);
+        if ((entryDate?.getTime() ?? 0) >= (previousDate?.getTime() ?? 0)) ded.set(key, { entry: t, identity });
+      } else ded.set(key, { entry: t, identity });
     }
 
     // one bill per month
@@ -1474,15 +1611,16 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
         if (num(o.tdsApplicable) !== 1) continue;
         const configured = num(o.tdsAmount);
         if (configured <= 0) { meta.applicableWithoutAmount += 1; continue; }
-        const key = `${idOf(o._id)}|${mkey}`;
-        const t = ded.get(key);
+        const key = `${ownerIdentity.ownerKey(o)}|${mkey}`;
+        const deduction = ded.get(key);
         const dueKey = dayKeyOf(d);
         const billMonth = text(bill.dueMonth) || `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
         const common = { billMonth, ownerName: text(o.name) || null, dueDate: dueKey, billStatus: BILL_STATUS[num(bill.approvalStatus ?? bill.status)] || "Unknown" };
-        if (t) {
+        if (deduction) {
           used.add(key);
-          const paidOn = toDate(t.paidAt) || toDate(t.date) || toDate(t.cycle);
-          const amount = num(t.paidAmount) || num(t.tdsAmount) || configured;
+          const t = deduction.entry;
+          const paidOn = tdsPaymentDate(t);
+          const amount = tdsPaidAmount(t) || configured;
           emit(d, "paid", amount, { ...common, date: paidOn ? dayKeyOf(paidOn) : dueKey, paidAt: paidOn ? dayKeyOf(paidOn) : null, utrNumber: text(t.utrNumber) || null });
         } else {
           emit(d, dueKey > todayKey ? "upcoming" : "due", configured, { ...common, date: dueKey, paidAt: null, utrNumber: null });
@@ -1490,14 +1628,15 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
       }
     }
     // a recorded deduction with no stored bill unit is still TDS paid: counted in its bill month
-    for (const [key, t] of ded) {
+    for (const [key, deduction] of ded) {
       if (used.has(key)) continue;
+      const t = deduction.entry;
       const bm = parseMonthLabel(t.dueMonth) || toDate(t.cycle);
-      const amount = num(t.paidAmount) || num(t.tdsAmount);
+      const amount = tdsPaidAmount(t);
       if (!bm || amount <= 0) continue;
       meta.deductionsWithoutBill += 1;
-      const paidOn = toDate(t.paidAt) || toDate(t.date) || toDate(t.cycle);
-      emit(bm, "paid", amount, { billMonth: text(t.dueMonth) || `${MONTH_NAMES[bm.getUTCMonth()]} ${bm.getUTCFullYear()}`, ownerName: text(t.landOwnerName) || null, dueDate: null, date: paidOn ? dayKeyOf(paidOn) : dayKeyOf(bm), paidAt: paidOn ? dayKeyOf(paidOn) : null, utrNumber: text(t.utrNumber) || null, billStatus: null });
+      const paidOn = tdsPaymentDate(t);
+      emit(bm, "paid", amount, { billMonth: text(t.dueMonth) || `${MONTH_NAMES[bm.getUTCMonth()]} ${bm.getUTCFullYear()}`, ownerName: deduction.identity.ownerName, dueDate: null, date: paidOn ? dayKeyOf(paidOn) : dayKeyOf(bm), paidAt: paidOn ? dayKeyOf(paidOn) : null, utrNumber: text(t.utrNumber) || null, billStatus: null });
     }
   }
   const fin = (t) => ({ amount: r2(t.amount), entries: t.entries, sites: t.sites.size });
@@ -1509,6 +1648,73 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
     summary: finAll(totals),
     ...(rows ? { records: rows.sort((a, z) => a.date.localeCompare(z.date) || a.siteName.localeCompare(z.siteName) || (a.ownerName || "").localeCompare(z.ownerName || "")) } : {}),
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
+  };
+};
+
+/**
+ * TDS chart: use the existing source-specific calculations for Total and Paid,
+ * while retaining the generated-bill status calculation for Due and Upcoming.
+ * Rental Master buckets by bill due date; Ledger buckets by deduction date.
+ */
+const computeTdsOverview = (docs, filters, lib, now = nowIST()) => {
+  const status = computeTdsStatus(docs, filters, lib, now);
+  const rentalMaster = computeTdsRentalMaster(docs, { ...filters, source: "rentalMaster" }, lib);
+  const ledger = computeTds(docs, { ...filters, source: "ledger" }, lib);
+  const metric = (amount, entries, sites) => ({ amount, entries, sites });
+  const rentalMasterBuckets = new Map(rentalMaster.buckets.map((b) => [b.key, b]));
+  const ledgerBuckets = new Map(ledger.buckets.map((b) => [b.key, b]));
+  const bySource = (sourceBuckets, key) => {
+    const bucket = sourceBuckets.get(key);
+    return metric(bucket?.amount ?? 0, bucket?.entries ?? 0, bucket?.sites ?? 0);
+  };
+  const details = filters.details
+    ? {
+        rentalMasterBuckets: rentalMaster.buckets,
+        ledgerBuckets: ledger.buckets,
+      }
+    : undefined;
+
+  // Paid detail rows are the Ledger deductions behind the Paid card/chart (same paidAt/date month and
+  // amount), not the bill-month rows of the status calculation; Due / Upcoming rows stay as they were.
+  let records = status.records;
+  if (records) {
+    const docById = new Map(docs.map((doc) => [idOf(doc._id), doc]));
+    const paidRecords = ledger.buckets.flatMap((bucket) => bucket.deductions.map((x) => ({
+      ...detailBase(docById.get(x.siteId) || { _id: x.siteId }),
+      mediaType: x.mediaType,
+      city: x.city,
+      mediaCodes: x.mediaCodes,
+      siteName: x.siteName,
+      date: x.date,
+      bucket: bucket.key,
+      status: "paid",
+      amount: x.amount,
+      billMonth: x.billMonth,
+      ownerName: x.ownerName,
+      dueDate: null,
+      paidAt: x.date,
+      utrNumber: x.utrNumber,
+      billStatus: null,
+    })));
+    records = [...records.filter((r) => r.status !== "paid"), ...paidRecords]
+      .sort((a, z) => a.date.localeCompare(z.date) || a.siteName.localeCompare(z.siteName) || (a.ownerName || "").localeCompare(z.ownerName || ""));
+  }
+
+  return {
+    ...status,
+    ...(records ? { records } : {}),
+    meta: { ...status.meta, ledgerPaid: ledger.meta },
+    summary: {
+      ...status.summary,
+      total: metric(rentalMaster.summary.total, rentalMaster.summary.entries, rentalMaster.summary.sites),
+      paid: metric(ledger.summary.total, ledger.summary.entries, ledger.summary.sites),
+    },
+    buckets: status.buckets.map((bucket) => ({
+      ...bucket,
+      total: bySource(rentalMasterBuckets, bucket.key),
+      paid: bySource(ledgerBuckets, bucket.key),
+    })),
+    ...(details ? { sourceDetails: details } : {}),
   };
 };
 
@@ -1826,6 +2032,7 @@ module.exports = {
   computeTds,
   computeTdsRentalMaster,
   computeTdsStatus,
+  computeTdsOverview,
   SOURCES,
   DEFAULT_SOURCE,
   SITE_STATUSES,

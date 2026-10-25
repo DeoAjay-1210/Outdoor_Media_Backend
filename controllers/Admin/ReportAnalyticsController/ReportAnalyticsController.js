@@ -69,13 +69,14 @@ const SELECT = {
     rentalMaster: `${FACE} rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory ${CYCLE} ${DETAIL_IDS}`,
   },
   tds: {
-    ledger: `${FACE} tdsBalanceHistory ${CYCLE}`,
+    // + the rent ledger rows (the Ledger records the TDS deduction with the rent payment) and the owner TDS settings they are priced with
+    ledger: `${FACE} tdsBalanceHistory ledger ledgerHistory landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.paymentCategory landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount appraisal.history ${CYCLE}`,
     rentalMaster: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount ${CYCLE} appraisal.history`,
   },
 };
 
 // TDS Total / Paid / Upcoming: Rental Master's configured TDS of the generated bills + the Ledger's recorded deductions (source-independent)
-SELECT.tdsStatus = { both: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold rentalPayment.totalRentalAmount appraisal.history tdsBalanceHistory ${CYCLE}` };
+SELECT.tdsStatus = { both: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold landOwners.paymentCategory rentalPayment.totalRentalAmount appraisal.history tdsBalanceHistory ledger ledgerHistory ${CYCLE}` };
 
 const UNSUPPORTED = {
   appraisal: { ledger: "Ledger records hold payments only; appraisals are Rental Master records (appraisal history)." },
@@ -92,9 +93,9 @@ const COMPUTE = {
   appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f) },
   bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
-  tdsStatus: { both: (d, f) => RA.computeTdsStatus(d, f, { landOwnersAsOfDate }) },
+  tdsStatus: { both: (d, f) => RA.computeTdsOverview(d, f, { landOwnersAsOfDate }) },
   tds: {
-    ledger: (d, f) => RA.computeTds(d, f),
+    ledger: (d, f) => RA.computeTds(d, f, { landOwnersAsOfDate }),
     rentalMaster: (d, f) => RA.computeTdsRentalMaster(d, f, { landOwnersAsOfDate }),
   },
 };
