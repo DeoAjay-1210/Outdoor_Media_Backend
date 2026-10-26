@@ -452,15 +452,19 @@ test("media endpoint passes unfiltered documents (status is applied per face); o
 
 // ── Appraisal ─────────────────────────────────────────────────────────────
 const appraisal = (history, extra = {}) => ({ applicable: 1, appraisalHold: 0, history, ...extra });
+// the bill of a month (approvalStatus 3 = approved, 1 = pending): an appraisal is "given" only when its month's bill is approved
+// Ledger payment evidence per "siteId|YYYY-MM": the cycle's rent is due and fully paid — only an approved bill WITH this is "given" (Paid)
+const paidCycles = (...keys) => new Map(keys.map((k) => [k, { due: 1000, unpaid: 0 }]));
+const apprBill = (y, m, approvalStatus = 3, extra = {}) => ({ dueDate: new Date(Date.UTC(y, m, 5)), approvalStatus, ...extra });
 
 test("appraisal separates given from upcoming using stored rows only (no projection)", () => {
-  const docs = deepFreeze([site("1", [["H", "C"]], { appraisal: appraisal([
+  const docs = deepFreeze([site("1", [["H", "C"]], { rentalDue: [apprBill(2026, 3)], appraisal: appraisal([
     { appraisalDate: new Date(Date.UTC(2026, 3, 1)), appraisalAmount: 1000 },
     { appraisalDate: new Date(Date.UTC(2026, 11, 1)), appraisalAmount: 1100 },
     { appraisalDate: new Date(Date.UTC(2026, 3, 1)), appraisalAmount: 9999, isAnchorEntry: true },
     { appraisalDate: new Date(Date.UTC(2026, 6, 1)), appraisalAmount: 0 },
   ]) })]);
-  const r = RA.computeAppraisal(docs, fy(), NOW);
+  const r = RA.computeAppraisal(docs, fy(), NOW, { payments: paidCycles("1|2026-04") });
   assert.deepEqual(r.summary.given, { sites: 1, amount: 1000, entries: 1 });
   assert.deepEqual(r.summary.upcoming, { sites: 1, amount: 1100, entries: 1 });
   assert.equal(r.summary.held.entries, 0);
@@ -470,14 +474,14 @@ test("appraisal separates given from upcoming using stored rows only (no project
 
 test("appraisal hold: entries from the hold date are 'held'; not-applicable sites are skipped", () => {
   const docs = deepFreeze([
-    site("1", [["H", "C"]], { appraisal: appraisal([
+    site("1", [["H", "C"]], { rentalDue: [apprBill(2025, 9), apprBill(2026, 9)], appraisal: appraisal([
       { appraisalDate: new Date(Date.UTC(2025, 9, 1)), appraisalAmount: 500 },
       { appraisalDate: new Date(Date.UTC(2026, 9, 1)), appraisalAmount: 600 },
       { appraisalDate: new Date(Date.UTC(2027, 9, 1)), appraisalAmount: 700 },
     ], { applicable: 0, appraisalHold: 1, appraisalHoldDate: new Date(Date.UTC(2026, 9, 5)) }) }),
     site("2", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: new Date(Date.UTC(2026, 5, 1)), appraisalAmount: 100 }], { applicable: 0 }) }),
   ]);
-  const wide = RA.computeAppraisal(docs, RA.parseFilters({ startDate: "2025-04-01", endDate: "2027-12-31" }, NOW).filters, NOW);
+  const wide = RA.computeAppraisal(docs, RA.parseFilters({ startDate: "2025-04-01", endDate: "2027-12-31" }, NOW).filters, NOW, { payments: paidCycles("1|2025-10", "1|2026-10") });
   assert.equal(wide.summary.given.amount, 1100);
   assert.equal(wide.summary.held.amount, 700);
   assert.equal(wide.meta.sitesNotApplicable, 1);
@@ -487,11 +491,11 @@ test("appraisal total = paid (given) + hold + upcoming, each entry counted once,
   const D1 = (y, m, d = 1) => new Date(Date.UTC(y, m, d));
   const docs = deepFreeze([
     // site 1: one given + one upcoming (a site in two categories is ONE site in the total)
-    site("1", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: D1(2026, 3), appraisalAmount: 1000 }, { appraisalDate: D1(2026, 11), appraisalAmount: 1100 }]) }),
+    site("1", [["H", "C"]], { rentalDue: [apprBill(2026, 3)], appraisal: appraisal([{ appraisalDate: D1(2026, 3), appraisalAmount: 1000 }, { appraisalDate: D1(2026, 11), appraisalAmount: 1100 }]) }),
     // site 2: held from 5 Oct 2026 — its later entry is Hold, never Upcoming
-    site("2", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: D1(2026, 3), appraisalAmount: 200 }, { appraisalDate: D1(2026, 11), appraisalAmount: 300 }], { appraisalHold: 1, appraisalHoldDate: D1(2026, 9, 5) }) }),
+    site("2", [["H", "C"]], { rentalDue: [apprBill(2026, 3)], appraisal: appraisal([{ appraisalDate: D1(2026, 3), appraisalAmount: 200 }, { appraisalDate: D1(2026, 11), appraisalAmount: 300 }], { appraisalHold: 1, appraisalHoldDate: D1(2026, 9, 5) }) }),
   ]);
-  const r = RA.computeAppraisal(docs, fy(), NOW);
+  const r = RA.computeAppraisal(docs, fy(), NOW, { payments: paidCycles("1|2026-04", "2|2026-04") });
   const { given, held, upcoming, total } = r.summary;
   assert.deepEqual([given.amount, held.amount, upcoming.amount], [1200, 300, 1100]);
   assert.equal(total.amount, given.amount + held.amount + upcoming.amount);
@@ -1138,7 +1142,7 @@ test("data sources: each chart + source reads exactly the top-level fields its l
     media: { both: ["createdAt", "mediaDetails", "rentalPayment"] },
     agreements: { both: ["agreement", "agreementHistory", "landOwners", "mediaDetails", "rentalPayment"] },
     tdsStatus: { both: ["appraisal", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment", "tdsBalanceHistory"] },
-    appraisal: { rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalPayment"] },
+    appraisal: { rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] }, // the bills projection + the whole appraisal subdocument (status from bills + Ledger payments)
     // Outstanding payments: the Rental Master cycle calculation's fields (as Payments)
     bills: { rentalMaster: ["appraisal", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] },
     gst: {
@@ -2093,10 +2097,10 @@ test("Sites onboarded detail rows: one per counted face, with the stored media c
 test("Appraisal detail rows: one per counted entry, split given / upcoming / held, reconciling with each category", () => {
   const entry = (date, amount, extra = {}) => ({ appraisalDate: date, appraisalAmount: amount, previousRent: 10000, newRent: 10000 + amount, type: 1, percentage: 5, ...extra });
   const docs = deepFreeze([
-    named(site("A1", [["Hoarding", "Chennai", "Alpha"]], { landOwners: [{ _id: "A1-o" }], appraisal: appraisal([entry(at(2026, 5, 10), 500), entry(at(2026, 10, 10), 700, { type: 2 }), { isAnchorEntry: true, appraisalDate: at(2026, 4, 1), appraisalAmount: 999 }]) }), "ADN-MEDIA-A1"),
+    named(site("A1", [["Hoarding", "Chennai", "Alpha"]], { landOwners: [{ _id: "A1-o" }], rentalDue: [apprBill(2026, 5)], appraisal: appraisal([entry(at(2026, 5, 10), 500), entry(at(2026, 10, 10), 700, { type: 2 }), { isAnchorEntry: true, appraisalDate: at(2026, 4, 1), appraisalAmount: 999 }]) }), "ADN-MEDIA-A1"),
     named(site("A2", [["Hoarding", "Chennai", "Beta"]], { appraisal: appraisal([entry(at(2026, 10, 15), 300)], { appraisalHold: 1, appraisalHoldDate: at(2026, 9, 1) }) }), "ADN-MEDIA-A2"),
   ]);
-  const r = RA.computeAppraisal(docs, RA.parseFilters({ details: true, fy: 2026 }, NOW).filters, NOW);
+  const r = RA.computeAppraisal(docs, RA.parseFilters({ details: true, fy: 2026 }, NOW).filters, NOW, { payments: paidCycles("A1|2026-06") });
   assert.ok(r.records.length >= 3);
   for (const k of ["given", "upcoming", "held"]) {
     const rows = r.records.filter((x) => x.kind === k);

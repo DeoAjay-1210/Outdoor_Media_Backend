@@ -54,7 +54,7 @@ const SELECT = {
   media: { both: `${FACE} createdAt ${CYCLE}` },
   // Agreements: the current agreement and every filed version (dates, reminder days, document type) + the site's payment cycle / landlords for the popup rows
   agreements: { both: `${FACE} agreement.startDate agreement.endDate agreement.reminderBeforeExpiry agreement.agreementStatus agreementHistory.startDate agreementHistory.endDate agreementHistory.reminderBeforeExpiry agreementHistory.agreementStatus ${CYCLE} ${DETAIL_IDS}` },
-  appraisal: { rentalMaster: `${FACE} appraisal ${CYCLE} ${DETAIL_IDS}` },
+  appraisal: { rentalMaster: "" }, // set below: the bills query + the appraisal subdocument
   // Outstanding payments = the Rental Master / Ledger cycle calculation (same fields as Payments) plus
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
   // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
@@ -75,6 +75,18 @@ const SELECT = {
   },
 };
 
+// Appraisals: each appraisal's status comes from the stored bill of its month (approval status / steps, CMD appraisal hold — the fields
+// /admin/appraisal-hold-remarks reads) and from the Ledger's payment calculation (the same cycle projection as Payment analytics / Outstanding).
+// = the bills projection, with the whole `appraisal` subdocument (history + revisions) instead of its `appraisal.history` part, plus the hold fields.
+SELECT.appraisal.rentalMaster = [
+  ...new Set([
+    ...SELECT.bills.rentalMaster.split(/\s+/).filter((t) => t && !t.startsWith("appraisal.")),
+    "appraisal",
+    "rentalDue.dueDate", "rentalDue.approvalStatus", "rentalDue.status", "rentalDue.currentPendingRole",
+    "rentalDue.appraisalHold.hold", "rentalDue.appraisalHold.heldAt", "rentalDue.appraisalHold.releasedAt",
+  ]),
+].join(" ");
+
 // TDS Total / Paid / Upcoming: Rental Master's configured TDS of the generated bills + the Ledger's recorded deductions (source-independent)
 SELECT.tdsStatus = { both: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold landOwners.paymentCategory rentalPayment.totalRentalAmount appraisal.history tdsBalanceHistory ledger ledgerHistory ${CYCLE}` };
 
@@ -90,7 +102,7 @@ const COMPUTE = {
   },
   media: { both: (d, f) => RA.computeMedia(d, f) },
   agreements: { both: (d, f) => RA.computeAgreements(d, f) },
-  appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f) },
+  appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f, undefined, { payments: RA.cyclePaymentIndex(d, f, LEDGER_LIB), lib: LEDGER_LIB }) },
   bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
   tdsStatus: { both: (d, f) => RA.computeTdsOverview(d, f, { landOwnersAsOfDate }) },

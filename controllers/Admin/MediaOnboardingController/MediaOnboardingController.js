@@ -16,6 +16,7 @@ const {
   resolveMediaOwnerBankAccounts, // ✅ NEW — landOwners[].bankAccountId
 } = require("../landOwnerMasterController/landOwnerMasterController");
 const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
+const appraisalRevision = require("../../../utils/appraisalRevision");
 
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
@@ -1105,6 +1106,16 @@ const handleAppraisalLogic = async (
     Number(appraisal.fixedAmount || 0) !==
       Number(existingMedia.appraisal?.fixedAmount || 0);
 
+  // Rows a revision of the appraisal AMOUNT must not touch: bills already approved and rows on CMD hold (pending approval).
+  // Rows before the current month are never offered to a revision (existing rule). See utils/appraisalRevision.js.
+  const revisionCtx = {
+    currentMonthKey: thisMonthKey(),
+    approvedMonths: appraisalRevision.approvedMonthKeys(existingMedia.rentalDue),
+    held: Number(existingMedia.appraisal?.appraisalHold) === 1,
+    holdDate: existingMedia.appraisal?.appraisalHoldDate || null,
+  };
+  let revisionEffectiveFrom = null; // first history row that took the revised amount rule (null: none did)
+
   const manualLastAppraisalDateUpdate =
     incomingLastAppraisalDate && anchorDateChanged
       ? incomingLastAppraisalDate
@@ -1196,34 +1207,22 @@ const handleAppraisalLogic = async (
     });
 
     history = [...preserved, ...newSchedule];
+    if (configChanged && newSchedule.length) revisionEffectiveFrom = newSchedule[0].appraisalDate;
   } else {
     // ✅ Update future entries with new appraisal config parameters if configuration changed
     if (configChanged) {
-      const currentMonth = thisMonthKey();
-      history.forEach((entry) => {
-        // ✅ FIXED — the CURRENT month's appraisal also takes the new config,
-        // so changing the amount (e.g. 2k -> 3k) REPLACES this cycle's amount
-        // on the same base (51k + 3k = 54k) instead of leaving the old 2k in
-        // the rent and only stacking 3k on the next cycle (53k + 3k = 56k).
-        const entryMonth = monthKey(entry.appraisalDate);
-        if (
-          entryMonth > currentMonth ||
-          (entryMonth === currentMonth && !entry.isAnchorEntry)
-        ) {
-          entry.type = appraisal.type;
-          entry.percentage = appraisal.percentage || 0;
-          entry.fixedAmount = Number(appraisal.fixedAmount || 0);
-          entry.frequency = Number(appraisal.frequency);
-          entry.customFrequencyMonths = Number(
-            appraisal.customFrequencyMonths || 0,
-          );
-          entry.updatedBy = userName;
-          entry.updatedAt = nowIST();
-          // transient flag — tells cascadeHistory to recompute this month's
-          // amount instead of keeping the already-applied one
-          if (entryMonth === currentMonth) entry._configEdited = true;
-        }
+      // ✅ The CURRENT month's open appraisal also takes the new config, so changing the amount (e.g. 2k -> 3k) REPLACES this
+      // cycle's amount on the same base (51k + 3k = 54k) instead of stacking it on the next cycle (existing rule). Rows whose bill
+      // is approved, and rows on hold (pending approval), keep their stored amounts — never recomputed by a revision.
+      const { affected } = appraisalRevision.applyConfigToHistory(history, appraisal, revisionCtx, {
+        userName,
+        now: nowIST(),
       });
+      if (affected.length) {
+        revisionEffectiveFrom = affected
+          .map((e) => e.appraisalDate)
+          .sort((x, y) => new Date(x) - new Date(y))[0];
+      }
     }
 
     if (nextDate) {
@@ -1234,7 +1233,10 @@ const handleAppraisalLogic = async (
 
     let appliedEntry = null;
 
-    if (existingIdx !== -1) {
+    if (existingIdx !== -1 && appraisalRevision.isEntryFrozen(history[existingIdx], revisionCtx)) {
+      // approved / held row: kept exactly as stored
+      appliedEntry = history[existingIdx];
+    } else if (existingIdx !== -1) {
       const previousFrequency = Number(history[existingIdx].frequency);
       const previousCustomMonths = Number(
         history[existingIdx].customFrequencyMonths || 0,
@@ -1385,6 +1387,9 @@ const handleAppraisalLogic = async (
     appliedCurrentMonthAmount,
   );
 
+  // transient hand-over to recordAppraisalRevision (never persisted)
+  appraisal._revisionMeta = { effectiveFrom: revisionEffectiveFrom };
+
   // Set the frequency metadata based on the current/first entry
   const currentEntryForMeta = history
     .filter((h) => monthKey(h.appraisalDate) <= currentMonth)
@@ -1401,6 +1406,37 @@ const handleAppraisalLogic = async (
   }
 
   return mediaData;
+};
+
+// Update flow only. revisionHistory is append-only and always comes from the STORED document (a client-sent copy is ignored, so
+// a save can neither drop nor forge audit rows). A new row is added when the appraisal AMOUNT rule (type / percentage / fixed
+// amount) changed on a site whose appraisal stays applicable. A revision is an audit event, not an appraisal transaction.
+const recordAppraisalRevision = (mediaData, existingMedia, userName) => {
+  const next = mediaData?.appraisal;
+  if (!next) return;
+  const meta = next._revisionMeta || {};
+  const reason = next.revisionReason;
+  delete next._revisionMeta;
+  delete next.revisionReason;
+
+  const stored = Array.isArray(existingMedia?.appraisal?.revisionHistory)
+    ? existingMedia.appraisal.revisionHistory.map((r) => (typeof r?.toObject === "function" ? r.toObject() : { ...r }))
+    : [];
+  next.revisionHistory = stored;
+
+  const previous = existingMedia?.appraisal;
+  // first-time setup (or a hold being released) is not a revision: only applicable → applicable changes of the amount rule
+  if (!previous || Number(previous.applicable) !== 1 || Number(next.applicable) !== 1) return;
+  const revision = appraisalRevision.buildRevision({
+    previous,
+    next,
+    baseRent: Number(existingMedia?.rentalPayment?.totalRentalAmount ?? 0),
+    changedBy: userName,
+    changedAt: nowIST(),
+    reason,
+    effectiveFrom: meta.effectiveFrom || null,
+  });
+  if (revision) next.revisionHistory = [...stored, revision];
 };
 
 const recomputeAppraisalSummary = (appraisal, fallbackBaseRent = 0) => {
@@ -2940,6 +2976,7 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         currentBaseRent,
         rentActuallyChanged,
       );
+      recordAppraisalRevision(mediaData, media, userName);
 
       applyAppraisalRentIfDuent(
         mediaData,
@@ -4925,4 +4962,6 @@ module.exports = {
   applyDueAppraisals,
   deleteMedia, // ✅ NEW
   recomputeAppraisalSummary, // ✅ NEW — used by the appraisal hold release (date shift)
+  handleAppraisalLogic, // exported for the appraisal revision tests
+  recordAppraisalRevision, // exported for the appraisal revision tests
 };

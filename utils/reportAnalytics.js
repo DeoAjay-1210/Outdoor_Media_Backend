@@ -33,6 +33,8 @@ const DEFAULT_SITE_STATUS = "all";
 const DAY_GRANULARITY_MAX_DAYS = 62;
 
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+const { revisionForEntry } = require("./appraisalRevision");
+
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => {
   const n = Number(v);
@@ -669,29 +671,156 @@ const computeMedia = (docs, f) => {
  * entries (autoScheduleFutureAppraisalEntries), so upcoming obligations are
  * STORED rows — nothing is projected here.
  * - Anchor entries (isAnchorEntry) are rent baselines, not increments → skipped.
- * - given   : appraisalDate <= today
- * - upcoming: appraisalDate  > today
- * - held    : site.appraisal.appraisalHold === 1 and the entry falls on/after the
- *             hold date (no hold date stored → only entries after today).
+ * Each row's status comes from the stored state of its month's bills + the Ledger's payment calculation (see classifyAppraisalRow):
+ * - given   : applied (dated <= today), bill(s) approved AND the Ledger shows the cycle's rent paid — the only "Paid"
+ * - unpaid  : applied and approved, but no Ledger evidence of payment (an approved bill is not money received)
+ * - held    : on CMD hold (bill hold / site hold), or applied but not through approval yet (pending / no bill) — "Hold (Pending Approval)"
+ * - upcoming: appraisalDate  > today (stored future rows, as /admin/media-list shows them)
  * - A site with appraisal.applicable !== 1 is skipped unless it is held (a hold
  *   switches `applicable` off by design).
+ * - Amounts are ALWAYS the stored `appraisalAmount` of each row — never recomputed from the current rent or the current appraisal
+ *   rule, so a later amount revision cannot change a given / held / upcoming figure.
+ * - changed : amount-rule REVISIONS (appraisal.revisionHistory[], an audit trail — not appraisal transactions). Counted by the day
+ *   they were made, inside the period and the site filters: `sites` = distinct sites, `revisions` = events. NOT part of `total`.
  */
-const computeAppraisal = (docs, f, now = nowIST()) => {
+/**
+ * The bills of a site by due month — what decides the status of that month's appraisal (the same stored fields
+ * /admin/appraisal-hold-remarks reads): how many bills, how many are approved (approvalStatus 3), how many are on a CMD appraisal hold, and
+ * the first bill still awaiting approval (its approval steps say at which stage). Stale bills (a deleted / re-created face) are ignored, as in
+ * the Outstanding payments panel.
+ */
+/**
+ * CMD approval of a bill: the approval step of role 3 (OWNER = CMD) is Approved (status 2) AND the bill is fully approved (approvalStatus 3, which
+ * the approval workflow sets only when the chain ends at that role). Rental Executive (role 1) / Manager (role 2) approvals never qualify.
+ * A legacy bill without approval steps has no CMD step to read: fully approved (3) is then all there is.
+ */
+const isCmdApproved = (b) => {
+  if (num(b.approvalStatus ?? b.status) !== 3) return false;
+  const steps = (Array.isArray(b.approvalSteps) ? b.approvalSteps : []).filter(Boolean);
+  const cmd = steps.find((st) => num(st.role) === 3);
+  return cmd ? num(cmd.status) === 2 : true;
+};
+
+const appraisalBillIndex = (doc) => {
+  const out = new Map();
+  const bills = (Array.isArray(doc.rentalDue) ? doc.rentalDue : []).filter((b) => b && toDate(b.dueDate) && !isStaleBill(doc, b));
+  // an active hold carries forward to the later bills of the site that are not CMD-approved yet (the Rental Master rule, effectiveAppraisalHold):
+  // unless that bill's own release is newer than the hold
+  const activeHolds = bills.filter((b) => num(b.appraisalHold && b.appraisalHold.hold) === 1);
+  const effectivelyHeld = (b, d) => {
+    if (num(b.appraisalHold && b.appraisalHold.hold) === 1) return true;
+    if (isCmdApproved(b)) return false;
+    const ownRel = toDate(b.appraisalHold && b.appraisalHold.releasedAt);
+    return activeHolds.some((h) => toDate(h.dueDate) < d && !(ownRel && ownRel > (toDate(h.appraisalHold.heldAt) || 0)));
+  };
+  for (const b of bills) {
+    const d = toDate(b.dueDate);
+    const k = monthKeyOf(d);
+    const e = out.get(k) || { total: 0, approved: 0, held: 0, statuses: new Set(), pendingBill: null };
+    const st = num(b.approvalStatus ?? b.status);
+    e.total += 1;
+    if (isCmdApproved(b)) e.approved += 1;
+    else if (!e.pendingBill) e.pendingBill = b;
+    if (effectivelyHeld(b, d)) e.held += 1;
+    e.statuses.add(isCmdApproved(b) ? "Approved" : st === 3 ? "CMD approval pending" : BILL_STATUS[st] || "Unknown");
+    out.set(k, e);
+  }
+  return out;
+};
+
+/**
+ * Payment EVIDENCE per site and bill month, from the Ledger's own per-cycle calculation (the one Payment analytics uses): rent (+ direct GST)
+ * due and still unpaid. Built over whole months so a cycle due earlier in the period's first month is found. A (site, month) the
+ * calculation has no cycle for has no evidence.
+ */
+const cyclePaymentIndex = (docs, f, lib, now = nowIST()) => {
+  const start = new Date(Date.UTC(f.start.getUTCFullYear(), f.start.getUTCMonth(), 1));
+  const end = new Date(Date.UTC(f.end.getUTCFullYear(), f.end.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+  const { records } = computePeriodDue(docs, { ...f, start, end, details: true }, lib, now);
+  const out = new Map();
+  for (const r of records || []) out.set(`${r.siteId}|${r.month}`, { due: num(r.rentDue), unpaid: num(r.rentUnpaid) });
+  return out;
+};
+
+/**
+ * Status of ONE appraisal row. Only stored facts decide it — never the current Rental Master amount, never the mere existence of an amount:
+ *   held     — CMD put the appraisal on hold: the site-level hold (rows on / after the hold date) or the month's bill has appraisalHold.hold = 1
+ *   upcoming — the row is dated after today (a stored future row, as /admin/media-list shows it)
+ *   pending  — dated on / before today but not through the approval workflow: some bill of the month is not approved (approvalStatus 1 / 2 /
+ *              Overdue; the approval steps tell the stage), or no bill exists for the month. NOT paid.
+ *   given    — approved AND the Ledger shows the month's rent fully paid (payment evidence: `payment.unpaid <= 0` on a cycle with something due)
+ *   unpaid   — approved, but the Ledger does not show the rent paid: no cycle found, still unpaid, or no payment data supplied. An approved
+ *              bill is not money received, so it is never "given" on approval alone.
+ */
+const classifyAppraisalRow = ({ d, today, siteHeld, holdDate, bill, payment }) => {
+  if (siteHeld && (holdDate ? d >= holdDate : d > today)) return { kind: "held", status: "onHold" };
+  if (bill && bill.held > 0) return { kind: "held", status: "onHold" };
+  if (d > today) return { kind: "upcoming", status: "upcoming" };
+  if (!bill || !(bill.total > 0) || bill.approved !== bill.total) return { kind: "held", status: bill ? "pendingApproval" : "noBill" };
+  if (payment === undefined) return { kind: "unpaid", status: "approvedNoPaymentData" }; // no payment data was supplied at all
+  if (payment && payment.due > 0.005 && payment.unpaid <= 0.005) return { kind: "given", status: "paid" };
+  return { kind: "unpaid", status: payment ? "approvedUnpaid" : "approvedNoPaymentEvidence" };
+};
+
+const computeAppraisal = (docs, f, now = nowIST(), opts = {}) => {
+  const paymentIndex = opts.payments || null; // Map from cyclePaymentIndex; null = no payment data (nothing can be Paid)
+  const lib = opts.lib || null; // the dashboard's pendingRoleOf: which stage a pending bill waits at
   const mk = () => ({ sites: new Set(), amount: 0, entries: 0 });
-  const buckets = buildBuckets(f, () => ({ given: mk(), upcoming: mk(), held: mk(), total: mk() }));
+  const mkChanged = () => ({ sites: new Set(), revisions: 0 });
+  const buckets = buildBuckets(f, () => ({ given: mk(), unpaid: mk(), upcoming: mk(), held: mk(), total: mk(), changed: mkChanged() }));
   const excl = newExclusions();
-  const meta = { sitesNotApplicable: 0, entriesWithoutDate: 0 };
-  const totals = { given: mk(), upcoming: mk(), held: mk(), total: mk() }; // total = given + held + upcoming (each entry is in exactly one kind); its sites are distinct across them
+  const meta = { sitesNotApplicable: 0, entriesWithoutDate: 0, appraisalsWithoutBill: 0, duplicateEntries: 0 };
+  const totals = { given: mk(), unpaid: mk(), upcoming: mk(), held: mk(), total: mk(), changed: mkChanged() }; // total = given + unpaid + held + upcoming (each entry is in exactly one kind); its sites are distinct across them
   const today = now;
   const rows = f.details ? [] : null; // per counted entry, behind the monthly totals (only when asked for)
+  const revisionRows = f.details ? [] : null; // one per revision in the period (the "Changed" popup)
 
   for (const doc of docs) {
     const ap = doc.appraisal;
     if (!ap || !Array.isArray(ap.history) || !ap.history.length) continue;
     const held = num(ap.appraisalHold) === 1;
+    const attr = siteAttr(doc);
+    // amount-rule revisions (audit events): counted whether or not the site still has applicable rows
+    const revisions = (Array.isArray(ap.revisionHistory) ? ap.revisionHistory : [])
+      .filter((r) => r && toDate(r.changedAt))
+      .sort((a, z) => toDate(a.changedAt) - toDate(z.changedAt));
+    const revisionsInRange = revisions.filter((r) => inRange(toDate(r.changedAt), f));
+    if (revisionsInRange.length && siteMatches(doc, attr, f, excl, 0)) {
+      revisionsInRange.forEach((r) => {
+        const at = toDate(r.changedAt);
+        const b = buckets.get(bucketKey(at, f.granularity));
+        for (const t of [b?.changed, totals.changed]) {
+          if (!t) continue;
+          t.sites.add(idOf(doc._id));
+          t.revisions += 1;
+        }
+        if (revisionRows) {
+          const ef = toDate(r.effectiveFrom);
+          revisionRows.push({
+            ...detailBase(doc),
+            bucket: bucketKey(at, f.granularity),
+            date: dayKeyOf(at),
+            changedAt: at.toISOString(),
+            changedBy: text(r.changedBy),
+            reason: text(r.reason),
+            previousAmount: r2(num(r.previousAmount)),
+            newAmount: r2(num(r.newAmount)),
+            previousType: num(r.previousType) === 1 ? "percentage" : num(r.previousType) === 2 ? "fixed" : null,
+            previousPercentage: num(r.previousType) === 1 ? num(r.previousPercentage) : null,
+            newType: num(r.newType) === 1 ? "percentage" : num(r.newType) === 2 ? "fixed" : null,
+            newPercentage: num(r.newType) === 1 ? num(r.newPercentage) : null,
+            baseRent: r2(num(r.baseRent)),
+            effectiveFrom: ef ? dayKeyOf(ef) : null,
+            revisionNumber: revisions.indexOf(r) + 1,
+            siteRevisionCount: revisions.length,
+          });
+        }
+      });
+    }
     if (num(ap.applicable) !== 1 && !held) { meta.sitesNotApplicable += 1; continue; }
     const holdDate = toDate(ap.appraisalHoldDate);
-    const attr = siteAttr(doc);
+    const bills = appraisalBillIndex(doc);
+    const seen = new Set(); // the same appraisal (site + day + amount) is counted once, even if it was stored twice
     for (const h of ap.history) {
       if (!h || h.isAnchorEntry) continue;
       const amount = num(h.appraisalAmount);
@@ -699,9 +828,14 @@ const computeAppraisal = (docs, f, now = nowIST()) => {
       const d = toDate(h.appraisalDate);
       if (!d) { meta.entriesWithoutDate += 1; continue; }
       if (!inRange(d, f)) continue;
+      const dupKey = `${dayKeyOf(d)}|${amount}`;
+      if (seen.has(dupKey)) { meta.duplicateEntries += 1; continue; }
+      seen.add(dupKey);
       if (!siteMatches(doc, attr, f, excl, amount)) continue;
-      let kind = d <= today ? "given" : "upcoming";
-      if (held && (holdDate ? d >= holdDate : d > today)) kind = "held";
+      const bill = bills.get(monthKeyOf(d)) || null;
+      const payment = paymentIndex ? paymentIndex.get(`${idOf(doc._id)}|${monthKeyOf(d)}`) || null : undefined;
+      const { kind, status } = classifyAppraisalRow({ d, today, siteHeld: held, holdDate, bill, payment });
+      if (status === "noBill") meta.appraisalsWithoutBill += 1;
       const b = buckets.get(bucketKey(d, f.granularity));
       if (!b) continue;
       for (const t of [b[kind], totals[kind], b.total, totals.total]) {
@@ -713,6 +847,14 @@ const computeAppraisal = (docs, f, now = nowIST()) => {
         rows.push({
           ...detailBase(doc),
           kind,
+          // the finer status behind the kind: onHold / pendingApproval / noBill / approved / upcoming, and the month's bill status(es)
+          status,
+          billStatus: bill ? [...bill.statuses].join(" / ") : null,
+          // the stage a not-yet-approved bill waits at (sales | manager | cmd | unknown), from its approval steps
+          approvalStage: status === "pendingApproval" && bill && bill.pendingBill ? (STAGE_KEY[lib && lib.pendingRoleOf ? lib.pendingRoleOf(bill.pendingBill) : null] || "unknown") : null,
+          // the Ledger's payment evidence for the month (null: none found / not supplied)
+          rentDue: payment ? r2(payment.due) : null,
+          rentUnpaid: payment ? r2(payment.unpaid) : null,
           bucket: bucketKey(d, f.granularity),
           date: dayKeyOf(d),
           amount: r2(amount),
@@ -720,18 +862,24 @@ const computeAppraisal = (docs, f, now = nowIST()) => {
           newRent: r2(num(h.newRent)),
           type: num(h.type) === 1 ? "percentage" : num(h.type) === 2 ? "fixed" : null,
           percentage: num(h.type) === 1 ? num(h.percentage) : null,
+          // "Changed" only on rows that took a revised amount rule (rows that predate / were frozen keep their stored amount, unflagged)
+          ...(() => {
+            const rev = revisionForEntry(revisions, d);
+            return rev ? { changed: true, revisionChangedAt: toDate(rev.changedAt).toISOString(), revisionPreviousAmount: r2(num(rev.previousAmount)), revisionNewAmount: r2(num(rev.newAmount)) } : { changed: false };
+          })(),
         });
       }
     }
   }
   const fin = (t) => ({ sites: t.sites.size, amount: r2(t.amount), entries: t.entries });
-  const list = [...buckets].map(([key, b]) => ({ key, given: fin(b.given), upcoming: fin(b.upcoming), held: fin(b.held), total: fin(b.total) }));
+  const finChanged = (t) => ({ sites: t.sites.size, revisions: t.revisions });
+  const list = [...buckets].map(([key, b]) => ({ key, given: fin(b.given), unpaid: fin(b.unpaid), upcoming: fin(b.upcoming), held: fin(b.held), total: fin(b.total), changed: finChanged(b.changed) }));
   return {
     filters: publicFilters(f),
     buckets: list,
-    summary: { given: fin(totals.given), upcoming: fin(totals.upcoming), held: fin(totals.held), total: fin(totals.total) },
-    ...(rows ? { records: rows.sort(byDateThenName) } : {}),
-    meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
+    summary: { given: fin(totals.given), unpaid: fin(totals.unpaid), upcoming: fin(totals.upcoming), held: fin(totals.held), total: fin(totals.total), changed: finChanged(totals.changed) },
+    ...(rows ? { records: rows.sort(byDateThenName), revisions: revisionRows.sort(byDateThenName) } : {}),
+    meta: { ...meta, paymentEvidence: paymentIndex ? "ledger" : "none", excludedMixedSites: exclusionMeta(excl) },
   };
 };
 
@@ -2024,6 +2172,10 @@ module.exports = {
   computeRentalMasterPayments,
   computeMedia,
   computeAppraisal,
+  classifyAppraisalRow,
+  appraisalBillIndex,
+  isCmdApproved,
+  cyclePaymentIndex,
   computeAgreements,
   computeBills,
   computeOutstanding,
