@@ -5,6 +5,7 @@ const {
   getAllDueCycles,
   getRequiredModesShared,
   calculateOverallLedgerSummary,
+  calculateNewOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
 const {
   computeRentalDueStats,
@@ -341,13 +342,38 @@ function computeLedgerEntries(docs, range, gst) {
   }
   const c = (amount, set, sites) => ({ count: set.size, sites: num(sites), amount: Math.round(num(amount)) });
   const both = new Set([...ll.rp, ...ll.gp]);
+  // GST Hold / Without Hold split (current + past month): amounts + landowner counts from the ledger's own
+  // newOverallLedgerSummary, site counts = active mediaDetails (faces) of the sites in each bucket
+  const nw = calculateNewOverallLedgerSummary(list, ym);
+  const faces = { curHold: 0, curWithout: 0, pastHold: 0, pastWithout: 0 };
+  for (const d of list) {
+    const active = (d.mediaDetails || []).filter((f) => num(f.status) === 1).length;
+    if (!active) continue;
+    const m = getOverallSummaryForCycle(d, ym);
+    const legacyUnpaid = (d.rentalPayment?.gstOutstandingHistory || []).some(
+      (row) => num(row.gstOutStandingAmount) > 0 && !(row.isPaid || (row.utrNumber && String(row.utrNumber).trim() !== "")),
+    );
+    if (num(m.splitCurGstHoldRemaining) > 0) faces.curHold += active;
+    if (num(m.splitCurGstCannotHoldTotal) > 0) faces.curWithout += active;
+    if (num(m.splitPastGstHoldRemaining) > 0 || legacyUnpaid) faces.pastHold += active;
+    if (num(m.splitPastGstCannotHoldTotal) > 0) faces.pastWithout += active;
+  }
+  const split = (total, paid, remaining, landOwnerCount, siteCount) => ({
+    totalAmount: num(total), paidAmount: num(paid), remainingAmount: num(remaining), landOwnerCount: num(landOwnerCount), siteCount,
+  });
   return {
+    currentMonthGstHold: split(nw.newOverAllCurrentMonthGstHoldAmount, nw.newCurrentMonthGstHoldAmountPaid, nw.newCurrentMonthGstHoldRemaining, nw.newCurrentMonthGstHoldPendingLandOwners, faces.curHold),
+    currentMonthGstWithoutHold: split(nw.newOverAllCurrentMonthGstCannotHoldAmount, nw.newCurrentMonthGstCannotHoldAmountPaid, nw.newCurrentMonthGstCannotHoldRemaining, nw.newCurrentMonthGstCannotHoldLandOwners, faces.curWithout),
+    pastMonthGstHold: split(nw.newOverAllPastGstHoldAmount, nw.newPastGstHoldAmountPaid, nw.newPastGstHoldRemaining, nw.newPastGstHoldPendingLandOwners, faces.pastHold),
+    pastMonthGstWithoutHold: split(nw.newOverAllPastGstCannotHoldAmount, nw.newPastGstCannotHoldAmountPaid, nw.newPastGstCannotHoldRemaining, nw.newPastGstCannotHoldLandOwners, faces.pastWithout),
     total: c(num(s.currentMonthRentPaid) + num(s.currentMonthGstPaid), both, num(s.currentMonthRentPaidSites) + num(s.currentMonthGstPaidSites)),
     rent: c(s.currentMonthRentPaid, ll.rp, s.currentMonthRentPaidSites),
     gst: c(s.currentMonthGstPaid, ll.gp, s.currentMonthGstPaidSites),
-    rentPending: c(s.currentMonthRentPending, ll.rpend, s.currentMonthRentPendingSites),
+    // amount = the ledger's own current-month rent remaining (newOverallLedgerSummary), same as the Ledger screen
+    rentPending: c(nw.newCurrentMonthRentRemaining ?? s.currentMonthRentPending, ll.rpend, s.currentMonthRentPendingSites),
     gstPending: c(s.currentMonthGstPending, ll.gpend, s.currentMonthGstPendingSites),
-    pastRentPending: c(s.pastRentPending, ll.prp, s.pastRentPendingSites),
+    // amount = the ledger's own past rent remaining (newOverallLedgerSummary) so the dashboard matches the Ledger screen
+    pastRentPending: c(nw.newPastMonthRentRemaining ?? s.pastRentPending, ll.prp, s.pastRentPendingSites),
     pastGstPending: c(s.pastGstPending, ll.pgp, s.pastGstPendingSites),
   };
 }
