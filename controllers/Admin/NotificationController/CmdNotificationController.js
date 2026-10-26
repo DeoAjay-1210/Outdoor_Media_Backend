@@ -4,7 +4,11 @@ const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/Med
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { nowIST } = require("../../../utils/updatedAt");
-const { sendOverdueRemarkPushNotification } = require("../../../utils/fcmService");
+const {
+  sendOverdueRemarkPushNotification,
+  sendApprovalPushNotification,
+  sendReminderPushNotification,
+} = require("../../../utils/fcmService");
 
 // userType values (same as UserSchema)
 const USER_ROLE = { RENTAL_EXECUTIVE: 1, RENTAL_MANAGER: 2, CMD: 3 };
@@ -231,6 +235,7 @@ async function createRentalApprovalNotificationFor({ media, entry, userType, use
       });
 
       const mergedFaceIds = [...new Set([...knownFaceIds, ...entryFaceIds])];
+      const siteLabelsExisting = buildSiteLabels(mergedFaceIds);
       await CmdNotification.updateOne(
         { _id: existing._id },
         {
@@ -238,17 +243,31 @@ async function createRentalApprovalNotificationFor({ media, entry, userType, use
             // a newer approval becomes the latest; an older one for a new face
             // only adds that face to the site
             ...(isNewerApproval ? latestFields : {}),
-            ...buildSiteLabels(mergedFaceIds),
+            ...siteLabelsExisting,
             readBy: [], // new approval on this site → unread again for the receiver
             dedupeKey,
             updatedAt: nowIST(),
           },
         },
       );
+      sendApprovalPushNotification({
+        media,
+        entry,
+        userType,
+        userId,
+        userName,
+        targetRole,
+        siteCode: siteLabelsExisting.siteCode,
+        siteName: siteLabelsExisting.siteName,
+        dueMonth,
+      }).catch((fcmErr) => {
+        console.error("[CmdNotification] Approval FCM push error:", fcmErr?.message || fcmErr);
+      });
       return dedupeKey;
     }
 
     const now = nowIST();
+    const siteLabelsNew = buildSiteLabels(entryFaceIds);
     await CmdNotification.updateOne(
       { dedupeKey },
       {
@@ -256,7 +275,7 @@ async function createRentalApprovalNotificationFor({ media, entry, userType, use
           targetRole: Number(targetRole),
           notificationType: NOTIFICATION_TYPE.NORMAL_APPROVAL,
           ...latestFields,
-          ...buildSiteLabels(entryFaceIds),
+          ...siteLabelsNew,
           readBy: [],
           dedupeKey,
           createdAt: now,
@@ -265,6 +284,19 @@ async function createRentalApprovalNotificationFor({ media, entry, userType, use
       },
       { upsert: true },
     );
+    sendApprovalPushNotification({
+      media,
+      entry,
+      userType,
+      userId,
+      userName,
+      targetRole,
+      siteCode: siteLabelsNew.siteCode,
+      siteName: siteLabelsNew.siteName,
+      dueMonth,
+    }).catch((fcmErr) => {
+      console.error("[CmdNotification] Approval FCM push error:", fcmErr?.message || fcmErr);
+    });
     return dedupeKey;
   } catch (err) {
     // E11000 = same approval processed concurrently — already notified
@@ -576,6 +608,7 @@ const formatNotification = (n, userObjectId) => ({
         remarkedBy: n.remarkedBy || "",
         remarkedByRole: n.remarkedByRole ?? null,
         remarkedAt: n.remarkedAt || null,
+        remarkId: n.remarkId || "",
       }
     : {}),
   landOwnerMasterId: (n.landOwnerMasterIds || [])[0] || null, // first / single landowner
@@ -1040,6 +1073,20 @@ async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userN
       { upsert: true, returnDocument: "after" },
     ).lean();
 
+    sendReminderPushNotification({
+      media,
+      dueMonth: month,
+      rentalDueId: dues[dues.length - 1]._id,
+      mediaDetailId: dues[dues.length - 1].mediaDetailId,
+      role,
+      userName,
+      userId,
+      siteCode: doc.siteCode,
+      siteName: doc.siteName,
+    }).catch((fcmErr) => {
+      console.error("[CmdNotification] Reminder FCM push error:", fcmErr?.message || fcmErr);
+    });
+
     reminders.push({
       notificationId: doc._id,
       notificationType: doc.notificationType,
@@ -1187,6 +1234,19 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
       ? "Combined Sites"
       : (faces.map((d) => d.mediaName).filter(Boolean).join(", ") || media.mediaName || "Site");
 
+    const latestHistory = await OverDueHistory.findOne({
+      mediaId: media._id,
+      ...(month ? { dueMonth: month } : {}),
+    }).sort({ updatedAt: -1 });
+
+    let remarkId = "";
+    if (latestHistory && Array.isArray(latestHistory.overDueRemarks) && latestHistory.overDueRemarks.length > 0) {
+      const latestRemark = latestHistory.overDueRemarks[latestHistory.overDueRemarks.length - 1];
+      remarkId = latestRemark?._id ? String(latestRemark._id) : "";
+      latestHistory.fcmNotifiedAt = now;
+      await latestHistory.save();
+    }
+
     for (const targetRole of targets) {
       const dedupeKey = `overdueRemark:media:${String(media._id)}:${month}:to:${targetRole}`;
       await CmdNotification.updateOne(
@@ -1206,6 +1266,7 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
             remarkedByRole: role,
             remarkedByUserId: toObjectId(userId),
             remarkedAt: now,
+            remarkId: remarkId || "",
             readBy: [], // new remark → unread again
             updatedAt: now,
           },
@@ -1221,19 +1282,6 @@ async function createOverdueRemarkNotification({ media, dueMonth, rentalDueId, m
         },
         { upsert: true },
       );
-    }
-
-    const latestHistory = await OverDueHistory.findOne({
-      mediaId: media._id,
-      ...(month ? { dueMonth: month } : {}),
-    }).sort({ updatedAt: -1 });
-
-    let remarkId = "";
-    if (latestHistory && Array.isArray(latestHistory.overDueRemarks) && latestHistory.overDueRemarks.length > 0) {
-      const latestRemark = latestHistory.overDueRemarks[latestHistory.overDueRemarks.length - 1];
-      remarkId = latestRemark?._id ? String(latestRemark._id) : "";
-      latestHistory.fcmNotifiedAt = now;
-      await latestHistory.save();
     }
 
     // Trigger FCM push notification to target roles (excluding author)

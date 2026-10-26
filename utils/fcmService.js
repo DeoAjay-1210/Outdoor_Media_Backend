@@ -183,8 +183,88 @@ async function sendOverdueRemarkPushNotification({
   });
 }
 
+/**
+ * Rental Approval Push Notification Helper
+ */
+async function sendApprovalPushNotification({
+  media,
+  entry,
+  userType,
+  userId,
+  userName,
+  targetRole,
+  siteCode,
+  siteName,
+  dueMonth,
+}) {
+  const roleLabel = Number(userType) === 3 ? "CMD" : (Number(userType) === 2 ? "Rental Manager" : "Rental Executive");
+  const title = `Rental Approval (${siteCode || "Site"})`;
+  const body = `${roleLabel} ${userName || ""} approved rental due${dueMonth ? ` for ${dueMonth}` : ""}`
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const payloadData = {
+    notificationType: "normalApproval",
+    mediaId: String(media?._id || ""),
+    rentalDueId: String(entry?._id || ""),
+    mediaDetailId: String(entry?.mediaDetailId || ""),
+    dueMonth: String(dueMonth || ""),
+    siteCode: String(siteCode || ""),
+    siteName: String(siteName || ""),
+  };
+
+  return sendPushNotificationToRoles({
+    targetRoles: [Number(targetRole)],
+    excludeUserId: userId,
+    title,
+    body,
+    data: payloadData,
+  });
+}
+
+/**
+ * Approval Reminder Push Notification Helper
+ */
+async function sendReminderPushNotification({
+  media,
+  dueMonth,
+  rentalDueId,
+  mediaDetailId,
+  role,
+  userName,
+  userId,
+  siteCode,
+  siteName,
+}) {
+  const roleLabel = Number(role) === 2 ? "Rental Manager" : "Rental Executive";
+  const title = `Approval Reminder (${siteCode || "Site"})`;
+  const body = `Reminder: ${roleLabel} ${userName || ""} requested approval${dueMonth ? ` for ${dueMonth}` : ""}`
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const payloadData = {
+    notificationType: "reminder",
+    mediaId: String(media?._id || ""),
+    rentalDueId: String(rentalDueId || ""),
+    mediaDetailId: String(mediaDetailId || ""),
+    dueMonth: String(dueMonth || ""),
+    siteCode: String(siteCode || ""),
+    siteName: String(siteName || ""),
+  };
+
+  return sendPushNotificationToRoles({
+    targetRoles: [3], // CMD role
+    excludeUserId: userId,
+    title,
+    body,
+    data: payloadData,
+  });
+}
+
 module.exports = {
   sendPushNotificationToRoles,
   sendOverdueRemarkPushNotification,
+  sendApprovalPushNotification,
+  sendReminderPushNotification,
   cleanInvalidTokens,
 };
