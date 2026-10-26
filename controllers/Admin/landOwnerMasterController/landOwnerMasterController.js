@@ -2652,6 +2652,22 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       });
     });
 
+    // ✅ NEW — the site has an unpaid pre-onboarding GST outstanding row of a
+    // PAST month (counts as GST Hold, same rule as the rows listed below)
+    const siteHasPastGstOutstanding = (site) =>
+      (site._gstOutstanding || []).some((row) => {
+        const amt = Number(row?.gstOutStandingAmount || 0);
+        const paid = row?.isPaid || (row?.utrNumber && String(row.utrNumber).trim() !== "");
+        if (amt <= 0 || paid) return false;
+        const [mStr, yStr] = String(row.dueMonth || "").trim().split(/\s+/);
+        const mIdx = SITE_FILTER_MONTH_NAMES.findIndex(
+          (m) => m.slice(0, 3).toLowerCase() === String(mStr || "").slice(0, 3).toLowerCase(),
+        );
+        const year = Number(yStr);
+        if (mIdx === -1 || !year) return false;
+        return year < referenceYear || (year === referenceYear && mIdx < referenceMonthIdx);
+      });
+
     const toSiteResponseShape = (site, targetOwnerId = null) => {
       // ✅ Filter rentalDue entries based on requested filters (supporting multiple select)
       const duesMap = new Map();
@@ -2777,10 +2793,12 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         if (includePastRentPendingSites && isPast && isPending) matchesOtherFilters = true;
         if (includePastRentalPending && isPast && isPending) matchesOtherFilters = true;
-        if (includePastGstPendingSites && isPast && !isPaidForGst) matchesOtherFilters = true;
+        // ✅ CHANGED — GST Hold bills only (withGst 1); Cannot Hold has its own filter
+        if (includePastGstPendingSites && isPast && !isPaidForGst && Number(due.withGst || 0) === 1) matchesOtherFilters = true;
 
         if (includeCurrentMonthRentPendingSites && isCurrent && isPending) matchesOtherFilters = true;
-        if (includeCurrentMonthGstPendingSites && isCurrent && !isPaidForGst) matchesOtherFilters = true;
+        // ✅ CHANGED — GST Hold bills only (withGst 1)
+        if (includeCurrentMonthGstPendingSites && isCurrent && !isPaidForGst && Number(due.withGst || 0) === 1) matchesOtherFilters = true;
         if (includeCurrentMonthRentPaidSites && isCurrent && isPaidForRent) matchesOtherFilters = true;
         if (includeCurrentMonthGstPaidSites && isCurrent && isPaidForGst) matchesOtherFilters = true;
 
@@ -3007,6 +3025,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         hasCurrentMonthGstPaid: false,
         hasPastRentPending: false,
         hasPastGstPending: false,
+        hasCurrentGstHoldPending: false, // ✅ NEW
+        hasPastGstHoldPending: false, // ✅ NEW
         hasCurrentMonthOverallDueAmount: false,
         hasTotalOutstanding: false
       };
@@ -3073,6 +3093,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           if (site._overallSummary.hasCurrentMonthGstPaid) combinedLedger.hasCurrentMonthGstPaid = true;
           if (site._overallSummary.hasPastRentPending) combinedLedger.hasPastRentPending = true;
           if (site._overallSummary.hasPastGstPending) combinedLedger.hasPastGstPending = true;
+          // ✅ NEW — GST Hold pending only (current / past), for the *GstPendingSites filters
+          if (Number(site._overallSummary.splitCurGstHoldRemaining || 0) > 0) combinedLedger.hasCurrentGstHoldPending = true;
+          if (Number(site._overallSummary.splitPastGstHoldRemaining || 0) > 0 || siteHasPastGstOutstanding(site)) combinedLedger.hasPastGstHoldPending = true;
           if (site._overallSummary.hasCurrentMonthOverallDueAmount) combinedLedger.hasCurrentMonthOverallDueAmount = true;
           if (site._overallSummary.hasTotalOutstanding) combinedLedger.hasTotalOutstanding = true;
         }
@@ -3187,11 +3210,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
             (includeTotalGstPendingAmount && combinedLedger.hasPendingGst) ||
             (includeCurrentMonthRentPendingSites && combinedLedger.hasCurrentMonthRentPending) ||
-            (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentMonthGstPending) ||
+            (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentGstHoldPending) || // ✅ CHANGED — GST Hold only
             (includeCurrentMonthRentPaidSites && combinedLedger.hasCurrentMonthRentPaid) ||
             (includeCurrentMonthGstPaidSites && combinedLedger.hasCurrentMonthGstPaid) ||
             (includePastRentPendingSites && combinedLedger.hasPastRentPending) ||
-            (includePastGstPendingSites && combinedLedger.hasPastGstPending) ||
+            (includePastGstPendingSites && combinedLedger.hasPastGstHoldPending) || // ✅ CHANGED — GST Hold only
             (includeCurrentMonthOverallDueAmountSites && combinedLedger.hasCurrentMonthOverallDueAmount) ||
             (includeTotalOutstandingSites && combinedLedger.hasTotalOutstanding)
           : false;
@@ -3311,6 +3334,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         hasCurrentMonthGstPaid: false,
         hasPastRentPending: false,
         hasPastGstPending: false,
+        hasCurrentGstHoldPending: false, // ✅ NEW
+        hasPastGstHoldPending: false, // ✅ NEW
         hasCurrentMonthOverallDueAmount: false,
         hasTotalOutstanding: false
       };
@@ -3351,6 +3376,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             if (site._overallSummary.hasCurrentMonthGstPaid) combinedLedger.hasCurrentMonthGstPaid = true;
             if (site._overallSummary.hasPastRentPending) combinedLedger.hasPastRentPending = true;
             if (site._overallSummary.hasPastGstPending) combinedLedger.hasPastGstPending = true;
+            // ✅ NEW — GST Hold pending only (current / past), for the *GstPendingSites filters
+            if (Number(site._overallSummary.splitCurGstHoldRemaining || 0) > 0) combinedLedger.hasCurrentGstHoldPending = true;
+            if (Number(site._overallSummary.splitPastGstHoldRemaining || 0) > 0 || siteHasPastGstOutstanding(site)) combinedLedger.hasPastGstHoldPending = true;
             if (site._overallSummary.hasCurrentMonthOverallDueAmount) combinedLedger.hasCurrentMonthOverallDueAmount = true;
             if (site._overallSummary.hasTotalOutstanding) combinedLedger.hasTotalOutstanding = true;
           }
@@ -3460,11 +3488,11 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             (includeTotalLedgerPendingAmount && combinedLedger.hasPendingLedger) ||
             (includeTotalGstPendingAmount && combinedLedger.hasPendingGst) ||
             (includeCurrentMonthRentPendingSites && combinedLedger.hasCurrentMonthRentPending) ||
-            (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentMonthGstPending) ||
+            (includeCurrentMonthGstPendingSites && combinedLedger.hasCurrentGstHoldPending) || // ✅ CHANGED — GST Hold only
             (includeCurrentMonthRentPaidSites && combinedLedger.hasCurrentMonthRentPaid) ||
             (includeCurrentMonthGstPaidSites && combinedLedger.hasCurrentMonthGstPaid) ||
             (includePastRentPendingSites && combinedLedger.hasPastRentPending) ||
-            (includePastGstPendingSites && combinedLedger.hasPastGstPending) ||
+            (includePastGstPendingSites && combinedLedger.hasPastGstHoldPending) || // ✅ CHANGED — GST Hold only
             (includeCurrentMonthOverallDueAmountSites && combinedLedger.hasCurrentMonthOverallDueAmount) ||
             (includeTotalOutstandingSites && combinedLedger.hasTotalOutstanding)
           : false;

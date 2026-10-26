@@ -7010,6 +7010,10 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     });
   };
 
+  const curCannotHoldOwners = new Set(); // ✅ NEW
+  const pastCannotHoldOwners = new Set(); // ✅ NEW
+  const curHoldPendingOwners = new Set(); // ✅ NEW
+  const pastHoldPendingOwners = new Set(); // ✅ NEW
   for (const media of mediaDocs || []) {
     if ((media.mediaDetails || []).some((d) => d.status === 1)) {
       addLegacy("Rent", media.rentalPayment?.rentalOutstandingHistory, "baseRentOutstandingAmount");
@@ -7021,6 +7025,28 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     t.pastRentTotal += s.splitPastRentTotal; t.pastRentPaid += s.splitPastRentPaid; t.pastRentRemaining += s.splitPastRentRemaining;
     t.pastGstTotal += s.splitPastGstTotal; t.pastGstPaid += s.splitPastGstPaid; t.pastGstRemaining += s.splitPastGstRemaining;
     // ✅ NEW
+    // ✅ NEW — distinct landowners of sites with GST Cannot Hold (current / past)
+    // and with GST Hold still pending (same sites as the site-filter
+    // currentMonthGstPendingSites / pastGstPendingSites filters: unpaid GST Hold
+    // bills; past also unpaid pre-onboarding GST outstanding rows)
+    {
+      const ownerKeys = (media.landOwners || []).map((o) =>
+        o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+      );
+      if (Number(s.splitCurGstCannotHoldTotal || 0) > 0) ownerKeys.forEach((k) => curCannotHoldOwners.add(k));
+      if (Number(s.splitPastGstCannotHoldTotal || 0) > 0) ownerKeys.forEach((k) => pastCannotHoldOwners.add(k));
+      const isActiveSite = (media.mediaDetails || []).some((d) => d.status === 1);
+      const pastLegacyGstPending =
+        isActiveSite &&
+        (media.rentalPayment?.gstOutstandingHistory || []).some(
+          (row) =>
+            Number(row.gstOutStandingAmount || 0) > 0 &&
+            !(row.isPaid || (row.utrNumber && String(row.utrNumber).trim() !== "")) &&
+            legacyBucket(row.dueMonth) === "past",
+        );
+      if (Number(s.splitCurGstHoldRemaining || 0) > 0) ownerKeys.forEach((k) => curHoldPendingOwners.add(k));
+      if (Number(s.splitPastGstHoldRemaining || 0) > 0 || pastLegacyGstPending) ownerKeys.forEach((k) => pastHoldPendingOwners.add(k));
+    }
     ["cur", "past"].forEach((b) => {
       const B = b === "cur" ? "Cur" : "Past";
       ["Hold", "CannotHold"].forEach((kind) => {
@@ -7058,6 +7084,12 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     newOverAllPastGstCannotHoldAmount: r(t.pastGstCannotHoldTotal),
     newPastGstCannotHoldAmountPaid: r(t.pastGstCannotHoldPaid),
     newPastGstCannotHoldRemaining: r(t.pastGstCannotHoldRemaining),
+    // ✅ NEW — distinct landowners with GST Cannot Hold
+    newCurrentMonthGstCannotHoldLandOwners: curCannotHoldOwners.size,
+    newPastGstCannotHoldLandOwners: pastCannotHoldOwners.size,
+    // ✅ NEW — distinct landowners with GST Hold still pending
+    newCurrentMonthGstHoldPendingLandOwners: curHoldPendingOwners.size,
+    newPastGstHoldPendingLandOwners: pastHoldPendingOwners.size,
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;
