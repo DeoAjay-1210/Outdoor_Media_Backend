@@ -3693,7 +3693,10 @@ const cityMatchQuery = city
         newOverallLedgerSummary: calculateNewOverallLedgerSummary(
           summaryDocs,
           parseSiteFilterMonthParam(typeof req.body?.dueMonth === "string" ? req.body.dueMonth.trim() : "") ||
-            (parsedMonthFilter ? outstandingMonthYear : null),
+            // ✅ FIXED — no monthFilter → the CURRENT month (same month as
+            // dueThisMonth), not each site's latest bill cycle (a yearly site
+            // billed in Sep was counted as "current month" in October)
+            outstandingMonthYear,
         ),
         // ✅ NEW: Rental Due Stats
         dueThisMonth: {

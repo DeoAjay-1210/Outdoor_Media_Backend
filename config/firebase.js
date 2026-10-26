@@ -48,7 +48,7 @@ function initFirebase() {
       admin.initializeApp({ credential });
       messaging = admin.messaging();
       isFirebaseInitialized = true;
-      console.log("✅ Firebase Admin SDK initialized successfully.");
+      // console.log("✅ Firebase Admin SDK initialized successfully.");
     } else {
       console.warn(
         "⚠️ [Firebase] Credentials not set in Outdoor_Media_Backend/.env. Please add FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY or FIREBASE_SERVICE_ACCOUNT_JSON."
