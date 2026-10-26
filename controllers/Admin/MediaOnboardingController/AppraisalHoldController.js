@@ -84,6 +84,37 @@ function effectiveAppraisalHold(media, entry) {
   return { ...held.appraisalHold, heldDueMonth: held.dueMonth || "", heldRentalDueId: held._id };
 }
 
+// ✅ NEW — held months, CMD-approval based: the held month first, then each
+// next month ONLY after the previous month's bill is CMD-approved
+// (approvalStatus 3); stops at the first month not approved yet. e.g. Sep held
+// (not approved) → [Sep]; Sep approved → [Sep, Oct]; Oct approved → + Nov.
+// endKey (optional) = last month to consider. Same face as the held bill when
+// bills are per face. Returns month labels in order.
+function cmdApprovedHeldMonths(rentalDue, heldBill, endKey = Infinity) {
+  const startKey = heldBill?.dueDate ? appraisalMonthKey(heldBill.dueDate) : null;
+  if (startKey === null) return [heldBill?.dueMonth].filter(Boolean);
+  const sameFace = (b) =>
+    !heldBill.mediaDetailId || !b.mediaDetailId || String(b.mediaDetailId) === String(heldBill.mediaDetailId);
+  const byMonth = new Map(); // monthKey → { label, approved }
+  (rentalDue || []).filter(sameFace).forEach((b) => {
+    const k = b.dueDate ? appraisalMonthKey(b.dueDate) : null;
+    if (k === null || k < startKey || k > endKey) return;
+    const m = byMonth.get(k) || { label: b.dueMonth, approved: false };
+    if (Number(b.approvalStatus) === 3) m.approved = true;
+    byMonth.set(k, m);
+  });
+  if (!byMonth.has(startKey)) byMonth.set(startKey, { label: heldBill.dueMonth, approved: Number(heldBill.approvalStatus) === 3 });
+  const months = [];
+  let prevApproved = true;
+  for (const k of [...byMonth.keys()].sort((a, b) => a - b)) {
+    if (!prevApproved) break;
+    const m = byMonth.get(k);
+    months.push(m.label);
+    prevApproved = m.approved;
+  }
+  return months.filter(Boolean);
+}
+
 // a bill's hold / release list (oldest first). Bills without the stored list
 // get it built from their latest hold + release fields.
 function buildAppraisalHoldHistory(h) {
@@ -535,18 +566,12 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user, 
           rentWithAppraisal: targetRent,
           approvalAmount: targetRent,
           nextBillRent: targetRent,
-          heldMonths: [
-            ...new Set(
-              (media.rentalDue || [])
-                .filter((e) => {
-                  const k = e.dueDate ? appraisalMonthKey(e.dueDate) : null;
-                  const endKey = Math.max(appraisalMonthKey(entry.dueDate) ?? -Infinity, releaseKey ?? -Infinity);
-                  return k !== null && heldBillKey !== null && k >= heldBillKey && k <= endKey;
-                })
-                .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
-                .map((e) => e.dueMonth),
-            ),
-          ],
+          // ✅ CHANGED — CMD-approval based held months (see cmdApprovedHeldMonths)
+          heldMonths: cmdApprovedHeldMonths(
+            media.rentalDue,
+            heldBill,
+            Math.max(appraisalMonthKey(entry.dueDate) ?? -Infinity, releaseKey ?? -Infinity),
+          ),
         };
       }
     }
@@ -625,23 +650,9 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user, 
     // release bill / release month), held appraisal total, releaseAmount and
     // the rent after release
     if (heldBill && Number(heldHold.hold) === 1) {
-      const startKey = heldBill.dueDate ? appraisalMonthKey(heldBill.dueDate) : null;
       const endKey = Math.max(appraisalMonthKey(entry.dueDate) ?? -Infinity, releaseKey ?? -Infinity);
-      const heldMonths =
-        startKey === null
-          ? [heldBill.dueMonth].filter(Boolean)
-          : [
-              ...new Set(
-                (media.rentalDue || [])
-                  .filter((e) => {
-                    const k = e.dueDate ? appraisalMonthKey(e.dueDate) : null;
-                    return k !== null && k >= startKey && k <= endKey;
-                  })
-                  .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
-                  .map((e) => e.dueMonth)
-                  .filter(Boolean),
-              ),
-            ];
+      // ✅ CHANGED — CMD-approval based held months (see cmdApprovedHeldMonths)
+      const heldMonths = cmdApprovedHeldMonths(media.rentalDue, heldBill, endKey);
       const amt = Number(heldHold.appraisalAmount || 0);
       releaseMeta = {
         appraisalAmount: amt,
@@ -874,18 +885,6 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
     const faces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
 
     // ✅ NEW — held months / totals for the rows and the summary
-    const billsByMonth = (fromKey, toKey) => [
-      ...new Set(
-        (media.rentalDue || [])
-          .filter((x) => {
-            const k = x.dueDate ? appraisalMonthKey(x.dueDate) : null;
-            return k !== null && k >= fromKey && k <= toKey;
-          })
-          .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
-          .map((x) => x.dueMonth)
-          .filter(Boolean),
-      ),
-    ];
     const totals = (amt, months) => ({
       appraisalAmount: amt,
       heldMonths: months,
@@ -919,22 +918,20 @@ exports.getAppraisalHoldRemarks = async (req, res) => {
         .flatMap((x) => buildAppraisalHoldHistory(x.appraisalHold || {}).filter((h) => h.action === "hold").map((h) => ({ x, h })))
         .filter(({ h }) => new Date(h.at || 0).getTime() <= relTime)
         .sort((a, b) => new Date(b.h.at || 0) - new Date(a.h.at || 0))[0];
-      const startKey = appraisalMonthKey((holdBefore?.x || bill).dueDate);
       const endKey = Math.max(appraisalMonthKey(bill.dueDate) ?? -Infinity, appraisalMonthKey(ev.at) ?? -Infinity);
       const amt = Number((holdBefore?.x.appraisalHold || {}).appraisalAmount || base.appraisalAmount || 0);
-      const months = startKey === null ? [bill.dueMonth].filter(Boolean) : billsByMonth(startKey, endKey);
+      // ✅ CHANGED — CMD-approval based held months
+      const months = cmdApprovedHeldMonths(media.rentalDue, holdBefore?.x || bill, endKey);
       return {
         ...totals(amt, months),
         releaseAmount: null,
         rentAfterRelease: Number((holdBefore?.x.appraisalHold || {}).rentWithAppraisal || base.rentWithAppraisal || 0) || null,
       };
     };
-    // summary while still on hold: held month up to this month
+    // summary while still on hold — ✅ CHANGED: CMD-approval based held months
+    // (held month, then each next month only after the previous one is CMD-approved)
     const holdSummaryMeta = (bill, base) => {
-      const startKey = bill.dueDate ? appraisalMonthKey(bill.dueDate) : null;
-      const now = nowIST();
-      const nowKey = now.getUTCFullYear() * 12 + now.getUTCMonth();
-      const months = startKey === null ? [bill.dueMonth].filter(Boolean) : billsByMonth(startKey, Math.max(startKey, nowKey));
+      const months = cmdApprovedHeldMonths(media.rentalDue, bill);
       return { ...totals(base.appraisalAmount, months), releaseAmount: null, rentAfterRelease: null };
     };
 
