@@ -1501,6 +1501,15 @@ const landOwnerSiteFilter = async (req, res) => {
       const includeOverDue = Number(wantOverDue) === 1;
       const includeCmdApproval = Number(wantCmdApproval) === 1; // ✅ NEW
       const includeDueThisMonth = Number(wantDueThisMonth) === 1; // ✅ NEW
+      // ✅ NEW — GST Cannot Hold filters (bill withGst 2, or 0 = not marked as
+      // hold, with GST): currentMonthGstCannotHold / pastMonthGstCannotHold.
+      // Key name read case-insensitively (e.g. currentMonthgstcannotHold).
+      const bodyFlag = (name) => {
+        const key = Object.keys(req.body || {}).find((k) => k.toLowerCase() === name.toLowerCase());
+        return key ? Number(req.body[key]) === 1 : false;
+      };
+      const includeCurrentGstCannotHold = bodyFlag("currentMonthGstCannotHold");
+      const includePastGstCannotHold = bodyFlag("pastMonthGstCannotHold");
 
     const includeCurrentPendingRent = Number(wantCurrentPendingRent) === 1;
     const includePastRentalPending = Number(wantPastRentalPending) === 1;
@@ -1548,7 +1557,9 @@ const landOwnerSiteFilter = async (req, res) => {
       includePendingSites ||
       includeOverDue ||
       includeCmdApproval ||
-      includeDueThisMonth;
+      includeDueThisMonth ||
+      includeCurrentGstCannotHold || // ✅ NEW
+      includePastGstCannotHold; // ✅ NEW
     const isAnyFilterActive = needsLedgerFields || needsRentalStatusFields;
 
     // let ownerFilter = {};
@@ -2541,6 +2552,23 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           );
         });
 
+        // ✅ NEW — GST Cannot Hold: this face's bill with withGst 2 (or 0 = not
+        // marked as hold) and GST on it — current month / past months
+        const cannotHoldMonths = rentalDue
+          .filter((due) => {
+            if (due.mediaDetailId && String(due.mediaDetailId) !== faceId) return false;
+            if (Number(due.withGst || 0) === 1) return false;
+            return Number(due.gstAmount || 0) > 0 || Number(resolvedSiteGstAmount || 0) > 0;
+          })
+          .map((due) => parseSiteFilterDueMonthLabel(due.dueMonth))
+          .filter(Boolean);
+        const hasCurrentGstCannotHoldSite = cannotHoldMonths.some(
+          (p) => p.year === referenceYear && p.monthIdx === referenceMonthIdx,
+        );
+        const hasPastGstCannotHoldSite = cannotHoldMonths.some(
+          (p) => p.year < referenceYear || (p.year === referenceYear && p.monthIdx < referenceMonthIdx),
+        );
+
         // ✅ Resolve final GST applicability (1=Hold, 2=Direct)
         let finalGstApplicable = 0;
         if (cycleWithGst === 1 || cycleWithGst === 2) {
@@ -2574,6 +2602,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
             hasCmdApprovalSite, // ✅ NEW
             // ✅ NEW — with roleType: only when this month's bill is waiting on that role
             hasDueThisMonthSite: roleFaceFlags ? hasDueThisMonthSite && !!roleFlags?.pending : hasDueThisMonthSite,
+            hasCurrentGstCannotHoldSite, // ✅ NEW
+            hasPastGstCannotHoldSite, // ✅ NEW
           },
           ownersDetail: ownersOnThisSite.map((o) => {
             const pc = Number(o.paymentCategory || 1);
@@ -2630,7 +2660,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         includeApprovalSite ||
         includePendingSites ||
         includeOverDue ||
-        includeCmdApproval;
+        includeCmdApproval ||
+        includeCurrentGstCannotHold || // ✅ NEW
+        includePastGstCannotHold; // ✅ NEW
 
       const hasLedgerCategoryFilter =
         includePastRentPendingSites ||
@@ -2756,6 +2788,13 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         if (includePendingSites && isCurrent && matchesPending) matchesOtherFilters = true;
         if (includeOverDue && matchesOverDue) matchesOtherFilters = true;
         if (includeCmdApproval && matchesCmdApproval) matchesOtherFilters = true;
+        // ✅ NEW — GST Cannot Hold bills (withGst 2 / 0 with GST), paid or not
+        {
+          const isCannotHold =
+            Number(due.withGst || 0) !== 1 && (Number(due.gstAmount || 0) > 0 || Number(site.gstAmount || 0) > 0);
+          if (includeCurrentGstCannotHold && isCurrent && isCannotHold) matchesOtherFilters = true;
+          if (includePastGstCannotHold && isPast && isCannotHold) matchesOtherFilters = true;
+        }
 
         if ((includeCurrentMonthOverallDueAmountSites || includeTotalOutstandingSites) && (isCurrent || (isPast && isPending))) {
           matchesOtherFilters = true;
@@ -2978,6 +3017,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         isOverDue: false,
         hasCmdApproval: false, // ✅ NEW
         hasDueThisMonth: false, // ✅ NEW
+        hasCurrentGstCannotHold: false, // ✅ NEW
+        hasPastGstCannotHold: false, // ✅ NEW
       };
 
       const processedDocIds = new Set();
@@ -3018,6 +3059,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         if (site.rentalStatus.isOverDueSite) rentalStatusMatch.isOverDue = true;
         if (site.rentalStatus.hasCmdApprovalSite) rentalStatusMatch.hasCmdApproval = true; // ✅ NEW
         if (site.rentalStatus.hasDueThisMonthSite) rentalStatusMatch.hasDueThisMonth = true; // ✅ NEW
+        if (site.rentalStatus.hasCurrentGstCannotHoldSite) rentalStatusMatch.hasCurrentGstCannotHold = true; // ✅ NEW
+        if (site.rentalStatus.hasPastGstCannotHoldSite) rentalStatusMatch.hasPastGstCannotHold = true; // ✅ NEW
 
         if (site._overallSummary && isFirstVisit) {
           if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
@@ -3158,7 +3201,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             (includePendingSites && rentalStatusMatch.hasPending) ||
             (includeOverDue && rentalStatusMatch.isOverDue) || // ✅ isOverDue now includes past pending
             (includeCmdApproval && rentalStatusMatch.hasCmdApproval) || // ✅ NEW
-            (includeDueThisMonth && rentalStatusMatch.hasDueThisMonth)
+            (includeDueThisMonth && rentalStatusMatch.hasDueThisMonth) ||
+            (includeCurrentGstCannotHold && rentalStatusMatch.hasCurrentGstCannotHold) || // ✅ NEW
+            (includePastGstCannotHold && rentalStatusMatch.hasPastGstCannotHold) // ✅ NEW
           : false;
 
         if (!ledgerMatch && !rentalMatch) return; // skip this owner — nothing to show for the requested flag(s)
@@ -3276,6 +3321,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         isOverDue: false,
         hasCmdApproval: false, // ✅ NEW
         hasDueThisMonth: false, // ✅ NEW
+        hasCurrentGstCannotHold: false, // ✅ NEW
+        hasPastGstCannotHold: false, // ✅ NEW
       };
 
       // if (needsLedgerFields || needsRentalStatusFields) {
@@ -3290,6 +3337,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             rentalStatusMatch.isOverDue = true;
           if (site.rentalStatus.hasCmdApprovalSite) rentalStatusMatch.hasCmdApproval = true; // ✅ NEW
           if (site.rentalStatus.hasDueThisMonthSite) rentalStatusMatch.hasDueThisMonth = true; // ✅ NEW
+          if (site.rentalStatus.hasCurrentGstCannotHoldSite) rentalStatusMatch.hasCurrentGstCannotHold = true; // ✅ NEW
+          if (site.rentalStatus.hasPastGstCannotHoldSite) rentalStatusMatch.hasPastGstCannotHold = true; // ✅ NEW
 
           if (site._overallSummary && !processedDocIds.has(docIdStr)) {
             if (site._overallSummary.hasTotalLedger) combinedLedger.hasTotalLedger = true;
@@ -3425,7 +3474,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             (includePendingSites && rentalStatusMatch.hasPending) ||
             (includeOverDue && rentalStatusMatch.isOverDue) || // ✅ isOverDue now includes past pending
             (includeCmdApproval && rentalStatusMatch.hasCmdApproval) || // ✅ NEW
-            (includeDueThisMonth && rentalStatusMatch.hasDueThisMonth)
+            (includeDueThisMonth && rentalStatusMatch.hasDueThisMonth) ||
+            (includeCurrentGstCannotHold && rentalStatusMatch.hasCurrentGstCannotHold) || // ✅ NEW
+            (includePastGstCannotHold && rentalStatusMatch.hasPastGstCannotHold) // ✅ NEW
           : false;
 
         if (!ledgerMatch && !rentalMatch) return;
