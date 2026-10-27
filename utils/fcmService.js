@@ -1,5 +1,9 @@
 const { getMessaging } = require("../config/firebase");
+const mongoose = require("mongoose");
 const User = require("../models/Admin/UserSchema/UserSchema");
+
+const toObjectId = (id) =>
+  id && mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)) : null;
 
 /**
  * Remove invalid/unregistered FCM tokens from User schema
@@ -15,6 +19,22 @@ async function cleanInvalidTokens(tokensToRemove) {
   } catch (err) {
     console.error("❌ [FCM] Error cleaning invalid tokens:", err.message);
   }
+}
+
+/**
+ * Format sender title cleanly without duplicating role names (e.g. "Rental Manager Manager")
+ */
+function formatSenderTitle(roleLbl, name) {
+  if (!name) return roleLbl;
+  const lName = name.trim().toLowerCase();
+  const lRole = roleLbl.trim().toLowerCase();
+  if (lName === lRole || (lRole.includes('manager') && lName === 'manager') || (lRole.includes('executive') && lName === 'executive')) {
+    return roleLbl;
+  }
+  if (lName.includes(lRole) || lRole.includes(lName)) {
+    return roleLbl.length >= name.length ? roleLbl : name;
+  }
+  return `${roleLbl} ${name}`;
 }
 
 /**
@@ -34,13 +54,17 @@ async function sendPushNotificationToRoles({
   }
 
   try {
+    const numericTargetRoles = (targetRoles || []).map(Number).filter((r) => !isNaN(r));
     const query = {
-      userType: { $in: targetRoles },
+      userType: { $in: numericTargetRoles },
       "fcmTokens.0": { $exists: true },
     };
 
     if (excludeUserId) {
-      query._id = { $ne: excludeUserId };
+      const objId = toObjectId(excludeUserId);
+      if (objId) {
+        query._id = { $ne: objId };
+      }
     }
 
     const users = await User.find(query, "fcmTokens _id userName userType").lean();
@@ -60,6 +84,7 @@ async function sendPushNotificationToRoles({
     const uniqueTokens = Array.from(new Set(tokenList));
 
     if (uniqueTokens.length === 0) {
+      console.log(`📱 [FCM] No active FCM tokens found for target roles: ${JSON.stringify(numericTargetRoles)}`);
       return { success: true, deliveredCount: 0, reason: "No active FCM tokens found for target roles" };
     }
 
@@ -159,8 +184,20 @@ async function sendOverdueRemarkPushNotification({
   const shortRemark =
     remark && remark.length > 80 ? `${remark.substring(0, 80)}...` : remark || "Attachment added";
 
-  const title = `Overdue Remark in Chat (${siteCode || "Site"})`;
-  const body = `${senderRoleName || "User"} ${senderName || ""}: "${shortRemark}"`;
+  const resolvedMediaCode = (siteCode && siteCode !== "SITE" ? siteCode : null) ||
+                            media?.mediaCode ||
+                            media?.mediaDetails?.[0]?.mediaCode ||
+                            media?._id?.toString() ||
+                            "SITE";
+
+  const resolvedMediaName = (siteName && siteName !== "Site" ? siteName : null) ||
+                            media?.mediaName ||
+                            media?.mediaDetails?.[0]?.mediaName ||
+                            "Site";
+
+  const title = `Overdue Remark in Chat (${resolvedMediaCode})`;
+  const senderFormatted = formatSenderTitle(senderRoleName || "User", senderName);
+  const body = `${senderFormatted}: "${shortRemark}"`;
 
   const landOwnerMasterId = String(
     media?.landOwners?.[0]?.landOwnerMasterId ||
@@ -176,8 +213,10 @@ async function sendOverdueRemarkPushNotification({
     mediaDetailId: String(mediaDetailId || ""),
     remarkId: String(remarkId || ""),
     dueMonth: String(dueMonth || ""),
-    siteCode: String(siteCode || ""),
-    siteName: String(siteName || ""),
+    siteCode: String(resolvedMediaCode),
+    siteName: String(resolvedMediaName),
+    mediaName: String(resolvedMediaName),
+    mediaCode: String(resolvedMediaCode),
     landOwnerMasterId: landOwnerMasterId,
     landlordId: landOwnerMasterId,
   };
@@ -206,8 +245,21 @@ async function sendApprovalPushNotification({
   dueMonth,
 }) {
   const roleLabel = Number(userType) === 3 ? "CMD" : (Number(userType) === 2 ? "Rental Manager" : "Rental Executive");
-  const title = `Rental Approval (${siteCode || "Site"})`;
-  const body = `${roleLabel} ${userName || ""} approved rental due${dueMonth ? ` for ${dueMonth}` : ""}`
+
+  const resolvedMediaCode = (siteCode && siteCode !== "SITE" ? siteCode : null) ||
+                            media?.mediaCode ||
+                            media?.mediaDetails?.[0]?.mediaCode ||
+                            media?._id?.toString() ||
+                            "SITE";
+
+  const resolvedMediaName = (siteName && siteName !== "Site" ? siteName : null) ||
+                            media?.mediaName ||
+                            media?.mediaDetails?.[0]?.mediaName ||
+                            "Site";
+
+  const title = `Rental Approval (${resolvedMediaCode})`;
+  const senderFormatted = formatSenderTitle(roleLabel, userName);
+  const body = `${senderFormatted} approved rental due${dueMonth ? ` for ${dueMonth}` : ""}`
     .replace(/\s+/g, " ")
     .trim();
 
@@ -223,8 +275,10 @@ async function sendApprovalPushNotification({
     rentalDueId: String(entry?._id || ""),
     mediaDetailId: String(entry?.mediaDetailId || ""),
     dueMonth: String(dueMonth || ""),
-    siteCode: String(siteCode || ""),
-    siteName: String(siteName || ""),
+    siteCode: String(resolvedMediaCode),
+    siteName: String(resolvedMediaName),
+    mediaName: String(resolvedMediaName),
+    mediaCode: String(resolvedMediaCode),
     landOwnerMasterId: landOwnerMasterId,
     landlordId: landOwnerMasterId,
   };
@@ -253,8 +307,21 @@ async function sendReminderPushNotification({
   siteName,
 }) {
   const roleLabel = Number(role) === 2 ? "Rental Manager" : "Rental Executive";
-  const title = `Approval Reminder (${siteCode || "Site"})`;
-  const body = `Reminder: ${roleLabel} ${userName || ""} requested approval${dueMonth ? ` for ${dueMonth}` : ""}`
+
+  const resolvedMediaCode = (siteCode && siteCode !== "SITE" ? siteCode : null) ||
+                            media?.mediaCode ||
+                            media?.mediaDetails?.[0]?.mediaCode ||
+                            media?._id?.toString() ||
+                            "SITE";
+
+  const resolvedMediaName = (siteName && siteName !== "Site" ? siteName : null) ||
+                            media?.mediaName ||
+                            media?.mediaDetails?.[0]?.mediaName ||
+                            "Site";
+
+  const title = `Approval Reminder (${resolvedMediaCode})`;
+  const senderFormatted = formatSenderTitle(roleLabel, userName);
+  const body = `Reminder: ${senderFormatted} requested approval${dueMonth ? ` for ${dueMonth}` : ""}`
     .replace(/\s+/g, " ")
     .trim();
 
@@ -270,8 +337,10 @@ async function sendReminderPushNotification({
     rentalDueId: String(rentalDueId || ""),
     mediaDetailId: String(mediaDetailId || ""),
     dueMonth: String(dueMonth || ""),
-    siteCode: String(siteCode || ""),
-    siteName: String(siteName || ""),
+    siteCode: String(resolvedMediaCode),
+    siteName: String(resolvedMediaName),
+    mediaName: String(resolvedMediaName),
+    mediaCode: String(resolvedMediaCode),
     landOwnerMasterId: landOwnerMasterId,
     landlordId: landOwnerMasterId,
   };
