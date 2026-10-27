@@ -892,6 +892,55 @@ const backfillHistoricalAppraisalEntries = (
   return history;
 };
 
+// ✅ NEW — the appraisal moves made by appraisal hold releases on this site:
+// [{ fromKey, toKey }] (month keys). Saved on the release event
+// (appraisalDateFrom / appraisalDateTo); releases saved before that → from the
+// held bill's month to the release month.
+const releasedAppraisalMoves = (existingMedia) => {
+  const moves = [];
+  for (const bill of existingMedia?.rentalDue || []) {
+    const events = Array.isArray(bill?.appraisalHold?.history) ? bill.appraisalHold.history : [];
+    const ownHold = events.some((ev) => ev?.action === "hold");
+    for (const ev of events) {
+      if (ev?.action !== "release") continue;
+      let fromKey = ev.appraisalDateFrom ? monthKey(ev.appraisalDateFrom) : null;
+      let toKey = ev.appraisalDateTo ? monthKey(ev.appraisalDateTo) : null;
+      if ((fromKey === null || toKey === null) && ownHold && bill.dueDate && ev.at) {
+        fromKey = monthKey(bill.dueDate);
+        toKey = monthKey(ev.at);
+      }
+      if (fromKey !== null && toKey !== null && toKey > fromKey) moves.push({ fromKey, toKey });
+    }
+  }
+  return moves;
+};
+
+// ✅ NEW — incoming lastAppraisalDate is the OLD (pre-release) month and the
+// stored one is the month the release moved it to → keep the stored dates
+// (nextAppraisalDate too, when it is the old schedule). Anything else → as sent.
+const keepReleasedAppraisalDates = (appraisal, existingMedia) => {
+  if (!appraisal || !existingMedia?.appraisal) return;
+  const storedLast = existingMedia.appraisal.lastAppraisalDate;
+  const storedNext = existingMedia.appraisal.nextAppraisalDate;
+  if (!appraisal.lastAppraisalDate || !storedLast) return;
+  const inLastKey = monthKey(appraisal.lastAppraisalDate);
+  const storedLastKey = monthKey(storedLast);
+  if (inLastKey === null || storedLastKey === null || inLastKey === storedLastKey) return;
+  const move = releasedAppraisalMoves(existingMedia).find(
+    (mv) => mv.fromKey === inLastKey && mv.toKey === storedLastKey,
+  );
+  if (!move) return;
+  const shift = move.toKey - move.fromKey;
+  appraisal.lastAppraisalDate = storedLast;
+  if (
+    storedNext &&
+    appraisal.nextAppraisalDate &&
+    monthKey(appraisal.nextAppraisalDate) === monthKey(storedNext) - shift
+  ) {
+    appraisal.nextAppraisalDate = storedNext;
+  }
+};
+
 const handleAppraisalLogic = async (
   mediaData,
   existingMedia,
@@ -904,6 +953,12 @@ const handleAppraisalLogic = async (
 
   if (!appraisal || Number(appraisal.applicable) !== 1) return mediaData;
   if (!agreement?.startDate || !agreement?.endDate) return mediaData;
+
+  // ✅ NEW — UPDATE only: an appraisal hold release moves the appraisal to the
+  // release month (e.g. 01.09.2026 → 01.10.2026). A form loaded before that
+  // release re-sends the OLD dates, which would rebuild the history back to
+  // September. Old dates that a release moved → the stored (moved) dates.
+  if (existingMedia) keepReleasedAppraisalDates(appraisal, existingMedia);
 
   const today = todayKey();
   const currentMonth = thisMonthKey();

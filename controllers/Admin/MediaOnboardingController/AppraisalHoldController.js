@@ -453,8 +453,11 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user, 
     // ✅ NEW — released in a LATER month than the held appraisal (e.g. held
     // August, released September) → the appraisal moves to the release month
     // (see the date shift below); bills before it keep the held amount (50k)
+    // ✅ CHANGED — the release month = the month of the BILL the release is
+    // sent on (not today's date): released on the September bill → stays
+    // September; released on the October bill → moves to October.
     const heldAppraisal = heldBill && Number(heldHold.hold) === 1 ? findAppraisalForBillMonth(media, heldBill) : null;
-    const releaseKey = appraisalMonthKey(holdData.releasedAt);
+    const releaseKey = entry?.dueDate ? appraisalMonthKey(entry.dueDate) : appraisalMonthKey(holdData.releasedAt);
     const fromKey = heldAppraisal ? appraisalMonthKey(heldAppraisal.appraisalDate) : null;
     const shift = fromKey !== null && releaseKey !== null ? releaseKey - fromKey : 0;
 
@@ -661,6 +664,11 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user, 
         heldAppraisalTotal: amt * heldMonths.length,
         releaseAmount: relAmt,
         rentAfterRelease: releaseInfo ? releaseInfo.rentWithAppraisal : Number(heldHold.rentWithAppraisal || 0) || null,
+        // ✅ NEW — the appraisal date this release moved (media onboarding uses it
+        // to ignore the old date re-sent by a stale form)
+        ...(appraisalDateShift
+          ? { appraisalDateFrom: appraisalDateShift.from || null, appraisalDateTo: appraisalDateShift.to || null }
+          : {}),
       };
       // the held bill's own release event (release sent on another bill)
       if (viaOtherBill) {
