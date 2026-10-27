@@ -525,6 +525,7 @@ const getDashboardV2 = async (req, res) => {
 
     const ledgerEntries = X.computeLedgerEntries(active, range, filters.gst);
     rental.cards.pastRent.landlords = ledgerEntries.pastRentPending.count;
+    rental.cards.pastRent.amount = ledgerEntries.pastRentPending.amount; // Financial Summary = Ledger Entries past rent
     rental.cards.pastGst.landlords = ledgerEntries.pastGstPending.count;
     return successResponse(res, "Dashboard fetched", {
       period: { months: range.months, start: range.start, end: range.end },

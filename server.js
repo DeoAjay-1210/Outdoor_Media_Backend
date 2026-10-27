@@ -17,6 +17,7 @@ const LandownerMasterRoutes = require("./routes/Admin/landOwnerMasterRoutes/land
 const dashboardRoutes = require("./routes/Admin/DashboardRoutes/DashboardRoutes");
 const reportAnalyticsRoutes = require("./routes/Admin/ReportAnalyticsRoutes/ReportAnalyticsRoutes");
 const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
+const fcmRoutes = require("./routes/Admin/NotificationRoutes/FcmRoutes");
 const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
 const appUpdateRoutes = require("./routes/Admin/AppUpdateRoutes/AppUpdateRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
@@ -97,6 +98,12 @@ app.use("/public", express.static(path.join(__dirname, "public")));
 // In-app update APK download (only .apk files from release/apk)
 app.use("/release/apk", (req, res, next) => (/^\/[\w.-]+\.apk$/i.test(req.path) ? next() : res.sendStatus(404)), express.static(path.join(__dirname, "release", "apk"), { index: false }));
 // Admin route
+// Initialize Firebase Admin SDK & Overdue Notification Scheduler
+const { initFirebase } = require("./config/firebase");
+const { startOverdueScheduler } = require("./utils/overdueScheduler");
+initFirebase();
+startOverdueScheduler();
+
 app.use("/admin", authRoutes);
 app.use("/admin", mediaRoutes);
 app.use("/admin", ledgerRoutes);
@@ -106,6 +113,7 @@ app.use("/admin", LandownerMasterRoutes);
 app.use("/admin", dashboardRoutes);
 app.use("/admin", reportAnalyticsRoutes);
 app.use("/admin", cmdNotificationRoutes);
+app.use("/admin", fcmRoutes);
 app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", appUpdateRoutes);
 // Auto-publish a new release/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)

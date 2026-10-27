@@ -2067,6 +2067,7 @@ async function processSingleRentalDueInternal({
   userId,
   userName,
   changeLog, // ✅ NEW — optional array; receives campaignName/reason/proof/invoice changes
+  campaignStatus, // ✅ NEW — 0 / 1; not sent → the saved value is kept
 }) {
   const mediaId = media._id;
 
@@ -2076,6 +2077,11 @@ async function processSingleRentalDueInternal({
 
   if (!pendingEntry) {
     return { success: false, mediaId, message: "Rental due entry not found" };
+  }
+  // ✅ NEW — campaignStatus: only 0 or 1 (not sent / "" → unchanged)
+  const hasCampaignStatus = campaignStatus !== undefined && campaignStatus !== null && campaignStatus !== "";
+  if (hasCampaignStatus && ![0, 1].includes(Number(campaignStatus))) {
+    return { success: false, mediaId, message: "campaignStatus must be 0 or 1" };
   }
 
   const entry = pendingEntry;
@@ -2105,6 +2111,7 @@ async function processSingleRentalDueInternal({
   if (reason) entry.reason = reason;
   if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
   if (invoice) entry.invoice = invoice;
+  if (hasCampaignStatus) entry.campaignStatus = Number(campaignStatus); // ✅ NEW
   // ✅ NEW — saved for real → its "Save as Draft" values are cleared
   if (entry.draft && Number(entry.draft.isDraft) === 1) entry.draft = { isDraft: 0 };
 
@@ -2301,6 +2308,7 @@ async function processSingleRentalDueInternal({
     mediaName: media.mediaName,
     rentalDueId: entry._id,
     approvalStatus: entry.approvalStatus,
+    campaignStatus: entry.campaignStatus ?? null, // ✅ NEW
     entryDoc: entry,
     gstApplicableFlag: resGst.gstApplicableFlag,
     pastgstApplicableFlag: resGst.pastgstApplicableFlag,
@@ -2328,6 +2336,7 @@ async function processSingleRentalDue({
   userId,
   userName,
   skipMail = false,
+  campaignStatus, // ✅ NEW
 }) {
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
     return { success: false, mediaId, message: "A valid mediaId is required" };
@@ -2360,6 +2369,7 @@ async function processSingleRentalDue({
       userId,
       userName,
       changeLog,
+      campaignStatus, // ✅ NEW
     });
 
     if (result.success) {
@@ -2685,6 +2695,7 @@ exports.saveRentalDue = async (req, res) => {
             userId,
             userName,
             changeLog: itemChangeLog,
+            campaignStatus: item.campaignStatus ?? req.body.campaignStatus, // ✅ NEW
           });
 
           results.push({ ...processResult, originalIndex: index });
@@ -2836,6 +2847,7 @@ exports.saveRentalDue = async (req, res) => {
       userType,
       userId,
       userName,
+      campaignStatus: req.body.campaignStatus, // ✅ NEW
     });
 
     if (!result.success) {
@@ -6250,6 +6262,7 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaName: face.mediaName,
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
+            campaignStatus: entry.campaignStatus ?? null, // ✅ NEW — 0 / 1, null = not set
             totalSqFt: face.totalSqFt,
             // ✅ NEW — this entry's own cycle dates (from its dueDate)
             ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),

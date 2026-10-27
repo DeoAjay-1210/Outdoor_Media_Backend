@@ -185,6 +185,9 @@ const rentalDueEntrySchema = new mongoose.Schema(
 
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
+    // ✅ NEW — campaign status of this bill: 0 / 1 (null = not set yet).
+    // Sent as campaignStatus in /admin/rental-due-save.
+    campaignStatus: { type: Number, enum: [0, 1, null], default: null },
     reason: { type: String, trim: true },
     proofOfCampaign: {
       originalName: { type: String },

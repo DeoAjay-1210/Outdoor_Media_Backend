@@ -82,6 +82,7 @@ const cmdNotificationSchema = new mongoose.Schema(
     remarkedByRole: { type: Number, enum: [1, 2, 3, null], default: null },
     remarkedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
     remarkedAt: { type: Date, default: null },
+    remarkId: { type: String, trim: true, default: "" },
     // billingDateRevert decision rows (to Executive / Manager) — CMD approve / reject
     cmdActionBy: { type: String, trim: true, default: "" },
     cmdActionByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },
