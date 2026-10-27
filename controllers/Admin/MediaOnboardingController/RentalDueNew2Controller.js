@@ -28,6 +28,8 @@ const {
 const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = require("../../../utils/googleChat");
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
+const { effectiveAppraisalHold } = require("./AppraisalHoldController"); // ✅ NEW — hold shown on later bills too
+const { siteBillDate } = require("../../../utils/billDate"); // ✅ NEW — rentalDueEntries[].billDate
 const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
@@ -1087,7 +1089,8 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       // rent, site GST, owner amounts and the bill's own amounts are scaled
       // the same way, and the appraisal block is not sent. Mail payload only.
       sitesInGroupData = sitesInGroupData.map((item) => {
-        const held = item.entry?.appraisalHold;
+        // ✅ CHANGED — also an earlier month's hold still on (later bill)
+        const held = effectiveAppraisalHold(item.media, item.entry);
         const heldRent = Number(held?.rentWithoutAppraisal || 0);
         const pricedRent = Number(item.media?.rentalPayment?.totalRentalAmount || 0);
         if (Number(held?.hold) !== 1 || heldRent <= 0 || pricedRent <= 0) return item;
@@ -2065,6 +2068,7 @@ async function processSingleRentalDueInternal({
   userId,
   userName,
   changeLog, // ✅ NEW — optional array; receives campaignName/reason/proof/invoice changes
+  campaignStatus, // ✅ NEW — 0 / 1; not sent → the saved value is kept
 }) {
   const mediaId = media._id;
 
@@ -2074,6 +2078,11 @@ async function processSingleRentalDueInternal({
 
   if (!pendingEntry) {
     return { success: false, mediaId, message: "Rental due entry not found" };
+  }
+  // ✅ NEW — campaignStatus: only 0 or 1 (not sent / "" → unchanged)
+  const hasCampaignStatus = campaignStatus !== undefined && campaignStatus !== null && campaignStatus !== "";
+  if (hasCampaignStatus && ![0, 1].includes(Number(campaignStatus))) {
+    return { success: false, mediaId, message: "campaignStatus must be 0 or 1" };
   }
 
   const entry = pendingEntry;
@@ -2103,6 +2112,7 @@ async function processSingleRentalDueInternal({
   if (reason) entry.reason = reason;
   if (proofOfCampaign) entry.proofOfCampaign = proofOfCampaign;
   if (invoice) entry.invoice = invoice;
+  if (hasCampaignStatus) entry.campaignStatus = Number(campaignStatus); // ✅ NEW
   // ✅ NEW — saved for real → its "Save as Draft" values are cleared
   if (entry.draft && Number(entry.draft.isDraft) === 1) entry.draft = { isDraft: 0 };
 
@@ -2299,6 +2309,7 @@ async function processSingleRentalDueInternal({
     mediaName: media.mediaName,
     rentalDueId: entry._id,
     approvalStatus: entry.approvalStatus,
+    campaignStatus: entry.campaignStatus ?? null, // ✅ NEW
     entryDoc: entry,
     gstApplicableFlag: resGst.gstApplicableFlag,
     pastgstApplicableFlag: resGst.pastgstApplicableFlag,
@@ -2326,6 +2337,7 @@ async function processSingleRentalDue({
   userId,
   userName,
   skipMail = false,
+  campaignStatus, // ✅ NEW
 }) {
   if (!mediaId || !mongoose.Types.ObjectId.isValid(mediaId)) {
     return { success: false, mediaId, message: "A valid mediaId is required" };
@@ -2358,6 +2370,7 @@ async function processSingleRentalDue({
       userId,
       userName,
       changeLog,
+      campaignStatus, // ✅ NEW
     });
 
     if (result.success) {
@@ -2683,6 +2696,7 @@ exports.saveRentalDue = async (req, res) => {
             userId,
             userName,
             changeLog: itemChangeLog,
+            campaignStatus: item.campaignStatus ?? req.body.campaignStatus, // ✅ NEW
           });
 
           results.push({ ...processResult, originalIndex: index });
@@ -2834,6 +2848,7 @@ exports.saveRentalDue = async (req, res) => {
       userType,
       userId,
       userName,
+      campaignStatus: req.body.campaignStatus, // ✅ NEW
     });
 
     if (!result.success) {
@@ -6248,6 +6263,8 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaName: face.mediaName,
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
+            campaignStatus: entry.campaignStatus ?? null, // ✅ NEW — 0 / 1, null = not set
+            billDate: siteBillDate(item), // ✅ NEW — site bill date slot (5/10/15/20/25/30, default 5)
             totalSqFt: face.totalSqFt,
             // ✅ NEW — this entry's own cycle dates (from its dueDate)
             ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),
@@ -6256,22 +6273,27 @@ const details = (item.mediaDetails || []).map((d) => ({
             // ✅ NEW — appraisal hold, display fields only (internal restore data
             // — amountsSnapshot, siteReduced, appraisalApplicableBefore,
             // heldByUserId — is not sent)
-            ...(entry.appraisalHold
-              ? {
-                  appraisalHold: {
-                    hold: Number(entry.appraisalHold.hold) === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
-                    appraisalAmount: Number(entry.appraisalHold.appraisalAmount || 0),
-                    rentWithAppraisal: Number(entry.appraisalHold.rentWithAppraisal || 0),
-                    rentWithoutAppraisal: Number(entry.appraisalHold.rentWithoutAppraisal || 0),
-                    remark: entry.appraisalHold.remark || "",
-                    heldBy: entry.appraisalHold.heldBy || "",
-                    heldAt: entry.appraisalHold.heldAt || null,
-                    releasedBy: entry.appraisalHold.releasedBy || "",
-                    releasedAt: entry.appraisalHold.releasedAt || null,
-                    releaseReason: entry.appraisalHold.releaseReason || "",
-                  },
-                }
-              : {}),
+            // ✅ CHANGED — a later month's bill also shows an earlier month's
+            // hold that is still on (e.g. September held → October On Hold)
+            ...((ah) =>
+              ah
+                ? {
+                    appraisalHold: {
+                      hold: Number(ah.hold) === 1 ? 0 : 1, // ✅ CHANGED — API value: 0 = on hold, 1 = released
+                      appraisalAmount: Number(ah.appraisalAmount || 0),
+                      rentWithAppraisal: Number(ah.rentWithAppraisal || 0),
+                      rentWithoutAppraisal: Number(ah.rentWithoutAppraisal || 0),
+                      remark: ah.remark || "",
+                      heldBy: ah.heldBy || "",
+                      heldAt: ah.heldAt || null,
+                      releasedBy: ah.releasedBy || "",
+                      releasedAt: ah.releasedAt || null,
+                      releaseReason: ah.releaseReason || "",
+                      // ✅ NEW — the month whose hold applies here ("" = this bill's own)
+                      heldDueMonth: ah.heldDueMonth || "",
+                    },
+                  }
+                : {})(effectiveAppraisalHold(item, entry)),
             // ✅ NEW — TDS hold status of this site's landowners (always present)
             tdsHold: buildTdsHoldSummary(item.landOwners),
             // ✅ NEW — "Save as Draft" values ({ isDraft: 0 } when none)

@@ -140,6 +140,7 @@ const rentalDueEntrySchema = new mongoose.Schema(
     draft: {
       isDraft: { type: Number, enum: [0, 1], default: 0 }, // 0 = no draft, 1 = draft saved
       campaignName: { type: String, trim: true, default: "" },
+      campaignStatus: { type: Number, enum: [0, 1, null], default: null }, // ✅ NEW — 0 / 1, null = not set
       reason: { type: String, trim: true, default: "" },
       withGst: { type: Number, default: null },
       gstApplicableFlag: { type: Number, default: null },
@@ -185,6 +186,9 @@ const rentalDueEntrySchema = new mongoose.Schema(
 
     // ── Campaign ──────────────────────────────────────────────
     campaignName: { type: String, trim: true },
+    // ✅ NEW — campaign status of this bill: 0 / 1 (null = not set yet).
+    // Sent as campaignStatus in /admin/rental-due-save.
+    campaignStatus: { type: Number, enum: [0, 1, null], default: null },
     reason: { type: String, trim: true },
     proofOfCampaign: {
       originalName: { type: String },

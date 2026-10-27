@@ -111,6 +111,30 @@ const ownerPaymentSchema = new mongoose.Schema(
 );
 
 // ─────────────────────────────────────────────────────────────
+// APPRAISAL REVISION SCHEMA — audit trail of changes to the appraisal AMOUNT rule (type / percentage / fixed amount).
+// An audit event only: not an appraisal transaction, never edited or deleted, and it does not alter any history row by itself
+// (see utils/appraisalRevision.js for which rows take the new rule and which are frozen).
+// ─────────────────────────────────────────────────────────────
+const APPRAISAL_REVISION_SCHEMA = new mongoose.Schema(
+  {
+    changedAt: { type: Date, required: true },
+    changedBy: { type: String, default: "" },
+    reason: { type: String, default: "" },
+    previousType: { type: Number, default: null }, // 1=Percentage, 2=Fixed
+    previousPercentage: { type: Number, default: 0 },
+    previousFixedAmount: { type: Number, default: 0 },
+    newType: { type: Number, default: null },
+    newPercentage: { type: Number, default: 0 },
+    newFixedAmount: { type: Number, default: 0 },
+    baseRent: { type: Number, default: 0 }, // rent the amounts below were computed on
+    previousAmount: { type: Number, default: 0 }, // per-appraisal amount of the old rule on baseRent
+    newAmount: { type: Number, default: 0 }, // per-appraisal amount of the new rule on baseRent
+    effectiveFrom: { type: Date, default: null }, // first appraisal row that took the new rule (null: none took it yet)
+  },
+  { _id: true },
+);
+
+// ─────────────────────────────────────────────────────────────
 // APPRAISAL HISTORY SCHEMA
 // ─────────────────────────────────────────────────────────────
 const APPRAISAL_HISTORY_SCHEMA = new mongoose.Schema(
@@ -555,6 +579,9 @@ const MediaSchema = new mongoose.Schema(
         type: Date,
       },
       billingStartDate: { type: Date, default: null },
+      // ✅ NEW — bill date slot (5, 10, 15, 20, 25, 30) for overdue / site-filter.
+      // Not sent → 5. Bill generation does NOT use it.
+      billDate: { type: Number, enum: [5, 10, 15, 20, 25, 30], default: 5 },
       // tdsApplicable: {
       //   type: Number,
       //   enum: [0, 1],
@@ -926,6 +953,8 @@ const MediaSchema = new mongoose.Schema(
       lastAppraisalDate: Date,
       nextAppraisalDate: Date,
       history: [APPRAISAL_HISTORY_SCHEMA],
+      // append-only audit of amount-rule changes (set by the update flow from the stored document, never from the client)
+      revisionHistory: { type: [APPRAISAL_REVISION_SCHEMA], default: [] },
       // ✅ NEW — 1 while CMD holds an applied appraisal (POST /admin/appraisal-hold):
       // the site rent stays at the pre-appraisal amount and the existing
       // auto-apply checks (pre-save hook, applyDueAppraisals, syncBillingCycles,
