@@ -1269,7 +1269,7 @@ test("data sources: each chart + source reads exactly the top-level fields its l
   };
   for (const [chart, bySource] of Object.entries(expected)) {
     assert.deepEqual(Object.keys(C.SELECT[chart]).sort(), Object.keys(bySource).sort(), chart);
-    for (const [src, v] of Object.entries(bySource)) assert.deepEqual(roots(C.SELECT[chart][src]), v, `${chart}/${src}`);
+    for (const [src, v] of Object.entries(bySource)) assert.deepEqual(roots(C.SELECT[chart][src]), [...v, "siteCode"].sort(), `${chart}/${src}`);
   }
   assert.ok(C.SELECT.gst.rentalMaster.includes("rentalPayment.gstOutstandingHistory"));
   assert.match(C.SELECT.appraisal.rentalMaster, /rentalDue\.approvalFlow/);
@@ -1292,7 +1292,8 @@ test("detail projections include only landlord identity fields needed for analyt
   for (const sel of [C.SELECT.payments.rentalMaster, C.SELECT.bills.rentalMaster, C.SELECT.gst.rentalMaster, C.SELECT.gst.ledger, C.SELECT.appraisal.rentalMaster]) {
     assert.match(sel, /mediaDetails\.mediaCode/, "the media code of each face");
     assert.match(sel, /landOwners\.name/);
-    assert.doesNotMatch(sel, /siteCode|landlordCode/);
+    assert.match(sel, /siteCode/);
+    assert.doesNotMatch(sel, /landlordCode/);
     assert.doesNotMatch(sel, /panNumber|aadhar|bankName|ifsc|accountNumber|upiId|landOwners\.phone/);
   }
   assert.match(C.SELECT.tds.ledger, /landOwners\._id landOwners\.landOwnerMasterId landOwners\.name/);
@@ -2072,7 +2073,7 @@ test("payments detail rows: reconcile with the summary (to be paid, unpaid, paid
   assert.deepEqual(byId.S4.mediaCodes, []);
   assert.deepEqual(byId.S3.landlords, [{ name: "Owner S30" }], "the landlord name only");
   for (const r of records) {
-    assert.ok(!("siteCode" in r), "no site code");
+    assert.equal(r.siteCode, null, "missing site code remains null");
     assert.ok(!JSON.stringify(r.landlords).includes("master"), "no landlord id");
     assert.ok(!JSON.stringify(r.mediaCodes).includes("S3-f"), "never an id in place of a code");
   }
@@ -2122,7 +2123,7 @@ test("outstanding records carry the stored media codes and the landlord names fo
   for (const rec of r.records.filter((x) => x.siteId === "A")) {
     assert.deepEqual(rec.mediaCodes, ["ADN-MEDIA-010", "ADN-MEDIA-011"], "exactly as stored, one per face");
     assert.deepEqual(rec.landlords, [{ name: "Asha" }, { name: "Ravi" }]);
-    assert.ok(!("siteCode" in rec));
+    assert.equal(rec.siteCode, null);
   }
   for (const rec of r.records.filter((x) => x.siteId === "N")) {
     assert.deepEqual(rec.mediaCodes, [], "no stored media code: empty, never the document id");
@@ -2287,6 +2288,75 @@ test("bill approvals: generated = approved + pending; past due ⊂ pending; stag
   assert.equal(RA.computeBillApprovals(docs, fy({ city: "Chennai" }), lib, NOW).summary.generated.bills, 4);
 });
 
+test("October bill approvals use the Rental Master site-cycle status for single-bill sites", () => {
+  const bill = (o) => ({
+    baseAmount: 100,
+    dueDate: new Date(Date.UTC(2026, 9, 20)),
+    dueMonth: "October 2026",
+    approvalStatus: 1,
+    ...o,
+  });
+  const docs = [
+    {
+      _id: "single-bill",
+      mediaDetails: [
+        { _id: "single-a", status: 1, siteBillMode: 1, mediaType: "Hoarding", city: "Chennai" },
+        { _id: "single-b", status: 1, siteBillMode: 1, mediaType: "Hoarding", city: "Chennai" },
+      ],
+      rentalDue: [
+        bill({ _id: "single-approved", mediaDetailId: "single-a", approvalStatus: 3 }),
+        bill({
+          _id: "single-partial",
+          mediaDetailId: "single-b",
+          approvalStatus: 2,
+          approvalSteps: [{ role: 1, status: 2 }, { role: 2, status: 1 }],
+        }),
+      ],
+    },
+    {
+      _id: "separate-bills",
+      mediaDetails: [
+        { _id: "separate-a", status: 1, siteBillMode: 2, mediaType: "Hoarding", city: "Chennai" },
+        { _id: "separate-b", status: 1, siteBillMode: 2, mediaType: "Hoarding", city: "Chennai" },
+      ],
+      rentalDue: [
+        bill({ _id: "separate-approved", mediaDetailId: "separate-a", approvalStatus: 3 }),
+        bill({
+          _id: "separate-pending",
+          mediaDetailId: "separate-b",
+          approvalStatus: 2,
+          approvalSteps: [{ role: 1, status: 1 }],
+        }),
+      ],
+    },
+    {
+      _id: "outside-period",
+      mediaDetails: [{ _id: "outside-face", status: 1, siteBillMode: 2, mediaType: "Hoarding", city: "Chennai" }],
+      rentalDue: [
+        bill({ _id: "before-october", dueDate: new Date(Date.UTC(2026, 8, 30)), approvalStatus: 3 }),
+        bill({ _id: "after-october", dueDate: new Date(Date.UTC(2026, 10, 1)), approvalStatus: 3 }),
+      ],
+    },
+  ];
+  const filters = RA.parseFilters({
+    startDate: "2026-10-01",
+    endDate: "2026-10-31",
+    details: true,
+  }, NOW).filters;
+  const lib = {
+    pendingRoleOf: require("../controllers/Admin/DashboardController/DashboardExtras").pendingRoleOf,
+  };
+  const result = RA.computeBillApprovals(deepFreeze(docs), filters, lib, NOW);
+
+  assert.deepEqual(result.summary.generated, { bills: 4, sites: 2, amount: 400 });
+  assert.deepEqual(result.summary.approved, { bills: 3, sites: 2, amount: 300 });
+  assert.deepEqual(result.summary.pending, { bills: 1, sites: 1, amount: 100 });
+  assert.deepEqual(result.summary.pastDue, { bills: 1, sites: 1, amount: 100 });
+  assert.equal(result.summary.generated.bills, result.summary.approved.bills + result.summary.pending.bills);
+  assert.equal(result.records.find((row) => row.billId === "single-partial").approvalStatus, "Approved");
+  assert.equal(result.records.find((row) => row.billId === "separate-pending").approvalStatus, "Partially approved");
+});
+
 test("payments detail rows: components (rental / direct GST / hold GST) reconcile with the cycle figures; paid sites = sites with something paid", () => {
   const { due, records, buckets } = detailRange(octFixture(), OCT);
   for (const r of records) {
@@ -2369,6 +2439,36 @@ test("GST rows carry the cycle's stored approval status and steps (Pending Appro
   assert.deepEqual([none.records[0].approvalStatus, none.records[0].approvalSteps], [null, []], "no bill, no invented status");
 });
 
+test("GST approval requires every configured approval step even when overall bill status says approved", () => {
+  assert.match(C.SELECT.gst.ledger, /rentalDue\.approvalFlow/, "the GST projection includes the flow needed to validate approval");
+  const start = D(2026, 7);
+  const incompleteFlow = [
+    { role: 1, status: 2 },
+    { role: 2, status: 1 },
+    { role: 3, status: 1 },
+  ];
+  const pending = withGstRp(dsite("AP", 10000, {
+    start,
+    rentalDue: [bill("October 2026", 1, {
+      approvalStatus: 3,
+      approvalFlow: 1,
+      approvalSteps: incompleteFlow,
+    })],
+  }), 1800);
+  const r = ledGst(deepFreeze([pending]), {
+    startDate: "2026-10-01",
+    endDate: "2026-10-31",
+    details: true,
+  });
+  const cards = r.summary.cards;
+  assert.equal(cards.generated.amount, 1800);
+  assert.equal(cards.unpaidPending.amount, 1800);
+  assert.equal(cards.hold.amount, 0, "an incomplete approval chain is not an approved Hold GST");
+  assert.equal(cards.paid.amount, 0, "approval status is not evidence of payment");
+  assert.equal(r.records[0].remainingAs, "pending");
+  assert.equal(r.records[0].approvalStatus, "Approval steps incomplete", "make the incomplete workflow clear in GST details");
+});
+
 test("GST by state: onboarding GST dues are Ledger Entry unpaid; a settled one is paid", () => {
   const start = D(2026, 8);
   const d = dsite("O", 3000, { start, rentalPayment: { ...dsite("O", 3000, { start }).rentalPayment, gstOutstandingHistory: [
@@ -2388,4 +2488,27 @@ test("Ledger history contract: a provided landOwnerMasterId must be a non-empty 
   await L.getLedgerHistory({ body: { mediaId: ["64f1a2b3c4d5e6f708091a01"], landOwnerMasterId: [], currentMonth: "09-2026" } }, res);
   assert.equal(res.code, 400);
   assert.match(JSON.stringify(res.body), /landOwnerMasterId must be a non-empty array when provided/);
+});
+
+
+test("payment transaction details use the same accepted deduplicated records and actual dates as the summary", () => {
+  const old = entry({ amount: 400 });
+  const latest = entry({ _id: 'history2', amount: 450, updatedAt: new Date(Date.UTC(2026, 5, 12)), date: new Date(Date.UTC(2026, 5, 11)) });
+  const online = entry({ landOwnerId: 'o2', paymentMode: 'Online', amount: 80, withGst: 1 });
+  const docs = deepFreeze([site('s1', [['Hoarding','Chennai']], {siteCode:'SITE-1', ledgerHistory:hist(old, latest, online, entry({landOwnerId:'no-date',date:null})), ledger:[latest]})]);
+  const summaryOnly = RA.computePayments(docs, fy());
+  const detail = RA.computePayments(docs, fy({details:true}));
+  assert.deepEqual(detail.summary, summaryOnly.summary);
+  assert.equal(summaryOnly.records, undefined);
+  assert.equal(detail.records.length, 2);
+  assert.equal(detail.records.reduce((n,r)=>n+r.amount,0), detail.summary.total);
+  assert.equal(detail.summary.total, 530);
+  assert.equal(detail.summary.gstPayments, 80, 'GST is a subset, not another receipt');
+  assert.deepEqual(detail.records.map(r=>r.date), ['2026-06-10','2026-06-11']);
+  assert(detail.records.every(r=>r.siteCode==='SITE-1' && r.siteId==='s1'));
+  assert.equal(new Set(detail.records.map(r=>r.recordId)).size,2);
+  assert(detail.records.every(r=>!('utrNumber' in r) && !('bankName' in r)));
+  const filtered = RA.computePayments(docs, fy({details:true, city:'Madurai'}));
+  assert.equal(filtered.records.length,0);
+  assert.equal(filtered.summary.total,0);
 });
