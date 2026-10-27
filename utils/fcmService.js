@@ -118,16 +118,20 @@ async function sendPushNotificationToRoles({
           },
         },
       },
-      webpush: {
-        headers: {
-          Urgency: "high",
-        },
-        notification: {
-          title: title || "Overdue Remark in Chat",
-          body: body || "A remark added by another user requires your attention.",
-          icon: "/assets/images/favicon.png",
-        },
-      },
+     webpush: {
+       headers: {
+         Urgency: "high",
+       },
+       fcmOptions: {
+         link: "https://adinntech.in/ooh-rms/",
+       },
+       notification: {
+         title: title || "Overdue Remark in Chat",
+         body: body || "A remark added by another user requires your attention.",
+         icon: "/ooh-rms/favicon.png",
+       },
+       data: stringifiedData,
+     },
     };
 
     const response = await messaging.sendEachForMulticast(messagePayload);
