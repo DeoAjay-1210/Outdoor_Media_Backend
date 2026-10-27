@@ -38,6 +38,18 @@ function formatSenderTitle(roleLbl, name) {
 }
 
 /**
+ * ✅ NEW — .env switch for Firebase push notifications:
+ *   FIREBASE_PUSH_NOTIFICATION=on   → sent (also 1 / true / yes)
+ *   FIREBASE_PUSH_NOTIFICATION=off  → NOT sent (also 0 / false / no)
+ * Not set → on (same as before). Read on every send, so a restart after
+ * editing .env is enough.
+ */
+function isPushNotificationEnabled() {
+  const v = String(process.env.FIREBASE_PUSH_NOTIFICATION ?? "on").trim().toLowerCase();
+  return !["off", "0", "false", "no"].includes(v);
+}
+
+/**
  * Send Multicast Push Notification to specific target user roles
  */
 async function sendPushNotificationToRoles({
@@ -47,6 +59,10 @@ async function sendPushNotificationToRoles({
   body = "A new remark was added.",
   data = {},
 }) {
+  // ✅ NEW — switched off in .env → nothing is sent (every push goes through here)
+  if (!isPushNotificationEnabled()) {
+    return { success: false, reason: "Push notifications are turned off (FIREBASE_PUSH_NOTIFICATION=off)" };
+  }
   const messaging = getMessaging();
   if (!messaging) {
     console.warn("⚠️ [FCM] Messaging service not initialized. Skipping push notification.");
