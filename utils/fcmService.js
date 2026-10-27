@@ -162,6 +162,12 @@ async function sendOverdueRemarkPushNotification({
   const title = `Overdue Remark in Chat (${siteCode || "Site"})`;
   const body = `${senderRoleName || "User"} ${senderName || ""}: "${shortRemark}"`;
 
+  const landOwnerMasterId = String(
+    media?.landOwners?.[0]?.landOwnerMasterId ||
+    media?.landOwners?.[0]?._id ||
+    ""
+  );
+
   const payloadData = {
     notificationType: "overdueRemark",
     chatId: String(media?._id || ""),
@@ -172,6 +178,8 @@ async function sendOverdueRemarkPushNotification({
     dueMonth: String(dueMonth || ""),
     siteCode: String(siteCode || ""),
     siteName: String(siteName || ""),
+    landOwnerMasterId: landOwnerMasterId,
+    landlordId: landOwnerMasterId,
   };
 
   return sendPushNotificationToRoles({
@@ -203,6 +211,12 @@ async function sendApprovalPushNotification({
     .replace(/\s+/g, " ")
     .trim();
 
+  const landOwnerMasterId = String(
+    media?.landOwners?.[0]?.landOwnerMasterId ||
+    media?.landOwners?.[0]?._id ||
+    ""
+  );
+
   const payloadData = {
     notificationType: "normalApproval",
     mediaId: String(media?._id || ""),
@@ -211,6 +225,8 @@ async function sendApprovalPushNotification({
     dueMonth: String(dueMonth || ""),
     siteCode: String(siteCode || ""),
     siteName: String(siteName || ""),
+    landOwnerMasterId: landOwnerMasterId,
+    landlordId: landOwnerMasterId,
   };
 
   return sendPushNotificationToRoles({
@@ -242,6 +258,12 @@ async function sendReminderPushNotification({
     .replace(/\s+/g, " ")
     .trim();
 
+  const landOwnerMasterId = String(
+    media?.landOwners?.[0]?.landOwnerMasterId ||
+    media?.landOwners?.[0]?._id ||
+    ""
+  );
+
   const payloadData = {
     notificationType: "reminder",
     mediaId: String(media?._id || ""),
@@ -250,6 +272,8 @@ async function sendReminderPushNotification({
     dueMonth: String(dueMonth || ""),
     siteCode: String(siteCode || ""),
     siteName: String(siteName || ""),
+    landOwnerMasterId: landOwnerMasterId,
+    landlordId: landOwnerMasterId,
   };
 
   return sendPushNotificationToRoles({
