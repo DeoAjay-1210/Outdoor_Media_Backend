@@ -472,6 +472,122 @@ test("appraisal separates given from upcoming using stored rows only (no project
   assert.equal(bucket(r, "2027-01").upcoming.entries, 0);
 });
 
+const approvedSteps = [
+  { role: 1, status: 2 },
+  { role: 2, status: 2 },
+  { role: 3, status: 2 },
+];
+const pendingCmdSteps = [
+  { role: 1, status: 2 },
+  { role: 2, status: 2 },
+  { role: 3, status: 1 },
+];
+const oneAprilAppraisal = (id, bill, amount = 1000, extra = {}) => site(id, [["H", "C"]], {
+  rentalDue: bill ? [bill] : [],
+  appraisal: appraisal([{ appraisalDate: D(2026, 3, 10), appraisalAmount: amount }], extra),
+});
+
+test("appraisal requires an explicit approved CMD step and a complete configured approval chain", () => {
+  const docs = deepFreeze([
+    oneAprilAppraisal("cmd-pending", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: pendingCmdSteps })),
+    oneAprilAppraisal("missing-cmd", apprBill(2026, 3, 3, { approvalFlow: 2, approvalSteps: [{ role: 2, status: 2 }] })),
+    oneAprilAppraisal("cmd-skipped", apprBill(2026, 3, 3, { approvalFlow: 3, approvalSteps: [{ role: 3, status: 3 }] })),
+    oneAprilAppraisal("pending-manager", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: [{ role: 1, status: 2 }, { role: 2, status: 1 }, { role: 3, status: 2 }] })),
+  ]);
+  const payments = paidCycles("cmd-pending|2026-04", "missing-cmd|2026-04", "cmd-skipped|2026-04", "pending-manager|2026-04");
+  const r = RA.computeAppraisal(docs, fy(), NOW, { payments });
+  assert.equal(r.summary.given.amount, 0);
+  assert.equal(r.summary.held.amount, 4000);
+  assert.ok(docs.every((d) => !RA.isCmdApproved(d.rentalDue[0])));
+});
+
+test("an active bill appraisal hold blocks Paid; a recorded release does not", () => {
+  const heldAt = new Date(Date.UTC(2026, 3, 6));
+  const releasedAt = new Date(Date.UTC(2026, 3, 8));
+  const docs = deepFreeze([
+    oneAprilAppraisal("active-hold", apprBill(2026, 3, 3, {
+      approvalFlow: 1, approvalSteps: approvedSteps,
+      appraisalHold: { hold: 1, heldAt },
+    })),
+    oneAprilAppraisal("released-hold", apprBill(2026, 3, 3, {
+      approvalFlow: 1, approvalSteps: approvedSteps,
+      appraisalHold: { hold: 0, heldAt, releasedAt, history: [{ action: "hold", at: heldAt }, { action: "release", at: releasedAt }] },
+    })),
+  ]);
+  const r = RA.computeAppraisal(docs, fy(), NOW, { payments: paidCycles("active-hold|2026-04", "released-hold|2026-04") });
+  assert.equal(r.summary.held.amount, 1000);
+  assert.equal(r.summary.given.amount, 1000);
+});
+
+test("approved, unheld appraisal is Unpaid without a full Ledger payment for its own month", () => {
+  const docs = deepFreeze([
+    oneAprilAppraisal("no-payment", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: approvedSteps })),
+    oneAprilAppraisal("partial", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: approvedSteps })),
+    oneAprilAppraisal("different-month", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: approvedSteps })),
+  ]);
+  const payments = new Map([
+    ["partial|2026-04", { due: 1000, unpaid: 250 }],
+    ["different-month|2026-05", { due: 1000, unpaid: 0 }],
+  ]);
+  const r = RA.computeAppraisal(docs, fy(), NOW, { payments });
+  assert.equal(r.summary.given.amount, 0);
+  assert.equal(r.summary.unpaid.amount, 3000);
+});
+
+test("CMD approval is isolated to its own site; legacy approved bills and future rows keep their rules", () => {
+  const docs = deepFreeze([
+    oneAprilAppraisal("site-a", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: pendingCmdSteps })),
+    oneAprilAppraisal("site-b", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: approvedSteps })),
+    oneAprilAppraisal("legacy", apprBill(2026, 3, 3)),
+    site("future", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: D(2026, 11, 10), appraisalAmount: 500 }]) }),
+  ]);
+  const r = RA.computeAppraisal(docs, fy(), NOW, { payments: paidCycles("site-a|2026-04", "site-b|2026-04", "legacy|2026-04") });
+  assert.equal(r.summary.held.amount, 1000);
+  assert.equal(r.summary.given.amount, 2000);
+  assert.equal(r.summary.upcoming.amount, 500);
+});
+
+test("appraisal hold carry-forward stops at a later bill's recorded release", () => {
+  const heldAt = new Date(Date.UTC(2026, 8, 6));
+  const releasedAt = new Date(Date.UTC(2026, 9, 2));
+  const history = [{ appraisalDate: D(2026, 9, 10), appraisalAmount: 1000 }];
+  const docs = deepFreeze([
+    site("carried-hold", [["H", "C"]], { rentalDue: [
+      apprBill(2026, 8, 1, { appraisalHold: { hold: 1, heldAt } }),
+      apprBill(2026, 9, 1),
+    ], appraisal: appraisal(history) }),
+    site("released-carry", [["H", "C"]], { rentalDue: [
+      apprBill(2026, 8, 1, { appraisalHold: { hold: 1, heldAt } }),
+      apprBill(2026, 9, 1, { appraisalHold: { hold: 0, releasedAt } }),
+    ], appraisal: appraisal(history) }),
+  ]);
+  const r = RA.computeAppraisal(docs, fy({ details: true }), NOW, { payments: new Map() });
+  const bySite = new Map(r.records.map((record) => [record.siteId, record.status]));
+  assert.equal(bySite.get("carried-hold"), "onHold");
+  assert.equal(bySite.get("released-carry"), "pendingApproval");
+});
+
+test("appraisal dashboard buckets and detail rows reconcile all four classifications", () => {
+  const docs = deepFreeze([
+    oneAprilAppraisal("paid", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: approvedSteps }), 400),
+    oneAprilAppraisal("unpaid", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: approvedSteps }), 200),
+    oneAprilAppraisal("held", apprBill(2026, 3, 3, { approvalFlow: 1, approvalSteps: pendingCmdSteps }), 300),
+    site("upcoming", [["H", "C"]], { appraisal: appraisal([{ appraisalDate: D(2026, 11, 10), appraisalAmount: 100 }]) }),
+  ]);
+  const r = RA.computeAppraisal(docs, fy({ details: true }), NOW, {
+    payments: paidCycles("paid|2026-04"),
+  });
+  const { given, unpaid, held, upcoming, total } = r.summary;
+  assert.deepEqual([given.amount, unpaid.amount, held.amount, upcoming.amount, total.amount], [400, 200, 300, 100, 1000]);
+  assert.equal(total.amount, given.amount + unpaid.amount + held.amount + upcoming.amount);
+  assert.equal(total.entries, r.records.length);
+  assert.equal(r.buckets.reduce((sum, item) => sum + item.total.amount, 0), total.amount);
+  for (const kind of ["given", "unpaid", "held", "upcoming"]) {
+    const recordsAmount = r.records.filter((row) => row.kind === kind).reduce((sum, row) => sum + row.amount, 0);
+    assert.equal(recordsAmount, r.summary[kind].amount, `${kind} summary matches exported detail rows`);
+  }
+});
+
 test("appraisal hold: entries from the hold date are 'held'; not-applicable sites are skipped", () => {
   const docs = deepFreeze([
     site("1", [["H", "C"]], { rentalDue: [apprBill(2025, 9), apprBill(2026, 9)], appraisal: appraisal([
@@ -1156,6 +1272,8 @@ test("data sources: each chart + source reads exactly the top-level fields its l
     for (const [src, v] of Object.entries(bySource)) assert.deepEqual(roots(C.SELECT[chart][src]), v, `${chart}/${src}`);
   }
   assert.ok(C.SELECT.gst.rentalMaster.includes("rentalPayment.gstOutstandingHistory"));
+  assert.match(C.SELECT.appraisal.rentalMaster, /rentalDue\.approvalFlow/);
+  assert.match(C.SELECT.appraisal.rentalMaster, /rentalDue\.approvalSteps\.role rentalDue\.approvalSteps\.status/);
   assert.ok(!/rentalPayment\.(?!gstOutstandingHistory|paymentFrequency|customPaymentFrequency)/.test(C.SELECT.gst.rentalMaster), "GST reads only onboarding GST dues (and the payment-cycle label) from rentalPayment");
   assert.ok(!/tdsBalanceHistory/.test(C.SELECT.tds.rentalMaster), "Rental Master TDS never reads recorded deductions");
   assert.match(C.SELECT.tds.ledger, /landOwners\._id landOwners\.landOwnerMasterId landOwners\.name/);

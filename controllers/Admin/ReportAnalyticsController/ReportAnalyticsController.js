@@ -82,7 +82,7 @@ SELECT.appraisal.rentalMaster = [
   ...new Set([
     ...SELECT.bills.rentalMaster.split(/\s+/).filter((t) => t && !t.startsWith("appraisal.")),
     "appraisal",
-    "rentalDue.dueDate", "rentalDue.approvalStatus", "rentalDue.status", "rentalDue.currentPendingRole",
+    "rentalDue.dueDate", "rentalDue.approvalStatus", "rentalDue.status", "rentalDue.approvalFlow", "rentalDue.currentPendingRole",
     "rentalDue.appraisalHold.hold", "rentalDue.appraisalHold.heldAt", "rentalDue.appraisalHold.releasedAt",
   ]),
 ].join(" ");

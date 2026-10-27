@@ -135,8 +135,14 @@ Anchor rows (`isAnchorEntry`) and rows with `appraisalAmount ≤ 0` are skipped.
 schema comment contradicts itself; the code (`appraisalHold !== 1` gates auto-apply, hold switches
 `applicable` to 0) shows **1 = on hold**. Held sites: rows on/after `appraisalHoldDate` (or after today
 if no hold date) are classified *On hold*, not given/upcoming. Sites with `applicable ≠ 1` that are not
-held are skipped. Hold can also be recorded per bill (`AppraisalHoldController`); that bill-level state
-is not used here.
+held are skipped. A bill's `appraisalHold.hold` and its release timestamp determine its active hold;
+an earlier active hold carries to later bills that are not CMD-approved unless the later bill's release
+is newer than that hold. A dated appraisal is *Paid* only if its same-month bill is fully approved
+(including an explicit approved CMD step whenever detailed approval steps exist), no effective hold
+blocks it, and the Ledger cycle calculation reports no unpaid rent for that same site and month. A
+legacy bill with no detailed approval steps retains the existing overall-approved status rule.
+Otherwise, an incomplete or unmatchable approval/bill is *Hold*, while an approved, unheld appraisal
+without full payment is *Unpaid*. Future stored rows are *Upcoming* unless an active hold applies.
 
 **Outstanding payments** (endpoint `upcoming-bills`, `computeOutstanding`) — one unit per **site × billing-month
 cycle** (several face bills never repeat a site's amount), from the Rental Master / Ledger cycle calculation:

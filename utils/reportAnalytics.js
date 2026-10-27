@@ -697,8 +697,31 @@ const computeMedia = (docs, f) => {
 const isCmdApproved = (b) => {
   if (num(b.approvalStatus ?? b.status) !== 3) return false;
   const steps = (Array.isArray(b.approvalSteps) ? b.approvalSteps : []).filter(Boolean);
-  const cmd = steps.find((st) => num(st.role) === 3);
-  return cmd ? num(cmd.status) === 2 : true;
+  // Older bills have no detailed steps; their completed overall status is the
+  // legacy approval signal. Once steps exist, validate the full configured chain.
+  if (!steps.length) return true;
+  const approvalFlows = {
+    1: [1, 2, 3], // Rental Executive -> Rental Manager -> CMD
+    2: [2, 3], // Rental Manager -> CMD
+    3: [3], // CMD only
+  };
+  const roles = steps.map((step) => num(step.role));
+  if (roles.some((role) => ![1, 2, 3].includes(role)) || new Set(roles).size !== roles.length) return false;
+  const flow = b.approvalFlow === undefined || b.approvalFlow === null ? null : num(b.approvalFlow);
+  const configuredRoles = flow === null ? null : approvalFlows[flow];
+  if (flow !== null && !configuredRoles) return false;
+  const expectedRoles = configuredRoles || (
+    roles.includes(1) ? approvalFlows[1] : roles.includes(2) ? approvalFlows[2] : approvalFlows[3]
+  );
+  const byRole = new Map();
+  for (const step of steps) {
+    const role = num(step.role);
+    byRole.set(role, num(step.status));
+  }
+  return expectedRoles.every((role) => {
+    const status = byRole.get(role);
+    return role === 3 ? status === 2 : status === 2 || status === 3;
+  });
 };
 
 const appraisalBillIndex = (doc) => {
