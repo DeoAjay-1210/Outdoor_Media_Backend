@@ -29,6 +29,7 @@ const { notifyRentalDueChat, notifyOverdueRemarkChat, rentalDueChatKey } = requi
 const { collectRentalDueChanges, recordRentalDueChanges } = require("./RentalDueHistoryController");
 const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — rentalDueEntries[].draft
 const { effectiveAppraisalHold } = require("./AppraisalHoldController"); // ✅ NEW — hold shown on later bills too
+const { siteBillDate } = require("../../../utils/billDate"); // ✅ NEW — rentalDueEntries[].billDate
 const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
@@ -6263,6 +6264,7 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
             campaignStatus: entry.campaignStatus ?? null, // ✅ NEW — 0 / 1, null = not set
+            billDate: siteBillDate(item), // ✅ NEW — site bill date slot (5/10/15/20/25/30, default 5)
             totalSqFt: face.totalSqFt,
             // ✅ NEW — this entry's own cycle dates (from its dueDate)
             ...(entry.dueDate ? cycleBillDates(new Date(entry.dueDate)) : {}),

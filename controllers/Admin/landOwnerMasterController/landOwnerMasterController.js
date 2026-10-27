@@ -1676,6 +1676,14 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       mediaProjection,
     ).lean();
 
+    // ✅ NEW — billDate (5 / 10 / 15 / 20 / 25 / 30) also filters the SITE LIST:
+    // only sites with that bill date are listed, together with pendingSite /
+    // approvalSite / overDue / the other filters (AND). Not sent → all sites.
+    const listBillDateFilter = parseBillDateFilter(req.body?.billDate);
+    if (listBillDateFilter.length) {
+      relatedMediaDocs = relatedMediaDocs.filter((m) => listBillDateFilter.includes(siteBillDate(m)));
+    }
+
     // roleType does NOT reduce landowners or sites by itself; it changes the header
     // summary totals AND the approvalSite / pendingSite / overDue filters (role rule).
 
@@ -3628,11 +3636,35 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         // ✅ NEW — roleType: dueThisMonth = this month's bills waiting on that role
         dueThisMonthByRole: true,
         ...(billDateFilter.length
-          ? { overdueFrom: (m) => billDateInMonth(statsYear, statsMonth, siteBillDate(m)) }
+          ? {
+              // ✅ FIXED — never before the bill's OWN due date: billDate slot 15 but
+              // bill due 27-Oct → overdue only from 28-Oct (the later of the two)
+              overdueFrom: (m, entry) => {
+                const slotDate = billDateInMonth(statsYear, statsMonth, siteBillDate(m));
+                const dueDate = entry?.dueDate ? new Date(entry.dueDate) : null;
+                return dueDate && !Number.isNaN(dueDate.getTime()) && dueDate > slotDate ? dueDate : slotDate;
+              },
+            }
           : {}),
       },
     );
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
+    // ✅ NEW — dueThisMonth is NOT filtered by billDate: with a billDate filter
+    // it comes from all sites (same options, no bill-date overdue rule);
+    // without the filter it is the same stats object as before
+    const dueThisMonthStats = billDateFilter.length
+      ? computeRentalDueStats(summaryDocs, {
+          year: statsYear,
+          month: statsMonth,
+          targetRole,
+          trackLandOwners: true,
+          pendingAtRoleOnly: true,
+          singleBillAsSite: true,
+          overdueByRole: true,
+          dueThisMonthByRole: true,
+        })
+      : rentalDueStats;
+    const dueThisMonthOwners = (dueThisMonthStats.landOwners || {}).dueThisMonth || [];
     const approvedCount = rentalDueStats.approvedCount;
     const approvedAmountTotal = rentalDueStats.approvedAmountTotal;
     const pendingCount = rentalDueStats.pendingCount;
@@ -3778,10 +3810,11 @@ const cityMatchQuery = city
             outstandingMonthYear,
         ),
         // ✅ NEW: Rental Due Stats
+        // ✅ CHANGED — not filtered by billDate (see dueThisMonthStats)
         dueThisMonth: {
-          siteCount: rentalDueStats.dueThisMonthCount,
-          amount: Math.round(rentalDueStats.dueThisMonthAmount),
-          landOwnerCount: ownerStats.dueThisMonth.length, // ✅ NEW
+          siteCount: dueThisMonthStats.dueThisMonthCount,
+          amount: Math.round(dueThisMonthStats.dueThisMonthAmount),
+          landOwnerCount: dueThisMonthOwners.length, // ✅ NEW
         },
         overDue: {
           siteCount: overdueSiteCount,
