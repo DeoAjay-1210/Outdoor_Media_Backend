@@ -2,7 +2,7 @@
 // RENTAL DUE — SAVE AS DRAFT
 // POST /admin/rental-due-save-draft   (multipart/form-data, same keys as
 // /admin/rental-due-save)
-//   single: mediaId, rentalDueId, campaignName, reason, withGst,
+//   single: mediaId, rentalDueId, campaignName, campaignStatus (0 / 1), reason, withGst,
 //           gstApplicableFlag, pastgstApplicableFlag, proofOfCampaign (file),
 //           invoice (file)
 //   batch : entries[i][...] (+ files entries[i][proofOfCampaign] / [invoice])
@@ -69,11 +69,17 @@ async function saveOneDraft({ item, proofOfCampaign, invoice, user }) {
     return fail(400, "This bill is already fully approved — draft not allowed");
   }
 
+  // ✅ NEW — campaignStatus: only 0 or 1 (not sent / "" → the draft's value is kept)
+  if (hasValue(item.campaignStatus) && ![0, 1].includes(Number(item.campaignStatus))) {
+    return fail(400, "campaignStatus must be 0 or 1");
+  }
+
   const prev = entry.draft && Number(entry.draft.isDraft) === 1 ? entry.draft : {};
   const num = (v, fallback) => (hasValue(v) && !Number.isNaN(Number(v)) ? Number(v) : fallback ?? null);
   const draft = {
     isDraft: 1,
     campaignName: hasValue(item.campaignName) ? String(item.campaignName).trim() : prev.campaignName || "",
+    campaignStatus: num(item.campaignStatus, prev.campaignStatus), // ✅ NEW
     reason: hasValue(item.reason) ? String(item.reason).trim() : prev.reason || "",
     withGst: num(item.withGst, prev.withGst),
     gstApplicableFlag: num(item.gstApplicableFlag, prev.gstApplicableFlag),
@@ -168,6 +174,7 @@ function formatDraft(draft) {
   return {
     isDraft: 1,
     campaignName: draft.campaignName || "",
+    campaignStatus: draft.campaignStatus ?? null, // ✅ NEW
     reason: draft.reason || "",
     withGst: draft.withGst ?? null,
     gstApplicableFlag: draft.gstApplicableFlag ?? null,
