@@ -793,14 +793,15 @@ const applyIncomingBankAccounts = async (landOwner, list, session) => {
       if (file) account[field] = file; // not sent → keep the existing file
     });
 
-    if (!cleanStr(account.accountNumber)) {
-      throw badRequest(`bankAccounts[${idx}]: accountNumber is required`);
+    // ✅ CHANGED — accountNumber is optional (no "accountNumber is required").
+    // The duplicate check needs a number, so it runs only when one is sent.
+    if (cleanStr(account.accountNumber)) {
+      const key = bankKey(account.accountNumber, account.ifsc);
+      if (seenKeys.has(key)) {
+        throw badRequest(`Bank account ${account.accountNumber} is added more than once`);
+      }
+      seenKeys.add(key);
     }
-    const key = bankKey(account.accountNumber, account.ifsc);
-    if (seenKeys.has(key)) {
-      throw badRequest(`Bank account ${account.accountNumber} is added more than once`);
-    }
-    seenKeys.add(key);
 
     account.isPrimary =
       Number(primarySent ? item.isPrimary : account.isPrimary) === 1 ? 1 : 0;
@@ -2608,8 +2609,8 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
             isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
             hasCmdApprovalSite, // ✅ NEW
-            // ✅ NEW — with roleType: only when this month's bill is waiting on that role
-            hasDueThisMonthSite: roleFaceFlags ? hasDueThisMonthSite && !!roleFlags?.pending : hasDueThisMonthSite,
+            // ✅ CHANGED — every site with a bill this month (any roleType)
+            hasDueThisMonthSite,
             hasCurrentGstCannotHoldSite, // ✅ NEW
             hasPastGstCannotHoldSite, // ✅ NEW
           },
@@ -2828,11 +2829,10 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
         let shouldInclude = false;
         if (includeDueThisMonth) {
-          // ✅ NEW — with roleType: only this month's bills waiting on that role
-          const dueWaitingOnRole =
-            !targetRole ||
-            (roleStatus(due, targetRole, { pendingAtRoleOnly: true }).isOpen && !!site.rentalStatus?.hasPendingSite);
-          if (isCurrent && dueWaitingOnRole) {
+          // ✅ CHANGED — dueThisMonth lists EVERY bill of this month (any roleType),
+          // same as its header count; pendingSite / approvalSite / overDue (role
+          // based) narrow it when sent together
+          if (isCurrent) {
             if (hasOtherFilters) {
               shouldInclude = matchesOtherFilters;
             } else {
@@ -3649,21 +3649,21 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       },
     );
     const ownerStats = rentalDueStats.landOwners || { dueThisMonth: [], approved: [], pending: [], overdue: [] }; // ✅ NEW
-    // ✅ NEW — dueThisMonth is NOT filtered by billDate: with a billDate filter
-    // it comes from all sites (same options, no bill-date overdue rule);
-    // without the filter it is the same stats object as before
-    const dueThisMonthStats = billDateFilter.length
-      ? computeRentalDueStats(summaryDocs, {
-          year: statsYear,
-          month: statsMonth,
-          targetRole,
-          trackLandOwners: true,
-          pendingAtRoleOnly: true,
-          singleBillAsSite: true,
-          overdueByRole: true,
-          dueThisMonthByRole: true,
-        })
-      : rentalDueStats;
+    // ✅ CHANGED — the dueThisMonth HEADER is the same whatever the filters:
+    // all sites (not by billDate) and every bill of the month (not by roleType).
+    // The dueThisMonth SITE LIST filter still follows roleType.
+    // No billDate and no roleType → the same stats object as before.
+    const dueThisMonthStats =
+      billDateFilter.length || targetRole
+        ? computeRentalDueStats(summaryDocs, {
+            year: statsYear,
+            month: statsMonth,
+            targetRole,
+            trackLandOwners: true,
+            pendingAtRoleOnly: true,
+            singleBillAsSite: true,
+          })
+        : rentalDueStats;
     const dueThisMonthOwners = (dueThisMonthStats.landOwners || {}).dueThisMonth || [];
     const approvedCount = rentalDueStats.approvedCount;
     const approvedAmountTotal = rentalDueStats.approvedAmountTotal;
