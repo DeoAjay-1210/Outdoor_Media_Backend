@@ -14,9 +14,33 @@ const monthKey = (input) => {
   return d.getUTCFullYear() * 12 + d.getUTCMonth();
 };
 
+// ✅ NEW — a MANUAL rent change (media onboarding totalRentalAmount, e.g. 50k →
+// 55k in October) takes effect from the month it was made: a due month BEFORE
+// that change keeps the rent in force before it (August / September stay 50k,
+// October onwards 55k). Returns that earlier rent, or 0 when no manual change
+// was made after the due month. Not counted as a manual change: the first
+// history row (onboarding amount) and the system rows (appraisal applied /
+// appraisal hold release).
+function rentBeforeLaterManualChange(media, dueKey) {
+  const rows = (media?.rentalPayment?.rentalAmountHistory || [])
+    .filter((h) => h && Number(h.amount || 0) > 0 && h.updatedAt && monthKey(h.updatedAt) !== null)
+    .slice()
+    .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
+  for (let i = 1; i < rows.length; i++) {
+    if (/Appraisal/i.test(String(rows[i].updatedBy || ""))) continue;
+    if (monthKey(rows[i].updatedAt) > dueKey) return Number(rows[i - 1].amount) || 0;
+  }
+  return 0;
+}
+
 function getRentForDueDate(media, dueDate) {
-  const currentRent = Number(media?.rentalPayment?.totalRentalAmount || 0);
+  let currentRent = Number(media?.rentalPayment?.totalRentalAmount || 0);
   const dueKey = dueDate ? monthKey(dueDate) : null;
+  // ✅ NEW — rent changed manually AFTER this month → this month keeps the old rent
+  if (dueKey !== null) {
+    const rentBefore = rentBeforeLaterManualChange(media, dueKey);
+    if (rentBefore > 0) currentRent = rentBefore;
+  }
   const history = media?.appraisal?.history;
   if (dueKey === null || !Array.isArray(history) || history.length === 0) {
     return currentRent;
