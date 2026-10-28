@@ -2,6 +2,9 @@ const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+// ✅ NEW — rent revision arrears (paid via ledger-save, shown in ledger-list)
+const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema");
+const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals } = require("../../../utils/rentRevisionArrears");
 const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
   getRentForDueDate,
@@ -1201,6 +1204,87 @@ async function syncWithOverDueHistory(mediaId, rentalDueId, entryDate, withGst, 
   }
 }
 
+// ✅ NEW — rentalDueId of a rent revision ARREARS bill → that payment is saved on
+// the arrears bill only (media.arrearsDue[]). Returns null when rentalDueId is not
+// an arrears bill (normal ledger flow continues unchanged).
+async function payArrearsBillIfArrears(req, res) {
+  const { mediaId, entryType, landOwnerId, paymentMode, utrNumber, date } = req.body || {};
+  // arrears GST row in gstBalanceHistory has _id = arrears bill id → either id works
+  const rentalDueId = req.body?.rentalDueId || req.body?.gstBalanceHistoryId;
+  if (!rentalDueId || !mongoose.Types.ObjectId.isValid(String(rentalDueId))) return null;
+  if (!mediaId || !mongoose.Types.ObjectId.isValid(String(mediaId))) return null;
+  const billId = new mongoose.Types.ObjectId(String(rentalDueId));
+  const media = await Media.findOne({ _id: mediaId, "arrearsDue._id": billId }).select("arrearsDue rentalDue._id rentalDue.withGst").lean();
+  if (!media) return null;
+  const bill = (media.arrearsDue || []).find((b) => String(b._id) === String(billId));
+  if (!bill) return null;
+  if (Number(bill.approvalStatus) !== 3) {
+    return errorResponse(res, "Rent revision not approved yet — arrears cannot be paid", null, 400);
+  }
+  let paid;
+  try {
+    paid = applyArrearsPayment(bill, {
+      entryType: entryType === "gst" ? "gst" : "rental",
+      landOwnerId,
+      paymentMode,
+      utrNumber,
+      date: date ? combineDateWithCurrentTime(date) : nowIST(),
+      userName: req.user?.userName || "",
+      parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
+    });
+  } catch (e) {
+    if (e && e.statusCode) return errorResponse(res, e.message, null, e.statusCode);
+    throw e;
+  }
+  await Media.updateOne(
+    { _id: mediaId },
+    { $set: { "arrearsDue.$[a]": paid.bill } },
+    { arrayFilters: [{ "a._id": billId }], strict: false },
+  );
+  const block = arrearsBlock([paid.bill]);
+  const b0 = block.bills[0];
+  return successResponse(
+    res,
+    "Ledger entry created successfully",
+    {
+      mediaId,
+      ledgerEntries: paid.saved.map((p) => ({
+        _id: p._id,
+        rentalDueId: paid.bill._id,
+        billType: "arrears",
+        label: p.type === "gst" ? `${paid.bill.label} GST` : paid.bill.label,
+        month: paid.bill.dueMonth,
+        landOwnerId: p.landOwnerId || null,
+        landOwnerName: p.landOwnerName || "",
+        amount: p.amount,
+        rentAmount: p.rentAmount,
+        tdsAmount: p.tdsAmount,
+        paymentMode: p.paymentMode,
+        utrNumber: p.utrNumber,
+        withGst: Number(paid.bill.withGst || 0),
+        gstAmount: Number(p.gstAmount || 0),
+        date: p.date,
+        createdBy: p.createdBy,
+      })),
+      tdsRecords: paid.saved
+        .filter((p) => Number(p.tdsAmount || 0) > 0)
+        .map((p) => ({ rentalDueId: paid.bill._id, month: paid.bill.dueMonth, billType: "arrears", landOwnerId: p.landOwnerId, tdsAmount: p.tdsAmount })),
+      arrears: {
+        rentalDueId: b0.rentalDueId,
+        dueMonth: b0.dueMonth,
+        rentAmount: b0.rentAmount,
+        rentPaid: b0.rentPaid,
+        rentPending: Math.max(0, b0.rentAmount - b0.rentPaid),
+        gstAmount: b0.gstAmount,
+        gstPaid: b0.gstPaid,
+        gstPending: Math.max(0, b0.gstAmount - b0.gstPaid),
+        status: b0.status,
+      },
+    },
+    201,
+  );
+}
+
 exports.createLedgerEntry = async (req, res) => {
   try {
     // ✅ NEW — handle array of batches
@@ -1212,6 +1296,9 @@ exports.createLedgerEntry = async (req, res) => {
       return runBulkLedgerEntry(req, res);
     }
 
+    // ✅ NEW — rent revision arrears bill → own payment flow
+    const arrearsHandled = await payArrearsBillIfArrears(req, res);
+    if (arrearsHandled) return arrearsHandled;
     const { mediaId } = req.body;
     let { entries, outstandingEntries } = req.body;
     const {
@@ -4561,6 +4648,49 @@ const cityFilter = [
     ),
   ),
 ].filter(Boolean).sort();
+    // ✅ NEW — rent revision arrears: rows / amounts added per site, totals added
+    // to the overall figures (sites without arrears unchanged, arrears: null)
+    {
+      const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
+      const [pageArrearsDocs, lastRevisions, allArrearsDocs] = await Promise.all([
+        Media.find({ _id: { $in: pageIds }, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue._id rentalDue.withGst").lean(),
+        RentRevision.find({ mediaId: { $in: pageIds }, status: "Approved" }).sort({ approvedAt: -1 }).lean(),
+        Media.find({ "mediaDetails.status": 1, "arrearsDue.0": { $exists: true } }).select("arrearsDue").lean(),
+      ]);
+      const arrearsById = new Map(pageArrearsDocs.map((d) => [String(d._id), d.arrearsDue || []]));
+      const parentWithGstById = new Map();
+      pageArrearsDocs.forEach((d) => (d.rentalDue || []).forEach((r) => parentWithGstById.set(String(r._id), r.withGst)));
+      const revisionById = new Map();
+      lastRevisions.forEach((r) => {
+        if (!revisionById.has(String(r.mediaId))) revisionById.set(String(r.mediaId), r);
+      });
+      finalMediaListData = finalMediaListData.map((m) => {
+        const id = String(m._id || m.mediaId);
+        return decorateLedgerItem(m, arrearsById.get(id) || [], revisionById.get(id) || null, parentWithGstById);
+      });
+
+      const t = overallArrearsTotals(allArrearsDocs);
+      overallOutstandingTotals.overallArrearsDue = t.pending;
+      overallOutstandingTotals.overallArrearsGSTDue = t.gstPending;
+      overallOutstandingTotals.overallTotalOutstandingAmount += t.pending + t.gstPending;
+      if (overallLedgerSummary && typeof overallLedgerSummary === "object") {
+        const pendingTotal = t.pending + t.gstPending;
+        if (typeof overallLedgerSummary.totalLedgerPendingAmount === "number") overallLedgerSummary.totalLedgerPendingAmount += pendingTotal;
+        if (typeof overallLedgerSummary.overallDueMonthAmount === "number") overallLedgerSummary.overallDueMonthAmount += t.amount + t.gst;
+        if (typeof overallLedgerSummary.totalOutstanding === "number") overallLedgerSummary.totalOutstanding += pendingTotal;
+        Object.assign(overallLedgerSummary, {
+          arrearsAmount: t.amount,
+          arrearsAmountSites: t.amountSites,
+          arrearsPaid: t.paid,
+          arrearsPaidSites: t.paidSites,
+          arrearsPending: t.pending,
+          arrearsPendingSites: t.pendingSites,
+          arrearsGstPending: t.gstPending,
+          arrearsGstPendingSites: t.gstPendingSites,
+        });
+      }
+    }
+
     return successResponse(
       res,
       "Media list fetched successfully",
@@ -4706,9 +4836,29 @@ exports.getLedgerHistory = async (req, res) => {
 
     const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, "mediaDetails.status": 1 })
       .select(
-        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger appraisal",
+        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger appraisal arrearsDue",
       )
       .lean();
+
+    // ✅ NEW — rent revision arrears: last approved revision per site, and the
+    // requested year / month range (arrears rows outside it are not added)
+    const historyRevisionById = new Map();
+    {
+      const arrearsMediaIds = mediaDocs.filter((m) => (m.arrearsDue || []).length).map((m) => m._id);
+      if (arrearsMediaIds.length) {
+        const revs = await RentRevision.find({ mediaId: { $in: arrearsMediaIds }, status: "Approved" }).sort({ approvedAt: -1 }).lean();
+        revs.forEach((r) => {
+          if (!historyRevisionById.has(String(r.mediaId))) historyRevisionById.set(String(r.mediaId), r);
+        });
+      }
+    }
+    const arrearsInRange = (d) => {
+      const k = d.getUTCFullYear() * 12 + d.getUTCMonth();
+      if (year && d.getUTCFullYear() !== Number(year)) return false;
+      if (rangeStart && k < rangeStart.year * 12 + (rangeStart.month - 1)) return false;
+      if (rangeEnd && k > rangeEnd.year * 12 + (rangeEnd.month - 1)) return false;
+      return true;
+    };
 
     const foundIds = new Set(mediaDocs.map((m) => String(m._id)));
     const notFoundIds = validMediaIds.filter((id) => !foundIds.has(String(id)));
@@ -4750,8 +4900,18 @@ exports.getLedgerHistory = async (req, res) => {
         }
       });
 
+      // ✅ NEW — arrears rows / GST / outstanding added (sites without arrears: arrears null)
+      const parentWithGstById = new Map((media.rentalDue || []).map((r) => [String(r._id), r.withGst]));
+      const blockWithArrears = decorateLedgerHistoryBlock(
+        block,
+        media.arrearsDue || [],
+        historyRevisionById.get(String(media._id)) || null,
+        parentWithGstById,
+        arrearsInRange,
+      );
+
       mediaHistoryList.push({
-        ...block,
+        ...blockWithArrears,
         overDueRemarks: siteOverDueRemarks,
       });
     }
@@ -4784,6 +4944,10 @@ exports.getLedgerHistory = async (req, res) => {
         overallTotalOutstandingAmount: 0,
       },
     );
+
+    // ✅ NEW — rent revision arrears totals
+    summary.overallArrearsDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.arrearsDue || 0), 0);
+    summary.overallArrearsGSTDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.arrearsGSTDue || 0), 0);
 
     // ✅ NEW — same billGroups collapsing as listMediaByLedger, applied
     // across every media block's ledgerHistory months. Groups real

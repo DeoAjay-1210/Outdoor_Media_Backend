@@ -39,6 +39,10 @@ const rentalAmountHistorySchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 0 },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
+    // ✅ NEW — rent revision (POST /admin/rent-revision): the rent applies from this
+    // month (fromMonth), not from updatedAt. null = from updatedAt (as before).
+    effectiveFrom: { type: Date, default: null },
+    rentRevisionId: { type: mongoose.Schema.Types.ObjectId, default: null },
   },
   { _id: false },
 );
@@ -524,6 +528,10 @@ const MediaSchema = new mongoose.Schema(
         min: 0,
       },
       rentalAmountHistory: [rentalAmountHistorySchema],
+      // ✅ NEW — rent revision: months that were already CMD approved before the
+      // revision keep their old rent (the difference is a separate arrears bill).
+      // [{ dueMonth: "September 2026", rent: 20000, rentRevisionId }]
+      rentRevisionKeptMonths: { type: [mongoose.Schema.Types.Mixed], default: undefined },
       gstApplicable: {
         type: Number,
         enum: [0, 1],
@@ -1044,6 +1052,8 @@ const MediaSchema = new mongoose.Schema(
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],
+    // ✅ NEW — arrears bills from an approved rent revision (paid separately)
+    arrearsDue: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
   },

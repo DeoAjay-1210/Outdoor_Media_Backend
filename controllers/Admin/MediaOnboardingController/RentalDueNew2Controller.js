@@ -416,6 +416,7 @@ async function generateMissedEntriesForMedia(media, userName) {
   return { generatedEntries };
 }
 exports.generateMissedEntriesForMedia = generateMissedEntriesForMedia;
+exports.sendRentalDueApprovalMail = sendRentalDueApprovalMail; // ✅ NEW — rent revision arrears mail
 
 function getAgreementVerificationStatus(item) {
   const history = item.agreementDocVerification || [];
@@ -1010,7 +1011,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
 }
 
 
- async function sendRentalDueApprovalMail(media, entry, batchSites = null) {
+ async function sendRentalDueApprovalMail(media, entry, batchSites = null, extraData = null) {
     try {
       const toMail = process.env.T0_EMail;
       const ccMail = process.env.CC_EMail;
@@ -1675,6 +1676,9 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         data.landOwners = rootLandOwners;
         data.sites = sitesPayload;
       }
+
+      // ✅ NEW — extra blocks added to data (e.g. rentRevision for an arrears bill mail)
+      if (extraData && typeof extraData === "object") Object.assign(data, extraData);
 
       const mailPayload = {
         mailtype: "cmdapproval",

@@ -21,14 +21,32 @@ const monthKey = (input) => {
 // was made after the due month. Not counted as a manual change: the first
 // history row (onboarding amount) and the system rows (appraisal applied /
 // appraisal hold release).
+// ✅ NEW — rent revision row: applies from its fromMonth (effectiveFrom)
+const rowEffectiveDate = (h) => h.effectiveFrom || h.updatedAt;
+
 function rentBeforeLaterManualChange(media, dueKey) {
   const rows = (media?.rentalPayment?.rentalAmountHistory || [])
-    .filter((h) => h && Number(h.amount || 0) > 0 && h.updatedAt && monthKey(h.updatedAt) !== null)
+    .filter((h) => h && Number(h.amount || 0) > 0 && h.updatedAt && monthKey(rowEffectiveDate(h)) !== null)
     .slice()
     .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
   for (let i = 1; i < rows.length; i++) {
     if (/Appraisal/i.test(String(rows[i].updatedBy || ""))) continue;
-    if (monthKey(rows[i].updatedAt) > dueKey) return Number(rows[i - 1].amount) || 0;
+    if (monthKey(rowEffectiveDate(rows[i])) > dueKey) return Number(rows[i - 1].amount) || 0;
+  }
+  return 0;
+}
+
+const MONTH_LABELS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// ✅ NEW — rent revision: a month already CMD approved before the revision keeps
+// the rent it was approved at (its difference is a separate arrears bill).
+// Latest revision wins. Returns 0 when the month was not kept.
+function rentRevisionKeptRent(media, dueKey) {
+  const kept = media?.rentalPayment?.rentRevisionKeptMonths;
+  if (!Array.isArray(kept) || kept.length === 0) return 0;
+  const label = `${MONTH_LABELS[dueKey % 12]} ${Math.floor(dueKey / 12)}`;
+  for (let i = kept.length - 1; i >= 0; i--) {
+    if (kept[i] && kept[i].dueMonth === label && Number(kept[i].rent) > 0) return Number(kept[i].rent);
   }
   return 0;
 }
@@ -36,6 +54,11 @@ function rentBeforeLaterManualChange(media, dueKey) {
 function getRentForDueDate(media, dueDate) {
   let currentRent = Number(media?.rentalPayment?.totalRentalAmount || 0);
   const dueKey = dueDate ? monthKey(dueDate) : null;
+  // ✅ NEW — month kept at its approved rent by a rent revision
+  if (dueKey !== null) {
+    const keptRent = rentRevisionKeptRent(media, dueKey);
+    if (keptRent > 0) return keptRent;
+  }
   // ✅ NEW — rent changed manually AFTER this month → this month keeps the old rent
   if (dueKey !== null) {
     const rentBefore = rentBeforeLaterManualChange(media, dueKey);
