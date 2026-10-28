@@ -314,3 +314,50 @@ test("upcoming stays upcoming and the categories reconcile with CMD rules in pla
   for (const b of r.buckets) assert.equal(b.total.amount, b.given.amount + b.unpaid.amount + b.held.amount + b.upcoming.amount);
   assert.equal(r.summary.total.sites, 1);
 });
+
+// ── combined (single-bill) sites: one bill stored once per face ─────────────
+const combined = (id, history, bills, extra = {}) => ({
+  _id: id,
+  mediaDetails: ["a", "b"].map((s) => ({ _id: `${id}-${s}`, mediaType: "Hoarding", city: "Chennai", mediaName: `Face ${s}`, mediaCode: `M-${id}-${s}`, status: 1, siteBillMode: 1 })),
+  appraisal: { applicable: 1, appraisalHold: 0, history },
+  rentalDue: bills,
+  ...extra,
+});
+const faceBill = (id, face, approvalStatus, stepStatuses, extra = {}) => bill(2026, 9, approvalStatus, { mediaDetailId: `${id}-${face}`, approvalSteps: steps(...stepStatuses), updatedAt: D(2026, 9, approvalStatus === 3 ? 14 : 10), ...extra });
+const OCT = (docs) => RA.computeAppraisal(docs, f({ details: "true", startDate: "2026-10-01", endDate: "2026-10-31" }), D(2026, 9, 27), { payments: null });
+
+test("combined site, bill approved on one face row while the other face row lags a step: the one bill is approved, not Hold (Pending Approval)", () => {
+  const docs = [combined("c1", [row(D(2026, 9), 3300)], [faceBill("c1", "a", 3, [2, 2, 2]), faceBill("c1", "b", 2, [2, 1, 1])])];
+  const r = OCT(docs);
+  assert.deepEqual([r.summary.held.amount, r.summary.unpaid.amount, r.records.length], [0, 3300, 1]);
+  assert.equal(r.records[0].status, "approvedNoPaymentData");
+  assert.equal(r.records[0].billStatus, "Approved");
+});
+
+test("combined site genuinely on CMD hold (hold on one face row, both approved) stays Hold; a hold on either row counts", () => {
+  for (const heldFace of ["a", "b"]) {
+    const bills = ["a", "b"].map((s) => faceBill("c2", s, 3, [2, 2, 2], s === heldFace ? { appraisalHold: { hold: 1, heldAt: D(2026, 9, 26) } } : {}));
+    const r = OCT([combined("c2", [row(D(2026, 9), 12000)], bills, { appraisal: { applicable: 0, appraisalHold: 1, appraisalHoldDate: D(2026, 9, 26), history: [row(D(2026, 9), 12000)] } })]);
+    assert.deepEqual([r.summary.held.amount, r.summary.unpaid.amount], [12000, 0], `hold on face ${heldFace}`);
+    assert.equal(r.records[0].status, "onHold");
+  }
+});
+
+test("combined site where no face row is approved yet is still pending approval; separate-bill faces still each need approval", () => {
+  const pend = OCT([combined("c3", [row(D(2026, 9), 500)], [faceBill("c3", "a", 2, [2, 1, 1]), faceBill("c3", "b", 1, [1, 1, 1])])]);
+  assert.equal(pend.records[0].status, "pendingApproval");
+  const sep = combined("c4", [row(D(2026, 9), 500)], [faceBill("c4", "a", 3, [2, 2, 2]), faceBill("c4", "b", 2, [2, 1, 1])]);
+  sep.mediaDetails.forEach((m) => { m.siteBillMode = 2; });
+  assert.equal(OCT([sep]).records[0].status, "pendingApproval", "separate bills: one unapproved bill keeps the month pending");
+});
+
+test("combined-site classification keeps summary, buckets and rows consistent", () => {
+  const docs = [
+    combined("c1", [row(D(2026, 9), 3300)], [faceBill("c1", "a", 3, [2, 2, 2]), faceBill("c1", "b", 2, [2, 1, 1])]),
+    combined("c2", [row(D(2026, 9), 12000)], ["a", "b"].map((s) => faceBill("c2", s, 3, [2, 2, 2], s === "a" ? { appraisalHold: { hold: 1, heldAt: D(2026, 9, 26) } } : {}))),
+  ];
+  const r = OCT(docs);
+  assert.deepEqual(sum(r), { paid: 0, unpaid: 3300, held: 12000, upcoming: 0, total: 15300 });
+  assert.equal(r.records.reduce((s, x) => s + x.amount, 0), r.summary.total.amount);
+  assert.deepEqual(r.records.map((x) => [x.siteId, x.kind]).sort(), [["c1", "unpaid"], ["c2", "held"]]);
+});

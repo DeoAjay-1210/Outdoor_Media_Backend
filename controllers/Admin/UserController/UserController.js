@@ -37,6 +37,18 @@ const REGISTER_LOGIN_USER_TYPES = [1, 2, 3, 4, 5];
 const REGISTER_LOGIN_USER_TYPE_MESSAGE =
   "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD), 4 (Other), 5 (Accounts)";
 
+const logLoginLookup = (phone, userType, matched) => {
+  if (process.env.NODE_ENV === "production") return;
+  console.info("[auth.login.lookup]", {
+    database: User.db.name || null,
+    collection: User.collection.collectionName,
+    databaseConnected: User.db.readyState === 1,
+    userType,
+    phoneMasked: `***${phone.slice(-2)}`,
+    matched,
+  });
+};
+
 // ============================================================
 // REGISTER USER (DIRECT - NO OTP/SMS)
 // ============================================================
@@ -171,6 +183,7 @@ const loginUser = async (req, res) => {
     const typeNum = Number(userType);
 
     const user = await User.findOne({ userPhone: normalizedPhone, userType: typeNum }).select("+pin");
+    logLoginLookup(normalizedPhone, typeNum, Boolean(user));
     if (!user) return errorResponse(res, "User not found", null, 404);
 
     const inputPin = String(pin).trim();

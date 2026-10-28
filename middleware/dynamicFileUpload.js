@@ -60,7 +60,9 @@ const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
 // ─────────────────────────────────────────────────────────────
 // FACTORY — createUploader("folderName")
 // ─────────────────────────────────────────────────────────────
-const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fieldFolderMap
+// ✅ NEW — options.maxFileSizeMB: per-uploader file size limit (default 3 MB, as before)
+const createUploader = (folderName, fieldFolderMap = {}, options = {}) => {  // ✅ added fieldFolderMap
+  const maxFileSizeMB = Number(options.maxFileSizeMB) > 0 ? Number(options.maxFileSizeMB) : 3;
 
   const SPACES_KEY_PREFIX = `${OUTDOORMEDIA_FOLDER}/${folderName}`;
   const LOCAL_FOLDER_PATH = path.join(process.cwd(), LOCAL_UPLOAD_PATH, folderName);
@@ -157,8 +159,21 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
   const upload = multer({
     storage: STORAGE_TYPE === "space" ? spacesStorageEngine : localStorageEngine,
     fileFilter,
-    limits: { fileSize: 3 * 1024 * 1024 }, // 3 MB limit
+    limits: { fileSize: Math.floor(maxFileSizeMB * 1024 * 1024) }, // 3 MB limit unless options.maxFileSizeMB
   });
+
+  // ✅ NEW — tells the global error handler this uploader's limit (for the message)
+  const withLimit = (mw) => (req, res, next) => {
+    req.uploadLimitMB = maxFileSizeMB;
+    return mw(req, res, next);
+  };
+  const uploadWithLimit = {
+    any: () => withLimit(upload.any()),
+    fields: (f) => withLimit(upload.fields(f)),
+    single: (n) => withLimit(upload.single(n)),
+    array: (n, c) => withLimit(upload.array(n, c)),
+    none: () => withLimit(upload.none()),
+  };
 
   // ── Get file URL ─────────────────────────────────────────
   const getFileUrl = (file) => {
@@ -204,7 +219,8 @@ const createUploader = (folderName, fieldFolderMap = {}) => {  // ✅ added fiel
   };
 
   return {
-    upload,         // multer middleware
+    upload: uploadWithLimit, // multer middleware (any / fields / single / array / none)
+    maxFileSizeMB,
     getFileUrl,     // get URL of file
     getFileBuffer,  // get buffer of file
     processFile,    // convert file → schema object

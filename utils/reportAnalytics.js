@@ -210,7 +210,7 @@ const paymentCycleOf = (doc) => {
   return PAYMENT_CYCLE_LABELS[f] || null;
 };
 
-const detailBase = (doc) => ({ siteId: idOf(doc._id), siteName: siteName(doc), city: cityOf(doc), paymentCycle: paymentCycleOf(doc), mediaCodes: mediaCodesOf(doc), landlords: landlordsOf(doc) });
+const detailBase = (doc) => ({ siteId: idOf(doc._id), siteCode: text(doc.siteCode) || null, siteName: siteName(doc), city: cityOf(doc), paymentCycle: paymentCycleOf(doc), mediaCodes: mediaCodesOf(doc), landlords: landlordsOf(doc) });
 const byDateThenName = (a, z) => a.date.localeCompare(z.date) || a.siteName.localeCompare(z.siteName);
 
 const siteName = (doc) => {
@@ -291,6 +291,7 @@ const computeFilterOptions = (docs, now = nowIST()) => {
  * history row, so history rows are de-duplicated (latest wins).
  */
 const computePayments = (docs, f) => {
+  const records = f.details ? [] : null;
   const buckets = buildBuckets(f, () => ({ total: 0, cash: 0, online: 0, gstPayments: 0, entries: 0, sites: new Set() }));
   const excl = newExclusions();
   const meta = { entriesWithoutAmount: 0, entriesWithoutDate: 0, duplicatesIgnored: 0 };
@@ -326,7 +327,7 @@ const computePayments = (docs, f) => {
         }
       }
     }
-    for (const e of seen.values()) {
+    for (const [paymentKey, e] of seen) {
       const d = toDate(e.date);
       if (!d) { meta.entriesWithoutDate += 1; continue; }
       if (!inRange(d, f)) continue;
@@ -340,6 +341,13 @@ const computePayments = (docs, f) => {
       b.sites.add(idOf(doc._id));
       if (e.paymentMode === "Cash") b.cash += amount; else b.online += amount;
       if (num(e.withGst) === 1) b.gstPayments += amount;
+      if (records) records.push({
+        ...detailBase(doc),
+        recordId: idOf(e._id) || `${idOf(doc._id)}|${paymentKey}`,
+        ownerId: idOf(e.landOwnerId) || null, billId: idOf(e.rentalDueId) || null,
+        date: dayKeyOf(d), bucket: bucketKey(d, f.granularity), billMonth: text(e.month) || null,
+        mediaType: typeLabel(attr), paymentMode: e.paymentMode, withGst: num(e.withGst), amount: r2(amount),
+      });
       total += amount;
       entries += 1;
       if (e.paymentMode === "Cash") cash += amount; else online += amount;
@@ -357,6 +365,7 @@ const computePayments = (docs, f) => {
     filters: publicFilters(f),
     buckets: list,
     summary: { total: r2(total), cash: r2(cash), online: r2(online), gstPayments: r2(gstPayments), entries, sites: allSites.size, peakKey: peak ? peak.key : null },
+    ...(records ? { records: records.sort((a,b) => a.date.localeCompare(b.date) || a.recordId.localeCompare(b.recordId)) } : {}),
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
   };
 };
@@ -416,7 +425,7 @@ const isDirectGstCycle = (doc, cycleDate, lib) => {
   return num(withGst) === 2;
 };
 
-const computePeriodDue = (docs, f, lib, now = nowIST()) => {
+const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
   const excl = newExclusions();
   const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0 };
   const zero = () => ({ toBePaid: 0, unpaid: 0 });
@@ -436,7 +445,7 @@ const computePeriodDue = (docs, f, lib, now = nowIST()) => {
     if (!rows) return;
     const month = monthKeyOf(d);
     const key = `${sid}|${month}`;
-    const r = rows.get(key) || { siteId: sid, paymentCycle: paymentCycleOf(curDoc), mediaCodes: mediaCodesOf(curDoc), landlords: landlordsOf(curDoc), siteName: siteName(curDoc), city: cityOf(curDoc), month, rentDue: 0, gstDue: 0, rentUnpaid: 0, gstUnpaid: 0, ...Object.fromEntries(COMPONENTS.map((c) => [c, 0])) };
+    const r = rows.get(key) || { siteId: sid, siteCode: text(curDoc.siteCode) || null, paymentCycle: paymentCycleOf(curDoc), mediaCodes: mediaCodesOf(curDoc), landlords: landlordsOf(curDoc), siteName: siteName(curDoc), city: cityOf(curDoc), month, rentDue: 0, gstDue: 0, rentUnpaid: 0, gstUnpaid: 0, ...Object.fromEntries(COMPONENTS.map((c) => [c, 0])) };
     r.rentDue += rentDue;
     r.gstDue += gstDue;
     r.rentUnpaid += rentUnpaid;
@@ -479,6 +488,7 @@ const computePeriodDue = (docs, f, lib, now = nowIST()) => {
         const d = parseMonthLabel(o.dueMonth);
         if (!d) { meta.openingRowsWithoutDate += 1; continue; }
         if (!inPeriod(d)) continue;
+        onEntry?.({ kind: "opening", doc, date: d, amount, hold, paid: isPaidRow(o), row: o });
         bucket.toBePaid += amount;
         (hold ? acc.hold : acc.rentDirect).toBePaid += amount;
         sites.add(sid);
@@ -509,6 +519,8 @@ const computePeriodDue = (docs, f, lib, now = nowIST()) => {
       if (rentTarget <= 0 && gstTarget <= 0) continue;
 
       const direct = isDirectGstCycle(doc, cycleDate, lib);
+
+      onEntry?.({ kind: "cycle", doc, date: cycleDate, summary: s, direct });
 
       acc.rentDirect.toBePaid += rentTarget + (direct ? gstTarget : 0);
       acc.hold.toBePaid += direct ? 0 : gstTarget;
@@ -643,7 +655,7 @@ const computeMedia = (docs, f) => {
       if (rows) {
         const code = fc && typeof fc.mediaCode === "string" ? fc.mediaCode.trim() : "";
         rows.push({
-          siteId: idOf(doc._id),
+          siteId: idOf(doc._id), siteCode: text(doc.siteCode) || null,
           siteName: (fc && (text(fc.mediaName) || code)) || siteName(doc),
           paymentCycle: paymentCycleOf(doc),
           mediaCodes: code ? [code] : [],
@@ -736,15 +748,21 @@ const appraisalBillIndex = (doc) => {
     const ownRel = toDate(b.appraisalHold && b.appraisalHold.releasedAt);
     return activeHolds.some((h) => toDate(h.dueDate) < d && !(ownRel && ownRel > (toDate(h.appraisalHold.heldAt) || 0)));
   };
+  // A combined (single-bill) site has ONE bill per month that is stored once per face; Rental Master shows every face at the stage of the
+  // furthest-along row (siteBillStatusesByMonth, the rule the Bills panel uses). A face row left one step behind is not a second bill awaiting
+  // approval. Approval therefore follows that row; a CMD hold on ANY row of the month still holds the appraisal.
+  const siteBill = siteBillStatusesByMonth(doc);
   for (const b of bills) {
     const d = toDate(b.dueDate);
     const k = monthKeyOf(d);
     const e = out.get(k) || { total: 0, approved: 0, held: 0, statuses: new Set(), pendingBill: null };
+    if (effectivelyHeld(b, d)) e.held += 1;
+    const lead = siteBill.get(k);
+    if (lead && lead !== b) { out.set(k, e); continue; }
     const st = num(b.approvalStatus ?? b.status);
     e.total += 1;
     if (isCmdApproved(b)) e.approved += 1;
     else if (!e.pendingBill) e.pendingBill = b;
-    if (effectivelyHeld(b, d)) e.held += 1;
     e.statuses.add(isCmdApproved(b) ? "Approved" : st === 3 ? "CMD approval pending" : BILL_STATUS[st] || "Unknown");
     out.set(k, e);
   }
@@ -1237,7 +1255,24 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
     if (!b) return;
     const as = remaining > 0 ? remainingAsOf(kind, approved) : null;
     if (rows && (paid > 0 || remaining > 0)) {
-      rows.push({ ...detailBase(curDoc), kind, remainingAs: as, approvalStatus: bill ? BILL_STATUS[num(bill.approvalStatus ?? bill.status)] || "Unknown" : null, approvalSteps: bill ? approvalStepsOf(bill) : [], bucket: monthKeyOf(d), date: dayKeyOf(d), billMonth: billMonth || `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`, paid: r2(paid), remaining: r2(remaining) });
+      const storedApprovalStatus = num(bill && (bill.approvalStatus ?? bill.status));
+      const approvalStatus = bill
+        ? !approved && storedApprovalStatus === 3
+          ? "Approval steps incomplete"
+          : BILL_STATUS[storedApprovalStatus] || "Unknown"
+        : null;
+      rows.push({
+        ...detailBase(curDoc),
+        kind,
+        remainingAs: as,
+        approvalStatus,
+        approvalSteps: bill ? approvalStepsOf(bill) : [],
+        bucket: monthKeyOf(d),
+        date: dayKeyOf(d),
+        billMonth: billMonth || `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`,
+        paid: r2(paid),
+        remaining: r2(remaining),
+      });
     }
     for (const [cat, amount] of [["paid", paid], ["remaining", remaining]]) {
       if (amount <= 0) continue;
@@ -1283,7 +1318,7 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
       if (num(sm.splitCurGstTotal) <= 0) continue;
       meta.cyclesCounted += 1;
       const bill = cycleBill(doc, cycleDate);
-      const approved = !!bill && num(bill.approvalStatus ?? bill.status) === 3;
+      const approved = !!bill && isCmdApproved(bill);
       add(sid, cycleDate, isDirectGstCycle(doc, cycleDate, lib) ? "direct" : "hold", num(sm.splitCurGstPaid), num(sm.splitCurGstRemaining), undefined, approved, bill);
     }
   }
@@ -1499,8 +1534,8 @@ const tdsOwnerIdentity = (doc) => {
  * Each bucket carries `deductions[]` — the exact rows behind its amount — so a
  * month's breakdown always matches the chart under the same filters.
  */
-const computeTds = (docs, filters, lib) => {
-  const f = { ...filters, granularity: "month" };
+const computeTds = (docs, filters, lib, granularity = "month") => {
+  const f = { ...filters, granularity };
   const buckets = buildBuckets(f, () => ({ amount: 0, sites: new Map(), owners: new Set(), deductions: [] }));
   const excl = newExclusions();
   const meta = { recordsWithoutDate: 0, duplicatesIgnored: 0, pendingIgnored: 0 };
@@ -1541,7 +1576,7 @@ const computeTds = (docs, filters, lib) => {
       if (!d) { meta.recordsWithoutDate += 1; continue; }
       if (!inRange(d, f)) continue;
       if (!siteMatches(doc, attr, f, excl, amount)) continue;
-      const b = buckets.get(monthKeyOf(d));
+      const b = buckets.get(bucketKey(d, f.granularity));
       if (!b) continue;
       const ownerKey = `${sid}|${identity.key}`;
       b.amount += amount;
@@ -1554,7 +1589,7 @@ const computeTds = (docs, filters, lib) => {
         date: dayKeyOf(d),
         amount: r2(amount),
         billMonth: text(t.dueMonth) || null,
-        siteId: sid,
+        siteId: sid, siteCode: text(doc.siteCode) || null,
         paymentCycle: paymentCycleOf(doc),
         siteName: name,
         mediaCodes: codes,
@@ -1595,8 +1630,8 @@ const computeTds = (docs, filters, lib) => {
  * The landowner configuration is the CURRENT one (Rental Master keeps no history
  * of TDS settings), so a bill from before a TDS change shows today's setting.
  */
-const computeTdsRentalMaster = (docs, filters, lib) => {
-  const f = { ...filters, granularity: "month" };
+const computeTdsRentalMaster = (docs, filters, lib, granularity = "month") => {
+  const f = { ...filters, granularity };
   const buckets = buildBuckets(f, () => ({ amount: 0, sites: new Map(), owners: new Set(), deductions: [] }));
   const excl = newExclusions();
   const meta = { billsWithoutDate: 0, duplicateBillsIgnored: 0, heldOwnersSkipped: 0, applicableWithoutAmount: 0 };
@@ -1634,7 +1669,7 @@ const computeTdsRentalMaster = (docs, filters, lib) => {
         const amount = num(o.tdsAmount);
         if (amount <= 0) { meta.applicableWithoutAmount += 1; continue; }
         if (!siteMatches(doc, attr, f, excl, amount)) continue;
-        const b = buckets.get(monthKeyOf(d));
+        const b = buckets.get(bucketKey(d, f.granularity));
         if (!b) continue;
         const ownerKey = `${sid}|${idOf(o._id) || text(o.name)}`;
         b.amount += amount;
@@ -1647,7 +1682,7 @@ const computeTdsRentalMaster = (docs, filters, lib) => {
           date: dayKeyOf(d),
           amount: r2(amount),
           billMonth: text(bill.dueMonth) || `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`,
-          siteId: sid,
+          siteId: sid, siteCode: text(doc.siteCode) || null,
           paymentCycle: paymentCycleOf(doc),
           siteName: name,
           mediaCodes: codes,
@@ -1692,8 +1727,8 @@ const computeTdsRentalMaster = (docs, filters, lib) => {
  * total = paid + due + upcoming, each unit exactly once; sites are distinct across them. The period applies to the unit's month.
  * @param lib { landOwnersAsOfDate }
  */
-const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
-  const f = { ...filters, granularity: "month" };
+const computeTdsStatus = (docs, filters, lib, now = nowIST(), granularity = "month") => {
+  const f = { ...filters, granularity };
   const todayKey = dayKeyOf(startOfUtcDay(now));
   const CATS = ["paid", "due", "upcoming"];
   const mk = () => ({ amount: 0, entries: 0, sites: new Set() });
@@ -1749,7 +1784,7 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
     const emit = (monthDate, status, amount, info) => {
       if (!inRange(monthDate, f)) return;
       if (!siteMatches(doc, attr, f, excl, amount)) return;
-      const b = buckets.get(monthKeyOf(monthDate));
+      const b = buckets.get(bucketKey(monthDate, f.granularity));
       if (!b) return;
       for (const part of [b, totals]) for (const c of ["total", status]) { const t = part[c]; t.amount += amount; t.entries += 1; t.sites.add(sid); }
       if (rows) {
@@ -1760,7 +1795,7 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
           mediaCodes: codes,
           siteName: name,
           date: info.date,
-          bucket: monthKeyOf(monthDate),
+          bucket: bucketKey(monthDate, f.granularity),
           status,
           amount: r2(amount),
           billMonth: info.billMonth,
@@ -1828,9 +1863,10 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST()) => {
  * Rental Master buckets by bill due date; Ledger buckets by deduction date.
  */
 const computeTdsOverview = (docs, filters, lib, now = nowIST()) => {
-  const status = computeTdsStatus(docs, filters, lib, now);
-  const rentalMaster = computeTdsRentalMaster(docs, { ...filters, source: "rentalMaster" }, lib);
-  const ledger = computeTds(docs, { ...filters, source: "ledger" }, lib);
+  const granularity = filters.granularity;
+  const status = computeTdsStatus(docs, filters, lib, now, granularity);
+  const rentalMaster = computeTdsRentalMaster(docs, { ...filters, source: "rentalMaster" }, lib, granularity);
+  const ledger = computeTds(docs, { ...filters, source: "ledger" }, lib, granularity);
   const metric = (amount, entries, sites) => ({ amount, entries, sites });
   const rentalMasterBuckets = new Map(rentalMaster.buckets.map((b) => [b.key, b]));
   const ledgerBuckets = new Map(ledger.buckets.map((b) => [b.key, b]));
@@ -1920,7 +1956,7 @@ const computeTdsOverview = (docs, filters, lib, now = nowIST()) => {
  */
 const computeOutstanding = (docs, f, lib, now = nowIST()) => {
   const base = computeOutstandingCycles(docs, f, lib, now);
-  const { records: billRecords, ...approvals } = computeBillApprovals(docs, f, lib, now);
+  const { records: billRecords, ...approvals } = computeRentalMasterApprovals(docs, f, lib, now);
   return { ...base, approvals, ...(billRecords ? { billRecords } : {}) };
 };
 
@@ -1985,7 +2021,7 @@ const computeOutstandingCycles = (docs, f, lib, now = nowIST()) => {
       if (records) {
         const codeOf = (id) => (faces.find((fc) => idOf(fc._id) === idOf(id)) || {}).mediaCode || null;
         records.push({
-          siteId: sid,
+          siteId: sid, siteCode: text(doc.siteCode) || null,
           paymentCycle: paymentCycleOf(doc),
           landlords: landlordsOf(doc),
           siteName: siteName(doc),
@@ -2081,6 +2117,48 @@ const approvalStepsOf = (bill) =>
   (Array.isArray(bill.approvalSteps) ? bill.approvalSteps.filter(Boolean) : [])
     .map((st) => ({ role: num(st.role), status: num(st.status), userName: text(st.userName) || null, approvedAt: toDate(st.approvedAt) ? toDate(st.approvedAt).toISOString() : null }))
     .sort((a, z) => a.role - z.role);
+
+const billApprovalProgress = (bill) => {
+  if (num(bill.approvalStatus ?? bill.status) === 3) return 100;
+  return Math.max(
+    0,
+    ...(Array.isArray(bill.approvalSteps) ? bill.approvalSteps : [])
+      .filter((step) => [2, 3].includes(num(step.status)))
+      .map((step) => num(step.role)),
+  );
+};
+
+const siteBillStatusesByMonth = (doc) => {
+  const activeFaces = faceList(doc).filter((face) => num(face.status) === 1);
+  if (activeFaces.length < 2 || !activeFaces.every((face) => num(face.siteBillMode) !== 2)) {
+    return new Map();
+  }
+
+  const activeFaceIds = new Set(activeFaces.map((face) => idOf(face._id)));
+  const rowsByMonth = new Map();
+  for (const bill of doc.rentalDue || []) {
+    if (!bill || isStaleBill(doc, bill)) continue;
+    if (bill.mediaDetailId && !activeFaceIds.has(idOf(bill.mediaDetailId))) continue;
+    const dueDate = toDate(bill.dueDate);
+    if (!dueDate) continue;
+    const month = monthKeyOf(dueDate);
+    const rows = rowsByMonth.get(month) || [];
+    rows.push(bill);
+    rowsByMonth.set(month, rows);
+  }
+
+  const statuses = new Map();
+  for (const [month, rows] of rowsByMonth) {
+    rows.sort(
+      (a, b) =>
+        billApprovalProgress(b) - billApprovalProgress(a) ||
+        (toDate(b.updatedAt)?.getTime() || 0) - (toDate(a.updatedAt)?.getTime() || 0),
+    );
+    statuses.set(month, rows[0]);
+  }
+  return statuses;
+};
+
 const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
   const today = startOfUtcDay(now);
   const mkCat = () => ({ bills: 0, sites: new Set(), amount: 0 });
@@ -2098,6 +2176,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
     const attr = siteAttr(doc);
     const sid = idOf(doc._id);
     const faces = faceList(doc);
+    const siteBillStatuses = siteBillStatusesByMonth(doc);
     for (const bill of doc.rentalDue || []) {
       if (!bill) continue;
       const d = toDate(bill.dueDate);
@@ -2113,7 +2192,8 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
       if (!siteMatches(doc, attr, { ...f, mediaType: "" }, excl, base)) continue;
       const b = buckets.get(bucketKey(d, f.granularity));
       if (!b) continue;
-      const status = num(bill.approvalStatus ?? bill.status);
+      const approvalBill = siteBillStatuses.get(monthKeyOf(d)) || bill;
+      const status = num(approvalBill.approvalStatus ?? approvalBill.status);
       const approved = status === 3;
       const pending = status === 1 || status === 2;
       if (!approved && !pending) meta.statusOutsideKnown += 1;
@@ -2121,7 +2201,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
       const tl = typeLabel({ mediaType: type });
       let stage = null;
       if (pending) {
-        const role = lib && lib.pendingRoleOf ? lib.pendingRoleOf(bill) : null;
+        const role = lib && lib.pendingRoleOf ? lib.pendingRoleOf(approvalBill) : null;
         stage = STAGE_KEY[role] || "unknown";
         if (stage === "unknown") meta.pendingStageUnknown += 1;
       }
@@ -2143,7 +2223,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
         const face = bill.mediaDetailId ? faces.find((fc) => idOf(fc._id) === idOf(bill.mediaDetailId)) : null;
         records.push({
           billId: idOf(bill._id) || null,
-          siteId: sid,
+          siteId: sid, siteCode: text(doc.siteCode) || null,
           paymentCycle: paymentCycleOf(doc),
           siteName: siteName(doc),
           city: cityOf(doc),
@@ -2156,7 +2236,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
           billMonth: text(bill.dueMonth) || null,
           approvalStatus: BILL_STATUS[status] || "Unknown",
           stage, // sales | manager | cmd | unknown (pending bills only)
-          approvalSteps: approvalStepsOf(bill),
+          approvalSteps: approvalStepsOf(approvalBill),
           approved, pending, pastDue,
           rental: r2(base - gst),
           gst: r2(direct ? gst : 0),
@@ -2182,7 +2262,155 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
   };
 };
 
+/**
+ * Outstanding card values use exactly the Payments period-demand iterator.
+ * Stored bills supply approval metadata only. Amounts never come from baseAmount.
+ * Past overdue preserves Rental Master's approval-based, all-cycle scope; it is
+ * deliberately independent of payments and is not added to the period total.
+ */
+const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
+  const { computeRentalDueStats } = require("./rentalDueStats");
+  const today = startOfUtcDay(now);
+  const startMonth = f.start.getUTCFullYear() * 12 + f.start.getUTCMonth();
+  const cap = f.end < now ? f.end : now;
+  const capMonth = cap.getUTCFullYear() * 12 + cap.getUTCMonth();
+  // The Payments source uses bill-cycle months, including the current month,
+  // rather than clipping individual face due dates inside the selected months.
+  const monthly = { ...f, granularity: "month" };
+  const category = () => ({ bills: 0, sites: new Set(), amount: 0 });
+  const aggregate = () => ({
+    generated: category(), approved: category(), pending: category(), pastDue: category(),
+    pendingByStage: {}, pendingByType: {}, generatedByType: {},
+  });
+  const buckets = buildBuckets(monthly, aggregate);
+  const summary = aggregate();
+  const records = [];
+  const add = (target, r) => {
+    for (const key of ["generated", "approved", "pending", "pastDue"]) {
+      if (!r[key]) continue;
+      target[key].bills += 1;
+      target[key].sites.add(r.siteId);
+      target[key].amount += r.total;
+    }
+    const by = (map, key) => {
+      const x = map[key] ||= { bills: 0, amount: 0 };
+      x.bills += 1; x.amount += r.total;
+    };
+    if (r.generated) by(target.generatedByType, r.mediaType);
+    if (r.pending) {
+      by(target.pendingByStage, r.stage);
+      by(target.pendingByType, r.mediaType);
+    }
+  };
+  const emit = (doc, date, values, entry, face, flags, extra = {}) => {
+    const attr = siteAttr(doc);
+    const stage = flags.pending ? STAGE_KEY[lib.pendingRoleOf?.(entry)] || "unknown" : null;
+    const r = {
+      ...detailBase(doc),
+      billId: idOf(entry?._id) || null, faceId: idOf(face?._id) || null,
+      mediaCodes: face && text(face.mediaCode) ? [text(face.mediaCode)] : mediaCodesOf(doc),
+      mediaType: typeLabel(attr), date: dayKeyOf(date), dueDate: dayKeyOf(toDate(entry?.dueDate) || date),
+      month: monthKeyOf(date), bucket: monthKeyOf(date),
+      billMonth: `${MONTH_NAMES[date.getUTCMonth()]} ${date.getUTCFullYear()}`,
+      approvalStatus: flags.approved ? "Approved" : entry ? BILL_STATUS[num(entry.approvalStatus)] || "Pending" : "Not billed yet",
+      approvalSteps: entry ? approvalStepsOf(entry) : [], stage,
+      ...values, total: r2(values.rental + values.gst + values.holdGst), ...flags, ...extra,
+    };
+    add(summary, r);
+    const b = buckets.get(r.bucket);
+    if (b) add(b, r);
+    records.push(r);
+  };
+  const cycle = (doc, date, s, direct, historicalRows = null) => {
+    const rows = historicalRows || [];
+    if (!historicalRows) {
+      // Reuse Rental Master's exact face selection, including its single-bill
+      // most-progressed status and separate-bill row-level status.
+      computeRentalDueStats([doc], {
+        year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, singleBillAsSite: true,
+        onFace: (x) => { if (!x.past) rows.push(x); },
+      });
+    }
+    if (!rows.length) return;
+    const rental = num(s.currentMonthRentalAmount);
+    const gst = num(s.currentMonthGstAmount);
+    // Cumulative cent rounding conserves each cycle's rent and GST exactly,
+    // including 3+ faces. Never floor each face's components independently.
+    const share = (total, i) => r2(r2(total * (i + 1) / rows.length) - r2(total * i / rows.length));
+    rows.forEach((x, i) => {
+      const approved = x.state === "approved";
+      const prior = !!historicalRows;
+      const pending = !approved && !prior;
+      const pastCycle = date.getUTCFullYear() * 12 + date.getUTCMonth() < capMonth;
+      const pastDue = !approved && (prior || pastCycle || Number(doc.rentalPayment?.status) === 3 || (toDate(x.entry?.dueDate) && toDate(x.entry.dueDate) < today));
+      emit(doc, date, { rental: share(rental, i), gst: direct ? share(gst, i) : 0, holdGst: direct ? 0 : share(gst, i) }, x.entry, x.face,
+        { generated: !prior, approved: approved && !prior, pending, pastDue: !!pastDue },
+        { kind: "cycle", priorPeriod: prior });
+    });
+  };
+  const opening = (doc, date, amount, hold, paid, row, prior = false) => {
+    if (prior && paid) return;
+    emit(doc, date, { rental: hold ? 0 : amount, gst: 0, holdGst: hold ? amount : 0 }, null, null,
+      { generated: !prior, approved: !prior && paid, pending: !prior && !paid, pastDue: !paid && date < today },
+      { kind: hold ? "openingGst" : "openingRent", openingId: idOf(row?._id), priorPeriod: prior, approvalStatus: paid ? "Paid opening balance" : "Unpaid opening balance" });
+  };
+  const selected = applySiteStatus(docs, f);
+  const period = computePeriodDue(selected, f, lib, now, (e) => {
+    if (e.kind === "cycle") cycle(e.doc, e.date, e.summary, e.direct);
+    else opening(e.doc, e.date, e.amount, e.hold, e.paid, e.row);
+  });
+  // Earlier cycles are part of Rental Master's overdue card even when outside
+  // Total/Approved/Pending's selected period. Group the shared helper's past
+  // face rows before allocating, so a representative bill never repeats money.
+  for (const doc of selected) {
+    if (!isActiveSite(doc) || !siteMatches(doc, siteAttr(doc), f)) continue;
+    const groups = new Map();
+    computeRentalDueStats([doc], {
+      year: cap.getUTCFullYear(), month: cap.getUTCMonth() + 1, singleBillAsSite: true,
+      onFace: (x) => {
+        if (!x.past && (capMonth >= startMonth || x.state === "approved")) return;
+        const entryDate = toDate(x.entry?.dueDate);
+        if (!x.past && Number(doc.rentalPayment?.status) !== 3 && !(entryDate && entryDate < today)) return;
+        const d = x.past ? toDate(x.cycleDate) : entryDate || new Date(Date.UTC(cap.getUTCFullYear(), cap.getUTCMonth(), 1));
+        if (!d || d.getUTCFullYear() * 12 + d.getUTCMonth() >= startMonth) return;
+        const key = monthKeyOf(d);
+        const group = groups.get(key) || { date: d, rows: [] };
+        group.rows.push(x); groups.set(key, group);
+      },
+    });
+    for (const { date, rows } of groups.values()) {
+      const s = lib.getOverallSummaryForCycle(doc, { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 });
+      // Historical rows contain only open faces: keep the whole active-face
+      // denominator even when a separate-bill face was already approved.
+      const activeCount = faceList(doc).filter(fc => num(fc.status) === 1).length;
+      const ratio = rows.length / activeCount;
+      cycle(doc, date, { currentMonthRentalAmount: num(s.currentMonthRentalAmount) * ratio, currentMonthGstAmount: num(s.currentMonthGstAmount) * ratio }, isDirectGstCycle(doc, date, lib), rows);
+    }
+    for (const [field, amountField, hold] of [["rentalOutstandingHistory", "baseRentOutstandingAmount", false], ["gstOutstandingHistory", "gstOutStandingAmount", true]]) {
+      for (const row of doc.rentalPayment?.[field] || []) {
+        const date = parseMonthLabel(row?.dueMonth);
+        if (!date || date.getUTCFullYear() * 12 + date.getUTCMonth() >= startMonth || num(row[amountField]) <= 0) continue;
+        opening(doc, date, num(row[amountField]), hold, !!(row.isPaid || text(row.utrNumber)), row, true);
+      }
+    }
+  }
+  const finish = (a) => {
+    const result = {};
+    for (const key of ["generated", "approved", "pending", "pastDue"]) result[key] = { bills: a[key].bills, sites: a[key].sites.size, amount: r2(a[key].amount) };
+    for (const key of ["pendingByStage", "pendingByType", "generatedByType"]) result[key] = Object.fromEntries(Object.entries(a[key]).map(([k,v]) => [k, { bills: v.bills, amount: r2(v.amount) }]));
+    return result;
+  };
+  return {
+    today: dayKeyOf(today), unit: "faceCycle", valuation: "rentalMaster", filters: publicFilters(monthly),
+    overdueScope: "allCyclesThroughPeriodEnd", approvalBasis: "workflow; paid opening balances approved",
+    summary: finish(summary), buckets: [...buckets].map(([key, a]) => ({ key, ...finish(a) })),
+    meta: { ...period.meta, dueParts: period.due.parts, periodToBePaid: period.due.toBePaid },
+    ...(f.details ? { records: records.sort((a,b) => a.dueDate.localeCompare(b.dueDate) || a.siteName.localeCompare(b.siteName)) } : {}),
+  };
+};
+
 module.exports = {
+  computeRentalMasterApprovals,
   computeBillApprovals,
   MIXED,
   parseFilters,
