@@ -29,11 +29,29 @@ function rentBeforeLaterManualChange(media, dueKey) {
     .filter((h) => h && Number(h.amount || 0) > 0 && h.updatedAt && monthKey(rowEffectiveDate(h)) !== null)
     .slice()
     .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
-  for (let i = 1; i < rows.length; i++) {
-    if (/Appraisal/i.test(String(rows[i].updatedBy || ""))) continue;
-    if (monthKey(rowEffectiveDate(rows[i])) > dueKey) return Number(rows[i - 1].amount) || 0;
+  const isAppraisalRow = (h) => /Appraisal/i.test(String(h.updatedBy || ""));
+  let start = 1;
+  for (;;) {
+    // first manual change effective AFTER the due month
+    let first = -1;
+    for (let i = start; i < rows.length; i++) {
+      if (isAppraisalRow(rows[i])) continue;
+      if (monthKey(rowEffectiveDate(rows[i])) > dueKey) {
+        first = i;
+        break;
+      }
+    }
+    if (first < 0) return 0;
+    // ✅ NEW — a LATER change with effectiveFrom on/before the due month (rent
+    // change applied to every not-approved month) overrides it
+    let cover = -1;
+    for (let j = first + 1; j < rows.length; j++) {
+      if (isAppraisalRow(rows[j]) || !rows[j].effectiveFrom) continue;
+      if (monthKey(rows[j].effectiveFrom) <= dueKey) cover = j;
+    }
+    if (cover < 0) return Number(rows[first - 1].amount) || 0;
+    start = cover + 1;
   }
-  return 0;
 }
 
 const MONTH_LABELS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
