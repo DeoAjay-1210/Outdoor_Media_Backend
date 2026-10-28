@@ -144,31 +144,42 @@ legacy bill with no detailed approval steps retains the existing overall-approve
 Otherwise, an incomplete or unmatchable approval/bill is *Hold*, while an approved, unheld appraisal
 without full payment is *Unpaid*. Future stored rows are *Upcoming* unless an active hold applies.
 
-**Outstanding payments** (endpoint `upcoming-bills`, `computeOutstanding`) — one unit per **site × billing-month
-cycle** (several face bills never repeat a site's amount), from the Rental Master / Ledger cycle calculation:
-- cycles = `getAllDueCycles` on the site without its stale rows (`isStaleBill`), one per month; the cycle date is the
-  due date; only cycles due within [start, end] (inclusive) count. Future cycles come from the billing schedule —
-  `notYetBilled` counts those without a bill row.
-- remaining = `getOverallSummaryForCycle(site, month)`: `currentMonthRentPending` (landlord shares with no ledger
-  entry for that month + mode — the ledger's binary paid rule, `isOwnerModePaidForCycle`; direct GST rides with rent)
-  + `currentMonthGstPending` (held GST not yet released through `gstBalanceHistory`). remaining = 0 → settled,
-  excluded (`meta.settledCycles`), whatever the approval status.
-- category vs today (IST day): `upcoming` (after today) / `dueToday` / `overdue` (before today, remaining > 0). This
-  overdue is **payment-based**; the Rental Master / dashboard Overdue is approval-based (not fully approved, past due).
+- **Payment-based cycle summary** (`summary` / `buckets`): one unit per site × billing-month cycle, from
+  `getAllDueCycles`; the cycle date is selected inclusively by the requested range. Future cycles come from the
+  billing schedule; `notYetBilled` counts those without a bill row.
+- remaining = `getOverallSummaryForCycle(site, month)`: `currentMonthRentPending` (landlord shares without a
+  qualifying ledger row for that month + mode; direct GST rides with rent) + `currentMonthGstPending` (held GST not
+  released through `gstBalanceHistory`). Remaining = 0 → settled and excluded. These are actual cycle outstanding
+  amounts, not the generated-bill amounts shown on the approval cards.
+- category vs today (IST day): `upcoming` / `dueToday` / `overdue` (before today, remaining > 0). This is
+  payment-based overdue; Rental Master's approval-based Overdue is a different metric.
 - `summary.total` = upcoming + dueToday + overdue (amount, cycles; sites distinct across them).
-- `summary.unallocated`: cycles of sites with no landlord (rent not computable) or no active face — listed with the
-  ledger's remaining and the configured rent, **outside the total** until their treatment is decided.
-- status of a cycle = least advanced approval status of its current-face bill rows ("Not billed yet" without rows);
-  media type / city are site-level (mixed sites leave filtered views). Opening balances are not cycles: not included.
-- Reconciles with Rental Master: for a month, total + unallocated remaining (+ opening unpaid of that month) =
-  `computePeriodDue(...).due.unpaid`.
-- Export details (opt-in, `details: true` in the body — sent only by the page's Excel / PDF export): adds
-  `records[]`, one row per outstanding cycle of the total (site, media codes, city, media type, due date, month,
-  category, status, rent / gst / remaining) with its current-face bill rows (`bills[]`: bill id, media code,
-  due date, base / GST / net payable as stored, approval status). Same calculation and filters as the summary:
-  the remaining of the records adds up to `summary.total.amount`; stale rows are never listed. Without the flag
-  the response is unchanged.
-
+- `summary.unallocated`: cycles of sites with no landlord or no active face are listed with ledger remaining and
+  configured rent, outside the total. Opening balances are not billing cycles.
+- media type / city for these site-cycle records are site-level; mixed sites are excluded from filtered views.
+- This cycle summary reconciles with the Rental Master cycle calculation (`computePeriodDue(...).due.unpaid`),
+  not with Rental Master's Total Due This Month or the approval cards.
+- **Approval-card view** (`approvals` / `billRecords`): `computeRentalMasterApprovals` uses
+  `computePeriodDue`'s authoritative period-demand iterator, the same as the Payments endpoint.
+  Total includes Rental + direct GST + hold GST, plus opening balances once; stored bill `baseAmount`
+  is never used to price these cards. Billing-cycle months follow Payments, capped at the current month.
+- Approved and Pending partition that period demand using `computeRentalDueStats` face/site approval
+  selection. Single-bill sites use the most-progressed active-face approval; separate bills keep face
+  statuses. Status 2 alone is not approved. Payments do not change workflow approval classifications.
+- Opening balances have no approval workflow: by the explicitly agreed rule, paid (`isPaid` or UTR)
+  openings are Approved and unpaid openings Pending. This classification does not create approval records.
+- Past Overdue preserves Rental Master's approval-based all-cycle definition through the selected end
+  month: unapproved previous cycles, current-month past-due allocations (including the status-3 override),
+  plus unpaid past-due openings. Approved-but-unpaid cycles are excluded. Earlier-period overdue is outside
+  Total/Approved/Pending; do not add it to Total. The monthly bars show only selected-period categories.
+- Amounts are split equally across active faces as in Rental Master, with cumulative cent rounding to
+  conserve rent and GST. Detail rows are face-cycle allocations or opening balances, not stored bills.
+  Earlier-period overdue rows carry `generated: false`, `approved: false`, `pending: false`, `pastDue: true`.
+- Active-site status, city and media filters match Payments. Media/city are site-level; mixed sites are
+  excluded from a filtered view instead of assigning an arbitrary valuation to a face type.
+- The legacy top-level payment-based `summary` / `records` remain unchanged. The frontend uses
+  `approvals.summary` and `billRecords`, including when the legacy payment summary is settled/empty.
+- `computeBillApprovals` and `computeBills` remain available for legacy stored-bill tests only.
 **Report export** (frontend, `analytics_export_*.dart`): Export (top right of the page) → Excel (.xlsx) or PDF.
 It re-fetches all six endpoints with the filters active at the click (outstanding with `details: true`) and
 writes every section in full — Summary (filters, generation date, key figures, data sources), outstanding cycles,
@@ -179,15 +190,25 @@ bound to the sheet cells, ₹ Indian-grouped formats, frozen headers and filters
 table headers, page numbers) writes amounts as "Rs." because the built-in PDF fonts have no ₹ glyph.
 Sections the chosen source does not support (Ledger: outstanding, appraisals) are left out and noted in Summary.
 
-`computeBills` (stored bill rows by timing — upcoming / dueToday / overdue / pastApproved) is kept and tested but no
-longer served. Its former panel showed `summary.upcoming` /
-`buckets[].upcoming`: stored bills whose `dueDate` is in the selected period **and after today** (today = the IST
-calendar day, `nowIST`, the convention of the stored due dates). Cards, donut (status / media type, count / amount),
-monthly chart and tooltips all use those rows. `summary.overdue` = due before today and not fully approved
-(`approvalStatus ≠ 3`, the Rental Master / dashboard rule in `rentalDueStats`) — its own card, never upcoming.
-`summary.dueToday` (neither upcoming nor overdue yet) and `summary.pastApproved` complete the partition; the
-top-level `summary` / bucket fields are still *all stored bills in the period* (= the four parts). The old "Overdue"
-card read stored `approvalStatus` 4, which no code sets.
+### Chart date granularity
+
+- Payment balances, Ledger GST classifications and Rental Master Outstanding are billing-cycle amounts,
+  not daily transaction activity or historical outstanding snapshots. They retain monthly buckets even
+  when the selected range covers one day. Their Rental Master calculation rules are unchanged.
+- The Payment chart's optional **Payment dates** view uses the existing `payments` endpoint with
+  `source: ledger`: deduplicated `ledgerHistory` payments grouped by their actual `date`. It does not
+  move unpaid cycle balances onto payment dates and does not change the cycle-based KPI cards.
+- The combined `tds-status` chart now honors the requested short-range daily granularity: Total/Due/
+  Upcoming use bill due dates, and Paid uses recorded deduction dates. Longer ranges remain monthly.
+  Its KPI definitions and amounts are unchanged. Legacy source-only TDS functions retain monthly
+  defaults for their existing callers; the combined chart requests its appropriate granularity.
+- Sites onboarded and appraisals already honor short-range daily buckets (`createdAt` and appraisal
+  effective/revision dates respectively). Agreements remain monthly state snapshots, not expiry events.
+- Monthly labels use a full year (e.g. **Oct 2026**) to distinguish them from daily **26 Oct** labels.
+  Missing transaction breakdowns are explained rather than supplied with artificial dates or amounts.
+
+The Outstanding Payments cards now use `computeRentalMasterApprovals`. The stored-bill description below
+explains legacy bill/GST storage, not the current Outstanding card valuation.
 
 **Stored bills** — `rentalDue[]`, by `dueDate`. Verified in `computeGstSplit`: `baseAmount` is the
 **gross** (rent + GST), `gstAmount` the GST part, `netPayable` what is payable to the owner now (rent for
@@ -268,3 +289,7 @@ month, upserted, so each row is an individual deduction and never a running bala
 6. Dashboard `allowedRole` admits role 5; analytics deliberately admits 1–4 only. Not changed there.
 7. Aggregation reads the full collection with a field projection (as dashboard v2 does); very large
    datasets may later need a `$match`/aggregation-pipeline rewrite or caching.
+
+## Shared UI / Excel / Power BI reporting contract
+
+The frontend mapping and export schema are documented in `../Outdoor_Media_frontend/docs/REPORTING_CONTRACT.md`. All financial computations remain in this backend. Detail responses now include the stored root Site Code (or null), and payments with source=ledger and details=true include the same deduplicated, dated payment records used in their summary. The response without details keeps its previous shape. These are read-only reporting additions; no billing-generation route or financial record write is involved.

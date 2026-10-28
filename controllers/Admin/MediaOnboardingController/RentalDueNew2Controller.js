@@ -4240,30 +4240,29 @@ roleName: REMARK_ROLE_NAME[userTypeNum] || "User",
 exports.getOverDueRemarks = async (req, res) => {
   try {
     const mediaIdParam = req.query.mediaId || req.body?.mediaId;
-    const rentalDueIdParam = req.query.rentalDueId || req.body?.rentalDueId;
 
-    let mediaIds = [];
-    if (mediaIdParam) {
-      mediaIds = Array.isArray(mediaIdParam) ? mediaIdParam : String(mediaIdParam).split(",").map(id => id.trim());
-    }
+    const parseIds = (param) => {
+      if (!param) return [];
+      if (Array.isArray(param)) return param.map(String).map(id => id.trim()).filter(Boolean);
+      let s = String(param).trim();
+      if (s.startsWith("[") && s.endsWith("]")) {
+        try {
+          const parsed = JSON.parse(s);
+          if (Array.isArray(parsed)) {
+            return parsed.map(String).map(id => id.trim()).filter(Boolean);
+          }
+        } catch (_) {}
+      }
+      return s.replace(/[\[\]"]/g, "").split(",").map(id => id.trim()).filter(Boolean);
+    };
 
-    let rentalDueIds = [];
-    if (rentalDueIdParam) {
-      rentalDueIds = Array.isArray(rentalDueIdParam) ? rentalDueIdParam : String(rentalDueIdParam).split(",").map(id => id.trim());
-    }
+    const mediaIds = parseIds(mediaIdParam);
 
     const query = {};
     if (mediaIds.length > 0) {
       const validMediaIds = mediaIds.filter(id => mongoose.Types.ObjectId.isValid(id));
       if (validMediaIds.length > 0) {
         query.mediaId = { $in: validMediaIds.map(id => new mongoose.Types.ObjectId(id)) };
-      }
-    }
-
-    if (rentalDueIds.length > 0) {
-      const validRentalDueIds = rentalDueIds.filter(id => mongoose.Types.ObjectId.isValid(id));
-      if (validRentalDueIds.length > 0) {
-        query.rentalDueId = { $in: validRentalDueIds.map(id => new mongoose.Types.ObjectId(id)) };
       }
     }
 

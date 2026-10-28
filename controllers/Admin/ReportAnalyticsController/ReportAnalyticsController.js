@@ -26,7 +26,7 @@ const ALLOWED_ROLES = [1, 2, 3, 4];
 const allowedRole = (req) => ALLOWED_ROLES.includes(Number(req.user?.userType));
 
 // face fields every chart reads: names / type / city for filters and labels, status for the site-status filter
-const FACE = "mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaType mediaDetails.city mediaDetails.status";
+const FACE = "siteCode mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaType mediaDetails.city mediaDetails.status";
 
 // Payments under Rental Master = the Rental Master cycle calculation: ledger rules need owner amounts,
 // paid-state rows, bill labels, billing anchors and appraisal history (no bank, PAN or contact fields).
@@ -59,12 +59,12 @@ const SELECT = {
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
   // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
   // (bill amounts feed the optional export detail rows, `details: true`)
-  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt` },
+  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id mediaDetails.siteBillMode rentalPayment.status rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt` },
   // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
   // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
   gst: {
     // (+ the bill's approval steps: the Pending Approval rows show who approved and who is pending)
-    ledger: `${RM_PAYMENTS} ${DETAIL_IDS} rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt`,
+    ledger: `${RM_PAYMENTS} ${DETAIL_IDS} rentalDue.approvalFlow rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt`,
     // (the bill month and status label the optional per-bill detail rows)
     rentalMaster: `${FACE} rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory ${CYCLE} ${DETAIL_IDS}`,
   },
