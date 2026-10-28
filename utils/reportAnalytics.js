@@ -981,9 +981,11 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
       const s0 = toDate(a.startDate), e0 = toDate(a.endDate);
       if (!s0 || !e0) { meta.recordsWithoutDates += 1; return; }
       const key = `${dayKeyOf(s0)}|${dayKeyOf(e0)}`;
+      const pdfPath = a.agreementPDF && typeof a.agreementPDF.filePath === "string" ? a.agreementPDF.filePath.trim() : "";
+      const pdf = pdfPath ? { path: pdfPath, name: (a.agreementPDF.originalName || a.agreementPDF.fileName || "").toString() } : null;
       const prev = recs.get(key);
-      if (prev) { prev.isCurrent = prev.isCurrent || isCurrent; return; }
-      recs.set(key, { start: s0, end: e0, reminder: num(a.reminderBeforeExpiry) || 30, docType: num(a.agreementStatus), isCurrent });
+      if (prev) { prev.isCurrent = prev.isCurrent || isCurrent; if (!prev.pdf && pdf) prev.pdf = pdf; return; }
+      recs.set(key, { start: s0, end: e0, reminder: num(a.reminderBeforeExpiry) || 30, docType: num(a.agreementStatus), isCurrent, pdf });
     };
     history.forEach((h) => add(h, false));
     const hadCurrent = (cur.startDate || cur.endDate) ? (toDate(cur.startDate) && toDate(cur.endDate) ? `${dayKeyOf(toDate(cur.startDate))}|${dayKeyOf(toDate(cur.endDate))}` : null) : null;
@@ -1019,6 +1021,8 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
           reminderDays: r.reminder,
           daysToExpiry,
           document: r.docType === 1 ? "Original" : r.docType === 2 ? "Draft" : null,
+          documentPath: r.pdf ? r.pdf.path : null,
+          documentName: r.pdf ? r.pdf.name : null,
         });
       }
     }
