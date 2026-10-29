@@ -532,6 +532,10 @@ const MediaSchema = new mongoose.Schema(
       // revision keep their old rent (the difference is a separate arrears bill).
       // [{ dueMonth: "September 2026", rent: 20000, rentRevisionId }]
       rentRevisionKeptMonths: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+      // ✅ NEW — rent revision ADVANCE (CMD approved) deducted from the bill of
+      // dueMonth: [{ dueMonth: "December 2026", amount: 25000, gstDeducted: 1|0,
+      // advanceBillId, rentRevisionId }]
+      advanceAdjustments: { type: [mongoose.Schema.Types.Mixed], default: undefined },
       gstApplicable: {
         type: Number,
         enum: [0, 1],

@@ -28,8 +28,25 @@ const RentRevisionSchema = new mongoose.Schema(
     mediaId: { type: mongoose.Schema.Types.ObjectId, ref: "Media", required: true, index: true },
     mediaCode: { type: String, trim: true, default: "" },
     mediaName: { type: String, trim: true, default: "" },
-    fromMonth: { type: String, trim: true, required: true }, // "August 2026"
+    // ✅ NEW — BILL: rent increase (arrears) | ADVANCE: advance deducted from the
+    // next bill. Old revisions (no billType) → BILL, old pricing.
+    billType: { type: String, enum: ["BILL", "ADVANCE"], default: null, index: true },
+    fromMonth: { type: String, trim: true, required: true }, // "August 2026" (ADVANCE: advanceMonth)
     fromDate: { type: Date, required: true }, // 1st of fromMonth (UTC)
+    // ✅ NEW — BILL applyToAllMonths 1: amount added to the site rent from the
+    // next bill after fromMonth (newRent = oldRent + nextIncreaseAmount)
+    nextIncreaseAmount: { type: Number, default: null },
+    nextBillFromMonth: { type: String, trim: true, default: "" },
+    // ✅ NEW — site has GST: 1 → GST on increaseAmount / advanceAmount, 0 → no GST
+    gstOnIncrease: { type: Number, enum: [0, 1, null], default: null },
+    gstPercentage: { type: Number, default: 0 },
+    increaseGstAmount: { type: Number, default: 0 },
+    // ✅ NEW — ADVANCE
+    advanceAmount: { type: Number, default: 0 },
+    advanceGstAmount: { type: Number, default: 0 },
+    adjustInMonth: { type: String, trim: true, default: "" }, // bill the advance is deducted from
+    adjustInDate: { type: Date, default: null },
+    advanceBillId: { type: mongoose.Schema.Types.ObjectId, default: null },
     oldRent: { type: Number, required: true },
     newRent: { type: Number, required: true },
     difference: { type: Number, default: 0 },

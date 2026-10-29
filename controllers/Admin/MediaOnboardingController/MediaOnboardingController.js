@@ -473,6 +473,11 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
     }
     // Same amount → no new entry, rentActuallyChanged stays false.
     if (keptMonths.length) mediaData.rentalPayment.rentRevisionKeptMonths = keptMonths;
+    // ✅ NEW — rent revision advances (deducted from a later bill) carried forward too
+    const advanceAdjustments = (existingMedia.rentalPayment?.advanceAdjustments || []).map((a) =>
+      a && a.toObject ? a.toObject() : { ...a },
+    );
+    if (advanceAdjustments.length) mediaData.rentalPayment.advanceAdjustments = advanceAdjustments;
   }
 
   history.sort((a, b) => b.updatedAt - a.updatedAt);

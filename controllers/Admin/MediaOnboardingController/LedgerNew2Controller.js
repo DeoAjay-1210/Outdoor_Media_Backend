@@ -1221,6 +1221,7 @@ async function payArrearsBillIfArrears(req, res) {
   if (Number(bill.approvalStatus) !== 3) {
     return errorResponse(res, "Rent revision not approved yet — arrears cannot be paid", null, 400);
   }
+  const kind = bill.type === "advance" ? "advance" : "arrears"; // ✅ NEW
   let paid;
   try {
     paid = applyArrearsPayment(bill, {
@@ -1251,7 +1252,7 @@ async function payArrearsBillIfArrears(req, res) {
       ledgerEntries: paid.saved.map((p) => ({
         _id: p._id,
         rentalDueId: paid.bill._id,
-        billType: "arrears",
+        billType: kind,
         label: p.type === "gst" ? `${paid.bill.label} GST` : paid.bill.label,
         month: paid.bill.dueMonth,
         landOwnerId: p.landOwnerId || null,
@@ -1268,9 +1269,10 @@ async function payArrearsBillIfArrears(req, res) {
       })),
       tdsRecords: paid.saved
         .filter((p) => Number(p.tdsAmount || 0) > 0)
-        .map((p) => ({ rentalDueId: paid.bill._id, month: paid.bill.dueMonth, billType: "arrears", landOwnerId: p.landOwnerId, tdsAmount: p.tdsAmount })),
-      arrears: {
+        .map((p) => ({ rentalDueId: paid.bill._id, month: paid.bill.dueMonth, billType: kind, landOwnerId: p.landOwnerId, tdsAmount: p.tdsAmount })),
+      [kind]: {
         rentalDueId: b0.rentalDueId,
+        ...(kind === "advance" ? { adjustInMonth: paid.bill.adjustInMonth || "" } : {}),
         dueMonth: b0.dueMonth,
         rentAmount: b0.rentAmount,
         rentPaid: b0.rentPaid,
@@ -4653,31 +4655,43 @@ const cityFilter = [
     {
       const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
       const [pageArrearsDocs, lastRevisions, allArrearsDocs] = await Promise.all([
-        Media.find({ _id: { $in: pageIds }, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue._id rentalDue.withGst").lean(),
+        Media.find({ _id: { $in: pageIds }, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue._id rentalDue.withGst rentalDue.dueMonth").lean(),
         RentRevision.find({ mediaId: { $in: pageIds }, status: "Approved" }).sort({ approvedAt: -1 }).lean(),
-        Media.find({ "mediaDetails.status": 1, "arrearsDue.0": { $exists: true } }).select("arrearsDue").lean(),
+        Media.find({ "mediaDetails.status": 1, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue.dueMonth").lean(),
       ]);
       const arrearsById = new Map(pageArrearsDocs.map((d) => [String(d._id), d.arrearsDue || []]));
       const parentWithGstById = new Map();
       pageArrearsDocs.forEach((d) => (d.rentalDue || []).forEach((r) => parentWithGstById.set(String(r._id), r.withGst)));
+      // ✅ NEW — bill months per site (advance adjusted = its bill is generated)
+      const billMonthsById = new Map(
+        pageArrearsDocs.map((d) => [String(d._id), new Set((d.rentalDue || []).map((r) => r && r.dueMonth).filter(Boolean))]),
+      );
       const revisionById = new Map();
       lastRevisions.forEach((r) => {
         if (!revisionById.has(String(r.mediaId))) revisionById.set(String(r.mediaId), r);
       });
       finalMediaListData = finalMediaListData.map((m) => {
         const id = String(m._id || m.mediaId);
-        return decorateLedgerItem(m, arrearsById.get(id) || [], revisionById.get(id) || null, parentWithGstById);
+        return decorateLedgerItem(m, arrearsById.get(id) || [], revisionById.get(id) || null, parentWithGstById, billMonthsById.get(id) || null);
       });
 
       const t = overallArrearsTotals(allArrearsDocs);
       overallOutstandingTotals.overallArrearsDue = t.pending;
       overallOutstandingTotals.overallArrearsGSTDue = t.gstPending;
       overallOutstandingTotals.overallTotalOutstandingAmount += t.pending + t.gstPending;
+      // ✅ NEW — rent revision advance totals
+      const adv = overallArrearsTotals(allArrearsDocs, "advance");
+      overallOutstandingTotals.overallAdvanceDue = adv.pending;
+      overallOutstandingTotals.overallAdvanceGSTDue = adv.gstPending;
+      overallOutstandingTotals.overallTotalOutstandingAmount += adv.pending + adv.gstPending;
       if (overallLedgerSummary && typeof overallLedgerSummary === "object") {
         const pendingTotal = t.pending + t.gstPending;
         if (typeof overallLedgerSummary.totalLedgerPendingAmount === "number") overallLedgerSummary.totalLedgerPendingAmount += pendingTotal;
         if (typeof overallLedgerSummary.overallDueMonthAmount === "number") overallLedgerSummary.overallDueMonthAmount += t.amount + t.gst;
         if (typeof overallLedgerSummary.totalOutstanding === "number") overallLedgerSummary.totalOutstanding += pendingTotal;
+        const advPendingTotal = adv.pending + adv.gstPending;
+        if (typeof overallLedgerSummary.totalLedgerPendingAmount === "number") overallLedgerSummary.totalLedgerPendingAmount += advPendingTotal;
+        if (typeof overallLedgerSummary.totalOutstanding === "number") overallLedgerSummary.totalOutstanding += advPendingTotal;
         Object.assign(overallLedgerSummary, {
           arrearsAmount: t.amount,
           arrearsAmountSites: t.amountSites,
@@ -4687,6 +4701,17 @@ const cityFilter = [
           arrearsPendingSites: t.pendingSites,
           arrearsGstPending: t.gstPending,
           arrearsGstPendingSites: t.gstPendingSites,
+          // ✅ NEW — advance
+          advanceAmount: adv.amount,
+          advanceAmountSites: adv.amountSites,
+          advancePaid: adv.paid,
+          advancePaidSites: adv.paidSites,
+          advancePending: adv.pending,
+          advancePendingSites: adv.pendingSites,
+          advanceGstPending: adv.gstPending,
+          advanceGstPendingSites: adv.gstPendingSites,
+          advanceAdjusted: adv.adjusted,
+          advanceAdjustedSites: adv.adjustedSites,
         });
       }
     }
@@ -4908,6 +4933,7 @@ exports.getLedgerHistory = async (req, res) => {
         historyRevisionById.get(String(media._id)) || null,
         parentWithGstById,
         arrearsInRange,
+        new Set((media.rentalDue || []).map((r) => r && r.dueMonth).filter(Boolean)), // ✅ NEW — advance adjusted
       );
 
       mediaHistoryList.push({
@@ -4948,6 +4974,9 @@ exports.getLedgerHistory = async (req, res) => {
     // ✅ NEW — rent revision arrears totals
     summary.overallArrearsDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.arrearsDue || 0), 0);
     summary.overallArrearsGSTDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.arrearsGSTDue || 0), 0);
+    // ✅ NEW — rent revision advance totals (already in overallTotalOutstandingAmount via outstanding)
+    summary.overallAdvanceDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.advanceDue || 0), 0);
+    summary.overallAdvanceGSTDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.advanceGSTDue || 0), 0);
 
     // ✅ NEW — same billGroups collapsing as listMediaByLedger, applied
     // across every media block's ledgerHistory months. Groups real
@@ -5385,6 +5414,84 @@ const details = (media.mediaDetails || []).map((d) => ({
       )
     : fullGstBalanceHistoryUnfiltered;
 
+  // ✅ NEW — rent revision ADVANCE in gstBalanceHistory: bill GST rows get
+  // billType "bill" (the bill the advance is deducted from also gets the advance
+  // amounts) and each advance bill with GST is its own GST row (_id = advance
+  // bill id → paid with gstBalanceHistoryId / rentalDueId), after its month's rows
+  {
+    const advanceBills = (media.arrearsDue || []).filter((b) => b && b.type === "advance");
+    const adjByMonth = new Map();
+    advanceBills.forEach((b) => {
+      if (!b.adjustInMonth) return;
+      const cur = adjByMonth.get(b.adjustInMonth) || {
+        totalRentalAmount: Number(b.billRent || 0),
+        advanceAdjusted: 0,
+        advanceGstAdjusted: 0,
+        advanceRentalDueId: b._id,
+      };
+      cur.advanceAdjusted += Number(b.netPayable || 0);
+      cur.advanceGstAdjusted += Number(b.gstAmount || 0);
+      adjByMonth.set(b.adjustInMonth, cur);
+    });
+    fullGstBalanceHistory.forEach((g, i) => {
+      if (!g || g.billType === "arrears" || g.billType === "advance") return;
+      fullGstBalanceHistory[i] = { ...g, billType: g.billType || "bill", ...(adjByMonth.get(g.dueMonth) || {}) };
+    });
+
+    const monthKeyOfLabel = (label) => {
+      const p = parseDueMonthLabel(label);
+      return p ? p.year * 12 + p.monthIdx : null;
+    };
+    advanceBills.forEach((b) => {
+      const gstAmount = Number(b.gstAmount || 0);
+      if (gstAmount <= 0) return;
+      const gstPays = (b.payments || []).filter((p) => p.type === "gst" || Number(p.gstAmount || 0) > 0);
+      const lastGst = gstPays.slice(-1)[0];
+      const gstPaidFull = Number(b.gstPaid || 0) >= gstAmount;
+      const row = {
+        _id: b._id,
+        rentalDueId: b._id,
+        parentRentalDueId: null,
+        billType: "advance",
+        label: `${String(b.label || "").split(" (")[0]} GST`,
+        adjustInMonth: b.adjustInMonth || "",
+        rentRevisionId: b.rentRevisionId,
+        dueMonth: b.dueMonth,
+        cycle: b.dueDate,
+        gstAmount,
+        isPaid: gstPaidFull,
+        isVirtual: !gstPaidFull,
+        paidAmount: Number(b.gstPaid || 0),
+        paidAt: lastGst ? lastGst.date : null,
+        paidBy: lastGst ? lastGst.createdBy || "" : "",
+        createdAt: b.createdAt || null,
+        createdBy: b.createdBy || "",
+        source: "rental",
+        ownerId: null,
+        ownerName: "",
+        utrNumber: lastGst ? lastGst.utrNumber || "" : "",
+        date: lastGst ? lastGst.date : null,
+        isUtrEntry: gstPaidFull,
+        withGst: Number(b.withGst || 0),
+        rentalDueApprovalStatus: 3,
+      };
+      // after the last row of the same month, else before the first later month
+      let at = -1;
+      fullGstBalanceHistory.forEach((g, i) => {
+        if (g && g.dueMonth === b.dueMonth) at = i;
+      });
+      if (at < 0) {
+        const key = monthKeyOfLabel(b.dueMonth);
+        const later = fullGstBalanceHistory.findIndex((g) => {
+          const k = g ? monthKeyOfLabel(g.dueMonth) : null;
+          return key !== null && k !== null && k > key;
+        });
+        at = later < 0 ? fullGstBalanceHistory.length - 1 : later - 1;
+      }
+      fullGstBalanceHistory.splice(at + 1, 0, row);
+    });
+  }
+
   // let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
   //   if (h.cycle) return h;
   //   const parsed = parseDueMonthLabel(h.dueMonth);
@@ -5508,6 +5615,75 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
       cycle: cycleDate,
     });
   });
+
+  // ✅ NEW — rent revision ADVANCE: generated bill rows get billType "bill"
+  // (the bill the advance is deducted from also gets the advance amounts) and
+  // each advance bill (media.arrearsDue[], type "advance") is its own row,
+  // after its month's row. Saved old-outstanding rows are not changed.
+  {
+    const advanceBills = (media.arrearsDue || []).filter((b) => b && b.type === "advance");
+    const adjByMonth = new Map();
+    advanceBills.forEach((b) => {
+      if (!b.adjustInMonth) return;
+      const cur = adjByMonth.get(b.adjustInMonth) || {
+        totalRentalAmount: Number(b.billRent || 0),
+        advanceAdjusted: 0,
+        advanceGstAdjusted: 0,
+        advanceRentalDueId: b._id,
+      };
+      cur.advanceAdjusted += Number(b.netPayable || 0);
+      cur.advanceGstAdjusted += Number(b.gstAmount || 0);
+      adjByMonth.set(b.adjustInMonth, cur);
+    });
+    fullRentalOutstandingHistory = fullRentalOutstandingHistory.map((h) =>
+      h && h.isVirtual === true ? { ...h, billType: "bill", ...(adjByMonth.get(h.dueMonth) || {}) } : h,
+    );
+
+    const monthKeyOfLabel = (label) => {
+      const p = parseDueMonthLabel(label);
+      return p ? p.year * 12 + p.monthIdx : null;
+    };
+    advanceBills.forEach((b) => {
+      const lastPay = (b.payments || []).filter((p) => p.type === "rental").slice(-1)[0];
+      const rentPending = Math.max(0, Math.round(Number(b.netPayable || 0) - Number(b.rentPaid || 0)));
+      const paid = rentPending === 0;
+      const row = {
+        _id: b._id,
+        rentalDueId: b._id,
+        dueMonth: b.dueMonth,
+        billType: "advance",
+        label: b.label,
+        adjustInMonth: b.adjustInMonth || "",
+        rentRevisionId: b.rentRevisionId,
+        baseRentOutstandingAmount: Number(b.netPayable || 0) + (Number(b.withGst) === 2 ? Number(b.gstAmount || 0) : 0),
+        withGst: Number(b.withGst || 0),
+        gstAmount: Number(b.gstAmount || 0),
+        tdsAmount: Number(b.tdsAmount || 0),
+        paidAmount: Number(b.rentPaid || 0),
+        pendingAmount: rentPending,
+        isPaid: paid,
+        isVirtual: !paid,
+        date: paid && lastPay ? lastPay.date : null,
+        updatedAt: lastPay ? lastPay.createdAt || null : null,
+        updatedBy: lastPay ? lastPay.createdBy || "" : "",
+        cycle: b.dueDate,
+      };
+      // after the last row of the same month, else before the first later month
+      let at = -1;
+      fullRentalOutstandingHistory.forEach((h, i) => {
+        if (h && h.dueMonth === b.dueMonth) at = i;
+      });
+      if (at < 0) {
+        const key = monthKeyOfLabel(b.dueMonth);
+        const later = fullRentalOutstandingHistory.findIndex((h) => {
+          const k = h ? monthKeyOfLabel(h.dueMonth) : null;
+          return key !== null && k !== null && k > key;
+        });
+        at = later < 0 ? fullRentalOutstandingHistory.length - 1 : later - 1;
+      }
+      fullRentalOutstandingHistory.splice(at + 1, 0, row);
+    });
+  }
 
   let gstPayment = false;
   if (fullGstBalanceHistory.length > 0) {

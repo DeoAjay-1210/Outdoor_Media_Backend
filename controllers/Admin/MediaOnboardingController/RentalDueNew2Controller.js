@@ -19,7 +19,7 @@ const {
   getMonthLabel,
 } = require("../../../utils/Datehelpers");
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
-const { getRentForDueDate, getRentRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
+const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const {
   createRentalApprovalNotification,
@@ -966,7 +966,9 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
   // ✅ FIXED — use the rent in force for the entry's due month, so a cycle
   // before an appraisal (e.g. Sep when appraisal starts Oct) keeps the old rent.
   let baseRent = getRentForDueDate(media, dueDate);
-  const rentRatio = getRentRatioForDueDate(media, dueDate);
+  // ✅ CHANGED — GST ratio (same as the rent ratio unless an increase / advance
+  // was taken without GST)
+  const rentRatio = getGstRatioForDueDate(media, dueDate);
 
   // ✅ FIXED — resolve the FULL GST from the best available source (Site or Sum of Owners)
   let gstAmountFull = Number(media.rentalPayment?.gstAmount || 0);
@@ -5249,6 +5251,37 @@ async function addBankDetailsToLinkedSites(owners) {
   });
 }
 
+// ✅ NEW — rent revision ADVANCE deducted from this bill (e.g. Dec bill 50k,
+// Oct advance 25k → balance 25k). {} when the bill has no advance.
+function advanceFieldsForEntry(item, entry) {
+  const rows = (item?.rentalPayment?.advanceAdjustments || []).filter((a) => a && a.dueMonth === entry?.dueMonth);
+  if (!rows.length) return {};
+  const bills = item.advanceBills || [];
+  const details = rows.map((a) => {
+    const b = bills.find((x) => String(x._id) === String(a.advanceBillId)) || {};
+    const paid = Number(b.rentPaid || 0) >= Number(b.netPayable || a.amount || 0);
+    return {
+      rentalDueId: a.advanceBillId || null,
+      revisionId: a.rentRevisionId || null,
+      advanceMonth: b.dueMonth || "",
+      amount: Number(a.amount || 0),
+      gstAmount: Number(b.gstAmount || 0),
+      isPaid: paid,
+    };
+  });
+  const advanceAdjusted = details.reduce((s, d) => s + d.amount, 0);
+  const advanceGstAdjusted = details.reduce((s, d) => s + d.gstAmount, 0);
+  const billRent = Number((bills.find((x) => String(x._id) === String(rows[0].advanceBillId)) || {}).billRent || 0);
+  return {
+    totalRentalAmount: billRent || Number(entry.netPayable || 0) + advanceAdjusted,
+    advanceAdjusted,
+    advanceGstAdjusted,
+    balanceAmount: Number(entry.netPayable || 0),
+    balanceGstAmount: Number(entry.gstAmount || 0),
+    advanceDetails: details,
+  };
+}
+
 exports.getRentalDueListWithStats = async (req, res) => {
   try {
     const today = new Date();
@@ -5872,6 +5905,10 @@ if (Number(isPastPending) === 1) {
         pastgstApplicableFlag: 1,
         gstBalanceHistory: 1,
         rentalDue: 1,
+        // ✅ NEW — rent revision advance bills only (advance deducted from a bill)
+        advanceBills: {
+          $filter: { input: { $ifNull: ["$arrearsDue", []] }, as: "a", cond: { $eq: ["$$a.type", "advance"] } },
+        },
         updatedAt: 1,
       },
     });
@@ -6301,6 +6338,8 @@ const details = (item.mediaDetails || []).map((d) => ({
             tdsHold: buildTdsHoldSummary(item.landOwners),
             // ✅ NEW — "Save as Draft" values ({ isDraft: 0 } when none)
             draft: formatDraft(entry.draft),
+            // ✅ NEW — rent revision advance deducted from this bill
+            ...advanceFieldsForEntry(item, entry),
           });
         });
       });
