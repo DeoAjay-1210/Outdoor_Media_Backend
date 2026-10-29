@@ -43,10 +43,13 @@ const RentRevisionSchema = new mongoose.Schema(
     currentPendingRole: { type: Number, enum: [1, 2, 3, null], default: 1 },
     approvalSteps: [revisionStepSchema],
 
-    preview: { type: mongoose.Schema.Types.Mixed, default: null }, // at create
-    applied: { type: mongoose.Schema.Types.Mixed, default: null }, // at CMD approval
-    mails: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     arrearsTotal: { type: Number, default: 0 },
+    // ✅ NEW — POST /admin/rent-revision/update: every edit (old / new values,
+    // approvals reset by that edit), oldest first
+    editHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    // ✅ NEW — earlier approvals replaced when the same role approved again
+    approvalHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    updatedBy: { type: String, trim: true, default: "" },
 
     requestedBy: { type: String, trim: true, default: "" },
     requestedByUserId: { type: mongoose.Schema.Types.ObjectId, default: null },

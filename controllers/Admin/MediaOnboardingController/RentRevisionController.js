@@ -19,7 +19,6 @@ const {
   monthLabelOfKey,
   parseFromMonth,
   buildRevisionPlan,
-  planPreview,
   toArrearsBill,
   arrearsStatus,
 } = require("../../../utils/rentRevisionArrears");
@@ -74,7 +73,77 @@ const parseApplyToAllMonths = (value) => {
   return n === 0 || n === 1 ? n : undefined;
 };
 
-// one site → { revision } or { error }
+// ✅ NEW — the site already has a Pending revision → POST /admin/rent-revision
+// updates THAT revision instead of failing. Amount / month / applyToAllMonths
+// changed → approvals reset (all 3 steps Pending again); old values + the
+// reset approvals → editHistory. reason / invoice only → approvals kept.
+// Returns { revision, action: "updated" | "unchanged" }.
+async function editPendingRevision(revision, media, { fromDate, fromLabel, newRent, oldRent, increaseAmount, applyToAllMonths, reason, invoice, plan, user }) {
+  const before = {
+    fromMonth: revision.fromMonth,
+    oldRent: revision.oldRent,
+    increaseAmount: revision.increaseAmount ?? revision.difference,
+    newRent: revision.newRent,
+    applyToAllMonths: revision.applyToAllMonths ?? null,
+    reason: revision.reason || "",
+    invoice: revision.invoice?.filePath || "",
+  };
+  // no new invoice uploaded → keep the saved one
+  const nextInvoice = invoice || revision.invoice || null;
+  const after = {
+    fromMonth: fromLabel,
+    oldRent,
+    increaseAmount,
+    newRent,
+    applyToAllMonths,
+    reason,
+    invoice: nextInvoice?.filePath || "",
+  };
+  const valuesChanged = ["fromMonth", "oldRent", "increaseAmount", "newRent", "applyToAllMonths"].some(
+    (k) => before[k] !== after[k],
+  );
+  if (!valuesChanged && before.reason === after.reason && before.invoice === after.invoice) {
+    return { revision, action: "unchanged" };
+  }
+
+  const now = nowIST();
+  const approvalsReset = valuesChanged
+    ? (revision.approvalSteps || [])
+        .filter((s) => s.status === "Approved" || s.status === "Skipped")
+        .map((s) => ({ role: s.role, roleName: s.roleName || ROLE_NAMES[s.role], status: s.status, by: s.by || "", at: s.at || null }))
+    : [];
+  if (valuesChanged) {
+    revision.approvalSteps = [1, 2, 3].map((role) => ({ role, roleName: ROLE_NAMES[role], status: "Pending" }));
+    revision.currentPendingRole = 1;
+  }
+
+  revision.fromMonth = fromLabel;
+  revision.fromDate = fromDate;
+  revision.oldRent = oldRent;
+  revision.newRent = newRent;
+  revision.difference = increaseAmount;
+  revision.increaseAmount = increaseAmount;
+  revision.applyToAllMonths = applyToAllMonths;
+  revision.reason = reason;
+  revision.invoice = nextInvoice;
+  revision.editHistory = [
+    ...(revision.editHistory || []),
+    {
+      editedBy: user?.userName || "",
+      editedByUserId: mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null,
+      editedByRole: Number(user?.userType) || null,
+      editedAt: now,
+      before,
+      after,
+      approvalsReset,
+    },
+  ];
+  revision.updatedBy = user?.userName || "";
+  await revision.save();
+  return { revision, action: "updated" };
+}
+
+// one site → { revision, action } or { error }
 async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount, applyToAllMonths, reason, invoice, user }) {
   if (!mongoose.Types.ObjectId.isValid(String(mediaId))) return { error: "mediaId is not a valid ObjectId" };
   const media = await Media.findById(mediaId).select(RENT_REVISION_MEDIA_FIELDS).lean();
@@ -86,14 +155,20 @@ async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount,
     (b) => b && (b.dueMonth === fromLabel || monthKey(b.dueDate) === monthKey(fromDate)),
   );
   if (!hasFromBill) return { error: `No bill for ${fromLabel} on this site` };
-  const waiting = await RentRevision.findOne({ mediaId, status: "Pending" }).select("_id").lean();
-  if (waiting) return { error: "A rent revision is already waiting for approval", revisionId: waiting._id };
 
   const oldRent = Number(media.rentalPayment?.totalRentalAmount || 0);
   const newRent = round(oldRent + increaseAmount);
   const onlyFromMonth = applyToAllMonths === 0;
   const plan = buildRevisionPlan(media, fromDate, newRent, applyToAllMonths);
   if (plan.heldMonth) return { error: `${plan.heldMonth} is on appraisal hold — release it first` };
+
+  // ✅ CHANGED — already a Pending revision on this site → update it (same API)
+  const waiting = await RentRevision.findOne({ mediaId, status: "Pending" });
+  if (waiting) {
+    return editPendingRevision(waiting, media, {
+      fromDate, fromLabel, newRent, oldRent, increaseAmount, applyToAllMonths, reason, invoice, plan, user,
+    });
+  }
 
   const { mediaCode, mediaName } = siteCodeName(media);
   const revision = await RentRevision.create({
@@ -112,13 +187,12 @@ async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount,
     status: "Pending",
     currentPendingRole: 1,
     approvalSteps: [1, 2, 3].map((role) => ({ role, roleName: ROLE_NAMES[role], status: "Pending" })),
-    preview: planPreview(plan, newRent, onlyFromMonth ? oldRent : newRent),
     requestedBy: user?.userName || "",
     requestedByUserId: mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null,
     requestedByRole: Number(user?.userType) || null,
     requestedAt: nowIST(),
   });
-  return { revision };
+  return { revision, action: "created" };
 }
 
 const revisionSummary = (r) => ({
@@ -135,7 +209,6 @@ const revisionSummary = (r) => ({
   currentPendingRole: r.currentPendingRole ?? null,
   currentPendingRoleName: r.currentPendingRole ? ROLE_NAMES[r.currentPendingRole] : null,
   approvalSteps: formatSteps(r.approvalSteps),
-  preview: r.preview,
   requestedBy: r.requestedBy,
   requestedByRole: r.requestedByRole,
   requestedAt: r.requestedAt,
@@ -186,17 +259,30 @@ exports.createRentRevision = async (req, res) => {
     for (const id of mediaIds) {
       const r = await createOneRevision(id, opts);
       if (r.error) failed.push({ mediaId: id, message: r.error, ...(r.revisionId ? { revisionId: r.revisionId } : {}) });
-      else created.push(revisionSummary(r.revision));
+      else {
+        created.push({
+          action: r.action, // created | updated (a Pending revision already existed) | unchanged
+          ...revisionSummary(r.revision),
+          ...(r.action !== "created" ? { editHistory: r.revision.editHistory || [], updatedBy: r.revision.updatedBy || "" } : {}),
+        });
+      }
     }
 
     if (created.length === 0) {
       return errorResponse(res, failed.length === 1 ? failed[0].message : "No rent revision created", { failed }, 400);
     }
+    const count = (a) => created.filter((c) => c.action === a).length;
+    const parts = [
+      count("created") ? `${count("created")} created` : "",
+      count("updated") ? `${count("updated")} updated` : "",
+      count("unchanged") ? `${count("unchanged")} unchanged` : "",
+    ].filter(Boolean);
+    const pendingRoles = [...new Set(created.map((c) => c.currentPendingRoleName).filter(Boolean))];
     return successResponse(
       res,
-      `${created.length} rent revision request(s) created — waiting for Rental Executive approval`,
+      `Rent revision ${parts.join(", ")} — waiting for ${pendingRoles.join(" / ") || "Rental Executive"} approval`,
       { created, failed },
-      failed.length ? 207 : 201,
+      failed.length ? 207 : count("created") ? 201 : 200,
     );
   } catch (error) {
     console.error("createRentRevision error:", error);
@@ -281,7 +367,7 @@ async function sendArrearsMail(media, bill, revision) {
   };
 }
 
-// Applies an approved revision to the site. Returns the "applied" block + bills.
+// Applies an approved revision to the site. Returns the arrears bills + total.
 async function applyRevision(revision, media, userName) {
   const now = nowIST();
   const newRent = Number(revision.newRent);
@@ -368,32 +454,6 @@ async function applyRevision(revision, media, userName) {
 
   return {
     arrearsBills,
-    applied: {
-      arrearsBills: arrearsBills.map((b) => ({
-        rentalDueId: b._id,
-        type: "arrears",
-        parentRentalDueId: b.parentRentalDueId,
-        dueMonth: b.dueMonth,
-        label: b.label,
-        netPayable: b.netPayable,
-        gstAmount: b.gstAmount,
-        tdsAmount: b.tdsAmount,
-        withGst: Number(b.withGst || 0),
-        paid: 0,
-      })),
-      billsUpdated: plan.billsUpdated.map((b) => ({
-        dueMonth: b.dueMonth,
-        rentalDueId: b.rentalDueId,
-        oldAmount: b.oldAmount,
-        newAmount: b.newAmount,
-      })),
-      keptMonths: plan.keptMonths.map((k) => k.dueMonth),
-      siteRent: {
-        old: oldRent,
-        increaseAmount: Number(revision.increaseAmount || newRent - oldRent),
-        new: onlyFromMonth ? oldRent : newRent,
-      },
-    },
     arrearsTotal: arrearsBills.reduce((s, b) => s + Number(b.netPayable || 0), 0),
   };
 }
@@ -410,8 +470,47 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
     return { statusCode: 400, message: `This rent revision is already ${revision.status}` };
   }
   const step = revision.approvalSteps.find((s) => Number(s.role) === role);
-  if (step && step.status === "Approved") {
-    return { statusCode: 400, message: `${ROLE_NAMES[role]} already approved this revision` };
+  // ✅ CHANGED — same role approves again (revision still Pending) → its approval
+  // is updated (remark / by / time); the earlier one goes to approvalHistory.
+  // Next role and the site are not changed. action 2 still rejects.
+  if (step && step.status === "Approved" && action === 1) {
+    const now = nowIST();
+    revision.approvalHistory = [
+      ...(revision.approvalHistory || []),
+      {
+        role: step.role,
+        roleName: step.roleName || ROLE_NAMES[role],
+        status: step.status,
+        by: step.by || "",
+        byUserId: step.byUserId || null,
+        at: step.at || null,
+        remark: step.remark || "",
+        replacedAt: now,
+      },
+    ];
+    step.by = user?.userName || "";
+    step.byUserId = mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null;
+    step.at = now;
+    step.remark = remark ? String(remark).trim() : "";
+    await revision.save();
+    return {
+      statusCode: 200,
+      message: `Rent revision approval updated by ${ROLE_NAMES[role]}${revision.currentPendingRole ? ` — waiting for ${ROLE_NAMES[revision.currentPendingRole]}` : ""}`,
+      data: {
+        revisionId: revision._id,
+        mediaId: revision.mediaId,
+        mediaCode: revision.mediaCode,
+        oldRent: revision.oldRent,
+        increaseAmount: revision.increaseAmount,
+        newRent: revision.newRent,
+        applyToAllMonths: revision.applyToAllMonths ?? null,
+        status: revision.status,
+        currentPendingRole: revision.currentPendingRole ?? null,
+        currentPendingRoleName: revision.currentPendingRole ? ROLE_NAMES[revision.currentPendingRole] : null,
+        approvalSteps: formatSteps(revision.approvalSteps),
+        approvalHistory: revision.approvalHistory,
+      },
+    };
   }
   // CMD can approve / reject directly (Executive / Manager not done yet → Skipped)
   if (Number(revision.currentPendingRole) !== role && role !== 3) {
@@ -489,12 +588,10 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
   revision.status = "Approved";
   revision.currentPendingRole = null;
   revision.approvedAt = now;
-  revision.applied = result.applied;
   revision.arrearsTotal = result.arrearsTotal;
   await revision.save();
 
   // CMD approval mail per arrears bill (a mail failure does not undo the approval)
-  const mails = [];
   if (result.arrearsBills.length) {
     const freshMedia = await Media.findById(revision.mediaId).select(RENT_REVISION_MEDIA_FIELDS).lean();
     for (const bill of result.arrearsBills) {
@@ -504,15 +601,12 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
       } catch (mailErr) {
         mail = { rentalDueId: bill._id, dueMonth: bill.dueMonth, mailtype: "cmdapproval", success: false, sent: false, statusCode: 500, message: mailErr?.message || "Mail error" };
       }
-      mails.push(mail);
       await Media.updateOne(
         { _id: revision.mediaId },
         { $set: { "arrearsDue.$[a].mailSent": !!mail.sent, "arrearsDue.$[a].mailSentAt": mail.sent ? nowIST() : null } },
         { arrayFilters: [{ "a._id": bill._id }], strict: false },
       );
     }
-    revision.mails = mails;
-    await revision.save();
   }
 
   return {
@@ -522,8 +616,6 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
       ...base(),
       currentPendingRole: null,
       approvalSteps: formatSteps(revision.approvalSteps),
-      applied: result.applied,
-      mails,
     },
   };
 }
@@ -586,6 +678,37 @@ exports.approveRentRevision = async (req, res) => {
   }
 };
 
+// ✅ NEW — rent-revision-list "site" block: current rent, payment frequency and
+// the last CMD-approved bill (previousBill). Same-month bills (multi-face) are
+// summed. null previousBill → no CMD-approved bill yet.
+const PAYMENT_FREQUENCY_LABELS = { 1: "Monthly", 2: "Quarterly", 3: "Half-Yearly", 4: "Yearly", 5: "2 Years", 6: "Custom" };
+function revisionSiteBlock(media) {
+  const rp = media?.rentalPayment || {};
+  const approved = (media?.rentalDue || [])
+    .filter((b) => b && Number(b.approvalStatus) === 3 && b.dueDate)
+    .sort((a, b) => new Date(b.dueDate) - new Date(a.dueDate));
+  let previousBill = null;
+  if (approved.length) {
+    const lastKey = monthKey(approved[0].dueDate);
+    const sameMonth = approved.filter((b) => monthKey(b.dueDate) === lastKey);
+    const approvedAts = sameMonth.map((b) => b.ownerApprovalDate).filter(Boolean).map((d) => new Date(d));
+    previousBill = {
+      rentalDueId: sameMonth[0]._id,
+      month: sameMonth[0].dueMonth || monthLabelOfKey(lastKey),
+      amount: sameMonth.reduce((s, b) => s + Number(b.netPayable || 0), 0),
+      cmdApprovedAt: approvedAts.length ? new Date(Math.max(...approvedAts.map((d) => d.getTime()))) : null,
+    };
+  }
+  const freq = Number(rp.paymentFrequency) || null;
+  return {
+    currentRent: Number(rp.totalRentalAmount || 0),
+    paymentFrequency: freq,
+    paymentFrequencyLabel: freq ? PAYMENT_FREQUENCY_LABELS[freq] || "" : "",
+    customPaymentFrequency: freq === 6 ? Number(rp.customPaymentFrequency) || null : null,
+    previousBill,
+  };
+}
+
 // ── GET /admin/rent-revision-list ────────────────────────────
 exports.getRentRevisionList = async (req, res) => {
   try {
@@ -612,8 +735,14 @@ exports.getRentRevisionList = async (req, res) => {
     // arrears paid / pending from the site's arrears bills
     const mediaIds = [...new Set(rows.map((r) => String(r.mediaId)))];
     const medias = mediaIds.length
-      ? await Media.find({ _id: { $in: mediaIds } }).select("arrearsDue").lean()
+      ? await Media.find({ _id: { $in: mediaIds } })
+          .select(
+            "arrearsDue rentalPayment.totalRentalAmount rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency " +
+              "rentalDue._id rentalDue.dueMonth rentalDue.dueDate rentalDue.netPayable rentalDue.approvalStatus rentalDue.ownerApprovalDate",
+          )
+          .lean()
       : [];
+    const siteById = new Map(medias.map((m) => [String(m._id), revisionSiteBlock(m)]));
     const billsByRevision = new Map();
     medias.forEach((m) =>
       (m.arrearsDue || []).forEach((b) => {
@@ -644,8 +773,6 @@ exports.getRentRevisionList = async (req, res) => {
         currentPendingRole: r.currentPendingRole ?? null,
         currentPendingRoleName: r.currentPendingRole ? ROLE_NAMES[r.currentPendingRole] : null,
         approvalSteps: formatSteps(r.approvalSteps),
-        preview: r.preview,
-        applied: r.applied || null,
         arrearsTotal,
         arrearsPaid,
         arrearsPending: Math.max(0, arrearsTotal - arrearsPaid),
@@ -662,7 +789,13 @@ exports.getRentRevisionList = async (req, res) => {
           mailSent: !!b.mailSent,
           mailSentAt: b.mailSentAt || null,
         })),
-        mails: r.mails || [],
+        // ✅ NEW — every update through POST /admin/rent-revision (oldest first)
+        editHistory: r.editHistory || [],
+        editCount: (r.editHistory || []).length,
+        approvalHistory: r.approvalHistory || [], // ✅ NEW — approvals replaced by a re-approval
+        site: siteById.get(String(r.mediaId)) || null, // ✅ NEW — rent, payment frequency, last CMD-approved bill
+        updatedBy: r.updatedBy || "",
+        updatedAt: r.updatedAt || null,
         requestedBy: r.requestedBy,
         requestedByRole: r.requestedByRole,
         requestedAt: r.requestedAt,
