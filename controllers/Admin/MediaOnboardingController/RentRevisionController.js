@@ -100,7 +100,42 @@ const parseAmount = (value) => {
   return Number.isFinite(n) && n > 0 ? round(n) : undefined;
 };
 
-const sameValue = (a, b) => (a ?? null) === (b ?? null);
+// ✅ CHANGED — arrays / objects (BILL months) compared by value
+const sameValue = (a, b) => {
+  const norm = (v) => (v && typeof v === "object" ? JSON.stringify(v) : v ?? null);
+  return norm(a) === norm(b);
+};
+
+// ✅ NEW — BILL months: [{ month, amount }] (array or JSON string) →
+// { list: [{ month, amount, key, date }] sorted by month } | { list: null } (not sent) | { error }
+const MONTHS_EXAMPLE = '[{"month":"August 2026","amount":2000}]';
+const parseRevisionMonths = (value) => {
+  if (value === undefined || value === null || (!Array.isArray(value) && String(value).trim() === "")) return { list: null };
+  let arr = value;
+  if (typeof value === "string") {
+    try {
+      arr = JSON.parse(value);
+    } catch (e) {
+      return { error: `months is invalid — send like ${MONTHS_EXAMPLE}` };
+    }
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return { error: `months is required — send like ${MONTHS_EXAMPLE}` };
+  const seen = new Set();
+  const list = [];
+  for (let i = 0; i < arr.length; i++) {
+    const date = parseFromMonth(arr[i]?.month);
+    if (!date) return { error: `months[${i}].month is invalid — send like "October 2026"` };
+    const amount = Number(arr[i]?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return { error: `months[${i}].amount must be more than 0` };
+    const key = monthKey(date);
+    const month = monthLabelOfKey(key);
+    if (seen.has(key)) return { error: `${month} is repeated in months` };
+    seen.add(key);
+    list.push({ month, amount: round(amount), key, date });
+  }
+  list.sort((a, b) => a.key - b.key);
+  return { list };
+};
 
 // ✅ NEW — the site already has a Pending revision (same billType) → POST
 // /admin/rent-revision updates THAT revision instead of failing.
@@ -193,10 +228,12 @@ function nextBillMonthAfter(media, fromDate) {
 // ✅ CHANGED — BILL: fromMonth bill + increaseAmount (GST on it only when
 // gstOnIncrease 1); applyToAllMonths 1 → site rent + nextIncreaseAmount from
 // the next bill (GST as the site's)
-async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount, applyToAllMonths, nextIncreaseAmount, gstOnIncrease, reason, invoice, user }) {
+// ✅ NEW — billMonths (BILL "months" array): each listed month + its own amount
+async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount, applyToAllMonths, nextIncreaseAmount, gstOnIncrease, reason, invoice, user, billMonths = null }) {
   const loaded = await loadActiveMedia(mediaId);
   if (loaded.error) return loaded;
   const { media } = loaded;
+  if (billMonths) return createOneMonthsRevision(mediaId, media, { billMonths, applyToAllMonths, nextIncreaseAmount, gstOnIncrease, reason, invoice, user });
   const hasFromBill = (media.rentalDue || []).some(
     (b) => b && (b.dueMonth === fromLabel || monthKey(b.dueDate) === monthKey(fromDate)),
   );
@@ -232,9 +269,101 @@ async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount,
     nextBillFromMonth: onlyFromMonth ? "" : nextBillMonthAfter(media, fromDate),
     gstPercentage,
     increaseGstAmount: gstFlag === 1 ? round((increaseAmount * gstPercentage) / 100) : 0,
+    // ✅ NEW — single-month request: no months list (an earlier months request is replaced)
+    months: undefined,
+    monthsDetail: undefined,
+    toMonth: "",
+    totalIncreaseAmount: increaseAmount,
   };
 
   // ✅ CHANGED — already a Pending BILL revision on this site → update it (same API)
+  const waiting = await RentRevision.findOne({ mediaId, status: "Pending", billType: { $ne: "ADVANCE" } });
+  if (waiting) return editPendingRevision(waiting, { compare, derived, reason, invoice, user });
+
+  const revision = await RentRevision.create({
+    ...newRevisionBase(mediaId, media, user),
+    ...compare,
+    ...derived,
+    invoice,
+    reason,
+  });
+  return { revision, action: "created" };
+}
+
+// ✅ NEW — BILL with "months" [{ month, amount }]: on CMD approval each listed
+// month gets its own amount — CMD approved bill → arrears bill of that month,
+// bill not CMD approved → that bill goes up. Months between the listed ones are
+// not changed. applyToAllMonths 1 → site rent + nextIncreaseAmount from the next
+// bill after the LAST listed month.
+async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllMonths, nextIncreaseAmount, gstOnIncrease, reason, invoice, user }) {
+  const billsOfMonth = (key) => (media.rentalDue || []).filter((b) => b && b.dueDate && monthKey(b.dueDate) === key);
+  const missing = billMonths.find((bm) => billsOfMonth(bm.key).length === 0);
+  if (missing) return { error: `No bill for ${missing.month} on this site` };
+
+  const first = billMonths[0];
+  const last = billMonths[billMonths.length - 1];
+  const gstPercentage = gstPercentageFor(media, first.date);
+  if (gstPercentage > 0 && gstOnIncrease === null) {
+    return { error: "This site has GST — send gstOnIncrease (1 = with GST, 0 = without GST)" };
+  }
+  const gstFlag = gstPercentage > 0 ? gstOnIncrease : null;
+
+  const onlyListed = applyToAllMonths === 0;
+  // applyToAllMonths not sent → next months take the last listed month's amount
+  const nextIncrease = onlyListed ? null : nextIncreaseAmount ?? last.amount;
+  const oldRent = Number(media.rentalPayment?.totalRentalAmount || 0);
+  const newRent = onlyListed ? oldRent : round(oldRent + nextIncrease);
+  const plan = buildRevisionPlan(media, first.date, newRent, applyToAllMonths, {
+    gstOnIncrease: gstFlag,
+    monthIncreases: new Map(billMonths.map((bm) => [bm.key, bm.amount])),
+  });
+  if (plan.heldMonth) return { error: `${plan.heldMonth} is on appraisal hold — release it first` };
+
+  const monthsDetail = billMonths.map((bm) => {
+    const monthBills = billsOfMonth(bm.key);
+    const status = Math.max(...monthBills.map((b) => Number(b.approvalStatus || 1)));
+    const arrears = plan.arrearsBills.filter((b) => b.dueMonth === bm.month || monthKey(b.dueDate) === bm.key);
+    const updated = plan.billsUpdated.filter((b) => b.dueMonth === bm.month);
+    const pct = gstPercentageFor(media, bm.date);
+    const gstAmount = gstFlag === 1 ? round((bm.amount * pct) / 100) : 0;
+    const currentAmount = arrears.length ? Number(arrears[0].oldMonthRent || 0) : updated.reduce((s, b) => s + Number(b.oldAmount || 0), 0);
+    return {
+      month: bm.month,
+      rentalDueId: monthBills[0]._id,
+      billStatus: BILL_APPROVAL_LABELS[status] || "Pending",
+      currentAmount,
+      amount: bm.amount,
+      gstAmount,
+      totalAmount: bm.amount + gstAmount,
+      newAmount: currentAmount + bm.amount,
+      action: status === 3 ? "arrears" : "billUpdate",
+    };
+  });
+  const totalIncreaseAmount = billMonths.reduce((s, bm) => s + bm.amount, 0);
+
+  const compare = {
+    months: billMonths.map((bm) => ({ month: bm.month, amount: bm.amount })),
+    oldRent,
+    newRent,
+    applyToAllMonths,
+    nextIncreaseAmount: nextIncrease,
+    gstOnIncrease: gstFlag,
+  };
+  const derived = {
+    billType: "BILL",
+    fromMonth: first.month,
+    fromDate: first.date,
+    toMonth: last.month,
+    increaseAmount: totalIncreaseAmount,
+    difference: totalIncreaseAmount,
+    totalIncreaseAmount,
+    monthsDetail,
+    nextBillFromMonth: onlyListed ? "" : nextBillMonthAfter(media, last.date),
+    gstPercentage,
+    increaseGstAmount: monthsDetail.reduce((s, d) => s + d.gstAmount, 0),
+  };
+
+  // already a Pending BILL revision on this site → update it (same API)
   const waiting = await RentRevision.findOne({ mediaId, status: "Pending", billType: { $ne: "ADVANCE" } });
   if (waiting) return editPendingRevision(waiting, { compare, derived, reason, invoice, user });
 
@@ -356,6 +485,16 @@ function billTypeFields(r, plan = null) {
     out.newRentGstAmount = round((newRent * gstPercentage) / 100);
     out.newRentWithGst = newRent + out.newRentGstAmount;
   }
+  // ✅ NEW — BILL "months": each month's amount / action, totals
+  if (Array.isArray(r.months) && r.months.length) {
+    const detail = Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : r.months;
+    out.toMonth = r.toMonth || "";
+    out.monthCount = r.months.length; // ✅ NEW
+    out.months = detail.map((d) => (d && typeof d.toObject === "function" ? d.toObject() : { ...d }));
+    out.totalIncreaseAmount = Number(r.totalIncreaseAmount || increaseAmount);
+    out.totalGstAmount = increaseGstAmount;
+    out.totalAmount = out.totalIncreaseAmount + increaseGstAmount;
+  }
   return out;
 }
 
@@ -414,7 +553,13 @@ exports.createRentRevision = async (req, res) => {
     let nextIncreaseAmount = null;
     let fromDate = null;
     let fromLabel = "";
+    let billMonths = null; // ✅ NEW — BILL "months" array
     if (billType === "BILL") {
+      const parsedMonths = parseRevisionMonths(body.months);
+      if (parsedMonths.error) return errorResponse(res, parsedMonths.error, null, 400);
+      billMonths = parsedMonths.list;
+    }
+    if (billType === "BILL" && !billMonths) {
       if (body.increaseAmount === undefined || body.increaseAmount === null || String(body.increaseAmount).trim() === "") {
         return errorResponse(res, "increaseAmount is required", null, 400);
       }
@@ -436,6 +581,33 @@ exports.createRentRevision = async (req, res) => {
       fromDate = parseFromMonth(body.fromMonth);
       if (!fromDate) return errorResponse(res, 'fromMonth is invalid — send like "August 2026"', null, 400);
       fromLabel = monthLabelOfKey(monthKey(fromDate));
+    }
+    // ✅ NEW — BILL "months": same applyToAllMonths / nextIncreaseAmount rules
+    if (billType === "BILL" && billMonths) {
+      applyToAllMonths = parseApplyToAllMonths(body.applyToAllMonths);
+      if (applyToAllMonths === undefined) return errorResponse(res, "applyToAllMonths must be 0 or 1", null, 400);
+      if (applyToAllMonths === 1) {
+        nextIncreaseAmount = parseAmount(body.nextIncreaseAmount);
+        if (nextIncreaseAmount === null) {
+          return errorResponse(res, "nextIncreaseAmount is required when applyToAllMonths is 1", null, 400);
+        }
+        if (nextIncreaseAmount === undefined) return errorResponse(res, "nextIncreaseAmount must be more than 0", null, 400);
+      }
+      fromDate = billMonths[0].date;
+      fromLabel = billMonths[0].month;
+      // ✅ NEW — optional total increaseAmount: must equal the months' total
+      if (body.increaseAmount !== undefined && body.increaseAmount !== null && String(body.increaseAmount).trim() !== "") {
+        const sentTotal = Number(body.increaseAmount);
+        const monthsTotal = billMonths.reduce((s, bm) => s + bm.amount, 0);
+        if (!Number.isFinite(sentTotal) || round(sentTotal) !== monthsTotal) {
+          return errorResponse(
+            res,
+            `increaseAmount ${body.increaseAmount} must equal the total of months ${monthsTotal} (${billMonths.map((bm) => `${bm.month} ${bm.amount}`).join(" + ")})`,
+            null,
+            400,
+          );
+        }
+      }
     }
 
     // one invoice PDF for all sites in the request → mail gstInvoiceUrl
@@ -465,6 +637,7 @@ exports.createRentRevision = async (req, res) => {
             increaseAmount: round(increaseAmount),
             applyToAllMonths,
             nextIncreaseAmount,
+            billMonths,
           });
       if (r.error) failed.push({ mediaId: id, message: r.error, ...(r.revisionId ? { revisionId: r.revisionId } : {}) });
       else {
@@ -500,7 +673,8 @@ exports.createRentRevision = async (req, res) => {
 
 // CMD approval mail for one arrears bill — same "cmdapproval" mail, amounts =
 // the arrears amounts, plus a rentRevision block
-async function sendArrearsMail(media, bill, revision) {
+// ✅ CHANGED — rentRevisionOverride: the mail's rentRevision block (BILL months total mail)
+async function sendArrearsMail(media, bill, revision, rentRevisionOverride = null) {
   const { sendRentalDueApprovalMail } = require("./RentalDueNew2Controller");
   const base = JSON.parse(JSON.stringify(media));
   const rp = base.rentalPayment || {};
@@ -548,8 +722,9 @@ async function sendArrearsMail(media, bill, revision) {
   };
   const isAdvance = bill.type === "advance";
   const result = await sendRentalDueApprovalMail(mailMedia, mailEntry, null, {
-    rentRevision: {
-      billType: isAdvance ? "advance" : "arrears",
+    rentRevision: rentRevisionOverride || {
+      // ✅ CHANGED — "billUpdate": the month's bill was increased (no arrears bill)
+      billType: isAdvance ? "advance" : bill.type === "billUpdate" ? "billUpdate" : "arrears",
       label: bill.label,
       dueMonth: bill.dueMonth,
       rentalDueId: bill._id,
@@ -564,7 +739,9 @@ async function sendArrearsMail(media, bill, revision) {
           }
         : {
             oldRent: Number(revision.oldRent || bill.oldMonthRent || 0),
-            increaseAmount: Number(revision.increaseAmount || revision.difference || 0),
+            increaseAmount: Array.isArray(revision.months) && revision.months.length
+              ? Number(bill.netPayable || 0) // ✅ NEW — months list: this month's amount
+              : Number(revision.increaseAmount || revision.difference || 0),
             nextIncreaseAmount: revision.nextIncreaseAmount ?? null,
             newRent: Number(revision.newRent || 0),
             arrearsAmount: Number(bill.netPayable || 0),
@@ -594,9 +771,16 @@ async function applyRevision(revision, media, userName) {
   const newRent = Number(revision.newRent);
   const onlyFromMonth = revision.applyToAllMonths === 0;
   // ✅ CHANGED — fromMonth priced at its own rent + increaseAmount (GST per gstOnIncrease)
+  // ✅ NEW — BILL "months": each listed month + its own amount
+  const listedMonths = (Array.isArray(revision.months) ? revision.months : [])
+    .map((x) => ({ key: monthKey(parseFromMonth(x?.month)), amount: Number(x?.amount || 0) }))
+    .filter((x) => x.key !== null && x.amount > 0);
+  const monthIncreases = listedMonths.length ? new Map(listedMonths.map((x) => [x.key, x.amount])) : null;
+  const lastListedKey = monthIncreases ? Math.max(...monthIncreases.keys()) : null;
   const plan = buildRevisionPlan(media, revision.fromDate, newRent, revision.applyToAllMonths ?? null, {
     fromMonthIncrease: Number(revision.increaseAmount ?? revision.difference ?? 0),
     gstOnIncrease: revision.gstOnIncrease ?? null,
+    ...(monthIncreases ? { monthIncreases } : {}),
   });
   if (plan.heldMonth) {
     throw { message: `${plan.heldMonth} is on appraisal hold — release it first`, statusCode: 400 };
@@ -656,9 +840,13 @@ async function applyRevision(revision, media, userName) {
     $push["rentalPayment.rentalAmountHistory"] = {
       $each: [{
         amount: newRent,
-        updatedBy: `${userName} (Rent Revision - from ${revision.fromMonth})`,
+        updatedBy: `${userName} (Rent Revision - from ${monthIncreases ? revision.nextBillFromMonth || monthLabelOfKey(lastListedKey + 1) : revision.fromMonth})`,
         updatedAt: now,
-        effectiveFrom: revision.fromDate,
+        // months list → from the month after the last listed month (months
+        // between the listed ones keep their rent)
+        effectiveFrom: monthIncreases
+          ? new Date(Date.UTC(Math.floor((lastListedKey + 1) / 12), (lastListedKey + 1) % 12, 1))
+          : revision.fromDate,
         rentRevisionId: revision._id,
       }],
       $sort: { updatedAt: -1 },
@@ -681,6 +869,7 @@ async function applyRevision(revision, media, userName) {
   return {
     arrearsBills,
     arrearsTotal: arrearsBills.reduce((s, b) => s + Number(b.netPayable || 0), 0),
+    billsUpdated: plan.billsUpdated, // ✅ NEW — BILL months response
   };
 }
 
@@ -740,6 +929,36 @@ async function applyAdvance(revision, media, userName) {
   revision.advanceGstAmount = plan.advanceGstAmount;
   revision.advanceBillId = bill._id;
   return { arrearsBills: [bill], arrearsTotal: advanceAmount };
+}
+
+// ✅ NEW — mail "bill" for a month whose bill was increased (not CMD approved
+// yet): amounts = that month's increase, owners split by their share
+function increaseMailBill(media, { month, amount, gstAmount, currentAmount, rentalDueId }) {
+  const dues = media.rentalDue || [];
+  const due = dues.find((b) => String(b._id) === String(rentalDueId)) || dues.find((b) => b.dueMonth === month) || {};
+  const ratio = currentAmount > 0 ? amount / currentAmount : 0;
+  const owners = media.landOwners || [];
+  const totalShare = owners.reduce((s, o) => s + Number(o.shareAmount || 0), 0);
+  return {
+    _id: due._id || rentalDueId,
+    type: "billUpdate",
+    label: `Rent Increase – ${month}`,
+    parentRentalDueId: due._id || rentalDueId || null,
+    mediaDetailId: due.mediaDetailId || null,
+    dueMonth: month,
+    dueDate: due.dueDate || null,
+    netPayable: amount,
+    gstAmount,
+    withGst: Number(due.withGst || 0),
+    owners: owners.map((o) => ({
+      landOwnerId: o._id,
+      shareAmount: round(Number(o.shareAmount || 0) * ratio),
+      cashAmount: round(Number(o.cashAmount || 0) * ratio),
+      onlineAmount: round(Number(o.onlineAmount || 0) * ratio),
+      gstAmount: totalShare > 0 ? round((gstAmount * Number(o.shareAmount || 0)) / totalShare) : 0,
+      tdsAmount: 0,
+    })),
+  };
 }
 
 // one revision → { statusCode, message, data } (statusCode >= 400 = not done)
@@ -865,14 +1084,38 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
     throw e;
   }
 
+  // ✅ NEW — BILL "months": each month's arrears bill / updated bill
+  if (!isAdvance && Array.isArray(revision.monthsDetail) && revision.monthsDetail.length) {
+    revision.monthsDetail = revision.monthsDetail.map((d0) => {
+      const d = d0 && typeof d0.toObject === "function" ? d0.toObject() : { ...d0 };
+      const arrears = (result.arrearsBills || []).filter((b) => b.dueMonth === d.month);
+      const updated = (result.billsUpdated || []).filter((b) => b.dueMonth === d.month);
+      if (arrears.length) {
+        return {
+          ...d,
+          action: "arrears",
+          arrearsRentalDueId: arrears[0]._id,
+          ...(arrears.length > 1 ? { arrearsRentalDueIds: arrears.map((b) => b._id) } : {}),
+          gstAmount: arrears.reduce((s, b) => s + Number(b.gstAmount || 0), 0),
+        };
+      }
+      if (updated.length) {
+        return { ...d, action: "billUpdate", rentalDueId: updated[0].rentalDueId, newAmount: updated.reduce((s, b) => s + Number(b.newAmount || 0), 0) };
+      }
+      return d;
+    });
+  }
   revision.status = "Approved";
   revision.currentPendingRole = null;
   revision.approvedAt = now;
   revision.arrearsTotal = result.arrearsTotal;
   await revision.save();
 
+  // ✅ NEW — BILL with a "months" list → ONE mail for the whole revision (below)
+  const isMonthsRevision = !isAdvance && Array.isArray(revision.months) && revision.months.length > 0;
+
   // CMD approval mail per arrears bill (a mail failure does not undo the approval)
-  if (result.arrearsBills.length) {
+  if (result.arrearsBills.length && !isMonthsRevision) {
     const freshMedia = await Media.findById(revision.mediaId).select(RENT_REVISION_MEDIA_FIELDS).lean();
     for (const bill of result.arrearsBills) {
       let mail;
@@ -889,11 +1132,136 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
     }
   }
 
+  // ✅ NEW — BILL month whose bill was NOT CMD approved (bill amount increased,
+  // no arrears bill) → the same CMD approval mail for that month's increase
+  // (amount / GST of the increase, revision invoice). Result kept in
+  // revision.billUpdateMails. A mail failure does not undo the approval.
+  if (!isAdvance && !isMonthsRevision) {
+    const increaseMonths = [];
+    if (Array.isArray(revision.monthsDetail) && revision.monthsDetail.length) {
+      revision.monthsDetail.forEach((d0) => {
+        const d = d0 && typeof d0.toObject === "function" ? d0.toObject() : d0;
+        if (d && d.action === "billUpdate") {
+          increaseMonths.push({ month: d.month, amount: Number(d.amount || 0), gstAmount: Number(d.gstAmount || 0), currentAmount: Number(d.currentAmount || 0), rentalDueId: d.rentalDueId });
+        }
+      });
+    } else {
+      const fromUpdated = (result.billsUpdated || []).filter((b) => b.dueMonth === revision.fromMonth);
+      if (fromUpdated.length) {
+        increaseMonths.push({
+          month: revision.fromMonth,
+          amount: Number(revision.increaseAmount ?? revision.difference ?? 0),
+          gstAmount: Number(revision.increaseGstAmount || 0),
+          currentAmount: fromUpdated.reduce((s, b) => s + Number(b.oldAmount || 0), 0),
+          rentalDueId: fromUpdated[0].rentalDueId,
+        });
+      }
+    }
+    if (increaseMonths.length) {
+      const freshMedia = (await Media.findById(revision.mediaId).select(RENT_REVISION_MEDIA_FIELDS).lean()) || media;
+      const billUpdateMails = [];
+      for (const im of increaseMonths) {
+        const bill = increaseMailBill(media, im);
+        let mail;
+        try {
+          mail = await sendArrearsMail(freshMedia, bill, revision);
+        } catch (mailErr) {
+          mail = { sent: false, message: mailErr?.message || "Mail error" };
+        }
+        billUpdateMails.push({
+          month: im.month,
+          rentalDueId: bill._id,
+          amount: im.amount,
+          gstAmount: im.gstAmount,
+          mailSent: !!mail.sent,
+          mailSentAt: mail.sent ? nowIST() : null,
+          message: mail.message || "",
+        });
+      }
+      revision.billUpdateMails = billUpdateMails;
+      await revision.save();
+    }
+  }
+
+  // ✅ NEW — BILL "months": ONE CMD approval mail, amounts = all months added
+  // (increaseAmount 6000 = 2000 + 2000 + 2000, GST total, owners' shares summed),
+  // the month-wise list inside rentRevision.months. Result → revision.mail and
+  // each arrears bill's mailSent.
+  if (isMonthsRevision) {
+    const freshMedia = (await Media.findById(revision.mediaId).select(RENT_REVISION_MEDIA_FIELDS).lean()) || media;
+    const detail = (revision.monthsDetail || []).map((d) => (d && typeof d.toObject === "function" ? d.toObject() : d));
+    const ownerTotals = new Map();
+    const addOwners = (owners) =>
+      (owners || []).forEach((o) => {
+        const k = String(o.landOwnerId);
+        const cur = ownerTotals.get(k) || { landOwnerId: o.landOwnerId, shareAmount: 0, cashAmount: 0, onlineAmount: 0, gstAmount: 0, tdsAmount: 0 };
+        ["shareAmount", "cashAmount", "onlineAmount", "gstAmount"].forEach((f) => (cur[f] += Number(o[f] || 0)));
+        ownerTotals.set(k, cur);
+      });
+    detail.forEach((d) => {
+      const arrears = (result.arrearsBills || []).filter((b) => b.dueMonth === d.month);
+      if (arrears.length) arrears.forEach((b) => addOwners(b.owners));
+      else addOwners(increaseMailBill(media, { month: d.month, amount: Number(d.amount || 0), gstAmount: Number(d.gstAmount || 0), currentAmount: Number(d.currentAmount || 0), rentalDueId: d.rentalDueId }).owners);
+    });
+    const increaseAmount = detail.reduce((s, d) => s + Number(d.amount || 0), 0);
+    const increaseGstAmount = detail.reduce((s, d) => s + Number(d.gstAmount || 0), 0);
+    const firstDue = (media.rentalDue || []).find((b) => String(b._id) === String(detail[0]?.rentalDueId)) || {};
+    const label = detail.length > 1 ? `Rent Revision – ${revision.fromMonth} to ${revision.toMonth}` : `Rent Revision – ${revision.fromMonth}`;
+    const totalBill = {
+      _id: revision._id,
+      type: "revisionTotal",
+      label,
+      parentRentalDueId: null,
+      mediaDetailId: firstDue.mediaDetailId || null,
+      dueMonth: revision.fromMonth,
+      dueDate: firstDue.dueDate || revision.fromDate,
+      netPayable: increaseAmount,
+      gstAmount: increaseGstAmount,
+      withGst: Number(firstDue.withGst || 0),
+      owners: [...ownerTotals.values()],
+    };
+    const block = {
+      billType: "BILL",
+      label,
+      fromMonth: revision.fromMonth,
+      toMonth: revision.toMonth || revision.fromMonth,
+      oldRent: Number(revision.oldRent || 0),
+      increaseAmount,
+      increaseGstAmount,
+      increaseTotalWithGst: increaseAmount + increaseGstAmount,
+      months: detail.map((d) => ({ month: d.month, amount: Number(d.amount || 0), gstAmount: Number(d.gstAmount || 0), action: d.action })),
+      applyToAllMonths: revision.applyToAllMonths ?? null,
+      nextIncreaseAmount: revision.nextIncreaseAmount ?? null,
+      newRent: Number(revision.newRent || 0),
+      nextBillFromMonth: revision.nextBillFromMonth || "",
+      gstOnIncrease: revision.gstOnIncrease ?? null,
+      reason: revision.reason || "",
+    };
+    let mail;
+    try {
+      mail = await sendArrearsMail(freshMedia, totalBill, revision, block);
+    } catch (mailErr) {
+      mail = { sent: false, message: mailErr?.message || "Mail error" };
+    }
+    const sentAt = mail.sent ? nowIST() : null;
+    for (const b of result.arrearsBills || []) {
+      await Media.updateOne(
+        { _id: revision.mediaId },
+        { $set: { "arrearsDue.$[a].mailSent": !!mail.sent, "arrearsDue.$[a].mailSentAt": sentAt } },
+        { arrayFilters: [{ "a._id": b._id }], strict: false },
+      );
+    }
+    revision.mail = { mailSent: !!mail.sent, mailSentAt: sentAt, increaseAmount, increaseGstAmount, message: mail.message || "" };
+    await revision.save();
+  }
+
   return {
     statusCode: 200,
     message: isAdvance
       ? `Advance approved by CMD — ${revision.fromMonth} advance bill generated (adjusted in ${revision.adjustInMonth})`
-      : `Rent revision approved by CMD and applied from ${revision.fromMonth}`,
+      : Array.isArray(revision.months) && revision.months.length > 1
+        ? `Rent revision approved by CMD and applied for ${revision.fromMonth} – ${revision.toMonth}`
+        : `Rent revision approved by CMD and applied from ${revision.fromMonth}`,
     data: {
       ...base(),
       currentPendingRole: null,
@@ -1077,6 +1445,17 @@ exports.getRentRevisionList = async (req, res) => {
         ...billTypeFields({ ...r, billType: isAdvance ? "ADVANCE" : "BILL" }),
         ...(isAdvance ? {} : { difference: r.difference }),
         ...advanceFields,
+        // ✅ NEW — CMD approval mail of months whose bill was increased (no arrears bill)
+        ...(!isAdvance ? { billUpdateMails: r.billUpdateMails || [], mail: r.mail || null } : {}),
+        // ✅ NEW — BILL "months": payment status of each month's arrears bill
+        ...(!isAdvance && Array.isArray(r.monthsDetail) && r.monthsDetail.length
+          ? {
+              months: r.monthsDetail.map((d) => {
+                const bill = d.arrearsRentalDueId ? bills.find((b) => String(b._id) === String(d.arrearsRentalDueId)) : null;
+                return bill ? { ...d, paymentStatus: arrearsStatus(bill) } : { ...d };
+              }),
+            }
+          : {}),
         invoice: r.invoice || null,
         reason: r.reason,
         status: r.status,

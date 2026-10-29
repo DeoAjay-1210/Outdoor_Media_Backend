@@ -3547,13 +3547,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // flags only narrow the sites further.
     const revisionStatsKey = statsYear * 12 + (statsMonth - 1);
     const revisionTargetRole = [1, 2, 3].includes(Number(targetRole)) ? Number(targetRole) : null;
-    const revisionKeyOf = (d) => {
-      const dt = d ? new Date(d) : null;
-      return dt && !Number.isNaN(dt.getTime()) ? dt.getUTCFullYear() * 12 + dt.getUTCMonth() : null;
-    };
+    // status / role only — the month (dueThisMonth) is checked per item below
     const revisionInScope = (r) => {
       if (!r || r.status === "Rejected") return false;
-      if (includeDueThisMonth && revisionKeyOf(r.fromDate) !== revisionStatsKey) return false;
       if (revisionTargetRole) return r.status === "Pending" && Number(r.currentPendingRole) === revisionTargetRole;
       return r.status === "Pending" || r.status === "Approved";
     };
@@ -3574,12 +3570,29 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         currentPendingRoleName: r.currentPendingRole ? REVISION_ROLE_NAMES[r.currentPendingRole] || null : null,
       };
     };
+    // ✅ NEW — BILL with a "months" list → one item per listed month (its own amount / GST)
+    const revisionItems = (r) => {
+      if (revisionKind(r) === "bill" && Array.isArray(r.months) && r.months.length) {
+        const detail = Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : r.months;
+        const base = revisionItem(r);
+        return detail.map((d) => {
+          const amount = Number(d.amount) || 0;
+          const gstAmount = Number(d.gstAmount) || 0;
+          return { ...base, month: d.month, amount, gstAmount, totalAmount: amount + gstAmount };
+        });
+      }
+      return [revisionItem(r)];
+    };
     const revisionsInScope = (await RentRevision.find({ status: { $in: ["Pending", "Approved"] } }).lean()).filter(revisionInScope);
     const revisionsByMedia = new Map(); // mediaId → { bill: [items], advance: [items] }
     revisionsInScope.forEach((r) => {
+      const items = revisionItems(r).filter(
+        (i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey,
+      );
+      if (items.length === 0) return;
       const k = String(r.mediaId);
       if (!revisionsByMedia.has(k)) revisionsByMedia.set(k, { bill: [], advance: [] });
-      revisionsByMedia.get(k)[revisionKind(r)].push(revisionItem(r));
+      revisionsByMedia.get(k)[revisionKind(r)].push(...items);
     });
     const revisionBlock = (items) => {
       const sorted = [...items].sort((a, b) => (parseRevisionMonth(a.month) || 0) - (parseRevisionMonth(b.month) || 0));

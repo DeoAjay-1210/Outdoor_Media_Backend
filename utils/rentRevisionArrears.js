@@ -39,11 +39,36 @@ function parseFromMonth(value) {
   }
   m = s.match(/^([A-Za-z]+)\s+(\d{4})$/);
   if (m) {
-    const idx = MONTHS.findIndex((n) => n.toLowerCase().startsWith(m[1].toLowerCase().slice(0, 3)));
+    let idx = MONTHS.findIndex((n) => n.toLowerCase().startsWith(m[1].toLowerCase().slice(0, 3)));
+    // ✅ NEW — small spelling mistake ("Aguest", "Septmber") → the closest month
+    if (idx < 0) idx = closestMonthIndex(m[1]);
     if (idx < 0) return null;
     return new Date(Date.UTC(Number(m[2]), idx, 1));
   }
   return null;
+}
+
+// ✅ NEW — month name with at most 2 letter mistakes (a swap of two letters
+// counts as one) → that month's index; -1 when none or more than one is that close
+function closestMonthIndex(word) {
+  const w = String(word || "").toLowerCase();
+  if (w.length < 3) return -1;
+  const distance = (a, b) => {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+    return d[a.length][b.length];
+  };
+  const scored = MONTHS.map((n, i) => ({ i, dist: distance(w, n.toLowerCase()) })).sort((a, b) => a.dist - b.dist);
+  if (scored[0].dist > 2) return -1;
+  if (scored[1] && scored[1].dist === scored[0].dist) return -1;
+  return scored[0].i;
 }
 
 const round = (v) => Math.round(Number(v) || 0);
@@ -80,6 +105,10 @@ function splitByWeights(total, weights) {
 // ✅ CHANGED — opts.fromMonthIncrease: fromMonth is priced at its own rent +
 // this amount (later months at newRent). opts.gstOnIncrease 0 → no GST on the
 // fromMonth increase (its GST stays on the old rent).
+// ✅ NEW — opts.monthIncreases (Map monthKey → amount, BILL "months" array):
+// each listed month is priced at its own rent + its amount; months between the
+// listed ones are not changed; applyToAllMonths 1 → months after the LAST
+// listed month at newRent.
 function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts = {}) {
   // applyToAllMonths 0 → only fromMonth changes (site rent and later months stay)
   const onlyFromMonth = Number(applyToAllMonths) === 0 && applyToAllMonths !== null;
@@ -89,16 +118,28 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
   const fromKey = monthKey(fromDate);
   const fromMonthIncrease = opts.fromMonthIncrease === undefined || opts.fromMonthIncrease === null ? null : Number(opts.fromMonthIncrease);
   const noGstOnFrom = opts.gstOnIncrease !== undefined && opts.gstOnIncrease !== null && Number(opts.gstOnIncrease) === 0;
+  const monthIncreases = opts.monthIncreases instanceof Map && opts.monthIncreases.size ? opts.monthIncreases : null;
+  const lastIncreaseKey = monthIncreases ? Math.max(...monthIncreases.keys()) : fromKey;
+  // month with its own increase (listed month / fromMonth) → its amount, else null
+  const increaseFor = (key) => {
+    if (monthIncreases) return monthIncreases.has(key) ? Number(monthIncreases.get(key)) : null;
+    return key === fromKey && fromMonthIncrease !== null ? fromMonthIncrease : null;
+  };
   // rent the month should have after the revision (an approved advance stays deducted)
   const targetRent = (dueDate, monthRent) => {
     const key = monthKey(dueDate);
-    if (key === fromKey && fromMonthIncrease !== null) return round(monthRent + fromMonthIncrease);
+    const inc = increaseFor(key);
+    if (inc !== null) return round(monthRent + inc);
     return round(newRent - advanceDeductionFor(m, key).amount);
   };
-  const noGstFor = (dueDate) => noGstOnFrom && monthKey(dueDate) === fromKey;
+  const noGstFor = (dueDate) => noGstOnFrom && increaseFor(monthKey(dueDate)) !== null;
+  const inPlan = (key) => {
+    if (monthIncreases) return monthIncreases.has(key) || (!onlyFromMonth && key > lastIncreaseKey);
+    return onlyFromMonth ? key === fromKey : key >= fromKey;
+  };
 
   const bills = (m.rentalDue || [])
-    .filter((b) => b && b.dueDate && (onlyFromMonth ? monthKey(b.dueDate) === fromKey : monthKey(b.dueDate) >= fromKey))
+    .filter((b) => b && b.dueDate && inPlan(monthKey(b.dueDate)))
     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
 
   const heldBill = bills.find((b) => Number(b?.appraisalHold?.hold) === 1);
@@ -176,8 +217,8 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
     // pending month → bills move to the new rent
     // (only this month / fromMonth increase: the month is priced at its target
     // rent, GST kept on the old rent when the increase is without GST)
-    const isFromMonth = monthKey(dueDate) === fromKey;
-    if (onlyFromMonth || (isFromMonth && fromMonthIncrease !== null)) {
+    const isIncreaseMonth = increaseFor(monthKey(dueDate)) !== null;
+    if (onlyFromMonth || isIncreaseMonth) {
       keptMonths.push({ dueMonth, rent: target, ...(noGst ? { gstRent: monthGstRent } : {}) });
     }
     monthBills.forEach((bill) => {
@@ -668,6 +709,10 @@ const revisionBlock = (r) =>
     ? {
         revisionId: r._id,
         fromMonth: r.fromMonth,
+        // ✅ NEW — BILL "months" list
+        ...(Array.isArray(r.months) && r.months.length
+          ? { billType: "BILL", toMonth: r.toMonth || "", totalIncreaseAmount: Number(r.totalIncreaseAmount || 0) }
+          : {}),
         oldRent: r.oldRent,
         increaseAmount: r.increaseAmount ?? r.difference,
         newRent: r.newRent,

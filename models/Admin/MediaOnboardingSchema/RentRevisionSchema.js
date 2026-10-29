@@ -36,6 +36,20 @@ const RentRevisionSchema = new mongoose.Schema(
     // ✅ NEW — BILL applyToAllMonths 1: amount added to the site rent from the
     // next bill after fromMonth (newRent = oldRent + nextIncreaseAmount)
     nextIncreaseAmount: { type: Number, default: null },
+    // ✅ NEW — BILL "months": a different increase per month
+    // [{ month: "August 2026", amount: 2000 }] (fromMonth = first, toMonth = last)
+    months: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    // per month: rentalDueId, billStatus, currentAmount, gstAmount, newAmount,
+    // action (arrears / billUpdate), arrearsRentalDueId after CMD approval
+    monthsDetail: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    toMonth: { type: String, trim: true, default: "" },
+    // ✅ NEW — CMD approval mail of each month whose bill was increased (no
+    // arrears bill): [{ month, rentalDueId, amount, gstAmount, mailSent, mailSentAt, message }]
+    billUpdateMails: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    // ✅ NEW — BILL "months": the ONE CMD approval mail of the whole revision
+    // { mailSent, mailSentAt, increaseAmount, increaseGstAmount, message }
+    mail: { type: mongoose.Schema.Types.Mixed, default: null },
+    totalIncreaseAmount: { type: Number, default: 0 },
     nextBillFromMonth: { type: String, trim: true, default: "" },
     // ✅ NEW — site has GST: 1 → GST on increaseAmount / advanceAmount, 0 → no GST
     gstOnIncrease: { type: Number, enum: [0, 1, null], default: null },
