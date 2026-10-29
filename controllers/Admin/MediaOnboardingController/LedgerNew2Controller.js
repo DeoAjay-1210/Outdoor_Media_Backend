@@ -4,7 +4,7 @@ const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardi
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 // ✅ NEW — rent revision arrears (paid via ledger-save, shown in ledger-list)
 const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema");
-const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals } = require("../../../utils/rentRevisionArrears");
+const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst } = require("../../../utils/rentRevisionArrears");
 const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
   getRentForDueDate,
@@ -1287,6 +1287,53 @@ async function payArrearsBillIfArrears(req, res) {
   );
 }
 
+// ✅ NEW — bulk / multi-batch ledger-save: one payment item whose rentalDueId
+// (or gstBalanceHistoryId) is a rent revision arrears / advance bill → paid on
+// that bill (same as payArrearsBillIfArrears). Returns a savedEntries row
+// ({ status: "saved" | "failed" }); never throws.
+async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedBy) {
+  const billId = String(item.rentalDueId || item.gstBalanceHistoryId || "");
+  const base = {
+    mediaId,
+    landOwnerId: item.landOwnerId || null,
+    targetType: item.targetType,
+    paymentMode: item.paymentMode,
+    utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+    rentalDueId: billId,
+  };
+  try {
+    const media = await Media.findById(mediaId).select("arrearsDue rentalDue._id rentalDue.withGst").lean();
+    const bill = (media?.arrearsDue || []).find((b) => String(b._id) === billId);
+    if (!bill) throw new Error("Arrears / advance bill not found");
+    const kind = bill.type === "advance" ? "advance" : "arrears";
+    if (Number(bill.approvalStatus) !== 3) throw new Error(`Rent revision not approved yet — ${kind} cannot be paid`);
+    const paid = applyArrearsPayment(bill, {
+      entryType: entryType === "gst" ? "gst" : "rental",
+      landOwnerId: entryType === "gst" ? null : item.landOwnerId,
+      paymentMode: item.paymentMode,
+      utrNumber: item.utrNumber,
+      date: entryDate,
+      userName: updatedBy,
+      parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
+    });
+    await Media.updateOne(
+      { _id: mediaId },
+      { $set: { "arrearsDue.$[a]": paid.bill } },
+      { arrayFilters: [{ "a._id": bill._id }], strict: false },
+    );
+    return {
+      ...base,
+      billType: kind,
+      label: entryType === "gst" ? `${String(bill.label || "").split(" (")[0]} GST` : bill.label,
+      dueMonth: bill.dueMonth,
+      amount: paid.saved.reduce((s, p) => s + Number(p.amount || 0), 0),
+      status: "saved",
+    };
+  } catch (e) {
+    return { ...base, status: "failed", error: e?.message || "Arrears / advance payment failed" };
+  }
+}
+
 exports.createLedgerEntry = async (req, res) => {
   try {
     // ✅ NEW — handle array of batches
@@ -2263,8 +2310,9 @@ async function executeBulkPaymentBatch(req, batchData) {
   }
 
   for (let i = 0; i < payments.length; i++) {
-    if (!["current", "pastCycle", "outstanding"].includes(payments[i].targetType)) {
-      throw { message: `payments[${i}].targetType must be "current", "pastCycle", or "outstanding"`, statusCode: 400 };
+    // ✅ CHANGED — "arrears" / "advance": rent revision bill (rentalDueId = that bill's id)
+    if (!["current", "pastCycle", "outstanding", "arrears", "advance"].includes(payments[i].targetType)) {
+      throw { message: `payments[${i}].targetType must be "current", "pastCycle", "outstanding", "arrears" or "advance"`, statusCode: 400 };
     }
     if (!payments[i].paymentMode || !["Cash", "Online"].includes(payments[i].paymentMode)) {
       throw { message: `payments[${i}].paymentMode must be "Cash" or "Online"`, statusCode: 400 };
@@ -2313,7 +2361,19 @@ async function executeBulkPaymentBatch(req, batchData) {
       if (!media.rentalPayment.gstOutstandingHistory) media.rentalPayment.gstOutstandingHistory = [];
       if (!media.rentalPayment.rentalOutstandingHistory) media.rentalPayment.rentalOutstandingHistory = [];
 
-      for (const item of sitePayments) {
+      // ✅ NEW — rentalDueId of a rent revision arrears / advance bill
+      // (media.arrearsDue[]) → paid on that bill after this site's normal
+      // payments are saved (normal payments unchanged)
+      const extraBillIds = new Set((media.arrearsDue || []).map((b) => String(b && b._id)));
+      const extraBillItems = sitePayments.filter(
+        (p) =>
+          p.targetType === "arrears" ||
+          p.targetType === "advance" ||
+          extraBillIds.has(String(p.rentalDueId || p.gstBalanceHistoryId || "")),
+      );
+      const normalSitePayments = sitePayments.filter((p) => !extraBillItems.includes(p));
+
+      for (const item of normalSitePayments) {
         const targetType = item.targetType;
         const result = {
           mediaId: mId,
@@ -2544,8 +2604,15 @@ async function executeBulkPaymentBatch(req, batchData) {
       recomputePendingMonths(media);
       await media.save({ timestamps: false });
 
+      // ✅ NEW — arrears / advance bill payments of this site
+      for (const item of extraBillItems) {
+        const r = await payExtraBillInBatch(mId, item, entryType, entryDate, updatedBy);
+        if (r.status === "saved") totalAmountSaved += r.amount;
+        savedEntries.push(r);
+      }
+
       // ✅ NEW — Sync with OverDueHistory for bulk batch
-      for (const item of sitePayments) {
+      for (const item of normalSitePayments) {
           if (item.rentalDueId) {
               const resolvedWithGst = entryType === "gst" ? 1 : 2;
               await syncWithOverDueHistory(mId, item.rentalDueId, entryDate, resolvedWithGst, updatedBy);
@@ -2566,8 +2633,11 @@ async function executeBulkPaymentBatch(req, batchData) {
     if (e.targetType === "current") acc.currentAmount += e.amount;
     else if (e.targetType === "pastCycle") acc.pastCycleAmount += e.amount;
     else if (e.targetType === "outstanding") acc.outstandingAmount += e.amount;
+    // ✅ NEW — rent revision bills (by the bill's own type)
+    else if (e.billType === "advance") acc.advanceAmount += e.amount;
+    else if (e.billType === "arrears") acc.arrearsAmount += e.amount;
     return acc;
-  }, { currentAmount: 0, pastCycleAmount: 0, outstandingAmount: 0 });
+  }, { currentAmount: 0, pastCycleAmount: 0, outstandingAmount: 0, arrearsAmount: 0, advanceAmount: 0 });
 
   const distinctMonths = [...new Set(savedEntries.filter(e => e.status === "saved").map(e => e.dueMonth).filter(Boolean))];
   const distinctUtrGroups = [...new Set(savedEntries.filter(e => e.status === "saved" && e.paymentMode === "Online" && e.utrNumber).map(e => `${e.utrNumber}_${entryDate.getUTCMonth() + 1}-${entryDate.getUTCFullYear()}`))];
@@ -7354,10 +7424,46 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
   const pastCannotHoldOwners = new Set(); // ✅ NEW
   const curHoldPendingOwners = new Set(); // ✅ NEW
   const pastHoldPendingOwners = new Set(); // ✅ NEW
+
+  // ✅ NEW — rent revision arrears / advance bills (media.arrearsDue[]), placed
+  // by their OWN dueMonth like the legacy rows: rent and GST each Total / Paid /
+  // Remaining; GST Hold (withGst 1 / not set) or Cannot Hold (withGst 2, the
+  // parent bill's when the arrears bill has none)
+  const addRevisionBills = (media) => {
+    const parentWithGst = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
+    const ownerKeys = (media.landOwners || []).map((o) =>
+      o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+    );
+    (media.arrearsDue || []).forEach((b) => {
+      if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+      const bucket = legacyBucket(b.dueMonth);
+      if (!bucket) return;
+      const rent = Number(b.netPayable || 0);
+      const rentPaid = Math.min(rent, Number(b.rentPaid || 0));
+      t[`${bucket}RentTotal`] += rent;
+      t[`${bucket}RentPaid`] += rentPaid;
+      t[`${bucket}RentRemaining`] += rent - rentPaid;
+
+      const gst = Number(b.gstAmount || 0);
+      if (gst <= 0) return;
+      const gstPaid = Math.min(gst, Number(b.gstPaid || 0));
+      const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
+      t[`${bucket}GstTotal`] += gst;
+      t[`${bucket}GstPaid`] += gstPaid;
+      t[`${bucket}GstRemaining`] += gst - gstPaid;
+      t[`${bucket}Gst${kind}Total`] += gst;
+      t[`${bucket}Gst${kind}Paid`] += gstPaid;
+      t[`${bucket}Gst${kind}Remaining`] += gst - gstPaid;
+      if (kind === "CannotHold") ownerKeys.forEach((k) => (bucket === "cur" ? curCannotHoldOwners : pastCannotHoldOwners).add(k));
+      else if (gst - gstPaid > 0) ownerKeys.forEach((k) => (bucket === "cur" ? curHoldPendingOwners : pastHoldPendingOwners).add(k));
+    });
+  };
+
   for (const media of mediaDocs || []) {
     if ((media.mediaDetails || []).some((d) => d.status === 1)) {
       addLegacy("Rent", media.rentalPayment?.rentalOutstandingHistory, "baseRentOutstandingAmount");
       addLegacy("Gst", media.rentalPayment?.gstOutstandingHistory, "gstOutStandingAmount");
+      addRevisionBills(media); // ✅ NEW
     }
     const s = getOverallSummaryForCycle(media, requestedMonthYear);
     t.curRentTotal += s.splitCurRentTotal; t.curRentPaid += s.splitCurRentPaid; t.curRentRemaining += s.splitCurRentRemaining;

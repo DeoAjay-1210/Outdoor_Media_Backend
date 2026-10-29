@@ -686,22 +686,68 @@ const downloadRentalOOHExcel = async (req, res) => {
         // ── ✅ NEW — UNPAID rows (pending rent / GST for this month) ──
         if (unpaid) {
           const { unpaidGst } = unpaid;
+          // ✅ CHANGED — GST already paid → the paid GST is shown (green, not
+          // added to the totals), same as the rent; was shown as 0
+          const gstPaidShown = status.gstApplicable && status.gstPaid && totalGst > 0;
 
           if (isCombined) {
             unpaidDataRows.push(buildRow(
               combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedDistrict, allOwnerNames,
-              Math.round(siteRent * cityShare), Math.round(unpaidGst * cityShare)
+              Math.round(siteRent * cityShare), Math.round((gstPaidShown ? totalGst : unpaidGst) * cityShare)
             ));
           } else {
             mediaDetails.forEach(mDetail => {
               if (!faceMatchesCity(mDetail)) return; // ✅ NEW — city filter
               unpaidDataRows.push(buildRow(
                 mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", mDetail.district || "", allOwnerNames,
-                siteRent / faceCount, unpaidGst / faceCount
+                siteRent / faceCount,
+                gstPaidShown ? gstByFace.get(String(mDetail._id)) || (siteWideGst / mediaDetails.length) : unpaidGst / faceCount
               ));
             });
           }
         }
+
+        // ── ✅ NEW — rent revision arrears / advance bills of this month
+        // (media.arrearsDue[], paid through their own bill, not in the ledger
+        // entries above): own row "<media name> (<bill label>)" — paid part on
+        // the Paid sheet (green), pending part on the Unpaid sheet (red).
+        // Landowners column 0 so the month total does not count the site twice.
+        (media.arrearsDue || [])
+          .filter((b) => b && (b.type === "arrears" || b.type === "advance") && normalizeMonth(b.dueMonth) === targetMonthNormalized)
+          .forEach((b) => {
+            const face = b.mediaDetailId ? mediaDetails.find((d) => String(d._id) === String(b.mediaDetailId)) : null;
+            if (face && !faceMatchesCity(face)) return;
+            const share = face ? 1 : cityShare;
+            // ✅ CHANGED — arrears → "New Bill", advance → "Advance Amount"
+            const label = b.type === "advance" ? "Advance Amount" : "New Bill";
+            const rent = Number(b.netPayable || 0);
+            const gst = Number(b.gstAmount || 0);
+            const rentPaidAmt = Math.min(rent, Number(b.rentPaid || 0));
+            const gstPaidAmt = Math.min(gst, Number(b.gstPaid || 0));
+            const billRow = (rental, gstAmt, rowStatus) => {
+              const r = face
+                ? buildRow(face.mediaCode, `${face.mediaName} (${label})`, face.mediaType, face.state || "", face.city || "", face.district || "", allOwnerNames, Math.round(rental), Math.round(gstAmt))
+                : buildRow(combinedCode, `${combinedName} (${label})`, combinedMediaType, combinedState, combinedCity, combinedDistrict, allOwnerNames, Math.round(rental * share), Math.round(gstAmt * share));
+              r[COL_OWNERS] = 0;
+              r.status = rowStatus;
+              return r;
+            };
+            const rentPending = rent - rentPaidAmt;
+            const gstPending = gst - gstPaidAmt;
+            // ✅ CHANGED — Paid sheet: the full bill (rent / GST), green = paid,
+            // red = not paid — same as the site row (was the paid part only)
+            if (rentPaidAmt > 0 || gstPaidAmt > 0) {
+              monthDataRows.push(billRow(rent, gst, {
+                rentPaid: rentPending <= 0, gstPaid: gstPending <= 0, gstApplicable: gst > 0, outstandingGstOnly: false,
+              }));
+            }
+            if (rentPending > 0 || gstPending > 0) {
+              // paid part shown green (not added to the totals), pending part red
+              unpaidDataRows.push(billRow(rentPending > 0 ? rentPending : rentPaidAmt, gstPending > 0 ? gstPending : gstPaidAmt, {
+                rentPaid: rentPending <= 0, gstPaid: gstPending <= 0, gstApplicable: gst > 0, outstandingGstOnly: false,
+              }));
+            }
+          });
       }
 
       if (monthDataRows.length > 0) paidMonths.push({ label: monthLabel, rows: monthDataRows });
@@ -782,7 +828,7 @@ const downloadRentalOOHExcel = async (req, res) => {
       });
 
       const grandTotalIdx = aoa.length;
-      aoa.push([`📊 GRAND TOTAL (${periodLabel})`, "", "", "", "", "", "", grandOwnerTotal, "", "", "", grandRentalTotal, grandGstTotal, grandRentalTotal + grandGstTotal]);
+      aoa.push([`📊 GRAND TOTAL (${periodLabel})`, "", "", "", "", "", "", "" /* ✅ CHANGED — no landowner total (summed across months) */, "", "", "", grandRentalTotal, grandGstTotal, grandRentalTotal + grandGstTotal]);
       merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 6 } });
 
       const ws = XLSX.utils.aoa_to_sheet(aoa);

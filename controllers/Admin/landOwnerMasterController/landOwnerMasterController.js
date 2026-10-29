@@ -3578,7 +3578,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
     const summaryDocs = await MediaOnboarding.find(
       summaryQuery,
-      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal",
+      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal arrearsDue", // ✅ CHANGED — arrearsDue: rent revision arrears / advance in newOverallLedgerSummary
     ).lean();
 
     for (const media of summaryDocs) {
