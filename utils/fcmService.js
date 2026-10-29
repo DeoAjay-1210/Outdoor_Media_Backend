@@ -142,6 +142,7 @@ async function sendPushNotificationToRoles({
           title: title || "Overdue Remark in Chat",
           body: body || "A remark added by another user requires your attention.",
           icon: "/favicon.png",
+          data: stringifiedData,
         },
         data: stringifiedData,
       },
@@ -179,6 +180,37 @@ async function sendPushNotificationToRoles({
     console.error("❌ [FCM] Error sending multicast push notification:", err.message);
     return { success: false, error: err.message };
   }
+}
+
+function buildClickUrl({
+  landOwnerMasterId,
+  mediaId,
+  dueMonth,
+  siteCode,
+  siteName,
+  rentalDueId,
+  remarkId,
+  notificationType,
+}) {
+  const query = new URLSearchParams();
+  if (landOwnerMasterId) query.append("landOwnerMasterId", landOwnerMasterId);
+  if (mediaId) query.append("mediaId", mediaId);
+  if (dueMonth) query.append("dueMonth", dueMonth);
+  if (siteCode) {
+    query.append("mediaCode", siteCode);
+    query.append("search", siteCode);
+  }
+  const isApprovalOrReminder = notificationType === "normalApproval" || notificationType === "reminder";
+  if (isApprovalOrReminder) {
+    query.append("openApproval", "1");
+  } else {
+    query.append("openChat", "1");
+  }
+  if (rentalDueId) query.append("rentalDueId", rentalDueId);
+  if (remarkId) query.append("remarkId", remarkId);
+  if (siteName) query.append("siteName", siteName);
+
+  return `/rental-master?${query.toString()}`;
 }
 
 /**
@@ -222,7 +254,7 @@ async function sendOverdueRemarkPushNotification({
     ""
   );
 
-  const payloadData = {
+  const rawPayload = {
     notificationType: "overdueRemark",
     chatId: String(media?._id || ""),
     mediaId: String(media?._id || ""),
@@ -236,6 +268,14 @@ async function sendOverdueRemarkPushNotification({
     mediaCode: String(resolvedMediaCode),
     landOwnerMasterId: landOwnerMasterId,
     landlordId: landOwnerMasterId,
+  };
+
+  const clickUrl = buildClickUrl(rawPayload);
+
+  const payloadData = {
+    ...rawPayload,
+    clickUrl,
+    url: clickUrl,
   };
 
   return sendPushNotificationToRoles({
@@ -286,7 +326,7 @@ async function sendApprovalPushNotification({
     ""
   );
 
-  const payloadData = {
+  const rawPayload = {
     notificationType: "normalApproval",
     mediaId: String(media?._id || ""),
     rentalDueId: String(entry?._id || ""),
@@ -298,6 +338,14 @@ async function sendApprovalPushNotification({
     mediaCode: String(resolvedMediaCode),
     landOwnerMasterId: landOwnerMasterId,
     landlordId: landOwnerMasterId,
+  };
+
+  const clickUrl = buildClickUrl(rawPayload);
+
+  const payloadData = {
+    ...rawPayload,
+    clickUrl,
+    url: clickUrl,
   };
 
   return sendPushNotificationToRoles({
@@ -348,7 +396,7 @@ async function sendReminderPushNotification({
     ""
   );
 
-  const payloadData = {
+  const rawPayload = {
     notificationType: "reminder",
     mediaId: String(media?._id || ""),
     rentalDueId: String(rentalDueId || ""),
@@ -360,6 +408,14 @@ async function sendReminderPushNotification({
     mediaCode: String(resolvedMediaCode),
     landOwnerMasterId: landOwnerMasterId,
     landlordId: landOwnerMasterId,
+  };
+
+  const clickUrl = buildClickUrl(rawPayload);
+
+  const payloadData = {
+    ...rawPayload,
+    clickUrl,
+    url: clickUrl,
   };
 
   return sendPushNotificationToRoles({
