@@ -5728,7 +5728,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
         baseRentOutstandingAmount: Number(b.netPayable || 0) + (Number(b.withGst) === 2 ? Number(b.gstAmount || 0) : 0),
         withGst: Number(b.withGst || 0),
         gstAmount: Number(b.gstAmount || 0),
-        tdsAmount: Number(b.tdsAmount || 0),
+        tdsAmount: 0, // ✅ CHANGED — no TDS on an advance
         paidAmount: Number(b.rentPaid || 0),
         pendingAmount: rentPending,
         isPaid: paid,

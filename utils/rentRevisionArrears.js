@@ -150,7 +150,7 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
           cashAmount: round(Number(o.cashAmount || 0) * ratio * billFraction),
           onlineAmount: round(Number(o.onlineAmount || 0) * ratio * billFraction),
           gstAmount: noGst ? 0 : round(Number(o.gstAmount || 0) * (monthGstRent > 0 ? diff / monthGstRent : ratio) * billFraction),
-          tdsAmount: round(Number(o.tdsAmount || 0) * ratio * billFraction),
+          tdsAmount: 0, // ✅ CHANGED — no TDS on arrears
           paidCash: false,
           paidOnline: false,
         }));
@@ -413,7 +413,7 @@ function buildAdvancePlan(media, advanceDate, advanceAmount, gstOnIncrease, adju
     cashAmount: round(Number(o.cashAmount || 0) * ratio),
     onlineAmount: round(Number(o.onlineAmount || 0) * ratio),
     gstAmount: withGstOnAdvance ? round(Number(o.gstAmount || 0) * gstRatio) : 0,
-    tdsAmount: round(Number(o.tdsAmount || 0) * ratio),
+    tdsAmount: 0, // ✅ CHANGED — no TDS on an advance
     paidCash: false,
     paidOnline: false,
   }));
@@ -557,7 +557,7 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
         const rentAmount = ownerModeAmount(o, md);
         if (rentAmount <= 0 || ownerModePaid(o, md)) return;
         const share = Number(o.shareAmount || 0);
-        const tds = share > 0 ? round((Number(o.tdsAmount || 0) * rentAmount) / share) : 0;
+        const tds = 0; // ✅ CHANGED — no TDS on arrears / advance (full amount paid)
         const gstPart = gstWithRent && share > 0 ? round((Number(o.gstAmount || 0) * rentAmount) / share) : 0;
         if (gstPart > 0) bill.gstPaid = Math.min(Number(bill.gstAmount || 0), Number(bill.gstPaid || 0) + gstPart);
         if (md === "Cash") o.paidCash = true;
@@ -603,7 +603,7 @@ function arrearsBlock(bills) {
   return {
     totalAmount: sum((b) => Number(b.netPayable || 0)),
     totalGst: sum((b) => Number(b.gstAmount || 0)),
-    totalTds: sum((b) => Number(b.tdsAmount || 0)),
+    totalTds: 0, // ✅ CHANGED — no TDS on arrears / advance
     paidAmount: sum((b) => Number(b.rentPaid || 0)),
     paidGst: sum((b) => Number(b.gstPaid || 0)),
     pendingAmount: sum(billPending),
@@ -616,7 +616,7 @@ function arrearsBlock(bills) {
       rentRevisionId: b.rentRevisionId,
       rentAmount: Number(b.netPayable || 0),
       gstAmount: Number(b.gstAmount || 0),
-      tdsAmount: Number(b.tdsAmount || 0),
+      tdsAmount: 0,
       rentPaid: Number(b.rentPaid || 0),
       gstPaid: Number(b.gstPaid || 0),
       status: arrearsStatus(b),
@@ -708,7 +708,7 @@ function arrearsLedgerRows(b) {
       updatedBy: paid && lastPay ? lastPay.createdBy || "" : "",
       updatedAt: paid && lastPay ? lastPay.createdAt : null,
       shareAmount: Number(o.shareAmount || 0),
-      tdsAmount: Number(o.tdsAmount || 0),
+      tdsAmount: 0, // ✅ CHANGED — no TDS on arrears / advance
       isVirtual: !paid,
       isPaid: paid,
       targetType: kind,
@@ -873,7 +873,7 @@ function advanceBlock(bills, billMonths = null) {
   return {
     totalAmount: sum((b) => Number(b.netPayable || 0)),
     totalGst: sum((b) => Number(b.gstAmount || 0)),
-    totalTds: sum((b) => Number(b.tdsAmount || 0)),
+    totalTds: 0, // ✅ CHANGED — no TDS on arrears / advance
     paidAmount: sum((b) => Number(b.rentPaid || 0)),
     paidGst: sum((b) => Number(b.gstPaid || 0)),
     pendingAmount: sum(billPending),
@@ -888,7 +888,7 @@ function advanceBlock(bills, billMonths = null) {
       rentRevisionId: b.rentRevisionId,
       rentAmount: Number(b.netPayable || 0),
       gstAmount: Number(b.gstAmount || 0),
-      tdsAmount: Number(b.tdsAmount || 0),
+      tdsAmount: 0,
       rentPaid: Number(b.rentPaid || 0),
       gstPaid: Number(b.gstPaid || 0),
       status: arrearsStatus(b),
@@ -1038,7 +1038,7 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
     const rows = arrearsLedgerRows(b).map((r) => ({
       ...r,
       month: monthName,
-      amount: r.isPaid ? Number(r.shareAmount || 0) - Number(r.tdsAmount || 0) : 0,
+      amount: r.isPaid ? Number(r.shareAmount || 0) : 0, // ✅ CHANGED — no TDS
     }));
     month.ledger = [...(month.ledger || []), ...rows];
 

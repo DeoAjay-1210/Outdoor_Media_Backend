@@ -528,7 +528,7 @@ async function sendArrearsMail(media, bill, revision) {
         cashAmount: Number(a.cashAmount || 0),
         onlineAmount: Number(a.onlineAmount || 0),
         gstAmount: Number(a.gstAmount || 0),
-        tdsAmount: Number(a.tdsAmount || 0),
+        tdsAmount: 0, // ✅ CHANGED — no TDS on arrears / advance
       };
     }),
   };
@@ -1057,7 +1057,7 @@ exports.getRentRevisionList = async (req, res) => {
                   dueMonth: advBill.dueMonth,
                   amount: Number(advBill.netPayable || 0),
                   gstAmount: Number(advBill.gstAmount || 0),
-                  tdsAmount: Number(advBill.tdsAmount || 0),
+                  tdsAmount: 0,
                   paid: Number(advBill.rentPaid || 0),
                   pending: Math.max(0, Number(advBill.netPayable || 0) - Number(advBill.rentPaid || 0)),
                   gstPaid: Number(advBill.gstPaid || 0),
@@ -1092,7 +1092,7 @@ exports.getRentRevisionList = async (req, res) => {
           dueMonth: b.dueMonth,
           netPayable: b.netPayable,
           gstAmount: b.gstAmount,
-          tdsAmount: b.tdsAmount,
+          tdsAmount: 0, // ✅ CHANGED — no TDS on arrears
           rentPaid: b.rentPaid || 0,
           gstPaid: b.gstPaid || 0,
           status: arrearsStatus(b),
