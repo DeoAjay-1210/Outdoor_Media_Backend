@@ -53,7 +53,7 @@ const SELECT = {
   },
   media: { both: `${FACE} createdAt ${CYCLE}` },
   // Agreements: the current agreement and every filed version (dates, reminder days, document type) + the site's payment cycle / landlords for the popup rows
-  agreements: { both: `${FACE} agreement.startDate agreement.endDate agreement.reminderBeforeExpiry agreement.agreementStatus agreementHistory.startDate agreementHistory.endDate agreementHistory.reminderBeforeExpiry agreementHistory.agreementStatus ${CYCLE} ${DETAIL_IDS}` },
+  agreements: { both: `${FACE} agreement.startDate agreement.endDate agreement.reminderBeforeExpiry agreement.agreementStatus agreement.agreementPDF.filePath agreement.agreementPDF.originalName agreement.agreementPDF.fileName agreementHistory.startDate agreementHistory.endDate agreementHistory.reminderBeforeExpiry agreementHistory.agreementStatus agreementHistory.agreementPDF.filePath agreementHistory.agreementPDF.originalName agreementHistory.agreementPDF.fileName ${CYCLE} ${DETAIL_IDS}` },
   appraisal: { rentalMaster: "" }, // set below: the bills query + the appraisal subdocument
   // Outstanding payments = the Rental Master / Ledger cycle calculation (same fields as Payments) plus
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
