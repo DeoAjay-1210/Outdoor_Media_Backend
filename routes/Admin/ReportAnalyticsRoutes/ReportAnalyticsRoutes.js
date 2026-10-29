@@ -4,6 +4,7 @@ const protect = require("../../../middleware/authMiddleware");
 const C = require("../../../controllers/Admin/ReportAnalyticsController/ReportAnalyticsController");
 
 // Read-only analytics. Role check (1-4) is enforced inside each handler.
+router.post("/report-analytics/overview", protect, C.getOverview); // all sections below in one response
 router.post("/report-analytics/filters", protect, C.getFilterOptions);
 router.post("/report-analytics/payments", protect, C.getPaymentAnalytics);
 router.post("/report-analytics/media", protect, C.getMediaAnalytics);

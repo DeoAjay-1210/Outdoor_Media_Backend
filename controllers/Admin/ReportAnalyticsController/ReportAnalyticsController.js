@@ -120,29 +120,37 @@ const resolve = (chart, source) => {
   return SELECT[chart][key] ? { select: SELECT[chart][key], compute: COMPUTE[chart][key], sourceIndependent: key === "both" } : null;
 };
 
+/**
+ * One chart's payload for already-parsed filters (shared by the single-chart endpoints and /overview, so the
+ * calculation exists once). `db.load` is the only DB access; tests may replace it.
+ */
+const db = { load };
+const buildSection = async (chart, f) => {
+  const route = resolve(chart, f.source);
+  if (!route) {
+    return {
+      filters: { source: f.source, siteStatus: f.siteStatus },
+      supported: false,
+      reason: UNSUPPORTED[chart]?.[f.source] || "Not available for this data source.",
+      buckets: [],
+      summary: {},
+      meta: {},
+    };
+  }
+  // site-status filter (active / inactive / all) narrows the sites before any chart is computed;
+  // the media chart counts faces like the dashboard, so it applies the status per face itself
+  const loaded = await db.load(route.select);
+  const docs = chart === "media" ? loaded : RA.applySiteStatus(loaded, f);
+  const data = route.compute(docs, f);
+  return { ...data, supported: true, sourceIndependent: route.sourceIndependent };
+};
+
 const makeHandler = (chart, message) => async (req, res) => {
   try {
     if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
     const parsed = RA.parseFilters({ ...(req.query || {}), ...(req.body || {}) });
     if (parsed.error) return errorResponse(res, parsed.error, null, 400);
-    const f = parsed.filters;
-    const route = resolve(chart, f.source);
-    if (!route) {
-      return successResponse(res, message, {
-        filters: { source: f.source, siteStatus: f.siteStatus },
-        supported: false,
-        reason: UNSUPPORTED[chart]?.[f.source] || "Not available for this data source.",
-        buckets: [],
-        summary: {},
-        meta: {},
-      });
-    }
-    // site-status filter (active / inactive / all) narrows the sites before any chart is computed;
-    // the media chart counts faces like the dashboard, so it applies the status per face itself
-    const loaded = await load(route.select);
-    const docs = chart === "media" ? loaded : RA.applySiteStatus(loaded, f);
-    const data = route.compute(docs, f);
-    return successResponse(res, message, { ...data, supported: true, sourceIndependent: route.sourceIndependent });
+    return successResponse(res, message, await buildSection(chart, parsed.filters));
   } catch (error) {
     return errorResponse(res, "Failed to build analytics", error.message, 500);
   }
@@ -151,10 +159,72 @@ const makeHandler = (chart, message) => async (req, res) => {
 const getFilterOptions = async (req, res) => {
   try {
     if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
-    const docs = await load(SELECT.filters);
+    const docs = await db.load(SELECT.filters);
     return successResponse(res, "Analytics filters fetched", RA.computeFilterOptions(docs));
   } catch (error) {
     return errorResponse(res, "Failed to load filter options", error.message, 500);
+  }
+};
+
+// response key -> internal chart name
+const OVERVIEW_SECTIONS = {
+  filters: "filters",
+  payments: "payments",
+  media: "media",
+  appraisal: "appraisal",
+  upcomingBills: "bills",
+  gst: "gst",
+  tds: "tds",
+  agreements: "agreements",
+  tdsStatus: "tdsStatus",
+};
+const OVERVIEW_CONCURRENCY = 3; // each section reads the collection once: bounded, not 9 at once
+
+/**
+ * POST /report-analytics/overview — every section above in one response, each exactly as its own endpoint
+ * returns it. A section that fails is null with its message under data.errors (never zeros / empty data);
+ * if every section fails the normal 500 is returned. Auth, role and filter validation are the same as the
+ * single endpoints (403 / 400 for the whole request).
+ */
+const getOverview = async (req, res) => {
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const parsed = RA.parseFilters({ ...(req.query || {}), ...(req.body || {}) });
+    if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+    const f = parsed.filters;
+    const keys = Object.keys(OVERVIEW_SECTIONS);
+    // optional per-section data source (body.sections = { gst: { source: "ledger" } }): some charts pin their own
+    // source (e.g. GST = Ledger) while the rest follow the selected one. Same parse and validation as a single call.
+    const base = { ...(req.query || {}), ...(req.body || {}) };
+    const own = {};
+    for (const [key, o] of Object.entries(base.sections && typeof base.sections === "object" ? base.sections : {})) {
+      if (!OVERVIEW_SECTIONS[key] || !o || o.source === undefined) continue;
+      const p = RA.parseFilters({ ...base, source: o.source });
+      if (p.error) return errorResponse(res, p.error, null, 400);
+      own[key] = p.filters;
+    }
+    const data = {};
+    const errors = {};
+    let next = 0;
+    const worker = async () => {
+      while (next < keys.length) {
+        const key = keys[next++];
+        try {
+          const chart = OVERVIEW_SECTIONS[key];
+          data[key] = chart === "filters" ? RA.computeFilterOptions(await db.load(SELECT.filters)) : await buildSection(chart, own[key] || f);
+        } catch (error) {
+          data[key] = null;
+          errors[key] = error.message || "Failed to build analytics";
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: OVERVIEW_CONCURRENCY }, worker));
+    const failed = Object.keys(errors);
+    if (failed.length === keys.length) return errorResponse(res, "Failed to build analytics", errors[failed[0]], 500);
+    const ordered = Object.fromEntries(keys.map((k) => [k, data[k]]));
+    return successResponse(res, "Report analytics overview fetched", failed.length ? { ...ordered, errors } : ordered);
+  } catch (error) {
+    return errorResponse(res, "Failed to build analytics", error.message, 500);
   }
 };
 
@@ -163,6 +233,8 @@ module.exports = {
   SELECT, // field projection per chart and source — the data sources named on the charts
   allowedRole,
   getFilterOptions,
+  getOverview,
+  db, // DB access seam (tests only)
   resolve,
   getPaymentAnalytics: makeHandler("payments", "Payment analytics fetched"),
   getMediaAnalytics: makeHandler("media", "Media analytics fetched"),
