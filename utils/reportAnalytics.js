@@ -210,7 +210,8 @@ const paymentCycleOf = (doc) => {
   return PAYMENT_CYCLE_LABELS[f] || null;
 };
 
-const detailBase = (doc) => ({ siteId: idOf(doc._id), siteCode: text(doc.siteCode) || null, siteName: siteName(doc), city: cityOf(doc), paymentCycle: paymentCycleOf(doc), mediaCodes: mediaCodesOf(doc), landlords: landlordsOf(doc) });
+const facesOf = (doc) => faceList(doc).map((fc) => ({ mediaName: text(fc.mediaName) || null, mediaCode: text(fc.mediaCode) || null, mediaType: mediaTypeText(fc.mediaType) || null, city: text(fc.city) || null }));
+const detailBase = (doc) => ({ faces: facesOf(doc), siteId: idOf(doc._id), siteCode: text(doc.siteCode) || null, siteName: siteName(doc), city: cityOf(doc), paymentCycle: paymentCycleOf(doc), mediaCodes: mediaCodesOf(doc), landlords: landlordsOf(doc) });
 const byDateThenName = (a, z) => a.date.localeCompare(z.date) || a.siteName.localeCompare(z.siteName);
 
 const siteName = (doc) => {
@@ -445,7 +446,7 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
     if (!rows) return;
     const month = monthKeyOf(d);
     const key = `${sid}|${month}`;
-    const r = rows.get(key) || { siteId: sid, siteCode: text(curDoc.siteCode) || null, paymentCycle: paymentCycleOf(curDoc), mediaCodes: mediaCodesOf(curDoc), landlords: landlordsOf(curDoc), siteName: siteName(curDoc), city: cityOf(curDoc), month, rentDue: 0, gstDue: 0, rentUnpaid: 0, gstUnpaid: 0, ...Object.fromEntries(COMPONENTS.map((c) => [c, 0])) };
+    const r = rows.get(key) || { faces: facesOf(curDoc), siteId: sid, siteCode: text(curDoc.siteCode) || null, paymentCycle: paymentCycleOf(curDoc), mediaCodes: mediaCodesOf(curDoc), landlords: landlordsOf(curDoc), siteName: siteName(curDoc), city: cityOf(curDoc), month, rentDue: 0, gstDue: 0, rentUnpaid: 0, gstUnpaid: 0, ...Object.fromEntries(COMPONENTS.map((c) => [c, 0])) };
     r.rentDue += rentDue;
     r.gstDue += gstDue;
     r.rentUnpaid += rentUnpaid;
@@ -2413,7 +2414,105 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
   };
 };
 
+// ── Campaign Live Status by month ─────────────────────────────────────────
+
+const CAMPAIGN_STATUSES = ["live", "notLive"]; // Not Updated (null / missing) bills are not part of this analysis
+const CAMPAIGN_RANK = { live: 0, notLive: 1, notUpdated: 2 };
+/** rentalDue[].campaignStatus: 1 = live, 0 = not live, null / missing / anything else = not updated. */
+const campaignStatusOf = (v) => {
+  if (v === null || v === undefined || v === "") return "notUpdated";
+  const n = Number(v);
+  return n === 1 ? "live" : n === 0 ? "notLive" : "notUpdated";
+};
+
+/**
+ * Source: rentalDue[] (the stored bill of each site / face / month; campaignStatus is saved per bill). Same bill rules as
+ * computeBills — period by dueDate, stale rows (isStaleBill) out, media type per bill, city per site — so it reconciles with
+ * the bills chart. Amount = the bill's baseAmount (that month's rent + GST), never an outstanding / carry-forward balance.
+ * De-duplication: a face's bill is counted once per bucket (the latest-updated duplicate wins). A site is counted ONCE per
+ * bucket, in ONE status — the worst of its bills (Not Live > Live); bills with no status are excluded — and all of its bills' amounts follow it, so
+ * the two statuses never overlap and sites / amounts add up to the bucket total. Summary sites = distinct sites per status.
+ */
+const computeCampaign = (docs, f) => {
+  const mk = () => ({ sites: new Set(), records: 0, amount: 0, gst: 0 });
+  const mkAll = () => ({ ...Object.fromEntries(CAMPAIGN_STATUSES.map((k) => [k, mk()])), all: mk() });
+  const buckets = buildBuckets(f, mkAll);
+  const sum = mkAll();
+  const excl = newExclusions();
+  const meta = { billsWithoutDueDate: 0, duplicateBillsIgnored: 0, notUpdatedBillsExcluded: 0 };
+  const stale = { bills: 0, sites: new Set() };
+  const rows = f.details ? [] : null;
+  for (const doc of docs) {
+    const attr = siteAttr(doc);
+    const sid = idOf(doc._id);
+    const kept = new Map(); // bucket|face -> { bill, d, idx }
+    let idx = 0;
+    for (const bill of doc.rentalDue || []) {
+      idx += 1;
+      if (!bill) continue;
+      const d = toDate(bill.dueDate);
+      if (!d) { meta.billsWithoutDueDate += 1; continue; }
+      if (!inRange(d, f)) continue;
+      const total = num(bill.baseAmount);
+      if (isStaleBill(doc, bill)) { stale.bills += 1; stale.sites.add(sid); continue; }
+      const type = billMediaType(doc, bill);
+      if (f.mediaType) {
+        if (type === MIXED) { excl.sites.add(sid); excl.amount += total; continue; }
+        if (type !== f.mediaType) continue;
+      }
+      if (!siteMatches(doc, attr, { ...f, mediaType: "" }, excl, total)) continue;
+      const bk = bucketKey(d, f.granularity);
+      if (!buckets.has(bk)) continue;
+      const key = `${bk}|${idOf(bill.mediaDetailId)}`;
+      const prev = kept.get(key);
+      const stamp = (toDate(bill.updatedAt) || new Date(0)).getTime();
+      if (prev) {
+        meta.duplicateBillsIgnored += 1;
+        if (stamp < prev.stamp) continue; // an equal stamp: the later row wins
+      }
+      kept.set(key, { bill, d, bk, type, stamp });
+    }
+    const perBucket = new Map();
+    for (const e of kept.values()) (perBucket.get(e.bk) || perBucket.set(e.bk, []).get(e.bk)).push(e);
+    for (const [bk, all] of perBucket) {
+      // only bills whose campaign status was set (1 / 0): a bill with no status is left out, not counted as Not Live
+      const list = all.filter((e) => campaignStatusOf(e.bill.campaignStatus) !== "notUpdated");
+      meta.notUpdatedBillsExcluded += all.length - list.length;
+      if (!list.length) continue;
+      const status = list.map((e) => campaignStatusOf(e.bill.campaignStatus)).reduce((a, z) => (CAMPAIGN_RANK[z] > CAMPAIGN_RANK[a] ? z : a));
+      const total = list.reduce((a, e) => a + num(e.bill.baseAmount), 0);
+      const gst = list.reduce((a, e) => a + num(e.bill.gstAmount), 0);
+      for (const t of [buckets.get(bk)[status], buckets.get(bk).all, sum[status], sum.all]) {
+        t.sites.add(sid); t.records += 1; t.amount += total; t.gst += gst;
+      }
+      if (rows) {
+        const first = list.map((e) => e.d).sort((a, z) => a - z)[0];
+        rows.push({
+          ...detailBase(doc), bucket: bk, date: dayKeyOf(first), status,
+          billMonth: uniq(list.map((e) => text(e.bill.dueMonth))).join(", "),
+          campaignName: uniq(list.map((e) => text(e.bill.campaignName))).join(", "),
+          mediaType: uniq(list.map((e) => typeLabel({ mediaType: e.type }))).join(", "),
+          bills: list.length, total: r2(total), gst: r2(gst), rent: r2(Math.max(total - gst, 0)),
+        });
+      }
+    }
+  }
+  const fin = (t) => ({ sites: t.sites.size, records: t.records, amount: r2(t.amount), gst: r2(t.gst), rent: r2(Math.max(t.amount - t.gst, 0)) });
+  const finAll = (o) => Object.fromEntries([...CAMPAIGN_STATUSES, "all"].map((k) => [k, fin(o[k])]));
+  return {
+    filters: publicFilters(f),
+    statuses: CAMPAIGN_STATUSES,
+    buckets: [...buckets].map(([key, b]) => ({ key, ...finAll(b) })),
+    summary: finAll(sum),
+    ...(rows ? { records: rows.sort(byDateThenName) } : {}),
+    meta: { ...meta, staleRowsExcluded: { bills: stale.bills, sites: stale.sites.size }, excludedMixedSites: exclusionMeta(excl) },
+  };
+};
+
+
 module.exports = {
+  computeCampaign,
+  campaignStatusOf,
   computeRentalMasterApprovals,
   computeBillApprovals,
   MIXED,

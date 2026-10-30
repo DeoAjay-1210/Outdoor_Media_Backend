@@ -90,6 +90,9 @@ SELECT.appraisal.rentalMaster = [
 // TDS Total / Paid / Upcoming: Rental Master's configured TDS of the generated bills + the Ledger's recorded deductions (source-independent)
 SELECT.tdsStatus = { both: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold landOwners.paymentCategory rentalPayment.totalRentalAmount appraisal.history tdsBalanceHistory ledger ledgerHistory ${CYCLE}` };
 
+// Campaign Live Status: the stored bills (campaignStatus is per bill) + the site's face / landlord / city labels for the popup rows
+SELECT.campaign = { both: `${FACE} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.dueDate rentalDue.dueMonth rentalDue.baseAmount rentalDue.gstAmount rentalDue.campaignStatus rentalDue.campaignName rentalDue.updatedAt ${CYCLE} ${DETAIL_IDS}` };
+
 const UNSUPPORTED = {
   appraisal: { ledger: "Ledger records hold payments only; appraisals are Rental Master records (appraisal history)." },
   bills: { ledger: "Outstanding payments come from the Rental Master cycle calculation; the ledger alone has no bills to be paid." },
@@ -105,6 +108,7 @@ const COMPUTE = {
   appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f, undefined, { payments: RA.cyclePaymentIndex(d, f, LEDGER_LIB), lib: LEDGER_LIB }) },
   bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
+  campaign: { both: (d, f) => RA.computeCampaign(d, f) },
   tdsStatus: { both: (d, f) => RA.computeTdsOverview(d, f, { landOwnersAsOfDate }) },
   tds: {
     ledger: (d, f) => RA.computeTds(d, f, { landOwnersAsOfDate }),
@@ -177,6 +181,7 @@ const OVERVIEW_SECTIONS = {
   tds: "tds",
   agreements: "agreements",
   tdsStatus: "tdsStatus",
+  campaign: "campaign", // appended: the keys above keep their order
 };
 const OVERVIEW_CONCURRENCY = 3; // each section reads the collection once: bounded, not 9 at once
 
@@ -244,4 +249,5 @@ module.exports = {
   getGstAnalytics: makeHandler("gst", "GST analytics fetched"),
   getTdsAnalytics: makeHandler("tds", "TDS analytics fetched"),
   getTdsStatusAnalytics: makeHandler("tdsStatus", "TDS status analytics fetched"),
+  getCampaignAnalytics: makeHandler("campaign", "Campaign live status analytics fetched"),
 };

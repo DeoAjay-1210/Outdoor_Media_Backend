@@ -14,5 +14,6 @@ router.post("/report-analytics/gst", protect, C.getGstAnalytics);
 router.post("/report-analytics/tds", protect, C.getTdsAnalytics);
 router.post("/report-analytics/agreements", protect, C.getAgreementAnalytics);
 router.post("/report-analytics/tds-status", protect, C.getTdsStatusAnalytics);
+router.post("/report-analytics/campaign", protect, C.getCampaignAnalytics); // per-bill campaign status; details:true for the popups
 
 module.exports = router;
