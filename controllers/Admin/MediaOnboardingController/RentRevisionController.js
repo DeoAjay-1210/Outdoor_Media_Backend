@@ -25,6 +25,7 @@ const {
   toAdvanceBill,
   gstPercentageFor,
   cycleMonthsOf,
+  nextBillDateAfter,
 } = require("../../../utils/rentRevisionArrears");
 
 const ROLE_NAMES = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
@@ -1359,6 +1360,53 @@ function revisionSiteBlock(media) {
   };
 }
 
+// ✅ NEW — rent-revision-list "siteBills" (mediaId sent): payment frequency of
+// the site and every generated bill month (dueMonth + withGst), oldest first.
+// Same-month bills (multi-face) → one row, the highest withGst. null when the
+// site is not found.
+async function revisionSiteBills(mediaId) {
+  const media = await Media.findById(mediaId).select("mediaDetails rentalPayment landOwners rentalDue").lean();
+  if (!media) return null;
+  const rp = media.rentalPayment || {};
+  const ymd = (d) => {
+    const dt = d ? new Date(d) : null;
+    return dt && !Number.isNaN(dt.getTime()) ? dt.toISOString().split("T")[0] : null;
+  };
+  const byMonth = new Map(); // monthKey → { dueMonth, withGst, dueDate }
+  (media.rentalDue || []).forEach((b) => {
+    const k = b && monthKey(b.dueDate);
+    if (k === null || k === undefined) return;
+    const withGst = Number(b.withGst || 0);
+    const cur = byMonth.get(k);
+    if (!cur) byMonth.set(k, { dueMonth: b.dueMonth || monthLabelOfKey(k), withGst, dueDate: b.dueDate });
+    else if (withGst > cur.withGst) cur.withGst = withGst;
+  });
+  const months = [...byMonth.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  const lastBill = months[months.length - 1] || null;
+  const next = nextBillDateAfter(media, lastBill ? lastBill.dueDate : new Date());
+  const freq = Number(rp.paymentFrequency) || null;
+  const gstPercentage = gstPercentageFor(media, lastBill ? lastBill.dueDate : new Date());
+  const { mediaCode, mediaName } = siteCodeName(media);
+  return {
+    mediaId: media._id,
+    mediaCode,
+    mediaName,
+    currentRent: Number(rp.totalRentalAmount || 0),
+    gstPercentage,
+    siteHasGst: gstPercentage > 0,
+    paymentFrequency: freq,
+    paymentFrequencyLabel: freq ? PAYMENT_FREQUENCY_LABELS[freq] || "" : "",
+    customPaymentFrequency: freq === 6 ? Number(rp.customPaymentFrequency) || null : null,
+    cycleMonths: cycleMonthsOf(rp),
+    billingStartDate: ymd(rp.billingStartDate),
+    lastBillDate: lastBill ? ymd(lastBill.dueDate) : null,
+    nextBillingDate: ymd(rp.nextBillingDate),
+    nextBillMonth: next ? monthLabelOfKey(monthKey(next)) : "",
+    billCount: months.length,
+    bills: months.map((m) => ({ dueMonth: m.dueMonth, withGst: m.withGst })),
+  };
+}
+
 // ── GET /admin/rent-revision-list ────────────────────────────
 exports.getRentRevisionList = async (req, res) => {
   try {
@@ -1499,6 +1547,8 @@ exports.getRentRevisionList = async (req, res) => {
       totalCount,
       totalPages: Math.ceil(totalCount / count),
       list,
+      // ✅ NEW — mediaId sent → that site's generated bill months + payment frequency
+      siteBills: filter.mediaId ? await revisionSiteBills(filter.mediaId) : null,
     });
   } catch (error) {
     console.error("getRentRevisionList error:", error);
