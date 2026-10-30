@@ -397,10 +397,29 @@ function pickAdvanceBill(m, advanceDate, adjustInDate) {
     return { adjustInDate: new Date(Date.UTC(Math.floor(k / 12), k % 12, 1)), monthBills };
   };
 
+  // ✅ NEW — advance for a not-generated bill: advanceMonth must be after the
+  // last generated bill and before the next one (yearly: Sep 2026 generated,
+  // next Sep 2027 → only Oct 2026 – Aug 2027; monthly → only the next month)
+  const advanceWindowError = () => {
+    if (!byKey.size || advanceKey === null) return null;
+    const lastKey = Math.max(...byKey.keys());
+    const cycle = cycleMonthsOf(m.rentalPayment);
+    const nextKey = lastKey + cycle;
+    const maxKey = cycle > 1 ? nextKey - 1 : nextKey;
+    if (advanceKey > lastKey && advanceKey <= maxKey) return null;
+    return {
+      error:
+        `advanceMonth ${monthLabelOfKey(advanceKey)} not allowed — last bill ${monthLabelOfKey(lastKey)} is already generated, ` +
+        `next bill ${monthLabelOfKey(nextKey)}. Send advanceMonth between ${monthLabelOfKey(lastKey + 1)} and ${monthLabelOfKey(maxKey)}`,
+    };
+  };
+
   if (adjustInDate) {
     const k = monthKey(adjustInDate);
     if (k < advanceKey) return { error: "adjustInMonth cannot be before advanceMonth" };
     if (byKey.has(k)) return generatedBill(k);
+    const windowError = advanceWindowError();
+    if (windowError) return windowError;
     // not generated yet → must be one of the site's coming bill months
     const lastKey = byKey.size ? Math.max(...byKey.keys()) : null;
     const cycle = cycleMonthsOf(m.rentalPayment);
@@ -419,6 +438,8 @@ function pickAdvanceBill(m, advanceDate, adjustInDate) {
     if (!firstError && !/already paid|already CMD approved/.test(r.error)) firstError = r;
     if (firstError) return firstError; // on hold → stop (don't skip to a later bill)
   }
+  const windowError = advanceWindowError();
+  if (windowError) return windowError;
   const next = nextBillDateAfter(m, advanceDate);
   if (!next) return { error: "Next bill month not found for this site" };
   return { adjustInDate: next, monthBills: [] };
