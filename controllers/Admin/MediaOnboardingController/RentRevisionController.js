@@ -1372,14 +1372,19 @@ async function revisionSiteBills(mediaId) {
     const dt = d ? new Date(d) : null;
     return dt && !Number.isNaN(dt.getTime()) ? dt.toISOString().split("T")[0] : null;
   };
-  const byMonth = new Map(); // monthKey → { dueMonth, withGst, dueDate }
+  const byMonth = new Map(); // monthKey → { dueMonth, withGst, dueDate, cmdApproved }
   (media.rentalDue || []).forEach((b) => {
     const k = b && monthKey(b.dueDate);
     if (k === null || k === undefined) return;
     const withGst = Number(b.withGst || 0);
+    // ✅ NEW — 1 when the month's bill is CMD approved (most approved bill of the month)
+    const cmdApproved = Number(b.approvalStatus) === 3 ? 1 : 0;
     const cur = byMonth.get(k);
-    if (!cur) byMonth.set(k, { dueMonth: b.dueMonth || monthLabelOfKey(k), withGst, dueDate: b.dueDate });
-    else if (withGst > cur.withGst) cur.withGst = withGst;
+    if (!cur) byMonth.set(k, { dueMonth: b.dueMonth || monthLabelOfKey(k), withGst, dueDate: b.dueDate, cmdApproved });
+    else {
+      if (withGst > cur.withGst) cur.withGst = withGst;
+      if (cmdApproved > cur.cmdApproved) cur.cmdApproved = cmdApproved;
+    }
   });
   const months = [...byMonth.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
   const lastBill = months[months.length - 1] || null;
@@ -1403,7 +1408,7 @@ async function revisionSiteBills(mediaId) {
     nextBillingDate: ymd(rp.nextBillingDate),
     nextBillMonth: next ? monthLabelOfKey(monthKey(next)) : "",
     billCount: months.length,
-    bills: months.map((m) => ({ dueMonth: m.dueMonth, withGst: m.withGst })),
+    bills: months.map((m) => ({ dueMonth: m.dueMonth, withGst: m.withGst, cmdApproved: m.cmdApproved })),
   };
 }
 
