@@ -1432,7 +1432,22 @@ exports.getRentRevisionList = async (req, res) => {
     const pageNumber = Math.max(1, parseInt(q.pageNumber, 10) || 1);
     const count = Math.max(1, parseInt(q.count, 10) || 10);
     const filter = {};
-    if (q.mediaId) {
+    // ✅ NEW — mediaId as an array (JSON array / JSON string / "id1,id2") →
+    // revisions of all those sites; siteBills becomes an array. A single id
+    // (plain string) works exactly as before.
+    const mediaIdArrayMode =
+      Array.isArray(q.mediaId) || (typeof q.mediaId === "string" && (q.mediaId.trim().startsWith("[") || q.mediaId.includes(",")));
+    let arrayMediaIds = null;
+    const invalidMediaIds = [];
+    if (mediaIdArrayMode) {
+      arrayMediaIds = [];
+      parseMediaIds(q.mediaId).forEach((id) => {
+        if (mongoose.Types.ObjectId.isValid(String(id))) arrayMediaIds.push(String(id));
+        else invalidMediaIds.push({ mediaId: id, message: "mediaId is not a valid ObjectId" });
+      });
+      if (arrayMediaIds.length === 0) return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
+      filter.mediaId = { $in: arrayMediaIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    } else if (q.mediaId) {
       if (!mongoose.Types.ObjectId.isValid(String(q.mediaId))) {
         return errorResponse(res, "mediaId is not a valid ObjectId", null, 400);
       }
@@ -1566,7 +1581,18 @@ exports.getRentRevisionList = async (req, res) => {
       totalPages: Math.ceil(totalCount / count),
       list,
       // ✅ NEW — mediaId sent → that site's generated bill months + payment frequency
-      siteBills: filter.mediaId ? await revisionSiteBills(filter.mediaId) : null,
+      ...(arrayMediaIds
+        ? await (async () => {
+            // ✅ NEW — mediaId array → one siteBills object per site (order sent)
+            const siteBills = [];
+            for (const id of arrayMediaIds) {
+              const sb = await revisionSiteBills(id);
+              if (sb) siteBills.push(sb);
+              else invalidMediaIds.push({ mediaId: id, message: "Media not found" });
+            }
+            return { siteBills, invalidMediaIds };
+          })()
+        : { siteBills: filter.mediaId ? await revisionSiteBills(filter.mediaId) : null }),
     });
   } catch (error) {
     console.error("getRentRevisionList error:", error);
