@@ -396,6 +396,9 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user, 
           amount: newRent,
           updatedBy: `${userName} (Appraisal release amount updated - appraisal ${relAmt})`,
           updatedAt: nowIST(),
+          isAppraisal: true,
+          isManualChange: false,
+          isInitial: false,
         };
       }
       // this bill shows the appraisal it belongs to
@@ -560,6 +563,9 @@ async function processAppraisalHold({ mediaId, rentalDueId, hold, remark, user, 
           amount: targetRent,
           updatedBy: `${userName} (Appraisal hold released - appraisal ${relAmt})`,
           updatedAt: nowIST(),
+          isAppraisal: true,
+          isManualChange: false,
+          isInitial: false,
         };
         releaseInfo = {
           originalAppraisalAmount: Number(heldHold.appraisalAmount || 0),

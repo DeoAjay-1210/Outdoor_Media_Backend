@@ -6656,6 +6656,55 @@ const details = (item.mediaDetails || []).map((d) => ({
           filteredAgreementDocVerificationHistory,
         gstBalanceHistory: item.gstBalanceHistory || [],
         gstOutstandingHistory: item.rentalPayment?.gstOutstandingHistory || [], // ✅ NEW
+        rentalPayment: {
+                  totalRentalAmount: item.rentalPayment?.totalRentalAmount || 0,
+                  rentalAmountHistory: (item.rentalPayment?.rentalAmountHistory || []).map((h) => {
+                    const hObj = h.toObject ? h.toObject() : h;
+                    return {
+                      amount: hObj.amount,
+                      previousAmount: hObj.previousAmount ?? 0,
+                      updatedBy: hObj.updatedBy || "",
+                      updatedAt: hObj.updatedAt || null,
+                      effectiveFrom: hObj.effectiveFrom || null,
+                      rentRevisionId: hObj.rentRevisionId || null,
+                      isManualChange: hObj.isManualChange ?? false,
+                      isInitial: hObj.isInitial ?? false,
+                      isAppraisal: hObj.isAppraisal ?? false,
+                    };
+                  }),
+                  gstApplicable: item.rentalPayment?.gstApplicable || 0,
+                  gstOutstandingHistory: item.rentalPayment?.gstOutstandingHistory || [],
+                  paymentFrequency: item.rentalPayment?.paymentFrequency || 1,
+                  customPaymentFrequency: item.rentalPayment?.customPaymentFrequency,
+                  lastBillPaidDate: selectedCycleBillDates
+                    ? selectedCycleBillDates.lastBillPaidDate
+                    : item.rentalPayment?.lastBillPaidDate,
+                  previousBillGenerateDate: item.rentalPayment?.previousBillGenerateDate,
+                  billingStartDate: item.rentalPayment?.billingStartDate,
+                  billDate: item.rentalPayment?.billDate || 5,
+                  gstPercentage: item.rentalPayment?.gstPercentage || 0,
+                  gstAmount: item.rentalPayment?.gstAmount || 0,
+                  totalRentalAmountWithGst: item.rentalPayment?.totalRentalAmountWithGst || 0,
+                  netPayable: item.rentalPayment?.netPayable || 0,
+                  nextBillingDate: selectedCycleBillDates
+                    ? selectedCycleBillDates.nextBillingDate
+                    : item.rentalPayment?.nextBillingDate,
+                  status: item.rentalPayment?.status || 1,
+                },
+                rentalAmountHistory: (item.rentalPayment?.rentalAmountHistory || []).map((h) => {
+                  const hObj = h.toObject ? h.toObject() : h;
+                  return {
+                    amount: hObj.amount,
+                    previousAmount: hObj.previousAmount ?? 0,
+                    updatedBy: hObj.updatedBy || "",
+                    updatedAt: hObj.updatedAt || null,
+                    effectiveFrom: hObj.effectiveFrom || null,
+                    rentRevisionId: hObj.rentRevisionId || null,
+                    isManualChange: hObj.isManualChange ?? false,
+                    isInitial: hObj.isInitial ?? false,
+                    isAppraisal: hObj.isAppraisal ?? false,
+                  };
+                }),
         rentalDueEntries: rentalDueEntries, // ✅ CHANGED: Now contains face-based entries
       };
     };
