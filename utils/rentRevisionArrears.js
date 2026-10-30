@@ -275,7 +275,7 @@ function toArrearsBill(planBill, revisionId, userName, now) {
   return {
     _id: new mongoose.Types.ObjectId(),
     type: "arrears",
-    label: `Arrears – ${planBill.dueMonth}`,
+    label: `New Bill – ${planBill.dueMonth}`, // ✅ CHANGED — was "Arrears – …"
     rentRevisionId: revisionId,
     parentRentalDueId: planBill.parentRentalDueId,
     mediaDetailId: planBill.mediaDetailId,
@@ -651,7 +651,7 @@ function arrearsBlock(bills) {
     pendingGst: sum(billGstPending),
     bills: bills.map((b) => ({
       rentalDueId: b._id,
-      label: b.label,
+      label: newBillLabel(b.label),
       dueMonth: b.dueMonth,
       parentRentalDueId: b.parentRentalDueId,
       rentRevisionId: b.rentRevisionId,
@@ -722,8 +722,11 @@ const revisionBlock = (r) =>
       }
     : null;
 
-// ✅ NEW — "arrears" | "advance" (both stored in media.arrearsDue[])
-const billKind = (b) => (b && b.type === "advance" ? "advance" : "arrears");
+// ✅ CHANGED — shown as "newBill" | "advance" (stored as type "arrears" /
+// "advance" in media.arrearsDue[]; the DB value is not changed)
+const billKind = (b) => (b && b.type === "advance" ? "advance" : "newBill");
+// ✅ NEW — old saved labels "Arrears – August 2026" → "New Bill – August 2026"
+const newBillLabel = (label) => String(label || "").replace(/^Arrears(?=\s)/, "New Bill");
 const advanceExtras = (b) =>
   billKind(b) === "advance" ? { adjustInMonth: b.adjustInMonth || "", adjustInDate: b.adjustInDate || null } : {};
 
@@ -746,7 +749,7 @@ function arrearsLedgerRows(b) {
       rentalDueId: b._id,
       parentRentalDueId: b.parentRentalDueId,
       billType: kind,
-      label: b.label,
+      label: newBillLabel(b.label),
       rentRevisionId: b.rentRevisionId,
       ...advanceExtras(b),
       index: null,
@@ -776,7 +779,7 @@ function arrearsGstRow(b) {
     rentalDueId: b._id,
     parentRentalDueId: b.parentRentalDueId,
     billType: billKind(b),
-    label: billKind(b) === "advance" ? `${b.label.split(" (")[0]} GST` : `${b.label} GST`,
+    label: billKind(b) === "advance" ? `${b.label.split(" (")[0]} GST` : `${newBillLabel(b.label)} GST`,
     dueMonth: b.dueMonth,
     cycle: b.dueDate,
     gstAmount: Number(b.gstAmount || 0),
@@ -844,7 +847,7 @@ function decorateLedgerItem(item, arrearsBills, lastRevision, parentWithGstById 
       [{
         _id: b._id,
         type: kind,
-        label: b.label,
+        label: newBillLabel(b.label),
         parentRentalDueId: b.parentRentalDueId,
         dueMonth: b.dueMonth,
         dueDate: b.dueDate,
@@ -868,7 +871,7 @@ function decorateLedgerItem(item, arrearsBills, lastRevision, parentWithGstById 
         [{
           month: b.dueMonth,
           billType: kind,
-          label: b.label,
+          label: newBillLabel(b.label),
           rentalDueId: b._id,
           ...advanceExtras(b),
           cycle: new Date(Date.UTC(due.getUTCFullYear(), due.getUTCMonth(), 1)),
@@ -926,7 +929,7 @@ function advanceBlock(bills, billMonths = null) {
     adjustedAmount: sum((b) => (isAdjusted(b) ? Number(b.netPayable || 0) : 0)),
     bills: bills.map((b) => ({
       rentalDueId: b._id,
-      label: b.label,
+      label: newBillLabel(b.label),
       dueMonth: b.dueMonth,
       adjustInMonth: b.adjustInMonth || "",
       adjusted: isAdjusted(b),
@@ -989,7 +992,7 @@ function markAdvanceAdjustedRows(out, advances) {
   const mark = (rows) =>
     Array.isArray(rows)
       ? rows.map((r) => {
-          if (!r || typeof r !== "object" || r.billType === "arrears" || r.billType === "advance") return r;
+          if (!r || typeof r !== "object" || r.billType === "arrears" || r.billType === "newBill" || r.billType === "advance") return r;
           const adj = byMonth.get(r.dueMonth) || byMonth.get(r.month);
           return { ...r, billType: r.billType || "bill", ...(adj || {}) };
         })
@@ -1008,7 +1011,7 @@ function markAdvanceAdjustedRows(out, advances) {
 // on its bill rows and on the month itself (TDS rows: billType only)
 function markAdvanceAdjustedHistory(out, advances) {
   const byMonth = advanceAdjustByMonth(advances);
-  const isExtra = (r) => !r || typeof r !== "object" || r.billType === "arrears" || r.billType === "advance";
+  const isExtra = (r) => !r || typeof r !== "object" || r.billType === "arrears" || r.billType === "newBill" || r.billType === "advance";
   const markRow = (adj) => (r) => (isExtra(r) ? r : { ...r, billType: r.billType || "bill", ...(adj || {}) });
   const ROW_KEYS = ["ledger", "withGst1Ledger", "allEntries", "gstBalanceHistory", "pendingLedgerHistory"];
   const ledgerHistory = Array.isArray(out.ledgerHistory)
@@ -1103,7 +1106,7 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
       parentRentalDueId: b.parentRentalDueId,
       billType: billKind(b),
       ...advanceExtras(b),
-      label: p.type === "gst" ? `${b.label} GST` : b.label,
+      label: p.type === "gst" ? `${newBillLabel(b.label)} GST` : newBillLabel(b.label),
       amount: Number(p.amount || 0),
       shareAmount: Number(p.rentAmount || 0),
       tdsAmount: Number(p.tdsAmount || 0),
@@ -1217,6 +1220,7 @@ module.exports = {
   cycleMonthsOf, // ✅ NEW
   advanceBlock, // ✅ NEW
   arrearsStatus,
+  newBillLabel, // ✅ NEW
   effectiveWithGst,
   applyArrearsPayment,
   arrearsBlock,

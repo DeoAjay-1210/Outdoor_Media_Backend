@@ -4,7 +4,7 @@ const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardi
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 // ✅ NEW — rent revision arrears (paid via ledger-save, shown in ledger-list)
 const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema");
-const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst } = require("../../../utils/rentRevisionArrears");
+const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst, newBillLabel } = require("../../../utils/rentRevisionArrears");
 const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
   getRentForDueDate,
@@ -1221,7 +1221,8 @@ async function payArrearsBillIfArrears(req, res) {
   if (Number(bill.approvalStatus) !== 3) {
     return errorResponse(res, "Rent revision not approved yet — arrears cannot be paid", null, 400);
   }
-  const kind = bill.type === "advance" ? "advance" : "arrears"; // ✅ NEW
+  const kind = bill.type === "advance" ? "advance" : "newBill"; // ✅ CHANGED — shown as "newBill" (was "arrears")
+  const blockKey = bill.type === "advance" ? "advance" : "arrears"; // response key name unchanged
   let paid;
   try {
     paid = applyArrearsPayment(bill, {
@@ -1253,7 +1254,7 @@ async function payArrearsBillIfArrears(req, res) {
         _id: p._id,
         rentalDueId: paid.bill._id,
         billType: kind,
-        label: p.type === "gst" ? `${paid.bill.label} GST` : paid.bill.label,
+        label: p.type === "gst" ? `${newBillLabel(paid.bill.label)} GST` : newBillLabel(paid.bill.label),
         month: paid.bill.dueMonth,
         landOwnerId: p.landOwnerId || null,
         landOwnerName: p.landOwnerName || "",
@@ -1270,7 +1271,7 @@ async function payArrearsBillIfArrears(req, res) {
       tdsRecords: paid.saved
         .filter((p) => Number(p.tdsAmount || 0) > 0)
         .map((p) => ({ rentalDueId: paid.bill._id, month: paid.bill.dueMonth, billType: kind, landOwnerId: p.landOwnerId, tdsAmount: p.tdsAmount })),
-      [kind]: {
+      [blockKey]: {
         rentalDueId: b0.rentalDueId,
         ...(kind === "advance" ? { adjustInMonth: paid.bill.adjustInMonth || "" } : {}),
         dueMonth: b0.dueMonth,
@@ -1305,7 +1306,7 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
     const media = await Media.findById(mediaId).select("arrearsDue rentalDue._id rentalDue.withGst").lean();
     const bill = (media?.arrearsDue || []).find((b) => String(b._id) === billId);
     if (!bill) throw new Error("Arrears / advance bill not found");
-    const kind = bill.type === "advance" ? "advance" : "arrears";
+    const kind = bill.type === "advance" ? "advance" : "newBill"; // ✅ CHANGED — was "arrears"
     if (Number(bill.approvalStatus) !== 3) throw new Error(`Rent revision not approved yet — ${kind} cannot be paid`);
     const paid = applyArrearsPayment(bill, {
       entryType: entryType === "gst" ? "gst" : "rental",
@@ -1324,7 +1325,7 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
     return {
       ...base,
       billType: kind,
-      label: entryType === "gst" ? `${String(bill.label || "").split(" (")[0]} GST` : bill.label,
+      label: entryType === "gst" ? `${newBillLabel(String(bill.label || "").split(" (")[0])} GST` : newBillLabel(bill.label),
       dueMonth: bill.dueMonth,
       amount: paid.saved.reduce((s, p) => s + Number(p.amount || 0), 0),
       status: "saved",
@@ -2311,8 +2312,8 @@ async function executeBulkPaymentBatch(req, batchData) {
 
   for (let i = 0; i < payments.length; i++) {
     // ✅ CHANGED — "arrears" / "advance": rent revision bill (rentalDueId = that bill's id)
-    if (!["current", "pastCycle", "outstanding", "arrears", "advance"].includes(payments[i].targetType)) {
-      throw { message: `payments[${i}].targetType must be "current", "pastCycle", "outstanding", "arrears" or "advance"`, statusCode: 400 };
+    if (!["current", "pastCycle", "outstanding", "newBill", "arrears", "advance"].includes(payments[i].targetType)) {
+      throw { message: `payments[${i}].targetType must be "current", "pastCycle", "outstanding", "newBill" or "advance"`, statusCode: 400 };
     }
     if (!payments[i].paymentMode || !["Cash", "Online"].includes(payments[i].paymentMode)) {
       throw { message: `payments[${i}].paymentMode must be "Cash" or "Online"`, statusCode: 400 };
@@ -2368,6 +2369,7 @@ async function executeBulkPaymentBatch(req, batchData) {
       const extraBillItems = sitePayments.filter(
         (p) =>
           p.targetType === "arrears" ||
+          p.targetType === "newBill" ||
           p.targetType === "advance" ||
           extraBillIds.has(String(p.rentalDueId || p.gstBalanceHistoryId || "")),
       );
@@ -2635,7 +2637,7 @@ async function executeBulkPaymentBatch(req, batchData) {
     else if (e.targetType === "outstanding") acc.outstandingAmount += e.amount;
     // ✅ NEW — rent revision bills (by the bill's own type)
     else if (e.billType === "advance") acc.advanceAmount += e.amount;
-    else if (e.billType === "arrears") acc.arrearsAmount += e.amount;
+    else if (e.billType === "arrears" || e.billType === "newBill") acc.arrearsAmount += e.amount;
     return acc;
   }, { currentAmount: 0, pastCycleAmount: 0, outstandingAmount: 0, arrearsAmount: 0, advanceAmount: 0 });
 
@@ -5504,7 +5506,7 @@ const details = (media.mediaDetails || []).map((d) => ({
       adjByMonth.set(b.adjustInMonth, cur);
     });
     fullGstBalanceHistory.forEach((g, i) => {
-      if (!g || g.billType === "arrears" || g.billType === "advance") return;
+      if (!g || g.billType === "arrears" || g.billType === "newBill" || g.billType === "advance") return;
       fullGstBalanceHistory[i] = { ...g, billType: g.billType || "bill", ...(adjByMonth.get(g.dueMonth) || {}) };
     });
 
@@ -5713,7 +5715,12 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
       const p = parseDueMonthLabel(label);
       return p ? p.year * 12 + p.monthIdx : null;
     };
-    advanceBills.forEach((b) => {
+    // ✅ CHANGED — New Bill (rent revision arrears, type "arrears") rows too
+    const parentWithGstById = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
+    const revisionBills = (media.arrearsDue || []).filter((b) => b && (b.type === "advance" || b.type === "arrears"));
+    revisionBills.forEach((b) => {
+      const isAdvance = b.type === "advance";
+      const withGst = isAdvance ? Number(b.withGst || 0) : effectiveWithGst(b, parentWithGstById.get(String(b.parentRentalDueId)));
       const lastPay = (b.payments || []).filter((p) => p.type === "rental").slice(-1)[0];
       const rentPending = Math.max(0, Math.round(Number(b.netPayable || 0) - Number(b.rentPaid || 0)));
       const paid = rentPending === 0;
@@ -5721,14 +5728,14 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
         _id: b._id,
         rentalDueId: b._id,
         dueMonth: b.dueMonth,
-        billType: "advance",
-        label: b.label,
-        adjustInMonth: b.adjustInMonth || "",
+        billType: isAdvance ? "advance" : "newBill",
+        label: isAdvance ? b.label : newBillLabel(b.label),
+        ...(isAdvance ? { adjustInMonth: b.adjustInMonth || "" } : { parentRentalDueId: b.parentRentalDueId || null }),
         rentRevisionId: b.rentRevisionId,
-        baseRentOutstandingAmount: Number(b.netPayable || 0) + (Number(b.withGst) === 2 ? Number(b.gstAmount || 0) : 0),
-        withGst: Number(b.withGst || 0),
+        baseRentOutstandingAmount: Number(b.netPayable || 0) + (withGst === 2 ? Number(b.gstAmount || 0) : 0),
+        withGst,
         gstAmount: Number(b.gstAmount || 0),
-        tdsAmount: 0, // ✅ CHANGED — no TDS on an advance
+        tdsAmount: 0, // ✅ CHANGED — no TDS on an advance / New Bill
         paidAmount: Number(b.rentPaid || 0),
         pendingAmount: rentPending,
         isPaid: paid,

@@ -5358,7 +5358,7 @@ function rentRevisionForEntry(item, entry, revisions) {
     ? {
         revisionId: arrearsBills[0].rentRevisionId || null,
         arrearsRentalDueId: arrearsBills[0]._id,
-        label: arrearsBills[0].label || "",
+        label: String(arrearsBills[0].label || "").replace(/^Arrears(?=\s)/, "New Bill"), // ✅ CHANGED — "New Bill – …"
         amount: arrearsBills.reduce((s, b) => s + Number(b.netPayable || 0), 0),
         gstAmount: arrearsBills.reduce((s, b) => s + Number(b.gstAmount || 0), 0),
         paymentStatus: rrPaymentStatus(arrearsBills),

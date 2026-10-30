@@ -21,6 +21,7 @@ const {
   buildRevisionPlan,
   toArrearsBill,
   arrearsStatus,
+  newBillLabel,
   buildAdvancePlan,
   toAdvanceBill,
   gstPercentageFor,
@@ -225,6 +226,10 @@ function nextBillMonthAfter(media, fromDate) {
   return monthLabelOfKey(later !== undefined ? later : fromKey + cycleMonthsOf(media.rentalPayment));
 }
 
+// ✅ NEW — BILL revision only for CMD approved months
+const notCmdApprovedError = (months) =>
+  `${months.join(", ")} bill${months.length > 1 ? "s are" : " is"} not CMD approved — new bill cannot be generated`;
+
 // one site → { revision, action } or { error }
 // ✅ CHANGED — BILL: fromMonth bill + increaseAmount (GST on it only when
 // gstOnIncrease 1); applyToAllMonths 1 → site rent + nextIncreaseAmount from
@@ -239,6 +244,11 @@ async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount,
     (b) => b && (b.dueMonth === fromLabel || monthKey(b.dueDate) === monthKey(fromDate)),
   );
   if (!hasFromBill) return { error: `No bill for ${fromLabel} on this site` };
+  // ✅ NEW — BILL: fromMonth bill must be CMD approved
+  const fromApproved = (media.rentalDue || []).some(
+    (b) => b && (b.dueMonth === fromLabel || monthKey(b.dueDate) === monthKey(fromDate)) && Number(b.approvalStatus) === 3,
+  );
+  if (!fromApproved) return { error: notCmdApprovedError([fromLabel]) };
 
   const gstPercentage = gstPercentageFor(media, fromDate);
   if (gstPercentage > 0 && gstOnIncrease === null) {
@@ -300,6 +310,9 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
   const billsOfMonth = (key) => (media.rentalDue || []).filter((b) => b && b.dueDate && monthKey(b.dueDate) === key);
   const missing = billMonths.find((bm) => billsOfMonth(bm.key).length === 0);
   if (missing) return { error: `No bill for ${missing.month} on this site` };
+  // ✅ NEW — BILL: only CMD approved months (a month with no CMD approved bill → error)
+  const notApproved = billMonths.filter((bm) => !billsOfMonth(bm.key).some((b) => Number(b.approvalStatus) === 3));
+  if (notApproved.length) return { error: notCmdApprovedError(notApproved.map((bm) => bm.month)) };
 
   const first = billMonths[0];
   const last = billMonths[billMonths.length - 1];
@@ -725,8 +738,8 @@ async function sendArrearsMail(media, bill, revision, rentRevisionOverride = nul
   const result = await sendRentalDueApprovalMail(mailMedia, mailEntry, null, {
     rentRevision: rentRevisionOverride || {
       // ✅ CHANGED — "billUpdate": the month's bill was increased (no arrears bill)
-      billType: isAdvance ? "advance" : bill.type === "billUpdate" ? "billUpdate" : "arrears",
-      label: bill.label,
+      billType: isAdvance ? "advance" : bill.type === "billUpdate" ? "billUpdate" : "newBill", // ✅ CHANGED — was "arrears"
+      label: newBillLabel(bill.label),
       dueMonth: bill.dueMonth,
       rentalDueId: bill._id,
       parentRentalDueId: bill.parentRentalDueId,
@@ -1520,7 +1533,7 @@ exports.getRentRevisionList = async (req, res) => {
         arrearsPending: Math.max(0, arrearsTotal - arrearsPaid),
         arrearsBills: bills.map((b) => ({
           rentalDueId: b._id,
-          label: b.label,
+          label: newBillLabel(b.label), // ✅ CHANGED — "New Bill – …"
           dueMonth: b.dueMonth,
           netPayable: b.netPayable,
           gstAmount: b.gstAmount,
