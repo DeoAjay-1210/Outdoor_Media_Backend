@@ -434,9 +434,27 @@ function buildAdvancePlan(media, advanceDate, advanceAmount, gstOnIncrease, adju
 
   // rent of that bill (an advance already approved for it is deducted)
   const { rent: billRent, gstRent } = rentPartsForDueDate(m, adjustInDate);
+  // ✅ NEW — advances already approved for this bill (more than one allowed,
+  // e.g. yearly bill: January + April advances both deducted from November)
+  const previousAdvances = (m.rentalPayment?.advanceAdjustments || [])
+    .filter((a) => a && a.dueMonth === adjustInMonth)
+    .map((a) => {
+      const b = (m.arrearsDue || []).find((x) => x && String(x._id) === String(a.advanceBillId)) || {};
+      return {
+        revisionId: a.rentRevisionId || null,
+        advanceMonth: b.dueMonth || "",
+        amount: Number(a.amount || 0),
+        gstAmount: Number(a.gstDeducted) === 1 ? Number(b.gstAmount || 0) : 0,
+        paymentStatus: b._id ? arrearsStatus(b) : "Pending",
+      };
+    });
+  const previousAdvanceTotal = previousAdvances.reduce((s, a) => s + a.amount, 0);
+  const previousAdvanceGst = previousAdvances.reduce((s, a) => s + a.gstAmount, 0);
   if (billRent <= 0) return { error: `${adjustInMonth} bill amount is 0 — advance not allowed` };
   if (advanceAmount > billRent) {
-    return { error: `Advance ${advanceAmount} is more than the ${adjustInMonth} bill amount ${billRent}` };
+    return {
+      error: `Advance ${advanceAmount} is more than the ${adjustInMonth} bill amount ${billRent}${previousAdvanceTotal > 0 ? ` (after earlier advances ${previousAdvanceTotal})` : ""}`,
+    };
   }
 
   const monthMedia = toPlain(mediaAsOfDate(m, adjustInDate)) || {};
@@ -478,6 +496,11 @@ function buildAdvancePlan(media, advanceDate, advanceAmount, gstOnIncrease, adju
     advanceGstAmount,
     balanceGstAmount: Math.max(0, round(gstForMonth - advanceGstAmount)),
     billGstAmount: fullGst,
+    // ✅ NEW — earlier advances of this bill; full bill = before every advance
+    previousAdvances,
+    previousAdvanceTotal,
+    fullBillRent: billRent + previousAdvanceTotal,
+    fullBillGstAmount: fullGst + previousAdvanceGst,
     owners,
     tdsAmount: owners.reduce((s, o) => s + o.tdsAmount, 0),
     cashAmount: owners.reduce((s, o) => s + o.cashAmount, 0),
