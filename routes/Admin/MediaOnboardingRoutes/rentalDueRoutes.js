@@ -35,6 +35,8 @@ const { setTdsHold, getTdsHoldRemarks } = require("../../../controllers/Admin/Me
 // ✅ NEW — rental due "Save as Draft" (own controller)
 const { saveRentalDueDraft } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueDraftController");
 const { getRentalDueHistory } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueHistoryController");
+// ✅ NEW — campaign status update (one bill, by mediaCode + dueMonth)
+const { updateCampaignStatus } = require("../../../controllers/Admin/MediaOnboardingController/RentalDueCampaignStatusController");
 // Middleware
 // const  authenticate  = require("../../../middleware/authMiddleware");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
@@ -122,5 +124,8 @@ router.post("/overdue-remark/pin", protect, pinOverdueRemark);
 router.post("/overdue-remark/read-receipt", protect, markOverdueRemarkRead);
 router.get("/overdue-remark/message-info", protect, getMessageInfo);
 router.get("/overdue-remark/edit-history", protect, getEditHistory);
+
+// ✅ NEW — POST /admin/rental-due/campaign-status { mediaCode, dueMonth, campaignStatus: 0 | 1 }
+router.post("/rental-due/campaign-status", protect, updateCampaignStatus);
 
 module.exports = router;
