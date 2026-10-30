@@ -47,6 +47,10 @@ const rentalAmountHistorySchema = new mongoose.Schema(
     isManualChange: { type: Boolean, default: false },
     isInitial: { type: Boolean, default: false },
     isAppraisal: { type: Boolean, default: false },
+    // ✅ NEW — rent revision (POST /admin/rent-revision): the rent applies from this
+    // month (fromMonth), not from updatedAt. null = from updatedAt (as before).
+    effectiveFrom: { type: Date, default: null },
+    rentRevisionId: { type: mongoose.Schema.Types.ObjectId, default: null },
   },
   { _id: false },
 );

@@ -4,6 +4,18 @@ const { successResponse, errorResponse } = require("../../../utils/response");
 const { computeRentalDueStats, getFaceRoleStatus, roleStatus } = require("../../../utils/rentalDueStats");
 const { parseBillDateFilter, siteBillDate, billDateInMonth } = require("../../../utils/billDate"); // ✅ NEW — billDate filter
 const mongoose = require("mongoose");
+const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema"); // ✅ NEW — site-filter billAmount / advanceAmount
+
+// ✅ NEW — rent revision helpers for landowner/site-filter
+const REVISION_ROLE_NAMES = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
+const REVISION_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+// "October 2026" → month key (year * 12 + month index), null when invalid
+const parseRevisionMonth = (label) => {
+  const parts = String(label || "").trim().split(/\s+/);
+  const idx = REVISION_MONTHS.findIndex((m) => m.toLowerCase() === String(parts[0] || "").toLowerCase());
+  const year = Number(parts[1]);
+  return idx >= 0 && year ? year * 12 + idx : null;
+};
 const {
   computeOutstandingSummary,
   dedupeGstBalanceHistory,
@@ -3527,6 +3539,98 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       entries.push(entryPayload);
     });
 
+    // ✅ NEW — rent revision BILL / ADVANCE amounts (rentRevisionAmount) and
+    // the billAmount / advanceAmount filters. dueThisMonth 1 → only the
+    // monthFilter month (BILL fromMonth / ADVANCE advanceMonth), else all
+    // months; roleType → only revisions waiting on that role, else Pending +
+    // CMD Approved. Rejected never counted. Existing filters unchanged: these
+    // flags only narrow the sites further.
+    const revisionStatsKey = statsYear * 12 + (statsMonth - 1);
+    const revisionTargetRole = [1, 2, 3].includes(Number(targetRole)) ? Number(targetRole) : null;
+    // status / role only — the month (dueThisMonth) is checked per item below
+    const revisionInScope = (r) => {
+      if (!r || r.status === "Rejected") return false;
+      if (revisionTargetRole) return r.status === "Pending" && Number(r.currentPendingRole) === revisionTargetRole;
+      return r.status === "Pending" || r.status === "Approved";
+    };
+    const revisionKind = (r) => (r.billType === "ADVANCE" ? "advance" : "bill");
+    const revisionItem = (r) => {
+      const isAdvance = revisionKind(r) === "advance";
+      const amount = Number(isAdvance ? r.advanceAmount : r.increaseAmount ?? r.difference) || 0;
+      const gstAmount = Number(isAdvance ? r.advanceGstAmount : r.increaseGstAmount) || 0;
+      return {
+        revisionId: r._id,
+        month: r.fromMonth,
+        amount,
+        gstAmount,
+        totalAmount: amount + gstAmount,
+        ...(isAdvance ? { adjustInMonth: r.adjustInMonth || "" } : {}),
+        status: r.status,
+        currentPendingRole: r.currentPendingRole ?? null,
+        currentPendingRoleName: r.currentPendingRole ? REVISION_ROLE_NAMES[r.currentPendingRole] || null : null,
+      };
+    };
+    // ✅ NEW — BILL with a "months" list → one item per listed month (its own amount / GST)
+    const revisionItems = (r) => {
+      if (revisionKind(r) === "bill" && Array.isArray(r.months) && r.months.length) {
+        const detail = Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : r.months;
+        const base = revisionItem(r);
+        return detail.map((d) => {
+          const amount = Number(d.amount) || 0;
+          const gstAmount = Number(d.gstAmount) || 0;
+          return { ...base, month: d.month, amount, gstAmount, totalAmount: amount + gstAmount };
+        });
+      }
+      return [revisionItem(r)];
+    };
+    const revisionsInScope = (await RentRevision.find({ status: { $in: ["Pending", "Approved"] } }).lean()).filter(revisionInScope);
+    const revisionsByMedia = new Map(); // mediaId → { bill: [items], advance: [items] }
+    revisionsInScope.forEach((r) => {
+      const items = revisionItems(r).filter(
+        (i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey,
+      );
+      if (items.length === 0) return;
+      const k = String(r.mediaId);
+      if (!revisionsByMedia.has(k)) revisionsByMedia.set(k, { bill: [], advance: [] });
+      revisionsByMedia.get(k)[revisionKind(r)].push(...items);
+    });
+    const revisionBlock = (items) => {
+      const sorted = [...items].sort((a, b) => (parseRevisionMonth(a.month) || 0) - (parseRevisionMonth(b.month) || 0));
+      const amount = sorted.reduce((s, i) => s + i.amount, 0);
+      const gstAmount = sorted.reduce((s, i) => s + i.gstAmount, 0);
+      return { amount, gstAmount, totalAmount: amount + gstAmount, items: sorted };
+    };
+
+    const includeBillAmountFilter = bodyFlag("billAmount");
+    const includeAdvanceAmountFilter = bodyFlag("advanceAmount");
+    if (includeBillAmountFilter || includeAdvanceAmountFilter) {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        const totals = { bill: [], advance: [] };
+        entry.sites = (entry.sites || [])
+          .map((s) => {
+            const rev = revisionsByMedia.get(String(s.mediaId));
+            const bill = includeBillAmountFilter && rev && rev.bill.length ? rev.bill : null;
+            const advance = includeAdvanceAmountFilter && rev && rev.advance.length ? rev.advance : null;
+            if (!bill && !advance) return null;
+            if (bill) totals.bill.push(...bill);
+            if (advance) totals.advance.push(...advance);
+            return {
+              ...s,
+              ...(bill ? { billAmount: revisionBlock(bill) } : {}),
+              ...(advance ? { advanceAmount: revisionBlock(advance) } : {}),
+            };
+          })
+          .filter(Boolean);
+        if (entry.sites.length === 0) {
+          entries.splice(i, 1);
+          continue;
+        }
+        if (includeBillAmountFilter) entry.billAmount = revisionBlock(totals.bill);
+        if (includeAdvanceAmountFilter) entry.advanceAmount = revisionBlock(totals.advance);
+      }
+    }
+
     // ✅ ADDED — sort by latestActivityAt descending (most recently
     // touched — owner OR any of their sites — first). Previously
     // entries had no sort at all; order was purely insertion order.
@@ -3578,7 +3682,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
 
     const summaryDocs = await MediaOnboarding.find(
       summaryQuery,
-      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal",
+      "status gstApplicableFlag mediaDetails updatedAt rentalPayment landOwners ledger ledgerHistory gstBalanceHistory rentalDue rentalDueEntries appraisal arrearsDue", // ✅ CHANGED — arrearsDue: rent revision arrears / advance in newOverallLedgerSummary
     ).lean();
 
     for (const media of summaryDocs) {
@@ -3801,6 +3905,57 @@ const cityMatchQuery = city
         // Optional req.body.dueMonth ("MM-YYYY") changes ONLY this object's
         // month (that month = current, earlier months = past); everything
         // else in the response still follows monthFilter.
+        // ✅ NEW — rent revision BILL / ADVANCE amounts (same sites as the
+        // header totals; dueThisMonth → monthFilter month only; roleType → waiting on that role)
+        rentRevisionAmount: (() => {
+          const docs = billDateFilter.length
+            ? summaryDocs.filter((m) => billDateFilter.includes(siteBillDate(m)))
+            : summaryDocs;
+          const ownerKeysById = new Map(
+            docs.map((m) => [
+              String(m._id),
+              (m.landOwners || []).map((o) =>
+                o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(m._id)}_${String(o._id || o.name || "")}`,
+              ),
+            ]),
+          );
+          const bucket = (kind) => {
+            const sites = new Set();
+            const owners = new Set();
+            const months = new Map();
+            let count = 0;
+            let amount = 0;
+            let gstAmount = 0;
+            revisionsByMedia.forEach((rev, mediaId) => {
+              if (!ownerKeysById.has(mediaId) || rev[kind].length === 0) return;
+              sites.add(mediaId);
+              ownerKeysById.get(mediaId).forEach((k) => owners.add(k));
+              rev[kind].forEach((i) => {
+                count += 1;
+                amount += i.amount;
+                gstAmount += i.gstAmount;
+                months.set(i.month, parseRevisionMonth(i.month) || 0);
+              });
+            });
+            return {
+              count,
+              siteCount: sites.size,
+              landOwnerCount: owners.size,
+              amount,
+              gstAmount,
+              totalAmount: amount + gstAmount,
+              months: [...months.entries()].sort((a, b) => a[1] - b[1]).map(([m]) => m),
+            };
+          };
+          return {
+            monthScope: includeDueThisMonth ? "currentMonth" : "allMonths",
+            month: includeDueThisMonth ? `${REVISION_MONTHS[statsMonth - 1]} ${statsYear}` : null,
+            roleType: revisionTargetRole,
+            roleName: revisionTargetRole ? REVISION_ROLE_NAMES[revisionTargetRole] : null,
+            billAmount: bucket("bill"),
+            advanceAmount: bucket("advance"),
+          };
+        })(),
         newOverallLedgerSummary: calculateNewOverallLedgerSummary(
           summaryDocs,
           parseSiteFilterMonthParam(typeof req.body?.dueMonth === "string" ? req.body.dueMonth.trim() : "") ||

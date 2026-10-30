@@ -476,6 +476,7 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
         previousAmount: oldAmount,
         updatedBy: userName,
         updatedAt: nowIST(),
+        ...(effectiveFrom ? { effectiveFrom } : {}),
         isManualChange: true,
         isInitial: false,
         isAppraisal: false,

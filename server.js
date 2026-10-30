@@ -19,6 +19,7 @@ const reportAnalyticsRoutes = require("./routes/Admin/ReportAnalyticsRoutes/Repo
 const cmdNotificationRoutes = require("./routes/Admin/NotificationRoutes/CmdNotificationRoutes");
 const fcmRoutes = require("./routes/Admin/NotificationRoutes/FcmRoutes");
 const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
+const rentRevisionRoutes = require("./routes/Admin/MediaOnboardingRoutes/RentRevisionRoutes"); // ✅ NEW — rent revision + arrears
 const appUpdateRoutes = require("./routes/Admin/AppUpdateRoutes/AppUpdateRoutes");
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 // SKIP_STARTUP_MAINTENANCE=true skips the five database maintenance routines below
@@ -115,6 +116,7 @@ app.use("/admin", reportAnalyticsRoutes);
 app.use("/admin", cmdNotificationRoutes);
 app.use("/admin", fcmRoutes);
 app.use("/admin", billingDateRevertRoutes);
+app.use("/admin", rentRevisionRoutes); // ✅ NEW
 app.use("/admin", appUpdateRoutes);
 // Auto-publish a new release/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
 if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
