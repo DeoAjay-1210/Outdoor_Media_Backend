@@ -1,4 +1,5 @@
 const jwt = require("jsonwebtoken");
+const { blockReadOnlyPhone } = require("./readOnlyPhones");
 
 const protect = (req, res, next) => {
   let token;
@@ -18,15 +19,21 @@ const protect = (req, res, next) => {
        req.user = {
         userId: decoded.id,
         userType: decoded.userType,
-        userName: decoded.userName // Get name directly from token
+        userName: decoded.userName, // Get name directly from token
+        userPhone: decoded.userPhone || "", // ✅ NEW
       };
-      next();
     } catch (error) {
       return res.status(401).json({
         success: false,
         message: "Invalid token"
       });
     }
+    // ✅ NEW — view-only phones (READ_ONLY_PHONES) cannot save on live
+    return blockReadOnlyPhone(req, res)
+      .then((blocked) => {
+        if (!blocked) next();
+      })
+      .catch(() => next());
   }
 
   if (!token) {
