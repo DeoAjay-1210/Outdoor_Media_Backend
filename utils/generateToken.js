@@ -8,7 +8,8 @@ const generateToken = (user) => {
     { 
       id: user.id || user._id,
       userType: user.userType,
-      userName: user.userName
+      userName: user.userName,
+      userPhone: user.userPhone // ✅ NEW — read-only phone check (authMiddleware)
     },
     process.env.JWT_SECRET,
     {
