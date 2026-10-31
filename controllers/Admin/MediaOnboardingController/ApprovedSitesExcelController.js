@@ -13,6 +13,13 @@ const STEP_STATUS_LABEL = { 1: "Pending", 2: "Approved", 3: "Skipped" };
 // rentalDue.approvalStatus: 1=Pending 2=PartiallyApproved 3=Approved 4=Overdue
 const APPROVAL_STATUS_LABEL = { 1: "Pending", 2: "Partially Approved", 3: "Approved", 4: "Overdue" };
 const PAYMENT_CATEGORY_LABEL = { 1: "Cash", 2: "Online", 3: "Cash + Online" };
+// ✅ NEW — rentalDue.campaignStatus: 0 Not Live, 1 Live; null / key missing → "-"
+const CAMPAIGN_STATUS_LABEL = { 0: "Not Live", 1: "Live" };
+const campaignStatusText = (due) => {
+  const v = due?.campaignStatus;
+  if (v === undefined || v === null || v === "") return "-";
+  return CAMPAIGN_STATUS_LABEL[Number(v)] || "-";
+};
 const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /**
@@ -127,7 +134,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
         (mediaDetails.length > 0 && Number(mediaDetails[0].siteBillMode) === 1);
       const activeFaceIds = mediaDetails.filter((d) => Number(d.status) === 1).map((d) => String(d._id));
 
-      const pushRecord = ({ dueMonth, dueDate, approvedAts, faces, rentalAmount, gstAmount, stepTexts, overallStatus }) => {
+      const pushRecord = ({ dueMonth, dueDate, approvedAts, faces, rentalAmount, gstAmount, campaignStatus, stepTexts, overallStatus }) => {
         const sizes = faces.map((d) => `${d.width || 0} × ${d.height || 0} (${d.totalSqFt || 0} Sq Ft)`);
         records.push({
           dueDate: dueDate ? new Date(dueDate) : null,
@@ -153,6 +160,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
             rentalAmount,
             gstAmount,
             rentalAmount + gstAmount,
+            campaignStatus || "-", // ✅ NEW — Campaign Status after Total Amount
             ...stepTexts,
             overallStatus,
           ],
@@ -188,6 +196,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
           rentalAmount,
           gstAmount,
           approvedAt: roleStep.approvedAt,
+          campaignStatus: campaignStatusText(due), // ✅ NEW
           stepTexts: [1, 2, 3].map((r) => stepText(steps.find((s) => Number(s.role) === r))),
           overallStatus: APPROVAL_STATUS_LABEL[Number(due.approvalStatus)] || "-",
         };
@@ -206,6 +215,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
           faces,
           rentalAmount,
           gstAmount,
+          campaignStatus: item.campaignStatus, // ✅ NEW
           stepTexts: item.stepTexts,
           overallStatus: item.overallStatus,
         });
@@ -248,6 +258,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
           faces: faces.length ? faces : mediaDetails,
           rentalAmount,
           gstAmount,
+          campaignStatus: joinUnique(items.map((it) => it.campaignStatus)), // ✅ NEW
           stepTexts: [0, 1, 2].map((i) => joinUnique(items.map((it) => it.stepTexts[i]))),
           overallStatus: joinUnique(items.map((it) => it.overallStatus)),
         });
@@ -275,12 +286,13 @@ const downloadApprovedSitesExcel = async (req, res) => {
       "Month", "Approval Date", "Media Code", "Media Name", "Media Type", "State", "City", "District / Town",
       "Location", "Size", "Landowner Name", "Landowner Phone", "Payment Category",
       "Bank / IFSC / Account", "PAN", "GST Applicable", "TDS Applicable",
-      "Total Rental Amount (₹)", "GST Amount (₹)", "Total Amount (₹)",
+      "Total Rental Amount (₹)", "GST Amount (₹)", "Total Amount (₹)", "Campaign Status",
       "Rental Executive", "Rental Manager", "CMD", "Overall Approval Status",
     ];
     const LAST_COL = colHeaders.length - 1;
     const COL_RENTAL = 17, COL_GST = 18, COL_TOTAL = 19;
-    const CENTER_COLS = new Set([0, 1, 15, 16, COL_RENTAL, COL_GST, COL_TOTAL, 23]);
+    const COL_CAMPAIGN = 20; // ✅ NEW — approval columns now 21–23, overall status 24
+    const CENTER_COLS = new Set([0, 1, 15, 16, COL_RENTAL, COL_GST, COL_TOTAL, COL_CAMPAIGN, 24]);
     const blankRow = (first) => [first, ...Array(LAST_COL).fill("")];
     const headerRowIdx = 2;
     const FREEZE_ROWS = 3;
@@ -372,8 +384,13 @@ const downloadApprovedSitesExcel = async (req, res) => {
           };
           if (isAmount) ws[addr].z = numFormat;
           // Approval columns: approved in green
-          if (c >= 20 && c <= 22 && String(aoa[r][c]).startsWith("Approved")) {
+          if (c >= 21 && c <= 23 && String(aoa[r][c]).startsWith("Approved")) {
             ws[addr].s.font = { bold: true, color: { rgb: "38761D" } };
+          }
+          // ✅ NEW — Campaign Status: Live green, Not Live red
+          if (c === COL_CAMPAIGN && aoa[r][c] !== "-") {
+            const live = String(aoa[r][c]).includes("Live") && !String(aoa[r][c]).includes("Not Live");
+            ws[addr].s.font = { bold: true, color: { rgb: live ? "38761D" : "C00000" } };
           }
         }
       }
@@ -409,6 +426,7 @@ const downloadApprovedSitesExcel = async (req, res) => {
       { wch: 22 }, // Total Rental Amount
       { wch: 18 }, // GST Amount
       { wch: 18 }, // Total Amount
+      { wch: 18 }, // Campaign Status
       { wch: 30 }, // Rental Executive
       { wch: 30 }, // Rental Manager
       { wch: 30 }, // CMD
