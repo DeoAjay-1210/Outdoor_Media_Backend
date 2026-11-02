@@ -16,7 +16,7 @@ const { upload, processFile } = createUploader("mediaImages", {
   bankPassbook: "mediaImages",
   cancelCheckLeaf: "mediaImages",
   aadharCardImage: "mediaImages",
-});
+}, { maxFileSizeMB: 10 }); // ✅ NEW — mobile photos are often 4–8 MB (same as media onboarding)
 
 // Only TWO routes
 router.post(
