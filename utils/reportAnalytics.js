@@ -2417,7 +2417,6 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
 // ── Campaign Live Status by month ─────────────────────────────────────────
 
 const CAMPAIGN_STATUSES = ["live", "notLive"]; // Not Updated (null / missing) bills are not part of this analysis
-const CAMPAIGN_RANK = { live: 0, notLive: 1, notUpdated: 2 };
 /** rentalDue[].campaignStatus: 1 = live, 0 = not live, null / missing / anything else = not updated. */
 const campaignStatusOf = (v) => {
   if (v === null || v === undefined || v === "") return "notUpdated";
@@ -2429,17 +2428,20 @@ const campaignStatusOf = (v) => {
  * Source: rentalDue[] (the stored bill of each site / face / month; campaignStatus is saved per bill). Same bill rules as
  * computeBills — period by dueDate, stale rows (isStaleBill) out, media type per bill, city per site — so it reconciles with
  * the bills chart. Amount = the bill's baseAmount (that month's rent + GST), never an outstanding / carry-forward balance.
- * De-duplication: a face's bill is counted once per bucket (the latest-updated duplicate wins). A site is counted ONCE per
- * bucket, in ONE status — the worst of its bills (Not Live > Live); bills with no status are excluded — and all of its bills' amounts follow it, so
- * the two statuses never overlap and sites / amounts add up to the bucket total. Summary sites = distinct sites per status.
+ * Only CMD-approved bills count (isCmdApproved), every month of the period. De-duplication: a face's bill is counted once per bucket
+ * (the latest-updated duplicate wins). Bills with no status ("-") are left out.
+ * Separate bills: each face's own amount goes to its own status.
+ * Single bill (combined site): the site's real bill of the month (site rent + GST, like the Approvals Excel — the per-face rows are floored and
+ * add up to a little less) is shared equally by the faces that are Live / Not Live (GST too); only one status among them → the whole bill goes to it.
+ * lib = { getRentForDueDate, resolveExpectedGstForCycle, mediaAsOfDate } (optional; without it the per-face rows are summed).
  */
-const computeCampaign = (docs, f) => {
+const computeCampaign = (docs, f, lib = {}) => {
   const mk = () => ({ sites: new Set(), records: 0, amount: 0, gst: 0 });
   const mkAll = () => ({ ...Object.fromEntries(CAMPAIGN_STATUSES.map((k) => [k, mk()])), all: mk() });
   const buckets = buildBuckets(f, mkAll);
   const sum = mkAll();
   const excl = newExclusions();
-  const meta = { billsWithoutDueDate: 0, duplicateBillsIgnored: 0, notUpdatedBillsExcluded: 0 };
+  const meta = { billsWithoutDueDate: 0, duplicateBillsIgnored: 0, notUpdatedBillsExcluded: 0, notApprovedBillsExcluded: 0 };
   const stale = { bills: 0, sites: new Set() };
   const rows = f.details ? [] : null;
   for (const doc of docs) {
@@ -2455,6 +2457,8 @@ const computeCampaign = (docs, f) => {
       if (!inRange(d, f)) continue;
       const total = num(bill.baseAmount);
       if (isStaleBill(doc, bill)) { stale.bills += 1; stale.sites.add(sid); continue; }
+      // only CMD-approved bills (what the Approvals Excel lists); a duplicate that is not approved must not hide an approved one
+      if (!isCmdApproved(bill)) { meta.notApprovedBillsExcluded += 1; continue; }
       const type = billMediaType(doc, bill);
       if (f.mediaType) {
         if (type === MIXED) { excl.sites.add(sid); excl.amount += total; continue; }
@@ -2474,26 +2478,61 @@ const computeCampaign = (docs, f) => {
     }
     const perBucket = new Map();
     for (const e of kept.values()) (perBucket.get(e.bk) || perBucket.set(e.bk, []).get(e.bk)).push(e);
+    const activeIds = faceList(doc).filter((fc) => num(fc.status) === 1).map((fc) => idOf(fc._id));
+    // single bill (combined): one site bill that is stored once per face; separate bill: every face has its own bill
+    const combined = activeIds.length > 1 && num(doc.siteBillMode) !== 2 && !faceList(doc).some((fc) => num(fc.siteBillMode) === 2);
     for (const [bk, all] of perBucket) {
-      // only bills whose campaign status was set (1 / 0): a bill with no status is left out, not counted as Not Live
+      // only bills whose campaign status was set (1 / 0): a bill with no status ("-") is left out
       const list = all.filter((e) => campaignStatusOf(e.bill.campaignStatus) !== "notUpdated");
       meta.notUpdatedBillsExcluded += all.length - list.length;
       if (!list.length) continue;
-      const status = list.map((e) => campaignStatusOf(e.bill.campaignStatus)).reduce((a, z) => (CAMPAIGN_RANK[z] > CAMPAIGN_RANK[a] ? z : a));
-      const total = list.reduce((a, e) => a + num(e.bill.baseAmount), 0);
-      const gst = list.reduce((a, e) => a + num(e.bill.gstAmount), 0);
-      for (const t of [buckets.get(bk)[status], buckets.get(bk).all, sum[status], sum.all]) {
-        t.sites.add(sid); t.records += 1; t.amount += total; t.gst += gst;
+      const live = list.filter((e) => campaignStatusOf(e.bill.campaignStatus) === "live");
+      const notLive = list.filter((e) => campaignStatusOf(e.bill.campaignStatus) === "notLive");
+      const parts = []; // { status, bills, total, gst } — the amount that goes to each status
+      if (combined) {
+        // ONE site bill: its real amount for the month (the per-face rows were floored, so they add up to a little less),
+        // shared by the faces that have a status. Only one status among them → the whole bill goes to it.
+        const ids = new Set(all.map((e) => idOf(e.bill.mediaDetailId)));
+        const coversAll = all.some((e) => !e.bill.mediaDetailId) || activeIds.every((id) => ids.has(id));
+        const billGst = all.reduce((a, e) => a + num(e.bill.gstAmount), 0);
+        let rent = all.reduce((a, e) => a + num(e.bill.baseAmount), 0) - billGst;
+        let gst = Math.round(billGst);
+        if (coversAll && lib.getRentForDueDate) {
+          const dueDate = all[0].bill.dueDate;
+          const siteRent = Math.round(num(lib.getRentForDueDate(doc, dueDate)));
+          if (siteRent > 0) rent = siteRent;
+          if (billGst > 0 && lib.resolveExpectedGstForCycle) {
+            const expected = Math.round(num(lib.resolveExpectedGstForCycle(lib.mediaAsOfDate ? lib.mediaAsOfDate(doc, dueDate) : doc)));
+            if (expected > 0) gst = expected;
+          }
+        }
+        rent = Math.round(rent);
+        const total = rent + gst;
+        const n = live.length + notLive.length;
+        const liveTotal = !notLive.length ? total : !live.length ? 0 : Math.round((total * live.length) / n);
+        const liveGst = !notLive.length ? gst : !live.length ? 0 : Math.round((gst * live.length) / n);
+        if (live.length) parts.push({ status: "live", bills: live, total: liveTotal, gst: liveGst });
+        if (notLive.length) parts.push({ status: "notLive", bills: notLive, total: total - liveTotal, gst: gst - liveGst });
+      } else {
+        for (const [status, bills] of [["live", live], ["notLive", notLive]]) {
+          if (!bills.length) continue;
+          parts.push({ status, bills, total: bills.reduce((a, e) => a + num(e.bill.baseAmount), 0), gst: bills.reduce((a, e) => a + num(e.bill.gstAmount), 0) });
+        }
       }
-      if (rows) {
-        const first = list.map((e) => e.d).sort((a, z) => a - z)[0];
-        rows.push({
-          ...detailBase(doc), bucket: bk, date: dayKeyOf(first), status,
-          billMonth: uniq(list.map((e) => text(e.bill.dueMonth))).join(", "),
-          campaignName: uniq(list.map((e) => text(e.bill.campaignName))).join(", "),
-          mediaType: uniq(list.map((e) => typeLabel({ mediaType: e.type }))).join(", "),
-          bills: list.length, total: r2(total), gst: r2(gst), rent: r2(Math.max(total - gst, 0)),
-        });
+      for (const p of parts) {
+        for (const t of [buckets.get(bk)[p.status], buckets.get(bk).all, sum[p.status], sum.all]) {
+          t.sites.add(sid); t.records += 1; t.amount += p.total; t.gst += p.gst;
+        }
+        if (rows) {
+          const first = p.bills.map((e) => e.d).sort((a, z) => a - z)[0];
+          rows.push({
+            ...detailBase(doc), bucket: bk, date: dayKeyOf(first), status: p.status,
+            billMonth: uniq(p.bills.map((e) => text(e.bill.dueMonth))).join(", "),
+            campaignName: uniq(p.bills.map((e) => text(e.bill.campaignName))).join(", "),
+            mediaType: uniq(p.bills.map((e) => typeLabel({ mediaType: e.type }))).join(", "),
+            bills: p.bills.length, total: r2(p.total), gst: r2(p.gst), rent: r2(Math.max(p.total - p.gst, 0)),
+          });
+        }
       }
     }
   }

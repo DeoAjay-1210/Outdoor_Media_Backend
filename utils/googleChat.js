@@ -402,7 +402,40 @@ function notifyOverdueRemarkChat({ media, mediaDetailId, landOwnerId, dueMonth, 
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — APPROVAL REMINDER (POST /admin/cmd-notifications/reminder), sent
+// right when the reminder is given. Same bill details as "Rental Due
+// Approved", to the space of the role the bill is waiting on:
+//   waiting on Rental Manager → Rental Manager space
+//   waiting on CMD            → CMD space
+// ─────────────────────────────────────────────────────────────
+const REMINDER_ROUTES = { 2: "RENTAL_MANAGER_URL", 3: "CMD_URL" };
+
+function notifyApprovalReminderChat({ media, entry, userType, userName, remarks = "", reminderCount = null }) {
+  if (!isGoogleChatEnabled() || !media || !entry) return;
+  const pendingRole = Number(entry.currentPendingRole);
+  const url = process.env[REMINDER_ROUTES[pendingRole]];
+  if (!url) return;
+
+  let text;
+  try {
+    const lines = buildMessage({ media, entry, userType, userName, action: "reminder" }).split("\n");
+    const by = `${ROLE_LABEL[Number(userType)] || "User"}${userName ? ` (${userName})` : ""}`;
+    lines[0] = `*Approval Reminder* — by ${by}`;
+    lines.splice(1, 0, `*Awaiting your approval* (${ROLE_LABEL[pendingRole]})`);
+    if (remarks) lines.push(`*Remarks:* ${remarks}`);
+    text = lines.join("\n");
+  } catch (err) {
+    console.error("[GoogleChat] approval reminder message build failed:", err.message);
+    return;
+  }
+  axios
+    .post(url, { text }, { timeout: 10000, headers: { "Content-Type": "application/json; charset=UTF-8" } })
+    .catch((err) => console.error("[GoogleChat] send failed:", err.response?.status || err.message));
+}
+
 module.exports = {
+  notifyApprovalReminderChat, // ✅ NEW
   notifyOverdueRemarkChat,
   buildOverdueRemarkMessage,
   notifyRentalDueChat,

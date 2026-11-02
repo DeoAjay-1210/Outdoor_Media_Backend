@@ -8,7 +8,7 @@ const MediaOnboarding = require("../../../models/Admin/MediaOnboardingSchema/Med
 const { successResponse, errorResponse } = require("../../../utils/response");
 const RA = require("../../../utils/reportAnalytics");
 const Ledger = require("../MediaOnboardingController/LedgerNew2Controller");
-const { mediaAsOfDate, landOwnersAsOfDate } = require("../../../utils/appraisalRent");
+const { mediaAsOfDate, landOwnersAsOfDate, getRentForDueDate } = require("../../../utils/appraisalRent");
 const { pendingRoleOf } = require("../DashboardController/DashboardExtras");
 
 // The ledger's own (pure, read-only) helpers — the Rental Master cycle calculation.
@@ -17,6 +17,7 @@ const LEDGER_LIB = {
   getOverallSummaryForCycle: Ledger.getOverallSummaryForCycle,
   resolveExpectedGstForCycle: Ledger.resolveExpectedGstForCycle,
   mediaAsOfDate,
+  getRentForDueDate,
   pendingRoleOf, // the dashboard's approval-stage helper (which role a pending bill waits on)
 };
 
@@ -91,7 +92,8 @@ SELECT.appraisal.rentalMaster = [
 SELECT.tdsStatus = { both: `${FACE} rentalDue._id rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.name landOwners.tdsApplicable landOwners.tdsAmount landOwners.tdsHold landOwners.paymentCategory rentalPayment.totalRentalAmount appraisal.history tdsBalanceHistory ledger ledgerHistory ${CYCLE}` };
 
 // Campaign Live Status: the stored bills (campaignStatus is per bill) + the site's face / landlord / city labels for the popup rows
-SELECT.campaign = { both: `${FACE} mediaDetails._id rentalDue._id rentalDue.mediaDetailId rentalDue.dueDate rentalDue.dueMonth rentalDue.baseAmount rentalDue.gstAmount rentalDue.campaignStatus rentalDue.campaignName rentalDue.updatedAt ${CYCLE} ${DETAIL_IDS}` };
+// + the approval fields (only CMD-approved bills count) and the site's rent / GST / bill-mode fields (a single-bill site's real monthly amount is shared by its Live / Not Live faces)
+SELECT.campaign = { both: `${FACE} siteBillMode mediaDetails._id mediaDetails.siteBillMode gstApplicableFlag appraisal.history rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable landOwners.gstApplicable landOwners.gstAmount landOwners.paymentCategory landOwners.shareAmount landOwners.onlineAmount rentalDue._id rentalDue.mediaDetailId rentalDue.dueDate rentalDue.dueMonth rentalDue.baseAmount rentalDue.gstAmount rentalDue.withGst rentalDue.approvalStatus rentalDue.approvalFlow rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.campaignStatus rentalDue.campaignName rentalDue.updatedAt ${CYCLE} ${DETAIL_IDS}` };
 
 const UNSUPPORTED = {
   appraisal: { ledger: "Ledger records hold payments only; appraisals are Rental Master records (appraisal history)." },
@@ -108,7 +110,7 @@ const COMPUTE = {
   appraisal: { rentalMaster: (d, f) => RA.computeAppraisal(d, f, undefined, { payments: RA.cyclePaymentIndex(d, f, LEDGER_LIB), lib: LEDGER_LIB }) },
   bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
-  campaign: { both: (d, f) => RA.computeCampaign(d, f) },
+  campaign: { both: (d, f) => RA.computeCampaign(d, f, LEDGER_LIB) },
   tdsStatus: { both: (d, f) => RA.computeTdsOverview(d, f, { landOwnersAsOfDate }) },
   tds: {
     ledger: (d, f) => RA.computeTds(d, f, { landOwnersAsOfDate }),
