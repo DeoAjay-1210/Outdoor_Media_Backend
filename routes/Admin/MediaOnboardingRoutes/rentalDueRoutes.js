@@ -45,7 +45,7 @@ const protect = require("../../../middleware/authMiddleware");
 const { upload, processFile } = createUploader("rentalDueProofs", {
   proofOfCampaign: "rentalDueProofs",
   invoice: "invoice",
-});
+}, { maxFileSizeMB: 10 }); // ✅ NEW — mobile photos are often 4–8 MB (same as media onboarding)
 const overdueRemarksUploader = createUploader("overdueRemarks");
 
 
