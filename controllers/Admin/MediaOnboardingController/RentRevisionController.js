@@ -941,6 +941,28 @@ async function sendNewBillCmdMail(media, revision, { rows = [], advanceBill = nu
       width: Number(detail.width || 0),
       height: Number(detail.height || 0),
       totalSqft: Number(detail.totalSqFt || Number(detail.width || 0) * Number(detail.height || 0)),
+      // ✅ NEW — every face / site of the media (inactive ones too)
+      siteCount: (media.mediaDetails || []).length,
+      sites: (media.mediaDetails || []).map((d) => {
+        const width = Number(d.width || 0);
+        const height = Number(d.height || 0);
+        const totalSqft = Number(d.totalSqFt || width * height);
+        return {
+          mediaCode: d.mediaCode || "",
+          mediaName: d.mediaName || "",
+          mediaType: d.mediaType || "",
+          state: d.state || "",
+          city: d.city || "",
+          district: d.district || "",
+          location: d.location || "",
+          fullAddress: [d.location, d.district, d.city, d.state].filter(Boolean).join(", "),
+          width,
+          height,
+          totalSqft,
+          size: width && height ? `${width} x ${height} ft (${totalSqft} sq.ft)` : "",
+          status: Number(d.status || 0),
+        };
+      }),
     },
     paymentFrequency: PAYMENT_FREQUENCY_LABELS[Number(rp.paymentFrequency || 1)] || "",
     gstPercentage: gstPercentageFor(media, isAdvance ? revision.adjustInDate || revision.fromDate : revision.fromDate),

@@ -328,7 +328,8 @@ function gstPercentageFor(media, dueDate) {
 }
 
 // next bill after the given month (not generated yet) → 1st of that month (UTC) or null
-function nextBillDateAfter(media, afterDate) {
+// ✅ NEW — sameMonth true: a bill IN the given month counts too (on or after)
+function nextBillDateAfter(media, afterDate, sameMonth = false) {
   const m = toPlain(media) || {};
   const rp = m.rentalPayment || {};
   const cycle = cycleMonthsOf(rp);
@@ -342,7 +343,7 @@ function nextBillDateAfter(media, afterDate) {
   else if (rp.billingStartDate) key = monthKey(rp.billingStartDate) + cycle;
   if (key === null || afterKey === null) return null;
   let guard = 0;
-  while (key <= afterKey && guard < 500) {
+  while ((sameMonth ? key < afterKey : key <= afterKey) && guard < 500) {
     key += cycle;
     guard += 1;
   }
@@ -440,7 +441,9 @@ function pickAdvanceBill(m, advanceDate, adjustInDate) {
   }
   const windowError = advanceWindowError();
   if (windowError) return windowError;
-  const next = nextBillDateAfter(m, advanceDate);
+  // ✅ CHANGED — advance month is itself a bill month (monthly: December
+  // advance → December bill) → deducted from that bill, not the next one
+  const next = nextBillDateAfter(m, advanceDate, true);
   if (!next) return { error: "Next bill month not found for this site" };
   return { adjustInDate: next, monthBills: [] };
 }
