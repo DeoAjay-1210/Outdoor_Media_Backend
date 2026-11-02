@@ -1087,6 +1087,21 @@ async function remindCmdForSite(rawMediaId, { dueMonth, remarksText, role, userN
       console.error("[CmdNotification] Reminder FCM push error:", fcmErr?.message || fcmErr);
     });
 
+    // ✅ NEW — Google Chat reminder right away (same bill details as the approval message)
+    try {
+      const { notifyApprovalReminderChat } = require("../../../utils/googleChat");
+      notifyApprovalReminderChat({
+        media,
+        entry: dues[dues.length - 1],
+        userType: role,
+        userName,
+        remarks: remarksText,
+        reminderCount: doc.reminderCount,
+      });
+    } catch (chatErr) {
+      console.error("[CmdNotification] Reminder Google Chat error:", chatErr?.message || chatErr);
+    }
+
     reminders.push({
       notificationId: doc._id,
       notificationType: doc.notificationType,
