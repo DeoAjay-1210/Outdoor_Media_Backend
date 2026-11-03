@@ -53,6 +53,8 @@ const RentRevisionSchema = new mongoose.Schema(
     nextBillFromMonth: { type: String, trim: true, default: "" },
     // ✅ NEW — site has GST: 1 → GST on increaseAmount / advanceAmount, 0 → no GST
     gstOnIncrease: { type: Number, enum: [0, 1, null], default: null },
+    // ✅ NEW — GST of the New Bill / advance: 0 → as per the bill, 1 → GST hold, 2 → direct (no hold)
+    withGst: { type: Number, enum: [0, 1, 2], default: 0 },
     gstPercentage: { type: Number, default: 0 },
     increaseGstAmount: { type: Number, default: 0 },
     // ✅ NEW — ADVANCE

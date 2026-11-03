@@ -25,6 +25,9 @@ const LEDGER_LIB = {
 // Deliberately stricter than the dashboard's helper, which also admits role 5.
 const ALLOWED_ROLES = [1, 2, 3, 4];
 const allowedRole = (req) => ALLOWED_ROLES.includes(Number(req.user?.userType));
+// ✅ NEW — /report-analytics/overview only: every role (1-5)
+const OVERVIEW_ROLES = [1, 2, 3, 4, 5];
+const overviewAllowedRole = (req) => OVERVIEW_ROLES.includes(Number(req.user?.userType));
 
 // face fields every chart reads: names / type / city for filters and labels, status for the site-status filter
 const FACE = "siteCode mediaDetails.mediaName mediaDetails.mediaCode mediaDetails.mediaType mediaDetails.city mediaDetails.status";
@@ -195,7 +198,7 @@ const OVERVIEW_CONCURRENCY = 3; // each section reads the collection once: bound
  */
 const getOverview = async (req, res) => {
   try {
-    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    if (!overviewAllowedRole(req)) return errorResponse(res, "Forbidden", null, 403); // ✅ CHANGED — roles 1-5
     const parsed = RA.parseFilters({ ...(req.query || {}), ...(req.body || {}) });
     if (parsed.error) return errorResponse(res, parsed.error, null, 400);
     const f = parsed.filters;

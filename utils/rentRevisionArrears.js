@@ -789,7 +789,8 @@ function insertAfterMonth(list, rows, dueMonth) {
 const arrearsBillsWithGst = (arrearsBills, parentWithGstById = new Map()) =>
   (arrearsBills || [])
     .filter((b) => b && b.type === "arrears")
-    .map((b) => ({ ...b, withGst: effectiveWithGst(b, parentWithGstById.get(String(b.parentRentalDueId))) }));
+    // ✅ CHANGED — no GST on the New Bill → withGst 0 (shown only)
+    .map((b) => ({ ...b, withGst: Number(b.gstAmount || 0) > 0 ? effectiveWithGst(b, parentWithGstById.get(String(b.parentRentalDueId))) : 0 }));
 
 const revisionBlock = (r) =>
   r

@@ -5739,7 +5739,8 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
     const revisionBills = (media.arrearsDue || []).filter((b) => b && (b.type === "advance" || b.type === "arrears"));
     revisionBills.forEach((b) => {
       const isAdvance = b.type === "advance";
-      const withGst = isAdvance ? Number(b.withGst || 0) : effectiveWithGst(b, parentWithGstById.get(String(b.parentRentalDueId)));
+      // ✅ CHANGED — New Bill with no GST → withGst 0 (shown only)
+      const withGst = isAdvance ? Number(b.withGst || 0) : Number(b.gstAmount || 0) > 0 ? effectiveWithGst(b, parentWithGstById.get(String(b.parentRentalDueId))) : 0;
       const lastPay = (b.payments || []).filter((p) => p.type === "rental").slice(-1)[0];
       const rentPending = Math.max(0, Math.round(Number(b.netPayable || 0) - Number(b.rentPaid || 0)));
       const paid = rentPending === 0;
