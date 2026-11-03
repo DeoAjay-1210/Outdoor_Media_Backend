@@ -97,6 +97,23 @@ function splitByWeights(total, weights) {
   });
 }
 
+// ✅ NEW — splits `total` like the face bills' amounts (parts ≤ 0 get 0);
+// the LAST bill with an amount takes the remainder, so the parts add up to total
+function splitToBills(total, billParts) {
+  const weights = billParts.map((p) => (p > 0 ? p : 0));
+  const sum = weights.reduce((s, w) => s + w, 0);
+  const lastIdx = weights.reduce((last, w, i) => (w > 0 ? i : last), -1);
+  if (sum <= 0 || lastIdx < 0) return billParts.map(() => 0);
+  let used = 0;
+  return weights.map((w, i) => {
+    if (w <= 0) return 0;
+    if (i === lastIdx) return total - used;
+    const part = round((total * w) / sum);
+    used += part;
+    return part;
+  });
+}
+
 /**
  * What a revision does to the site (no DB write).
  * media: lean / plain media doc. Returns
@@ -109,6 +126,15 @@ function splitByWeights(total, weights) {
 // each listed month is priced at its own rent + its amount; months between the
 // listed ones are not changed; applyToAllMonths 1 → months after the LAST
 // listed month at newRent.
+// ✅ NEW — false for a bill whose face (mediaDetailId) was deleted from the site,
+// so its leftover bill gets no New Bill / GST split (bills with no face are kept)
+function isLiveFaceBill(m, b) {
+  if (!b || !b.mediaDetailId) return true;
+  const faces = Array.isArray(m.mediaDetails) ? m.mediaDetails : [];
+  if (!faces.length) return true;
+  return faces.some((d) => d && String(d._id) === String(b.mediaDetailId));
+}
+
 function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts = {}) {
   // applyToAllMonths 0 → only fromMonth changes (site rent and later months stay)
   const onlyFromMonth = Number(applyToAllMonths) === 0 && applyToAllMonths !== null;
@@ -139,7 +165,7 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
   };
 
   const bills = (m.rentalDue || [])
-    .filter((b) => b && b.dueDate && inPlan(monthKey(b.dueDate)))
+    .filter((b) => b && b.dueDate && inPlan(monthKey(b.dueDate)) && isLiveFaceBill(m, b))
     .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
 
   const heldBill = bills.find((b) => Number(b?.appraisalHold?.hold) === 1);
@@ -177,20 +203,29 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
         diff,
         monthBills.map((b) => Number(b.baseAmount || b.netPayable || 0)),
       );
+      // ✅ FIXED — the month total is rounded ONCE and split over the face bills
+      // (last bill takes the remainder), so the bills always add up to it
+      // (e.g. GST 900, not 898 from rounding every face separately)
+      const billGstParts = splitToBills(round(gstForMonth * ratio), billParts);
+      const ownerParts = owners.map((o) => ({
+        share: splitToBills(round(Number(o.shareAmount || 0) * ratio), billParts),
+        cash: splitToBills(round(Number(o.cashAmount || 0) * ratio), billParts),
+        online: splitToBills(round(Number(o.onlineAmount || 0) * ratio), billParts),
+        gst: splitToBills(noGst ? 0 : round(Number(o.gstAmount || 0) * (monthGstRent > 0 ? diff / monthGstRent : ratio)), billParts),
+      }));
 
       monthBills.forEach((bill, i) => {
         const amount = billParts[i];
         if (amount <= 0) return;
-        const billFraction = amount / diff;
-        const ownerRows = owners.map((o) => ({
+        const ownerRows = owners.map((o, oi) => ({
           landOwnerId: o._id,
           landOwnerMasterId: o.landOwnerMasterId || null,
           landOwnerName: o.name || "",
           paymentCategory: Number(o.paymentCategory || 1),
-          shareAmount: round(Number(o.shareAmount || 0) * ratio * billFraction),
-          cashAmount: round(Number(o.cashAmount || 0) * ratio * billFraction),
-          onlineAmount: round(Number(o.onlineAmount || 0) * ratio * billFraction),
-          gstAmount: noGst ? 0 : round(Number(o.gstAmount || 0) * (monthGstRent > 0 ? diff / monthGstRent : ratio) * billFraction),
+          shareAmount: ownerParts[oi].share[i],
+          cashAmount: ownerParts[oi].cash[i],
+          onlineAmount: ownerParts[oi].online[i],
+          gstAmount: ownerParts[oi].gst[i],
           tdsAmount: 0, // ✅ CHANGED — no TDS on arrears
           paidCash: false,
           paidOnline: false,
@@ -204,7 +239,7 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
           oldMonthRent: monthRent,
           newRent: target,
           arrearsAmount: amount,
-          gstAmount: round(gstForMonth * ratio * billFraction),
+          gstAmount: billGstParts[i],
           tdsAmount: ownerRows.reduce((s, o) => s + o.tdsAmount, 0),
           cashAmount: ownerRows.reduce((s, o) => s + o.cashAmount, 0),
           onlineAmount: ownerRows.reduce((s, o) => s + o.onlineAmount, 0),
@@ -379,7 +414,7 @@ function pickAdvanceBill(m, advanceDate, adjustInDate) {
   const advanceKey = monthKey(advanceDate);
   const byKey = new Map();
   (m.rentalDue || []).forEach((b) => {
-    if (!b || !b.dueDate) return;
+    if (!b || !b.dueDate || !isLiveFaceBill(m, b)) return;
     const k = monthKey(b.dueDate);
     if (!byKey.has(k)) byKey.set(k, []);
     byKey.get(k).push(b);
@@ -487,7 +522,13 @@ function buildAdvancePlan(media, advanceDate, advanceAmount, gstOnIncrease, adju
   const withGstOnAdvance = siteHasGst && Number(gstOnIncrease) === 1;
   const ratio = advanceAmount / billRent;
   const gstRatio = gstRent > 0 ? advanceAmount / gstRent : 0;
-  const owners = (monthMedia.landOwners || []).map((o) => ({
+  const advanceGstAmount = withGstOnAdvance ? round(gstForMonth * gstRatio) : 0;
+  // ✅ FIXED — owners' GST = the advance GST split by their GST (adds up to it)
+  const ownerGstParts = splitToBills(
+    advanceGstAmount,
+    (monthMedia.landOwners || []).map((o) => Number(o.gstAmount || 0)),
+  );
+  const owners = (monthMedia.landOwners || []).map((o, oi) => ({
     landOwnerId: o._id,
     landOwnerMasterId: o.landOwnerMasterId || null,
     landOwnerName: o.name || "",
@@ -495,12 +536,11 @@ function buildAdvancePlan(media, advanceDate, advanceAmount, gstOnIncrease, adju
     shareAmount: round(Number(o.shareAmount || 0) * ratio),
     cashAmount: round(Number(o.cashAmount || 0) * ratio),
     onlineAmount: round(Number(o.onlineAmount || 0) * ratio),
-    gstAmount: withGstOnAdvance ? round(Number(o.gstAmount || 0) * gstRatio) : 0,
+    gstAmount: withGstOnAdvance ? ownerGstParts[oi] : 0,
     tdsAmount: 0, // ✅ CHANGED — no TDS on an advance
     paidCash: false,
     paidOnline: false,
   }));
-  const advanceGstAmount = withGstOnAdvance ? round(gstForMonth * gstRatio) : 0;
   const fullGst = gstRent > 0 ? round((gstForMonth * billRent) / gstRent) : 0;
   // withGst of the advance bill: the adjusted bill's, else last bill's (GST
   // hold / direct), hold when unknown
@@ -814,6 +854,52 @@ function arrearsLedgerRows(b) {
   });
 }
 
+// ✅ NEW — New Bill / advance rows: common totals of every bill of the same
+// rent revision + month (a combined site has one bill per face), the same
+// value on each of those rows, plus the bill's ownerApprovalDate.
+//   byOwner → that landowner's share of the bills (ledger rows)
+//   gstOnly → only totalGstAmount (GST rows)
+// Other rows (normal bills) are returned unchanged.
+function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false } = {}) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  const groupKey = (b) => `${String(b.rentRevisionId || "")}|${b.dueMonth || ""}`;
+  const groups = new Map();
+  const billById = new Map();
+  (bills || []).forEach((b) => {
+    if (!b || !b._id) return;
+    billById.set(String(b._id), b);
+    const k = groupKey(b);
+    const g = groups.get(k) || { share: 0, gst: 0, byOwner: new Map() };
+    g.share += Number(b.netPayable || 0);
+    g.gst += Number(b.gstAmount || 0);
+    (b.owners || []).forEach((o) => {
+      const ok = String(o.landOwnerId);
+      const c = g.byOwner.get(ok) || { share: 0, gst: 0 };
+      c.share += Number(o.shareAmount || 0);
+      c.gst += Number(o.gstAmount || 0);
+      g.byOwner.set(ok, c);
+    });
+    groups.set(k, g);
+  });
+  return rows.map((r) => {
+    if (!r || !["newBill", "advance"].includes(r.targetType || r.billType)) return r;
+    const b = billById.get(String(r.rentalDueId || r._id));
+    if (!b) return r;
+    const g = groups.get(groupKey(b));
+    const t = byOwner ? g.byOwner.get(String(r.landOwnerId)) || { share: 0, gst: 0 } : g;
+    const extra = { ownerApprovalDate: b.ownerApprovalDate || null };
+    if (gstOnly) return { ...r, ...extra, totalGstAmount: round(t.gst) };
+    return {
+      ...r,
+      ...extra,
+      totalShareAmount: round(t.share),
+      totalTdsAmount: 0, // no TDS on New Bill / advance
+      totalGstAmount: round(t.gst),
+      totalAmountWithGst: round(t.share + t.gst),
+    };
+  });
+}
+
 // arrears GST row (same shape as gstBalanceHistory rows; _id = arrears bill id,
 // so it can be paid with gstBalanceHistoryId or rentalDueId). null when no GST.
 function arrearsGstRow(b) {
@@ -939,14 +1025,14 @@ function decorateLedgerItem(item, arrearsBills, lastRevision, parentWithGstById 
     }
   });
 
-  out.ledger = ledger;
+  out.ledger = addRevisionBillTotals(ledger, bills, { byOwner: true }); // ✅ NEW — common totals
   out.rentalDue = [
     ...(out.rentalDue || []),
     ...bills.map(({ owners, payments, ...b }) => b),
   ];
   out.rentalDueEntries = rentalDueEntries;
   out.pendingMonths = pendingMonths;
-  out.gstBalanceHistory = gstBalanceHistory;
+  out.gstBalanceHistory = addRevisionBillTotals(gstBalanceHistory, bills, { gstOnly: true }); // ✅ NEW
   out.pendingMonthsCount = Number(out.pendingMonthsCount || 0) + unpaidBills;
   if (arrears.length) out.outstanding = withArrearsOutstanding(out.outstanding, arrears);
   if (advances.length) out.outstanding = withAdvanceOutstanding(out.outstanding, advances);
@@ -1205,8 +1291,17 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
     yearEntry.months[mIdx] = month;
   });
 
-  out.ledgerHistory = ledgerHistory;
-  out.gstBalanceHistory = gstBalanceHistory;
+  // ✅ NEW — common totals + ownerApprovalDate on New Bill / advance rows
+  out.ledgerHistory = ledgerHistory.map((y) => ({
+    ...y,
+    months: (y.months || []).map((mo) => ({
+      ...mo,
+      ledger: addRevisionBillTotals(mo.ledger, bills, { byOwner: true }),
+      gstBalanceHistory: addRevisionBillTotals(mo.gstBalanceHistory, bills, { gstOnly: true }),
+    })),
+  }));
+  out.gstBalanceHistory = addRevisionBillTotals(gstBalanceHistory, bills, { gstOnly: true });
+  out.rentalOutstandingHistory = addRevisionBillTotals(out.rentalOutstandingHistory, bills);
   if (arrears.length) out.outstanding = withArrearsOutstanding(out.outstanding, arrears);
   if (advances.length) out.outstanding = withAdvanceOutstanding(out.outstanding, advances);
   out.arrears = arrearsBlock(arrears);
