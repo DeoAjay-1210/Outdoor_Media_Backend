@@ -4788,6 +4788,25 @@ const cityFilter = [
       }
     }
 
+    // ✅ NEW — ownerApprovalDate on every ledger / gstBalanceHistory row (its bill's
+    // date, null when the bill is not approved yet); New Bill / advance rows keep theirs
+    {
+      const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
+      const approvalDocs = await Media.find({ _id: { $in: pageIds } }).select("rentalDue._id rentalDue.ownerApprovalDate").lean();
+      const approvalDateByBillId = new Map();
+      approvalDocs.forEach((d) => (d.rentalDue || []).forEach((r) => approvalDateByBillId.set(String(r._id), r.ownerApprovalDate || null)));
+      const withApprovalDate = (rows) =>
+        rows.map((g) => {
+          if (!g || g.ownerApprovalDate !== undefined) return g;
+          return { ...g, ownerApprovalDate: g.rentalDueId ? approvalDateByBillId.get(String(g.rentalDueId)) || null : null };
+        });
+      finalMediaListData = finalMediaListData.map((m) => ({
+        ...m,
+        ...(Array.isArray(m.ledger) ? { ledger: withApprovalDate(m.ledger) } : {}),
+        ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: withApprovalDate(m.gstBalanceHistory) } : {}),
+      }));
+    }
+
     return successResponse(
       res,
       "Media list fetched successfully",

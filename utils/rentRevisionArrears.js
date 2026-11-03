@@ -929,6 +929,7 @@ function arrearsGstRow(b) {
     date: lastGst ? lastGst.date : null,
     isUtrEntry: gstPaidFull,
     withGst: b.withGst,
+    rentalDueApprovalStatus: 3, // ✅ NEW — same as the New Bill / advance ledger rows
   };
 }
 
