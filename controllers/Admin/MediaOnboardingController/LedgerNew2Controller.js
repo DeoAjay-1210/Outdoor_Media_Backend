@@ -7402,7 +7402,33 @@ const LAND_OWNER_COUNT_CONDITIONS = [
 // ✅ NEW — newOverallLedgerSummary (landOwnerSiteFilter): PURE rent and PURE
 // GST, each split into Total / Paid / Remaining for the requested month and
 // for past months. GST (incl. withGst 2 "Direct") is never added to rent.
-function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
+// ✅ NEW — rent / GST of a rent revision not yet CMD approved (no bill yet):
+// BILL → monthsDetail amounts (else increaseAmount), ADVANCE → advanceAmount.
+// gstKind: "CannotHold" when the revision withGst is 2, else "Hold".
+function pendingRevisionAmounts(r) {
+  const isAdvance = r.billType === "ADVANCE";
+  const detail = !isAdvance && Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : null;
+  const rent = isAdvance
+    ? Number(r.advanceAmount || 0)
+    : detail
+      ? detail.reduce((s, d) => s + Number(d.amount || 0), 0)
+      : Number(r.increaseAmount ?? r.difference ?? 0);
+  const gst = isAdvance
+    ? Number(r.advanceGstAmount || 0)
+    : detail
+      ? detail.reduce((s, d) => s + Number(d.gstAmount || 0), 0)
+      : Number(r.increaseGstAmount || 0);
+  return {
+    kind: isAdvance ? "advance" : "newBill",
+    rent: Math.max(0, rent),
+    gst: Number(r.gstOnIncrease) === 1 ? Math.max(0, gst) : 0,
+    gstKind: Number(r.withGst || 0) === 2 ? "CannotHold" : "Hold",
+  };
+}
+
+// ✅ CHANGED — options.pendingRevisions (optional, site-filter): rent revisions
+// still Pending are added to the New Bill / Advance OverAll + Remaining
+function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const t = {
     curRentTotal: 0, curRentPaid: 0, curRentRemaining: 0,
     curGstTotal: 0, curGstPaid: 0, curGstRemaining: 0,
@@ -7452,9 +7478,26 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
   // GST split Hold (withGst 1 / not set) / Cannot Hold (withGst 2, the parent
   // bill's when the arrears bill has none)
   const revisionTotals = {
-    newBill: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0 },
-    advance: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0 },
+    newBill: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
+    advance: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
   };
+  // ✅ NEW — Pending rent revisions of active sites (no bill yet → paid 0)
+  if (Array.isArray(options.pendingRevisions) && options.pendingRevisions.length) {
+    const activeIds = new Set(
+      (mediaDocs || []).filter((m) => (m.mediaDetails || []).some((d) => d.status === 1)).map((m) => String(m._id)),
+    );
+    options.pendingRevisions.forEach((rv) => {
+      if (!rv || rv.status !== "Pending" || !activeIds.has(String(rv.mediaId))) return;
+      const p = pendingRevisionAmounts(rv);
+      const tt = revisionTotals[p.kind];
+      tt.rentTotal += p.rent;
+      tt.rentPendingApproval += p.rent;
+      if (p.gst > 0) {
+        tt[`gst${p.gstKind}Total`] += p.gst;
+        tt.gstPendingApproval += p.gst;
+      }
+    });
+  }
   const addRevisionTotals = (media) => {
     const parentWithGst = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
     (media.arrearsDue || []).forEach((b) => {
@@ -7600,11 +7643,14 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
         acc[`${k}Gst${kind}PaidAmount`] = r(tt[`gst${kind}Paid`]);
         acc[`${k}Gst${kind}RemainingAmount`] = r(tt[`gst${kind}Total`] - tt[`gst${kind}Paid`]);
       });
+      acc[`${k}RentPendingApprovalAmount`] = r(tt.rentPendingApproval); // ✅ NEW — part of OverAll not yet CMD approved
+      acc[`${k}GstPendingApprovalAmount`] = r(tt.gstPendingApproval); // ✅ NEW
       return acc;
     }, {}),
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;
+exports.pendingRevisionAmounts = pendingRevisionAmounts; // ✅ NEW
 
 function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const includeLandOwnerCounts = !!options.includeLandOwnerCounts;

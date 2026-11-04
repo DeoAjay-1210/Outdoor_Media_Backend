@@ -22,6 +22,7 @@ const {
   getOwnerWiseOutstanding,
   calculateOverallLedgerSummary,
   calculateNewOverallLedgerSummary, // ✅ NEW
+  pendingRevisionAmounts, // ✅ NEW
   getOverallSummaryForCycle,
   ensureRentalDueForCycles,
 isOwnerModePaidForCycle,
@@ -3717,6 +3718,17 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           const withGst = own > 0 ? own : parentWithGst.get(String(b.parentRentalDueId)) || 0;
           mark(withGst === 2 ? a.GstCannotHold : a.GstHold, Number(b.gstAmount || 0), Number(b.gstPaid || 0)); // ✅ NEW
         });
+        // ✅ NEW — Pending rent revisions (no bill yet) → Remaining
+        allRevisions.forEach((rv) => {
+          if (rv.status !== "Pending" || String(rv.mediaId) !== String(m._id)) return;
+          const p = pendingRevisionAmounts(rv);
+          const a = acc[p.kind];
+          if (p.rent > 0) a.Rent.Remaining = true;
+          if (p.gst > 0) {
+            a.Gst.Remaining = true;
+            a[`Gst${p.gstKind}`].Remaining = true;
+          }
+        });
         paidByMedia.set(String(m._id), acc);
       });
       const siteMatches = (mediaId) => {
@@ -4069,6 +4081,7 @@ const cityMatchQuery = city
             // dueThisMonth), not each site's latest bill cycle (a yearly site
             // billed in Sep was counted as "current month" in October)
             outstandingMonthYear,
+          { pendingRevisions: allRevisions.filter((r) => r.status === "Pending") }, // ✅ NEW — Pending revisions in New Bill / Advance OverAll + Remaining
         ),
         // ✅ NEW: Rental Due Stats
         // ✅ CHANGED — not filtered by billDate (see dueThisMonthStats)
