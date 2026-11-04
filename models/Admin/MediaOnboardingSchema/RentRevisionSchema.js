@@ -82,6 +82,8 @@ const RentRevisionSchema = new mongoose.Schema(
     editHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     // ✅ NEW — earlier approvals replaced when the same role approved again
     approvalHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    // ✅ NEW — withGst changed on approve: [{ from, to, role, roleName, by, byUserId, at }]
+    withGstHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     updatedBy: { type: String, trim: true, default: "" },
 
     requestedBy: { type: String, trim: true, default: "" },

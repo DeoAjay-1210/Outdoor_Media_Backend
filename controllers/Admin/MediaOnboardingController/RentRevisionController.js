@@ -484,6 +484,41 @@ const BILL_APPROVAL_LABELS = { 1: "Pending", 2: "Partially Approved", 3: "CMD Ap
 
 // ✅ NEW — revision withGst label ("No GST" when the revision has no GST)
 const withGstLabelOf = (r) => (Number(r.gstOnIncrease) === 1 ? WITH_GST_LABELS[Number(r.withGst || 0)] || "" : "No GST");
+// ✅ NEW — withGst changes made on approve, with labels
+const withGstHistoryOf = (r) =>
+  (r.withGstHistory || []).map((h) => ({
+    ...h,
+    fromLabel: WITH_GST_LABELS[Number(h.from || 0)] || "",
+    toLabel: WITH_GST_LABELS[Number(h.to || 0)] || "",
+  }));
+
+// ✅ NEW — approve: withGst 1 / 2 sent (revision has GST) → saved on the revision
+// + withGstHistory (approvals not reset). Not sent / same / no GST → no change.
+// Returns an error message (advance bill withGst mismatch) or null.
+async function applyApproveWithGst(revision, withGst, { role, user }) {
+  if (withGst === null || Number(revision.gstOnIncrease) !== 1) return null;
+  const from = Number(revision.withGst || 0);
+  if (from === withGst) return null;
+  if (revision.billType === "ADVANCE") {
+    const media = await Media.findById(revision.mediaId).select("rentalDue.dueMonth rentalDue.withGst").lean();
+    const err = advanceWithGstError(media || {}, revision.adjustInMonth, withGst);
+    if (err) return err;
+  }
+  revision.withGst = withGst;
+  revision.withGstHistory = [
+    ...(revision.withGstHistory || []),
+    {
+      from,
+      to: withGst,
+      role,
+      roleName: ROLE_NAMES[role],
+      by: user?.userName || "",
+      byUserId: mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null,
+      at: nowIST(),
+    },
+  ];
+  return null;
+}
 
 // ✅ NEW — BILL / ADVANCE amounts of a revision (create / approve / list responses)
 function billTypeFields(r, plan = null) {
@@ -500,6 +535,7 @@ function billTypeFields(r, plan = null) {
       gstOnIncrease: r.gstOnIncrease ?? null,
       withGst: Number(r.withGst || 0), // ✅ NEW
       withGstLabel: withGstLabelOf(r), // ✅ NEW
+      withGstHistory: withGstHistoryOf(r), // ✅ NEW
       advanceGstAmount,
       advanceTotalWithGst: advanceAmount + advanceGstAmount,
       adjustInMonth: r.adjustInMonth || "",
@@ -542,6 +578,7 @@ function billTypeFields(r, plan = null) {
     gstOnIncrease: r.gstOnIncrease ?? null,
     withGst: Number(r.withGst || 0), // ✅ NEW
     withGstLabel: withGstLabelOf(r), // ✅ NEW
+    withGstHistory: withGstHistoryOf(r), // ✅ NEW
     increaseGstAmount,
     increaseTotalWithGst: increaseAmount + increaseGstAmount,
   };
@@ -1299,7 +1336,7 @@ function increaseMailBill(media, { month, amount, gstAmount, currentAmount, rent
 }
 
 // one revision → { statusCode, message, data } (statusCode >= 400 = not done)
-async function approveOneRevision(revisionId, { action, remark, role, user }) {
+async function approveOneRevision(revisionId, { action, remark, role, user, withGst = null }) {
   const userName = user?.userName || "";
   if (!revisionId || !mongoose.Types.ObjectId.isValid(String(revisionId))) {
     return { statusCode: 400, message: "revisionId is not a valid ObjectId" };
@@ -1314,6 +1351,9 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
   // is updated (remark / by / time); the earlier one goes to approvalHistory.
   // Next role and the site are not changed. action 2 still rejects.
   if (step && step.status === "Approved" && action === 1) {
+    // ✅ NEW — withGst 1 / 2 sent → saved on the revision
+    const reWithGstError = await applyApproveWithGst(revision, withGst, { role, user });
+    if (reWithGstError) return { statusCode: 400, message: reWithGstError };
     const now = nowIST();
     revision.approvalHistory = [
       ...(revision.approvalHistory || []),
@@ -1352,6 +1392,11 @@ async function approveOneRevision(revisionId, { action, remark, role, user }) {
   // CMD can approve / reject directly (Executive / Manager not done yet → Skipped)
   if (Number(revision.currentPendingRole) !== role && role !== 3) {
     return { statusCode: 403, message: `Waiting on ${ROLE_NAMES[revision.currentPendingRole] || "another role"}` };
+  }
+  // ✅ NEW — approve with withGst 1 / 2 → saved on the revision (CMD → used for the bills)
+  if (action === 1) {
+    const withGstError = await applyApproveWithGst(revision, withGst, { role, user });
+    if (withGstError) return { statusCode: 400, message: withGstError };
   }
 
   const now = nowIST();
@@ -1588,7 +1633,14 @@ exports.approveRentRevision = async (req, res) => {
     if (![1, 2, 3].includes(role)) {
       return errorResponse(res, "Only Rental Executive, Rental Manager or CMD can approve a rent revision", null, 403);
     }
-    const opts = { action, remark, role, user: req.user };
+    // ✅ NEW — optional withGst on approve: 1 (GST hold) / 2 (direct) only
+    let withGst = null;
+    const rawWithGst = req.body?.withGst;
+    if (rawWithGst !== undefined && rawWithGst !== null && String(rawWithGst).trim() !== "" && String(rawWithGst).trim() !== "null") {
+      withGst = Number(String(rawWithGst).trim());
+      if (withGst !== 1 && withGst !== 2) return errorResponse(res, "withGst must be 1 (GST hold) or 2 (direct)", null, 400);
+    }
+    const opts = { action, remark, role, user: req.user, withGst };
 
     if (!isBulk) {
       const r = await approveOneRevision(ids[0], opts);
