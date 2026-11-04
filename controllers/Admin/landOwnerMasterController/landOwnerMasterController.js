@@ -3684,26 +3684,25 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // Remaining → any bill with an unpaid balance.
     //   newBillRentPaid / newBillRentRemaining
     //   newBillHoldGstPaid / newBillHoldGstRemaining (withGst 1 / not set)
-    //   newBillCannotHoldGst (withGst 2, any bill)
+    //   newBillCannotHoldGstPaid / newBillCannotHoldGstRemaining (withGst 2)
     // and the same for advance. Any flag matching keeps the site.
     const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) => [
       ...["Remaining", "Paid"].map((state) => ({ name: `${kind}Rent${state}`, kind, part: "Rent", state })),
       ...["Remaining", "Paid"].map((state) => ({ name: `${kind}HoldGst${state}`, kind, part: "GstHold", state })), // ✅ CHANGED — key name
-      { name: `${kind}CannotHoldGst`, kind, part: "GstCannotHold", state: "Any" }, // ✅ CHANGED — key name
+      ...["Remaining", "Paid"].map((state) => ({ name: `${kind}CannotHoldGst${state}`, kind, part: "GstCannotHold", state })), // ✅ CHANGED — Paid / Remaining
     ]).filter((fl) => bodyFlag(fl.name));
     if (revisionPaidFlags.length) {
       const entryMediaIds = [...new Set(entries.flatMap((e) => (e.sites || []).map((s) => String(s.mediaId))))];
       const arrearsDocs = await MediaOnboarding.find({ _id: { $in: entryMediaIds } }, "arrearsDue rentalDue._id rentalDue.withGst").lean(); // ✅ CHANGED — + parent bill withGst
       const paidByMedia = new Map(); // mediaId → { newBill: { Rent: { Paid, Remaining }, Gst }, advance }
       arrearsDocs.forEach((m) => {
-        const parts = () => ({ Paid: false, Remaining: false, Any: false });
+        const parts = () => ({ Paid: false, Remaining: false });
         const acc = {
           newBill: { Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() },
           advance: { Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() },
         };
         const mark = (st, total, paid) => {
           if (total <= 0) return;
-          st.Any = true;
           if (total - Math.min(total, paid) > 0) st.Remaining = true;
           else st.Paid = true;
         };
