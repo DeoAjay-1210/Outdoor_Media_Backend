@@ -3554,6 +3554,24 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       return r.status === "Pending" || r.status === "Approved";
     };
     const revisionKind = (r) => (r.billType === "ADVANCE" ? "advance" : "bill");
+    // ✅ NEW — pendingAmount / approvedAmount split. pending → waiting on
+    // roleType (else any role); approved → roleType step Approved (else CMD approved)
+    const revisionState = (r) => {
+      if (!r || r.status === "Rejected") return null;
+      if (r.status === "Pending" && (!revisionTargetRole || Number(r.currentPendingRole) === revisionTargetRole)) return "pending";
+      if (!revisionTargetRole) return r.status === "Approved" ? "approved" : null;
+      const step = (r.approvalSteps || []).find((st) => Number(st.role) === revisionTargetRole);
+      return step && step.status === "Approved" ? "approved" : null;
+    };
+    // ✅ NEW — revisionStatus "pending" / "approved" (only with billAmount 1 /
+    // advanceAmount 1): entries + totals → that state only. Absent → unchanged.
+    const revisionStatusKey = Object.keys(req.body || {}).find((k) => k.toLowerCase() === "revisionstatus");
+    const revisionStatusRaw = revisionStatusKey ? String(req.body[revisionStatusKey] || "").trim().toLowerCase() : "";
+    const revisionStatusFilter =
+      (bodyFlag("billAmount") || bodyFlag("advanceAmount")) && (revisionStatusRaw === "pending" || revisionStatusRaw === "approved")
+        ? revisionStatusRaw
+        : null;
+    const revisionInTotals = (r) => (revisionStatusFilter ? revisionState(r) === revisionStatusFilter : revisionInScope(r));
     const revisionItem = (r) => {
       const isAdvance = revisionKind(r) === "advance";
       const amount = Number(isAdvance ? r.advanceAmount : r.increaseAmount ?? r.difference) || 0;
@@ -3583,22 +3601,51 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       }
       return [revisionItem(r)];
     };
-    const revisionsInScope = (await RentRevision.find({ status: { $in: ["Pending", "Approved"] } }).lean()).filter(revisionInScope);
+    const allRevisions = await RentRevision.find({ status: { $in: ["Pending", "Approved"] } }).lean(); // ✅ CHANGED — also used for pending / approved split
+    const revisionsInScope = allRevisions.filter(revisionInTotals); // ✅ CHANGED — revisionStatus aware (absent → revisionInScope)
     const revisionsByMedia = new Map(); // mediaId → { bill: [items], advance: [items] }
+    const revisionMonthItems = (r) =>
+      revisionItems(r).filter((i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey);
     revisionsInScope.forEach((r) => {
-      const items = revisionItems(r).filter(
-        (i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey,
-      );
+      const items = revisionMonthItems(r);
       if (items.length === 0) return;
       const k = String(r.mediaId);
       if (!revisionsByMedia.has(k)) revisionsByMedia.set(k, { bill: [], advance: [] });
       revisionsByMedia.get(k)[revisionKind(r)].push(...items);
     });
-    const revisionBlock = (items) => {
+    // ✅ NEW — pendingAmount / approvedAmount: mediaId → { bill: { pending, approved }, advance: {...} }
+    const revisionSplitByMedia = new Map();
+    allRevisions.forEach((r) => {
+      const state = revisionState(r);
+      if (!state || (revisionStatusFilter && state !== revisionStatusFilter)) return;
+      const items = revisionMonthItems(r);
+      if (items.length === 0) return;
+      const k = String(r.mediaId);
+      if (!revisionSplitByMedia.has(k))
+        revisionSplitByMedia.set(k, { bill: { pending: [], approved: [] }, advance: { pending: [], approved: [] } });
+      revisionSplitByMedia.get(k)[revisionKind(r)][state].push(...items);
+    });
+    const splitTotals = (items) => {
+      const amount = items.reduce((s, i) => s + i.amount, 0);
+      const gstAmount = items.reduce((s, i) => s + i.gstAmount, 0);
+      return { count: items.length, amount, gstAmount, totalAmount: amount + gstAmount };
+    };
+    const splitOf = (mediaIds, kind) => {
+      const pending = [];
+      const approved = [];
+      mediaIds.forEach((id) => {
+        const sp = revisionSplitByMedia.get(String(id));
+        if (!sp) return;
+        pending.push(...sp[kind].pending);
+        approved.push(...sp[kind].approved);
+      });
+      return { pendingAmount: splitTotals(pending), approvedAmount: splitTotals(approved) };
+    };
+    const revisionBlock = (items, split) => {
       const sorted = [...items].sort((a, b) => (parseRevisionMonth(a.month) || 0) - (parseRevisionMonth(b.month) || 0));
       const amount = sorted.reduce((s, i) => s + i.amount, 0);
       const gstAmount = sorted.reduce((s, i) => s + i.gstAmount, 0);
-      return { amount, gstAmount, totalAmount: amount + gstAmount, items: sorted };
+      return { amount, gstAmount, totalAmount: amount + gstAmount, ...(split || {}), items: sorted };
     };
 
     const includeBillAmountFilter = bodyFlag("billAmount");
@@ -3617,8 +3664,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             if (advance) totals.advance.push(...advance);
             return {
               ...s,
-              ...(bill ? { billAmount: revisionBlock(bill) } : {}),
-              ...(advance ? { advanceAmount: revisionBlock(advance) } : {}),
+              ...(bill ? { billAmount: revisionBlock(bill, splitOf([s.mediaId], "bill")) } : {}),
+              ...(advance ? { advanceAmount: revisionBlock(advance, splitOf([s.mediaId], "advance")) } : {}),
             };
           })
           .filter(Boolean);
@@ -3626,8 +3673,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           entries.splice(i, 1);
           continue;
         }
-        if (includeBillAmountFilter) entry.billAmount = revisionBlock(totals.bill);
-        if (includeAdvanceAmountFilter) entry.advanceAmount = revisionBlock(totals.advance);
+        const entryMediaIds = [...new Set(entry.sites.map((s) => String(s.mediaId)))]; // ✅ NEW
+        if (includeBillAmountFilter) entry.billAmount = revisionBlock(totals.bill, splitOf(entryMediaIds, "bill"));
+        if (includeAdvanceAmountFilter) entry.advanceAmount = revisionBlock(totals.advance, splitOf(entryMediaIds, "advance"));
       }
     }
 
@@ -3919,6 +3967,10 @@ const cityMatchQuery = city
               ),
             ]),
           );
+          // ✅ NEW — live faces (mediaDetails status 1) per site → faceCount
+          const faceCountById = new Map(
+            docs.map((m) => [String(m._id), (m.mediaDetails || []).filter((d) => d && Number(d.status) === 1).length || 1]),
+          );
           const bucket = (kind) => {
             const sites = new Set();
             const owners = new Set();
@@ -3940,11 +3992,13 @@ const cityMatchQuery = city
             return {
               count,
               siteCount: sites.size,
+              faceCount: [...sites].reduce((s, id) => s + (faceCountById.get(id) || 1), 0), // ✅ NEW
               landOwnerCount: owners.size,
               amount,
               gstAmount,
               totalAmount: amount + gstAmount,
               months: [...months.entries()].sort((a, b) => a[1] - b[1]).map(([m]) => m),
+              ...splitOf([...ownerKeysById.keys()], kind), // ✅ NEW — pendingAmount / approvedAmount
             };
           };
           return {
@@ -3952,6 +4006,7 @@ const cityMatchQuery = city
             month: includeDueThisMonth ? `${REVISION_MONTHS[statsMonth - 1]} ${statsYear}` : null,
             roleType: revisionTargetRole,
             roleName: revisionTargetRole ? REVISION_ROLE_NAMES[revisionTargetRole] : null,
+            revisionStatus: revisionStatusFilter, // ✅ NEW
             billAmount: bucket("bill"),
             advanceAmount: bucket("advance"),
           };
