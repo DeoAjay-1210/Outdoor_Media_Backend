@@ -7447,6 +7447,27 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     });
   };
 
+  // ✅ NEW — New Bill (arrears) / Advance totals, ALL months (not by bucket):
+  // rent (netPayable / rentPaid) and GST (gstAmount / gstPaid) separately
+  const revisionTotals = {
+    newBill: { rentTotal: 0, rentPaid: 0, gstTotal: 0, gstPaid: 0 },
+    advance: { rentTotal: 0, rentPaid: 0, gstTotal: 0, gstPaid: 0 },
+  };
+  const addRevisionTotals = (media) => {
+    (media.arrearsDue || []).forEach((b) => {
+      if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+      const tt = revisionTotals[b.type === "advance" ? "advance" : "newBill"];
+      const rent = Number(b.netPayable || 0);
+      const gst = Number(b.gstAmount || 0);
+      tt.rentTotal += rent;
+      tt.rentPaid += Math.min(rent, Number(b.rentPaid || 0));
+      if (gst > 0) {
+        tt.gstTotal += gst;
+        tt.gstPaid += Math.min(gst, Number(b.gstPaid || 0));
+      }
+    });
+  };
+
   const curCannotHoldOwners = new Set(); // ✅ NEW
   const pastCannotHoldOwners = new Set(); // ✅ NEW
   const curHoldPendingOwners = new Set(); // ✅ NEW
@@ -7491,6 +7512,7 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
       addLegacy("Rent", media.rentalPayment?.rentalOutstandingHistory, "baseRentOutstandingAmount");
       addLegacy("Gst", media.rentalPayment?.gstOutstandingHistory, "gstOutStandingAmount");
       addRevisionBills(media); // ✅ NEW
+      addRevisionTotals(media); // ✅ NEW
     }
     const s = getOverallSummaryForCycle(media, requestedMonthYear);
     t.curRentTotal += s.splitCurRentTotal; t.curRentPaid += s.splitCurRentPaid; t.curRentRemaining += s.splitCurRentRemaining;
@@ -7563,6 +7585,17 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     // ✅ NEW — distinct landowners with GST Hold still pending
     newCurrentMonthGstHoldPendingLandOwners: curHoldPendingOwners.size,
     newPastGstHoldPendingLandOwners: pastHoldPendingOwners.size,
+    // ✅ NEW — New Bill / Advance (all months): rent and GST, Total / Paid / Remaining
+    ...["newBill", "advance"].reduce((acc, k) => {
+      const tt = revisionTotals[k];
+      acc[`${k}RentOverAllAmount`] = r(tt.rentTotal);
+      acc[`${k}RentPaidAmount`] = r(tt.rentPaid);
+      acc[`${k}RentRemainingAmount`] = r(tt.rentTotal - tt.rentPaid);
+      acc[`${k}GstOverAllAmount`] = r(tt.gstTotal);
+      acc[`${k}GstPaidAmount`] = r(tt.gstPaid);
+      acc[`${k}GstRemainingAmount`] = r(tt.gstTotal - tt.gstPaid);
+      return acc;
+    }, {}),
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;

@@ -645,6 +645,11 @@ const effectiveWithGst = (bill, parentWithGst) => {
   return own > 0 ? own : Number(parentWithGst || 0);
 };
 
+// ✅ NEW — IST "now" (same as nowIST() in the controllers) for payment
+// createdAt / bill updatedAt, so they match the IST payment date
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
+
 const ownerModeAmount = (owner, mode) => Number(mode === "Cash" ? owner.cashAmount : owner.onlineAmount) || 0;
 const ownerModePaid = (owner, mode) => (mode === "Cash" ? owner.paidCash : owner.paidOnline) === true;
 
@@ -671,7 +676,7 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
     if (Number(bill.gstAmount || 0) <= 0) throw { message: `${bill.label} has no GST`, statusCode: 400 };
     if (gstPending <= 0) throw { message: `${bill.label} GST already paid`, statusCode: 400 };
     bill.gstPaid = Number(bill.gstAmount || 0);
-    const row = { _id: new mongoose.Types.ObjectId(), type: "gst", amount: gstPending, paymentMode: mode || "Online", utrNumber: utrNumber || "", date: payDate, createdBy: userName, createdAt: new Date() };
+    const row = { _id: new mongoose.Types.ObjectId(), type: "gst", amount: gstPending, paymentMode: mode || "Online", utrNumber: utrNumber || "", date: payDate, createdBy: userName, createdAt: nowIST() }; // ✅ CHANGED — IST
     bill.payments.push(row);
     saved.push(row);
   } else {
@@ -704,7 +709,7 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
           utrNumber: md === "Online" ? utrNumber || "" : "",
           date: payDate,
           createdBy: userName,
-          createdAt: new Date(),
+          createdAt: nowIST(), // ✅ CHANGED — IST
         };
         bill.payments.push(row);
         saved.push(row);
@@ -716,7 +721,7 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
     if (gstWithRent && Number(bill.rentPaid) >= Number(bill.netPayable || 0)) bill.gstPaid = Number(bill.gstAmount || 0);
   }
   bill.status = arrearsStatus(bill) === "Paid" ? 3 : bill.status;
-  bill.updatedAt = new Date();
+  bill.updatedAt = nowIST(); // ✅ CHANGED — IST (was UTC)
   return { bill, saved };
 }
 
@@ -888,7 +893,7 @@ function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false }
     if (!b) return r;
     const g = groups.get(groupKey(b));
     const t = byOwner ? g.byOwner.get(String(r.landOwnerId)) || { share: 0, gst: 0 } : g;
-    const extra = { ownerApprovalDate: b.ownerApprovalDate || null };
+    const extra = { ownerApprovalDate: b.ownerApprovalDate || null, billCreatedAt: b.createdAt || null }; // ✅ CHANGED — + billCreatedAt
     if (gstOnly) return { ...r, ...extra, totalGstAmount: round(t.gst) };
     return {
       ...r,

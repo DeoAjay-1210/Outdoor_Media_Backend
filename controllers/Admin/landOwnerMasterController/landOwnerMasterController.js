@@ -3679,6 +3679,49 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       }
     }
 
+    // ✅ NEW — New Bill / Advance paid filters (all months, CMD approved bills
+    // in arrearsDue): newBillRentRemaining / newBillRentPaid / newBillGstRemaining /
+    // newBillGstPaid and the same for advance, checked PER BILL: Paid → any bill
+    // of that kind fully paid, Remaining → any bill with an unpaid balance.
+    // Any flag matching keeps the site.
+    const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) =>
+      ["Rent", "Gst"].flatMap((part) =>
+        ["Remaining", "Paid"].map((state) => ({ name: `${kind}${part}${state}`, kind, part, state })),
+      ),
+    ).filter((fl) => bodyFlag(fl.name));
+    if (revisionPaidFlags.length) {
+      const entryMediaIds = [...new Set(entries.flatMap((e) => (e.sites || []).map((s) => String(s.mediaId))))];
+      const arrearsDocs = await MediaOnboarding.find({ _id: { $in: entryMediaIds } }, "arrearsDue").lean();
+      const paidByMedia = new Map(); // mediaId → { newBill: { Rent: { Paid, Remaining }, Gst }, advance }
+      arrearsDocs.forEach((m) => {
+        const acc = {
+          newBill: { Rent: { Paid: false, Remaining: false }, Gst: { Paid: false, Remaining: false } },
+          advance: { Rent: { Paid: false, Remaining: false }, Gst: { Paid: false, Remaining: false } },
+        };
+        const mark = (st, total, paid) => {
+          if (total <= 0) return;
+          if (total - Math.min(total, paid) > 0) st.Remaining = true;
+          else st.Paid = true;
+        };
+        (m.arrearsDue || []).forEach((b) => {
+          if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+          const a = acc[b.type === "advance" ? "advance" : "newBill"];
+          mark(a.Rent, Number(b.netPayable || 0), Number(b.rentPaid || 0));
+          mark(a.Gst, Number(b.gstAmount || 0), Number(b.gstPaid || 0));
+        });
+        paidByMedia.set(String(m._id), acc);
+      });
+      const siteMatches = (mediaId) => {
+        const acc = paidByMedia.get(String(mediaId));
+        if (!acc) return false;
+        return revisionPaidFlags.some(({ kind, part, state }) => acc[kind][part][state]);
+      };
+      for (let i = entries.length - 1; i >= 0; i--) {
+        entries[i].sites = (entries[i].sites || []).filter((s) => siteMatches(s.mediaId));
+        if (entries[i].sites.length === 0) entries.splice(i, 1);
+      }
+    }
+
     // ✅ ADDED — sort by latestActivityAt descending (most recently
     // touched — owner OR any of their sites — first). Previously
     // entries had no sort at all; order was purely insertion order.
