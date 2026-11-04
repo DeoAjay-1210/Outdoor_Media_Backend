@@ -3680,34 +3680,43 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     }
 
     // ✅ NEW — New Bill / Advance paid filters (all months, CMD approved bills
-    // in arrearsDue): newBillRentRemaining / newBillRentPaid / newBillGstRemaining /
-    // newBillGstPaid and the same for advance, checked PER BILL: Paid → any bill
-    // of that kind fully paid, Remaining → any bill with an unpaid balance.
-    // Any flag matching keeps the site.
-    const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) =>
-      ["Rent", "Gst"].flatMap((part) =>
-        ["Remaining", "Paid"].map((state) => ({ name: `${kind}${part}${state}`, kind, part, state })),
-      ),
-    ).filter((fl) => bodyFlag(fl.name));
+    // in arrearsDue), checked PER BILL: Paid → any bill of that kind fully paid,
+    // Remaining → any bill with an unpaid balance.
+    //   newBillRentPaid / newBillRentRemaining
+    //   newBillHoldGstPaid / newBillHoldGstRemaining (withGst 1 / not set)
+    //   newBillCannotHoldGst (withGst 2, any bill)
+    // and the same for advance. Any flag matching keeps the site.
+    const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) => [
+      ...["Remaining", "Paid"].map((state) => ({ name: `${kind}Rent${state}`, kind, part: "Rent", state })),
+      ...["Remaining", "Paid"].map((state) => ({ name: `${kind}HoldGst${state}`, kind, part: "GstHold", state })), // ✅ CHANGED — key name
+      { name: `${kind}CannotHoldGst`, kind, part: "GstCannotHold", state: "Any" }, // ✅ CHANGED — key name
+    ]).filter((fl) => bodyFlag(fl.name));
     if (revisionPaidFlags.length) {
       const entryMediaIds = [...new Set(entries.flatMap((e) => (e.sites || []).map((s) => String(s.mediaId))))];
-      const arrearsDocs = await MediaOnboarding.find({ _id: { $in: entryMediaIds } }, "arrearsDue").lean();
+      const arrearsDocs = await MediaOnboarding.find({ _id: { $in: entryMediaIds } }, "arrearsDue rentalDue._id rentalDue.withGst").lean(); // ✅ CHANGED — + parent bill withGst
       const paidByMedia = new Map(); // mediaId → { newBill: { Rent: { Paid, Remaining }, Gst }, advance }
       arrearsDocs.forEach((m) => {
+        const parts = () => ({ Paid: false, Remaining: false, Any: false });
         const acc = {
-          newBill: { Rent: { Paid: false, Remaining: false }, Gst: { Paid: false, Remaining: false } },
-          advance: { Rent: { Paid: false, Remaining: false }, Gst: { Paid: false, Remaining: false } },
+          newBill: { Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() },
+          advance: { Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() },
         };
         const mark = (st, total, paid) => {
           if (total <= 0) return;
+          st.Any = true;
           if (total - Math.min(total, paid) > 0) st.Remaining = true;
           else st.Paid = true;
         };
+        // arrears bill withGst — the parent bill's when the arrears bill has none
+        const parentWithGst = new Map((m.rentalDue || []).map((d) => [String(d._id), Number(d.withGst || 0)]));
         (m.arrearsDue || []).forEach((b) => {
           if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
           const a = acc[b.type === "advance" ? "advance" : "newBill"];
           mark(a.Rent, Number(b.netPayable || 0), Number(b.rentPaid || 0));
           mark(a.Gst, Number(b.gstAmount || 0), Number(b.gstPaid || 0));
+          const own = Number(b.withGst || 0);
+          const withGst = own > 0 ? own : parentWithGst.get(String(b.parentRentalDueId)) || 0;
+          mark(withGst === 2 ? a.GstCannotHold : a.GstHold, Number(b.gstAmount || 0), Number(b.gstPaid || 0)); // ✅ NEW
         });
         paidByMedia.set(String(m._id), acc);
       });

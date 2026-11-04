@@ -7448,12 +7448,15 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
   };
 
   // ✅ NEW — New Bill (arrears) / Advance totals, ALL months (not by bucket):
-  // rent (netPayable / rentPaid) and GST (gstAmount / gstPaid) separately
+  // rent (netPayable / rentPaid) and GST (gstAmount / gstPaid) separately,
+  // GST split Hold (withGst 1 / not set) / Cannot Hold (withGst 2, the parent
+  // bill's when the arrears bill has none)
   const revisionTotals = {
-    newBill: { rentTotal: 0, rentPaid: 0, gstTotal: 0, gstPaid: 0 },
-    advance: { rentTotal: 0, rentPaid: 0, gstTotal: 0, gstPaid: 0 },
+    newBill: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0 },
+    advance: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0 },
   };
   const addRevisionTotals = (media) => {
+    const parentWithGst = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
     (media.arrearsDue || []).forEach((b) => {
       if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
       const tt = revisionTotals[b.type === "advance" ? "advance" : "newBill"];
@@ -7462,8 +7465,9 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
       tt.rentTotal += rent;
       tt.rentPaid += Math.min(rent, Number(b.rentPaid || 0));
       if (gst > 0) {
-        tt.gstTotal += gst;
-        tt.gstPaid += Math.min(gst, Number(b.gstPaid || 0));
+        const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
+        tt[`gst${kind}Total`] += gst;
+        tt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
       }
     });
   };
@@ -7585,15 +7589,17 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     // ✅ NEW — distinct landowners with GST Hold still pending
     newCurrentMonthGstHoldPendingLandOwners: curHoldPendingOwners.size,
     newPastGstHoldPendingLandOwners: pastHoldPendingOwners.size,
-    // ✅ NEW — New Bill / Advance (all months): rent and GST, Total / Paid / Remaining
+    // ✅ NEW — New Bill / Advance (all months): rent, GST Hold and GST Cannot Hold, Total / Paid / Remaining
     ...["newBill", "advance"].reduce((acc, k) => {
       const tt = revisionTotals[k];
       acc[`${k}RentOverAllAmount`] = r(tt.rentTotal);
       acc[`${k}RentPaidAmount`] = r(tt.rentPaid);
       acc[`${k}RentRemainingAmount`] = r(tt.rentTotal - tt.rentPaid);
-      acc[`${k}GstOverAllAmount`] = r(tt.gstTotal);
-      acc[`${k}GstPaidAmount`] = r(tt.gstPaid);
-      acc[`${k}GstRemainingAmount`] = r(tt.gstTotal - tt.gstPaid);
+      ["Hold", "CannotHold"].forEach((kind) => {
+        acc[`${k}Gst${kind}OverAllAmount`] = r(tt[`gst${kind}Total`]);
+        acc[`${k}Gst${kind}PaidAmount`] = r(tt[`gst${kind}Paid`]);
+        acc[`${k}Gst${kind}RemainingAmount`] = r(tt[`gst${kind}Total`] - tt[`gst${kind}Paid`]);
+      });
       return acc;
     }, {}),
   };
