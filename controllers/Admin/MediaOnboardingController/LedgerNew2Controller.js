@@ -7558,7 +7558,9 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
     if ((media.mediaDetails || []).some((d) => d.status === 1)) {
       addLegacy("Rent", media.rentalPayment?.rentalOutstandingHistory, "baseRentOutstandingAmount");
       addLegacy("Gst", media.rentalPayment?.gstOutstandingHistory, "gstOutStandingAmount");
-      addRevisionBills(media); // ✅ NEW
+      // ✅ CHANGED — New Bill / Advance no longer added to the current / past
+      // rent + GST fields; they are only in newBill* / advance* fields below
+      // addRevisionBills(media);
       addRevisionTotals(media); // ✅ NEW
     }
     const s = getOverallSummaryForCycle(media, requestedMonthYear);
