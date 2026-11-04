@@ -811,6 +811,12 @@ const downloadRentalOOHExcel = async (req, res) => {
             row[LAST_COL] = rental + gst; // Total Amount = red (unpaid) amounts only
             // Only Outstanding GST pending → no rent amount, GST Amount shows the outstanding GST
             if (row.status.outstandingGstOnly) row[COL_RENTAL] = "-";
+          } else if (!unpaidOnly && row.status) {
+            // ✅ NEW — Paid sheet: red (not paid) amounts are shown but NOT added
+            // to Total Amount or to the month / grand totals
+            if (!row.status.rentPaid) rental = 0;
+            if (row.status.gstApplicable && !row.status.gstPaid) gst = 0;
+            row[LAST_COL] = rental + gst; // Total Amount = green (paid) amounts only
           }
           monthRentalTotal += rental;
           monthGstTotal += gst;
