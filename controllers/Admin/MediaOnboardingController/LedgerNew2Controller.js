@@ -1207,8 +1207,16 @@ async function syncWithOverDueHistory(mediaId, rentalDueId, entryDate, withGst, 
 // ✅ NEW — rentalDueId of a rent revision ARREARS bill → that payment is saved on
 // the arrears bill only (media.arrearsDue[]). Returns null when rentalDueId is not
 // an arrears bill (normal ledger flow continues unchanged).
+// ✅ NEW — ledger-save remark: first non-empty value (item, then batch / body)
+const remarkText = (...values) => {
+  for (const v of values) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
+  }
+  return "";
+};
+
 async function payArrearsBillIfArrears(req, res) {
-  const { mediaId, entryType, landOwnerId, paymentMode, utrNumber, date } = req.body || {};
+  const { mediaId, entryType, landOwnerId, paymentMode, utrNumber, date, remark } = req.body || {};
   // arrears GST row in gstBalanceHistory has _id = arrears bill id → either id works
   const rentalDueId = req.body?.rentalDueId || req.body?.gstBalanceHistoryId;
   if (!rentalDueId || !mongoose.Types.ObjectId.isValid(String(rentalDueId))) return null;
@@ -1232,6 +1240,7 @@ async function payArrearsBillIfArrears(req, res) {
       utrNumber,
       date: date ? combineDateWithCurrentTime(date) : nowIST(),
       userName: req.user?.userName || "",
+      remark: remarkText(remark), // ✅ NEW
       parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
     });
   } catch (e) {
@@ -1263,6 +1272,7 @@ async function payArrearsBillIfArrears(req, res) {
         tdsAmount: p.tdsAmount,
         paymentMode: p.paymentMode,
         utrNumber: p.utrNumber,
+        remark: p.remark || "", // ✅ NEW
         withGst: Number(paid.bill.withGst || 0),
         gstAmount: Number(p.gstAmount || 0),
         date: p.date,
@@ -1292,14 +1302,16 @@ async function payArrearsBillIfArrears(req, res) {
 // (or gstBalanceHistoryId) is a rent revision arrears / advance bill → paid on
 // that bill (same as payArrearsBillIfArrears). Returns a savedEntries row
 // ({ status: "saved" | "failed" }); never throws.
-async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedBy) {
+async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedBy, batchRemark = "") {
   const billId = String(item.rentalDueId || item.gstBalanceHistoryId || "");
+  const remark = remarkText(item.remark, batchRemark); // ✅ NEW
   const base = {
     mediaId,
     landOwnerId: item.landOwnerId || null,
     targetType: item.targetType,
     paymentMode: item.paymentMode,
     utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+    remark, // ✅ NEW
     rentalDueId: billId,
   };
   try {
@@ -1315,6 +1327,7 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
       utrNumber: item.utrNumber,
       date: entryDate,
       userName: updatedBy,
+      remark, // ✅ NEW
       parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
     });
     await Media.updateOne(
@@ -1360,6 +1373,7 @@ exports.createLedgerEntry = async (req, res) => {
       utrNumber,
       date,
       paymentSplits,
+      remark, // ✅ NEW
     } = req.body;
     if (entryType && targetType && !entries && !outstandingEntries) {
       if (entryType === "rental" && targetType === "current") {
@@ -1370,6 +1384,7 @@ exports.createLedgerEntry = async (req, res) => {
             paymentMode,
             utrNumber,
             date,
+            remark, // ✅ NEW
             // withGst: 2,
           },
         ];
@@ -1381,6 +1396,7 @@ exports.createLedgerEntry = async (req, res) => {
             paymentMode,
             utrNumber,
             date,
+            remark, // ✅ NEW
             withGst: 1,
           },
         ];
@@ -1395,6 +1411,7 @@ exports.createLedgerEntry = async (req, res) => {
             utrNumber,
             date,
             paymentSplits,
+            remark, // ✅ NEW
             gstBalanceHistoryId: req.body.gstBalanceHistoryId,
             gstOutstandingId: req.body.gstOutstandingId,
             rentalOutstandingId: req.body.rentalOutstandingId,
@@ -1558,6 +1575,7 @@ exports.createLedgerEntry = async (req, res) => {
       for (let i = 0; i < entries.length; i++) {
         const item = entries[i];
         const entryDate = item.date ? combineDateWithCurrentTime(item.date) : nowIST();
+        const itemRemark = remarkText(item.remark, req.body.remark); // ✅ NEW
         const matchedOwner = item.landOwnerId
           ? media.landOwners.id(item.landOwnerId) ||
             media.landOwners.find(
@@ -1588,6 +1606,7 @@ exports.createLedgerEntry = async (req, res) => {
             // ✅ NEW field only — amount, when caller supplies it (optional,
             // does not affect any existing matching/upsert logic below)
             amount: item.amount !== undefined ? Number(item.amount) : 0,
+            remark: itemRemark, // ✅ NEW
           };
 
           let savedLedgerEntry;
@@ -1674,6 +1693,7 @@ exports.createLedgerEntry = async (req, res) => {
             matchingGstRecords.forEach((g) => {
               g.utrNumber = item.utrNumber;
               g.date = entryDate;
+              g.remark = itemRemark; // ✅ NEW
               g.isUtrEntry = true;
               g.isPaid = true; // ✅ ADDED — mark as paid
               g.updatedBy = req.user?.userName || "";
@@ -1753,6 +1773,7 @@ exports.createLedgerEntry = async (req, res) => {
             rentalDueId: item.rentalDueId || null,
             index: withGst === 2 ? ledgerEntryData.index : null,
             amount: ledgerEntryData.amount, // ✅ NEW field only
+            remark: itemRemark, // ✅ NEW
           });
           historyBuckets.push({ year: bucketYear, month: bucketMonthName });
         }
@@ -1789,6 +1810,7 @@ exports.createLedgerEntry = async (req, res) => {
               landOwnerName: matchedOwner ? matchedOwner.name : "",
               utrNumber: item.utrNumber,
               date: item.date,
+              remark: itemRemark, // ✅ NEW
             });
             tdsRecord =
               media.tdsBalanceHistory[media.tdsBalanceHistory.length - 1];
@@ -1800,6 +1822,7 @@ exports.createLedgerEntry = async (req, res) => {
             tdsRecord.paidBy = req.user?.userName || "Admin";
             tdsRecord.utrNumber = item.utrNumber;
             tdsRecord.date = entryDate;
+            tdsRecord.remark = itemRemark; // ✅ NEW
             tdsRecord.dueMonth = dueMonth;
           }
           media.markModified("tdsBalanceHistory");
@@ -1825,6 +1848,7 @@ exports.createLedgerEntry = async (req, res) => {
           rentalOutstandingId,
           rentalDueId,
         } = item;
+        const outstandingRemark = remarkText(item.remark, req.body.remark); // ✅ NEW
 
         if (!["gst", "rental"].includes(entryType)) {
           return errorResponse(
@@ -2006,6 +2030,7 @@ exports.createLedgerEntry = async (req, res) => {
           row.isPaid = true;
           row.isUtrEntry = true;
           row.date = entryDate;
+          row.remark = outstandingRemark; // ✅ NEW
           row.updatedBy = updatedBy;
           row.updatedAt = nowIST();
           media.markModified("gstBalanceHistory");
@@ -2058,6 +2083,7 @@ exports.createLedgerEntry = async (req, res) => {
           }
           row.isPaid = true;
           row.date = entryDate;
+          row.remark = outstandingRemark; // ✅ NEW
           row.updatedBy = updatedBy;
           row.updatedAt = nowIST();
           media.markModified("rentalPayment");
@@ -2112,6 +2138,7 @@ exports.createLedgerEntry = async (req, res) => {
           }
           row.isPaid = true;
           row.date = entryDate;
+          row.remark = outstandingRemark; // ✅ NEW
           row.updatedBy = updatedBy;
           row.updatedAt = nowIST();
           media.markModified("rentalPayment");
@@ -2377,6 +2404,7 @@ async function executeBulkPaymentBatch(req, batchData) {
 
       for (const item of normalSitePayments) {
         const targetType = item.targetType;
+        const itemRemark = remarkText(item.remark, batchData.remark); // ✅ NEW
         const result = {
           mediaId: mId,
           mediaName: media.mediaName,
@@ -2384,6 +2412,7 @@ async function executeBulkPaymentBatch(req, batchData) {
           targetType,
           paymentMode: item.paymentMode,
           utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+          remark: itemRemark, // ✅ NEW
           status: "saved"
         };
 
@@ -2438,7 +2467,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
               date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
               amount, updatedBy, updatedAt: nowIST(), index: media.ledger.length, withGst: effectiveWithGst,
-              isUtrEntry: false
+              isUtrEntry: false, remark: itemRemark // ✅ NEW
             });
             media.markModified("ledger");
           }
@@ -2456,7 +2485,7 @@ async function executeBulkPaymentBatch(req, batchData) {
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: effectiveWithGst, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null
+            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null, remark: itemRemark // ✅ NEW
           });
           media.markModified("ledgerHistory");
         }
@@ -2475,6 +2504,7 @@ async function executeBulkPaymentBatch(req, batchData) {
           }
 
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
+          row.remark = itemRemark; // ✅ NEW
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
 
@@ -2492,7 +2522,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
               netPayable: amount, rentalDueId: null, withGst: 2, month: dueMonthLabel, cycle: null,
               paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-              isUtrEntry: false
+              isUtrEntry: false, remark: itemRemark // ✅ NEW
             });
             media.markModified("ledgerHistory");
           }
@@ -2538,13 +2568,14 @@ async function executeBulkPaymentBatch(req, batchData) {
           amount = Number(row.gstAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.isUtrEntry = true;
           row.date = entryDate; row.updatedBy = updatedBy; row.updatedAt = nowIST();
+          row.remark = itemRemark; // ✅ NEW
           media.markModified("gstBalanceHistory");
 
           if (targetType === "current") {
             media.withGst1Ledger.push({
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
               date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
-              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true
+              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true, remark: itemRemark // ✅ NEW
             });
             media.markModified("withGst1Ledger");
           }
@@ -2562,7 +2593,7 @@ async function executeBulkPaymentBatch(req, batchData) {
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 1, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: true
+            isUtrEntry: true, remark: itemRemark // ✅ NEW
           });
           media.markModified("ledgerHistory");
         }
@@ -2574,6 +2605,7 @@ async function executeBulkPaymentBatch(req, batchData) {
           dueMonthLabel = row.dueMonth;
           amount = Number(row.gstOutStandingAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
+          row.remark = itemRemark; // ✅ NEW
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
 
@@ -2591,7 +2623,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
               netPayable: 0, rentalDueId: null, withGst: 1, month: dueMonthLabel, cycle: null,
               paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-              isUtrEntry: true
+              isUtrEntry: true, remark: itemRemark // ✅ NEW
             });
             media.markModified("ledgerHistory");
           }
@@ -2608,7 +2640,7 @@ async function executeBulkPaymentBatch(req, batchData) {
 
       // ✅ NEW — arrears / advance bill payments of this site
       for (const item of extraBillItems) {
-        const r = await payExtraBillInBatch(mId, item, entryType, entryDate, updatedBy);
+        const r = await payExtraBillInBatch(mId, item, entryType, entryDate, updatedBy, batchData.remark); // ✅ CHANGED — + batch remark
         if (r.status === "saved") totalAmountSaved += r.amount;
         savedEntries.push(r);
       }
@@ -5562,6 +5594,7 @@ const details = (media.mediaDetails || []).map((d) => ({
         ownerName: "",
         utrNumber: lastGst ? lastGst.utrNumber || "" : "",
         date: lastGst ? lastGst.date : null,
+        remark: lastGst ? lastGst.remark || "" : "", // ✅ NEW
         isUtrEntry: gstPaidFull,
         withGst: Number(b.withGst || 0),
         rentalDueApprovalStatus: 3,
@@ -5761,6 +5794,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
         isPaid: paid,
         isVirtual: !paid,
         date: paid && lastPay ? lastPay.date : null,
+        remark: paid && lastPay ? lastPay.remark || "" : "", // ✅ NEW
         updatedAt: lastPay ? lastPay.createdAt || null : null,
         updatedBy: lastPay ? lastPay.createdBy || "" : "",
         cycle: b.dueDate,
