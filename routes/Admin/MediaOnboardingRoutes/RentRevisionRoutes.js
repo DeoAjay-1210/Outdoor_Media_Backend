@@ -21,7 +21,17 @@ router.post(
   },
   createRentRevision,
 );
-router.post("/rent-revision/approve", protect, approveRentRevision);
+// ✅ CHANGED — optional invoice PDF (form-data key "invoice"); raw JSON still works
+router.post(
+  "/rent-revision/approve",
+  protect,
+  upload.any(),
+  (req, res, next) => {
+    req.processFile = processFile;
+    next();
+  },
+  approveRentRevision,
+);
 router.get("/rent-revision-list", protect, getRentRevisionList);
 router.post("/rent-revision-list", protect, getRentRevisionList);
 

@@ -1336,7 +1336,7 @@ function increaseMailBill(media, { month, amount, gstAmount, currentAmount, rent
 }
 
 // one revision → { statusCode, message, data } (statusCode >= 400 = not done)
-async function approveOneRevision(revisionId, { action, remark, role, user, withGst = null }) {
+async function approveOneRevision(revisionId, { action, remark, role, user, withGst = null, invoice = null }) {
   const userName = user?.userName || "";
   if (!revisionId || !mongoose.Types.ObjectId.isValid(String(revisionId))) {
     return { statusCode: 400, message: "revisionId is not a valid ObjectId" };
@@ -1354,6 +1354,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
     // ✅ NEW — withGst 1 / 2 sent → saved on the revision
     const reWithGstError = await applyApproveWithGst(revision, withGst, { role, user });
     if (reWithGstError) return { statusCode: 400, message: reWithGstError };
+    if (invoice) revision.invoice = invoice; // ✅ NEW — invoice PDF sent on approve → replaces the saved one
     const now = nowIST();
     revision.approvalHistory = [
       ...(revision.approvalHistory || []),
@@ -1381,6 +1382,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
         mediaId: revision.mediaId,
         mediaCode: revision.mediaCode,
         ...billTypeFields(revision),
+        invoice: revision.invoice || null, // ✅ NEW
         status: revision.status,
         currentPendingRole: revision.currentPendingRole ?? null,
         currentPendingRoleName: revision.currentPendingRole ? ROLE_NAMES[revision.currentPendingRole] : null,
@@ -1397,6 +1399,8 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
   if (action === 1) {
     const withGstError = await applyApproveWithGst(revision, withGst, { role, user });
     if (withGstError) return { statusCode: 400, message: withGstError };
+    // ✅ NEW — invoice PDF sent on approve → replaces the saved one (CMD mail gstInvoiceUrl)
+    if (invoice) revision.invoice = invoice;
   }
 
   const now = nowIST();
@@ -1420,6 +1424,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
     mediaId: revision.mediaId,
     mediaCode: revision.mediaCode,
     ...billTypeFields(revision),
+    invoice: revision.invoice || null, // ✅ NEW
     status: revision.status,
   });
   const isAdvance = revision.billType === "ADVANCE";
@@ -1640,7 +1645,15 @@ exports.approveRentRevision = async (req, res) => {
       withGst = Number(String(rawWithGst).trim());
       if (withGst !== 1 && withGst !== 2) return errorResponse(res, "withGst must be 1 (GST hold) or 2 (direct)", null, 400);
     }
-    const opts = { action, remark, role, user: req.user, withGst };
+    // ✅ NEW — optional invoice PDF (form-data key "invoice") on approve
+    let invoice = null;
+    const invoiceFile = (req.files || []).find((f) => f.fieldname === "invoice");
+    if (invoiceFile) {
+      const isPdf = invoiceFile.mimetype === "application/pdf" || /\.pdf$/i.test(invoiceFile.originalname || "");
+      if (!isPdf) return errorResponse(res, "invoice must be a PDF file", null, 400);
+      invoice = typeof req.processFile === "function" ? req.processFile(invoiceFile) : null;
+    }
+    const opts = { action, remark, role, user: req.user, withGst, invoice };
 
     if (!isBulk) {
       const r = await approveOneRevision(ids[0], opts);
