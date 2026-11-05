@@ -104,133 +104,138 @@ test("extractBillNumbers reads the bill number dynamically and ignores unrelated
   assert.deepEqual(extractBillNumbers("Thanks\n> Bill Number : adinn0511202601"), []);
 });
 
-const runBillFlow = async (threads, query = { subject: "Test CMD Approved" }) => {
+
+// ── Bill Number-only API (Gmail mocked; no network, no database) ─────────────
+const BILL = "adinn0511202601";
+const gmailCalls = { search: [], getThread: [] };
+// threads: [{ id, subject, messages }]. A thread is returned by search when its id is in `hitIds` (default: all).
+const mockGmail = (threads, hitIds) => {
   const orig = { searchThreads: Gmail.searchThreads, getThread: Gmail.getThread };
-  Gmail.searchThreads = async (q) => threads.filter((t) => t.match(q)).map((t) => ({ id: t.id }));
+  gmailCalls.search = [];
+  gmailCalls.getThread = [];
+  Gmail.searchThreads = async (q) => {
+    gmailCalls.search.push(q);
+    return threads.filter((t) => !hitIds || hitIds.includes(t.id)).map((t) => ({ id: t.id }));
+  };
   Gmail.getThread = async (id) => {
+    gmailCalls.getThread.push(id);
     const t = threads.find((x) => x.id === id);
     return { id, subject: t.subject, messages: t.messages };
   };
+  return () => Object.assign(Gmail, orig);
+};
+const th = (id, ...bodies) => ({ id, subject: "Payment", messages: bodies.map((b, i) => msg(i + 1, b)) });
+
+const call = async (query, threads = [], user = { userType: 3 }) => {
+  const restore = mockGmail(threads);
   let out;
   const res = { status() { return this; }, json(b) { out = b; return this; } };
   try {
-    await GmailController.testUtr({ user: { userType: 3 }, query }, res);
+    await GmailController.testUtr({ user, query }, res);
   } finally {
-    Object.assign(Gmail, orig);
+    restore();
   }
   return out;
 };
-const approvedThread = (id = "T1", bill = "adinn0511202601") => ({
-  id, subject: "Test CMD Approved",
-  match: (q) => q.includes("subject:") ? q.includes("Test CMD Approved") : q.includes(bill),
-  messages: [msg(1, `Grand Total 15,000\nBill Number : ${bill}`)],
-});
 
-test("bill flow: approved mail -> Bill Number -> UTR from the reply in the same thread", async () => {
-  const t = approvedThread();
-  t.messages.push(msg(2, "Paid.\nUTR Number: HDFC92023012200543116\n> Bill Number : adinn0511202601"));
-  const r = (await runBillFlow([t])).data;
-  assert.equal(r.extractionStatus, "found");
-  assert.equal(r.billNumber, "adinn0511202601");
-  assert.equal(r.utr, "HDFC92023012200543116");
-  assert.equal(r.gmailThreadId, "T1");
-  assert.equal(r.sourceMessageId, 2);
-});
-
-test("bill flow: UTR in a separate conversation is used only when it contains the exact Bill Number", async () => {
-  const sep = { id: "T2", subject: "Payment done", match: (q) => q.includes("adinn0511202601"), messages: [msg(1, "Bill Number: adinn0511202601\nUTR: SBIN12345678901234")] };
-  const other = { id: "T3", subject: "UTR", match: (q) => q.includes("adinn0511202601"), messages: [msg(1, "UTR: ICIC99999999999999 for some other bill")] };
-  const r = (await runBillFlow([approvedThread(), sep, other])).data;
-  assert.equal(r.extractionStatus, "found");
-  assert.equal(r.utr, "SBIN12345678901234");
-  assert.equal(r.gmailThreadId, "T2");
-  assert.equal(r.matchedThreads.length, 2); // approved + T2; T3 lacks the Bill Number, so it is rejected
-});
-
-test("bill flow: clear statuses, never a guess", async () => {
-  assert.equal((await runBillFlow([approvedThread()])).data.extractionStatus, "utr_not_found");
-  assert.equal((await runBillFlow([], {})).statusCode, 400);
-  assert.equal((await runBillFlow([])).data.extractionStatus, "approved_mail_not_found");
-  const noBill = { id: "T9", subject: "Test CMD Approved", match: () => true, messages: [msg(1, "no number here")] };
-  assert.equal((await runBillFlow([noBill])).data.extractionStatus, "bill_number_not_found");
-  const two = [approvedThread("A"), approvedThread("B", "adinn0611202601")];
-  assert.equal((await runBillFlow(two)).data.extractionStatus, "multiple_approved_mails");
-
-  const t1 = approvedThread();
-  t1.messages.push(msg(2, "UTR: HDFC92023012200543116"));
-  const t2 = { id: "T2", subject: "again", match: (q) => q.includes("adinn0511202601"), messages: [msg(1, "adinn0511202601 UTR: SBIN12345678901234")] };
-  const multi = (await runBillFlow([t1, t2])).data;
-  assert.equal(multi.extractionStatus, "multiple_review_required");
-  assert.equal(multi.utr, null);
-});
-
-// ── Direct Bill Number mode (?billNumber=) ──────────────────────────────────
-const direct = (threads, query) => runBillFlow(threads, query);
-const bt = (id, text, extra = {}) => ({ id, subject: extra.subject || "Payment", match: (q) => q.includes("adinn0511202601"), messages: [msg(1, text)] });
-
-test("direct billNumber: no subject / approved-mail lookup, UTR returned with source details", async () => {
-  let subjectSearched = false;
-  const t = bt("D1", "Bill Number : adinn0511202601\nUTR Number: HDFC92023012200543116");
-  const orig = Gmail.searchThreads;
-  const r = await runBillFlow([{ ...t, match: (q) => { if (q.includes("subject:")) subjectSearched = true; return q.includes("adinn0511202601"); } }], { billNumber: "adinn0511202601" });
-  Gmail.searchThreads = orig;
-  assert.equal(subjectSearched, false);
+test("1. valid Bill Number returns the UTR with thread, message, sender and date; searches Gmail by the exact code only", async () => {
+  const r = await call({ billNumber: BILL }, [th("T1", `Bill Number : ${BILL}\nTotal 15,000`, "Paid.\nUTR : HDFC92023012200543116")]);
   assert.equal(r.data.extractionStatus, "found");
+  assert.equal(r.data.billNumber, BILL);
   assert.equal(r.data.utr, "HDFC92023012200543116");
-  assert.equal(r.data.gmailThreadId, "D1");
-  assert.equal(r.data.sourceMessageId, 1);
+  assert.equal(r.data.gmailThreadId, "T1");
+  assert.equal(r.data.sourceMessageId, 2);
   assert.ok(r.data.senderEmail && r.data.messageDate);
-  assert.equal(r.data.approvedMail, undefined);
+  assert.deepEqual(gmailCalls.search, [`"${BILL}"`]); // one search: the exact Bill Number
 });
 
-test("direct billNumber: bill_not_found, utr_not_found, exact match only", async () => {
-  assert.equal((await direct([], { billNumber: "adinn0511202601" })).data.extractionStatus, "bill_not_found");
-  // Gmail returns a thread, but it only contains a LONGER code -> not an exact match
-  const longer = bt("D2", "Bill Number : adinn051120260123\nUTR: HDFC92023012200543116");
-  assert.equal((await direct([longer], { billNumber: "adinn0511202601" })).data.extractionStatus, "bill_not_found");
-  // landlord / subject alone never matches: thread lacks the bill number
-  const unrelated = { id: "D3", subject: "UTR Number", match: () => true, messages: [msg(1, "Landlord Ravi paid. UTR: SBIN12345678901234")] };
-  assert.equal((await direct([unrelated], { billNumber: "adinn0511202601" })).data.extractionStatus, "bill_not_found");
-  assert.equal((await direct([bt("D4", "Bill Number : adinn0511202601 pending")], { billNumber: "adinn0511202601" })).data.extractionStatus, "utr_not_found");
+test("10. no subject search and no approved-mail lookup happens internally", async () => {
+  await call({ billNumber: BILL }, [th("T1", `Bill Number : ${BILL}`, "UTR: HDFC92023012200543116")]);
+  assert.equal(gmailCalls.search.length, 1);
+  assert.ok(gmailCalls.search.every((q) => !/subject:/i.test(q) && !/approved/i.test(q)));
+  assert.deepEqual(gmailCalls.getThread, ["T1"]); // only threads returned by the Bill Number search are read
+  assert.equal(typeof Gmail.getThreadSummary, "undefined"); // subject/query listing helper is gone
 });
 
-test("direct billNumber: several threads / different UTRs -> review, nothing picked", async () => {
-  const a = bt("D5", "adinn0511202601 UTR: HDFC92023012200543116");
-  const b = bt("D6", "adinn0511202601 UTR: SBIN12345678901234");
-  const diff = (await direct([a, b], { billNumber: "adinn0511202601" })).data;
-  assert.equal(diff.extractionStatus, "multiple_review_required");
-  assert.equal(diff.utr, null);
-  assert.equal(diff.candidates.length, 2);
-  const same = bt("D7", "adinn0511202601 UTR: HDFC92023012200543116");
-  assert.equal((await direct([a, same], { billNumber: "adinn0511202601" })).data.extractionStatus, "multiple_review_required"); // two conversations: still manual
-  const mixed = bt("D8", "Bill Number : adinn0511202601\nBill Number : adinn0611202602\nUTR: HDFC92023012200543116");
-  assert.equal((await direct([mixed], { billNumber: "adinn0511202601" })).data.extractionStatus, "ambiguous_bill_numbers");
+test("2. unknown Bill Number -> bill_not_found", async () => {
+  assert.equal((await call({ billNumber: "adinn9999999999" }, [])).data.extractionStatus, "bill_not_found");
+  // Gmail may return a thread, but if the code is not in any message body it is not a match
+  const r = await call({ billNumber: BILL }, [th("T9", "Landlord Ravi paid. UTR: SBIN12345678901234")]);
+  assert.equal(r.data.extractionStatus, "bill_not_found");
+  assert.equal(r.data.utr, null);
 });
 
-test("validation: billNumber cannot be combined with other modes; bad format rejected", async () => {
-  for (const q of [{ billNumber: "adinn0511202601", subject: "Test CMD Approved" }, { billNumber: "adinn0511202601", query: "x" }, { billNumber: "adinn0511202601", threadId: "T" }]) {
-    const r = await direct([], q);
-    assert.equal(r.statusCode, 400);
-    assert.match(r.error || r.message, /cannot be combined|one search mode/);
+test("3. exact matching: a longer similar Bill Number does not match", async () => {
+  const r = await call({ billNumber: BILL }, [th("T2", "Bill Number : adinn051120260123\nUTR: HDFC92023012200543116")]);
+  assert.equal(r.data.extractionStatus, "bill_not_found");
+  const prefixed = await call({ billNumber: BILL }, [th("T3", "Bill Number : xadinn0511202601\nUTR: HDFC92023012200543116")]);
+  assert.equal(prefixed.data.extractionStatus, "bill_not_found");
+});
+
+test("4. several conversations require manual review", async () => {
+  const same = await call({ billNumber: BILL }, [th("A", `${BILL} UTR: HDFC92023012200543116`), th("B", `${BILL} UTR: HDFC92023012200543116`)]);
+  assert.equal(same.data.extractionStatus, "multiple_review_required");
+  assert.equal(same.data.utr, null);
+  assert.equal(same.data.matchedThreads.length, 2);
+});
+
+test("5. several different UTRs require manual review", async () => {
+  const across = await call({ billNumber: BILL }, [th("A", `${BILL} UTR: HDFC92023012200543116`), th("B", `${BILL} UTR: SBIN12345678901234`)]);
+  assert.equal(across.data.extractionStatus, "multiple_review_required");
+  assert.equal(across.data.candidates.length, 2);
+  const within = await call({ billNumber: BILL }, [th("A", `${BILL}`, "UTR: HDFC92023012200543116", "Correction UTR: SBIN12345678901234")]);
+  assert.equal(within.data.extractionStatus, "multiple_review_required");
+  assert.equal(within.data.utr, null);
+});
+
+test("6. several Bill Numbers in one conversation -> ambiguous_bill_numbers", async () => {
+  const r = await call({ billNumber: BILL }, [th("A", `Bill Number : ${BILL}\nBill Number : adinn0611202602\nUTR: HDFC92023012200543116`)]);
+  assert.equal(r.data.extractionStatus, "ambiguous_bill_numbers");
+  assert.equal(r.data.utr, null);
+  assert.deepEqual(r.data.matchedThreads[0].otherBillNumbers, ["adinn0611202602"]);
+});
+
+test("7. Bill Number found but no UTR -> utr_not_found", async () => {
+  const r = await call({ billNumber: BILL }, [th("A", `Bill Number : ${BILL}`, "Approved, payment tomorrow.", "Invoice No: 202601234567")]);
+  assert.equal(r.data.extractionStatus, "utr_not_found");
+  assert.equal(r.data.utr, null);
+});
+
+test("8. missing / malformed Bill Number -> HTTP 400; removed search parameters rejected", async () => {
+  for (const q of [{}, { billNumber: "" }, { billNumber: "abc" }, { billNumber: "no-digits-here" }, { billNumber: 'adinn"0511202601' }]) {
+    const r = await call(q);
+    assert.equal(r.statusCode, 400, JSON.stringify(q));
   }
-  assert.equal((await direct([], { billNumber: "abc" })).statusCode, 400);
-  assert.equal((await direct([], { billNumber: "no-digits-here" })).statusCode, 400);
+  for (const extra of [{ subject: "Test CMD Approved" }, { query: "x" }, { threadId: "T" }, { approvedThreadId: "T" }]) {
+    const r = await call({ billNumber: BILL, ...extra });
+    assert.equal(r.statusCode, 400);
+    assert.match(r.message, /Unsupported parameter/);
+  }
+  assert.equal(gmailCalls.search.length, 0); // rejected before any Gmail call
+  assert.equal((await call({ billNumber: BILL }, [], { userType: 1 })).statusCode, 403); // CMD only
 });
 
-test("existing query and threadId modes still work", async () => {
-  const t = { id: "Q1", subject: "Get UTR Number", match: (q) => q.includes("Get UTR Number"), messages: [msg(1, "UTR Number: HDFC92023012200543116")] };
-  const byQuery = (await runBillFlow([t], { query: 'subject:"Get UTR Number"' })).data;
-  assert.equal(byQuery.extractionStatus, "found");
-  assert.equal(byQuery.utr, "HDFC92023012200543116");
-  const byThread = (await runBillFlow([t], { threadId: "Q1" })).data;
-  assert.equal(byThread.threadId, "Q1");
-  assert.equal(byThread.utr, "HDFC92023012200543116");
-  const two = [t, { ...t, id: "Q2" }];
-  const origSummary = Gmail.getThreadSummary;
-  Gmail.getThreadSummary = async (id) => ({ threadId: id });
+test("9. works over HTTP with CMD authentication (401 without a token, 403 for other roles)", async () => {
+  process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret";
+  const express = require("express");
+  const jwt = require("jsonwebtoken");
+  const app = express();
+  app.use("/api/gmail", require("../routes/Admin/GmailRoutes/GmailRoutes"));
+  const srv = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+  const restore = mockGmail([th("H1", `Bill Number : ${BILL}`, "UTR : HDFC92023012200543116")]);
   try {
-    assert.equal((await runBillFlow(two, { query: 'subject:"Get UTR Number"' })).data.extractionStatus, "multiple_threads");
+    const url = `http://127.0.0.1:${srv.address().port}/api/gmail/test-utr?billNumber=${BILL}`;
+    const token = (t) => "Bearer " + jwt.sign({ id: "u1", userType: t, userName: "t", userPhone: "9999999999" }, process.env.JWT_SECRET);
+    assert.equal((await fetch(url)).status, 401);
+    assert.equal((await fetch(url, { headers: { Authorization: token(1) } })).status, 403);
+    const ok = await fetch(url, { headers: { Authorization: token(3) } });
+    assert.equal(ok.status, 200);
+    const body = await ok.json();
+    assert.equal(body.data.extractionStatus, "found");
+    assert.equal(body.data.utr, "HDFC92023012200543116");
+    assert.equal((await fetch(url.replace(BILL, "abc"), { headers: { Authorization: token(3) } })).status, 400);
   } finally {
-    Gmail.getThreadSummary = origSummary;
+    restore();
+    srv.close();
   }
 });

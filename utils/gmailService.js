@@ -154,23 +154,6 @@ const getThread = async (threadId) => {
   return { id: data.id, subject: messages[0]?.subject || "", messages };
 };
 
-/** Light thread info for the "which conversation?" list (headers only). */
-const getThreadSummary = async (threadId) => {
-  const data = await gmailGet(authorizedClient(), `/threads/${encodeURIComponent(threadId)}`, {
-    format: "metadata",
-    metadataHeaders: ["Subject", "From", "Date"],
-  });
-  const first = data.messages?.[0];
-  const last = data.messages?.[data.messages.length - 1];
-  return {
-    threadId: data.id,
-    subject: first ? header(first, "Subject") : "",
-    messageCount: (data.messages || []).length,
-    firstFrom: first ? header(first, "From") : "",
-    lastDate: last?.internalDate ? new Date(Number(last.internalDate)).toISOString() : "",
-  };
-};
-
 module.exports = {
   SCOPES,
   buildAuthUrl,
@@ -179,7 +162,6 @@ module.exports = {
   getProfile,
   searchThreads,
   getThread,
-  getThreadSummary,
   // exported for unit tests
   parseMessage,
   decodeBase64Url,
