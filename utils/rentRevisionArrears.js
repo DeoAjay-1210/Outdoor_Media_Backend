@@ -657,7 +657,7 @@ const ownerModePaid = (owner, mode) => (mode === "Cash" ? owner.paidCash : owner
  * Pays an arrears bill (rent or GST). Mutates and returns the bill copy.
  * Throws { message, statusCode } on a bad request.
  */
-function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrNumber, date, userName, parentWithGst }) {
+function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrNumber, date, userName, parentWithGst, remark = "" }) {
   // shallow copies — keeps ObjectIds as ObjectIds
   const bill = { ...billIn };
   bill.owners = (billIn.owners || []).map((o) => ({ ...o }));
@@ -676,7 +676,7 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
     if (Number(bill.gstAmount || 0) <= 0) throw { message: `${bill.label} has no GST`, statusCode: 400 };
     if (gstPending <= 0) throw { message: `${bill.label} GST already paid`, statusCode: 400 };
     bill.gstPaid = Number(bill.gstAmount || 0);
-    const row = { _id: new mongoose.Types.ObjectId(), type: "gst", amount: gstPending, paymentMode: mode || "Online", utrNumber: utrNumber || "", date: payDate, createdBy: userName, createdAt: nowIST() }; // ✅ CHANGED — IST
+    const row = { _id: new mongoose.Types.ObjectId(), type: "gst", amount: gstPending, paymentMode: mode || "Online", utrNumber: utrNumber || "", date: payDate, remark: String(remark || "").trim(), createdBy: userName, createdAt: nowIST() }; // ✅ CHANGED — IST, + remark
     bill.payments.push(row);
     saved.push(row);
   } else {
@@ -708,6 +708,7 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
           paymentMode: md,
           utrNumber: md === "Online" ? utrNumber || "" : "",
           date: payDate,
+          remark: String(remark || "").trim(), // ✅ NEW — ledger-save remark
           createdBy: userName,
           createdAt: nowIST(), // ✅ CHANGED — IST
         };
@@ -760,6 +761,7 @@ function arrearsBlock(bills) {
         paymentMode: p.paymentMode,
         utrNumber: p.utrNumber,
         date: p.date,
+        remark: p.remark || "", // ✅ NEW
       })),
     })),
   };
@@ -836,6 +838,7 @@ function arrearsLedgerRows(b) {
       paymentMode: ownerMode(o),
       utrNumber: paid && lastPay ? lastPay.utrNumber || "" : "",
       date: paid && lastPay ? lastPay.date : null,
+      remark: paid && lastPay ? lastPay.remark || "" : "", // ✅ NEW
       status: 1,
       dueMonth: b.dueMonth,
       cycle: b.dueDate,
@@ -933,6 +936,7 @@ function arrearsGstRow(b) {
     ownerName: "",
     utrNumber: lastGst ? lastGst.utrNumber || "" : "",
     date: lastGst ? lastGst.date : null,
+    remark: lastGst ? lastGst.remark || "" : "", // ✅ NEW
     isUtrEntry: gstPaidFull,
     withGst: b.withGst,
     rentalDueApprovalStatus: 3, // ✅ NEW — same as the New Bill / advance ledger rows
@@ -1089,6 +1093,7 @@ function advanceBlock(bills, billMonths = null) {
         paymentMode: p.paymentMode,
         utrNumber: p.utrNumber,
         date: p.date,
+        remark: p.remark || "", // ✅ NEW
       })),
     })),
   };
@@ -1238,6 +1243,7 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
       paymentMode: p.paymentMode,
       utrNumber: p.utrNumber || "",
       date: p.date,
+      remark: p.remark || "", // ✅ NEW
       status: 1,
       month: monthName,
       dueMonth: b.dueMonth,

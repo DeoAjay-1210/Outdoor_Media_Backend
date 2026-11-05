@@ -3603,39 +3603,52 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       return [revisionItem(r)];
     };
     const allRevisions = await RentRevision.find({ status: { $in: ["Pending", "Approved"] } }).lean(); // ✅ CHANGED — also used for pending / approved split
-    const revisionsInScope = allRevisions.filter(revisionInTotals); // ✅ CHANGED — revisionStatus aware (absent → revisionInScope)
-    const revisionsByMedia = new Map(); // mediaId → { bill: [items], advance: [items] }
     const revisionMonthItems = (r) =>
       revisionItems(r).filter((i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey);
-    revisionsInScope.forEach((r) => {
-      const items = revisionMonthItems(r);
-      if (items.length === 0) return;
-      const k = String(r.mediaId);
-      if (!revisionsByMedia.has(k)) revisionsByMedia.set(k, { bill: [], advance: [] });
-      revisionsByMedia.get(k)[revisionKind(r)].push(...items);
-    });
+    // mediaId → { bill: [items], advance: [items] }
+    const buildRevisionsByMedia = (list) => {
+      const map = new Map();
+      list.forEach((r) => {
+        const items = revisionMonthItems(r);
+        if (items.length === 0) return;
+        const k = String(r.mediaId);
+        if (!map.has(k)) map.set(k, { bill: [], advance: [] });
+        map.get(k)[revisionKind(r)].push(...items);
+      });
+      return map;
+    };
+    // ✅ CHANGED — rentRevisionAmount (summary) → every revision in scope;
+    // entries[] → revisionStatus aware (absent → same as the summary)
+    const revisionsByMedia = buildRevisionsByMedia(allRevisions.filter(revisionInScope));
+    const revisionsByMediaForEntries = revisionStatusFilter
+      ? buildRevisionsByMedia(allRevisions.filter(revisionInTotals))
+      : revisionsByMedia;
     // ✅ NEW — pendingAmount / approvedAmount: mediaId → { bill: { pending, approved }, advance: {...} }
-    const revisionSplitByMedia = new Map();
-    allRevisions.forEach((r) => {
-      const state = revisionState(r);
-      if (!state || (revisionStatusFilter && state !== revisionStatusFilter)) return;
-      const items = revisionMonthItems(r);
-      if (items.length === 0) return;
-      const k = String(r.mediaId);
-      if (!revisionSplitByMedia.has(k))
-        revisionSplitByMedia.set(k, { bill: { pending: [], approved: [] }, advance: { pending: [], approved: [] } });
-      revisionSplitByMedia.get(k)[revisionKind(r)][state].push(...items);
-    });
+    const buildRevisionSplit = (statusFilter) => {
+      const map = new Map();
+      allRevisions.forEach((r) => {
+        const state = revisionState(r);
+        if (!state || (statusFilter && state !== statusFilter)) return;
+        const items = revisionMonthItems(r);
+        if (items.length === 0) return;
+        const k = String(r.mediaId);
+        if (!map.has(k)) map.set(k, { bill: { pending: [], approved: [] }, advance: { pending: [], approved: [] } });
+        map.get(k)[revisionKind(r)][state].push(...items);
+      });
+      return map;
+    };
+    const revisionSplitByMedia = buildRevisionSplit(null); // summary
+    const revisionSplitForEntries = revisionStatusFilter ? buildRevisionSplit(revisionStatusFilter) : revisionSplitByMedia;
     const splitTotals = (items) => {
       const amount = items.reduce((s, i) => s + i.amount, 0);
       const gstAmount = items.reduce((s, i) => s + i.gstAmount, 0);
       return { count: items.length, amount, gstAmount, totalAmount: amount + gstAmount };
     };
-    const splitOf = (mediaIds, kind) => {
+    const splitOf = (mediaIds, kind, splitMap = revisionSplitByMedia) => {
       const pending = [];
       const approved = [];
       mediaIds.forEach((id) => {
-        const sp = revisionSplitByMedia.get(String(id));
+        const sp = splitMap.get(String(id));
         if (!sp) return;
         pending.push(...sp[kind].pending);
         approved.push(...sp[kind].approved);
@@ -3657,7 +3670,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         const totals = { bill: [], advance: [] };
         entry.sites = (entry.sites || [])
           .map((s) => {
-            const rev = revisionsByMedia.get(String(s.mediaId));
+            const rev = revisionsByMediaForEntries.get(String(s.mediaId)); // ✅ CHANGED — revisionStatus aware
             const bill = includeBillAmountFilter && rev && rev.bill.length ? rev.bill : null;
             const advance = includeAdvanceAmountFilter && rev && rev.advance.length ? rev.advance : null;
             if (!bill && !advance) return null;
@@ -3665,8 +3678,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             if (advance) totals.advance.push(...advance);
             return {
               ...s,
-              ...(bill ? { billAmount: revisionBlock(bill, splitOf([s.mediaId], "bill")) } : {}),
-              ...(advance ? { advanceAmount: revisionBlock(advance, splitOf([s.mediaId], "advance")) } : {}),
+              ...(bill ? { billAmount: revisionBlock(bill, splitOf([s.mediaId], "bill", revisionSplitForEntries)) } : {}),
+              ...(advance ? { advanceAmount: revisionBlock(advance, splitOf([s.mediaId], "advance", revisionSplitForEntries)) } : {}),
             };
           })
           .filter(Boolean);
@@ -3675,8 +3688,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           continue;
         }
         const entryMediaIds = [...new Set(entry.sites.map((s) => String(s.mediaId)))]; // ✅ NEW
-        if (includeBillAmountFilter) entry.billAmount = revisionBlock(totals.bill, splitOf(entryMediaIds, "bill"));
-        if (includeAdvanceAmountFilter) entry.advanceAmount = revisionBlock(totals.advance, splitOf(entryMediaIds, "advance"));
+        if (includeBillAmountFilter) entry.billAmount = revisionBlock(totals.bill, splitOf(entryMediaIds, "bill", revisionSplitForEntries));
+        if (includeAdvanceAmountFilter) entry.advanceAmount = revisionBlock(totals.advance, splitOf(entryMediaIds, "advance", revisionSplitForEntries));
       }
     }
 

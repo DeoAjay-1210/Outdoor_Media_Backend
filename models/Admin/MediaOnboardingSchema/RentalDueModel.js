@@ -300,6 +300,7 @@ const gstBalanceSchema = new mongoose.Schema(
      utrNumber: { type: String, trim: true, default: "" },
     date: { type: Date, default: null },
     isUtrEntry: { type: Boolean, default: false },
+    remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
     updatedBy: { type: String, trim: true, default: null },   // ← ADDED
     updatedAt: { type: Date, default: null },                 
   },

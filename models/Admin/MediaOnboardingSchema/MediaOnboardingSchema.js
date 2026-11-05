@@ -261,6 +261,7 @@ const ledgerSchema = new mongoose.Schema({
   index: { type: Number, default: null },
   amount: { type: Number, default: 0, min: 0 },
   isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
+  remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -290,6 +291,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     index: { type: Number, default: null },
     amount: { type: Number, default: 0, min: 0 },
     isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
+    remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
   },
   { _id: true },
 );
@@ -325,6 +327,7 @@ const tdsBalanceSchema = new mongoose.Schema(
     landOwnerName: { type: String, trim: true, default: "" },
     utrNumber: { type: String, trim: true, default: "" },
     date: { type: Date, default: null },
+    remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
   },
   { _id: true },
 );
@@ -381,6 +384,7 @@ const gstOutstandingHistorySchema = new mongoose.Schema({
   utrNumber: { type: String, trim: true, default: null },
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
+  remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
   // populated only when paymentMode === "Cash+Online"
   paymentBreakup: [
     {
@@ -411,6 +415,7 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
   utrNumber: { type: String, trim: true, default: null },
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
+  remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
   paymentBreakup: [
     {
       paymentMode: { type: String, enum: ["Cash", "Online"] },
