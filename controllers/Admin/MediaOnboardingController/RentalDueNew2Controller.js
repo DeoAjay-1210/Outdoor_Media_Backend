@@ -1568,6 +1568,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
           const siteObj = {
             mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
             mediaName: activeDetail.mediaName || site.mediaName || "",
+            billNo: siteEntry?.billNo || "", // ✅ NEW — this bill's number
           };
 
           if (activeDetail.location || site.location) {
@@ -1679,6 +1680,9 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         data.landOwners = rootLandOwners;
         data.sites = sitesPayload;
       }
+
+      // ✅ NEW — bill number(s) of the mailed bill(s) (single bill → one number)
+      data.billNo = [...new Set(sitesInGroupData.map((it) => it?.entry?.billNo).filter(Boolean))].join(", ");
 
       // ✅ NEW — extra blocks added to data (e.g. rentRevision for an arrears bill mail)
       if (extraData && typeof extraData === "object") Object.assign(data, extraData);
@@ -5128,6 +5132,7 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
     },
     { returnDocument: 'after',timestamps: false  },
   );
+  if (created) await assignBillNoToNewBill(Media, created, newEntry); // ✅ NEW — bill number
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
 // ─────────────────────────────────────────────────────────────
@@ -6476,6 +6481,7 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaName: face.mediaName,
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
+            billNo: entry.billNo || null, // ✅ NEW — bill number
             campaignStatus: entry.campaignStatus ?? null, // ✅ NEW — 0 / 1, null = not set
             billDate: siteBillDate(item), // ✅ NEW — site bill date slot (5/10/15/20/25/30, default 5)
             totalSqFt: face.totalSqFt,

@@ -54,6 +54,27 @@ const formatSteps = (steps) =>
     remark: s.remark || "",
   }));
 
+// ✅ NEW — latest decided step (Approved / Rejected, by `at`; Skipped ignored);
+// same time → the higher role (CMD). null when nobody decided yet.
+const lastRemarkOf = (steps) => {
+  const decided = (steps || []).filter((st) => st && st.at && (st.status === "Approved" || st.status === "Rejected"));
+  if (!decided.length) return null;
+  const last = decided.reduce((a, b) => {
+    const ta = new Date(a.at).getTime();
+    const tb = new Date(b.at).getTime();
+    if (tb !== ta) return tb > ta ? b : a;
+    return Number(b.role) > Number(a.role) ? b : a;
+  });
+  return {
+    role: last.role,
+    roleName: last.roleName || ROLE_NAMES[last.role],
+    status: last.status,
+    by: last.by || "",
+    remark: last.remark || "",
+    at: last.at || null,
+  };
+};
+
 const RENT_REVISION_MEDIA_FIELDS =
   "mediaDetails rentalPayment landOwners appraisal rentalDue arrearsDue gstApplicableFlag agreement status ledger ledgerHistory";
 
@@ -608,6 +629,7 @@ const revisionSummary = (r, plan = null) => ({
   status: r.status,
   currentPendingRole: r.currentPendingRole ?? null,
   currentPendingRoleName: r.currentPendingRole ? ROLE_NAMES[r.currentPendingRole] : null,
+  lastRemark: lastRemarkOf(r.approvalSteps), // ✅ NEW
   approvalSteps: formatSteps(r.approvalSteps),
   requestedBy: r.requestedBy,
   requestedByRole: r.requestedByRole,
@@ -1386,6 +1408,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
         status: revision.status,
         currentPendingRole: revision.currentPendingRole ?? null,
         currentPendingRoleName: revision.currentPendingRole ? ROLE_NAMES[revision.currentPendingRole] : null,
+        lastRemark: lastRemarkOf(revision.approvalSteps), // ✅ NEW
         approvalSteps: formatSteps(revision.approvalSteps),
         approvalHistory: revision.approvalHistory,
       },
@@ -1439,7 +1462,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
     return {
       statusCode: 200,
       message: `${noun} rejected by ${ROLE_NAMES[role]}`,
-      data: { ...base(), approvalSteps: formatSteps(revision.approvalSteps) },
+      data: { ...base(), lastRemark: lastRemarkOf(revision.approvalSteps), approvalSteps: formatSteps(revision.approvalSteps) }, // ✅ CHANGED — + lastRemark
     };
   }
 
@@ -1454,6 +1477,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
         ...base(),
         currentPendingRole: role + 1,
         currentPendingRoleName: ROLE_NAMES[role + 1],
+        lastRemark: lastRemarkOf(revision.approvalSteps), // ✅ NEW
         approvalSteps: formatSteps(revision.approvalSteps),
       },
     };
@@ -1601,6 +1625,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
     data: {
       ...base(),
       currentPendingRole: null,
+      lastRemark: lastRemarkOf(revision.approvalSteps), // ✅ NEW
       approvalSteps: formatSteps(revision.approvalSteps),
       mail: revision.mail || null, // ✅ NEW — new bill CMD mail result
     },
@@ -1716,8 +1741,15 @@ function revisionSiteBlock(media) {
 // Same-month bills (multi-face) → one row, the highest withGst. null when the
 // site is not found.
 async function revisionSiteBills(mediaId) {
-  const media = await Media.findById(mediaId).select("mediaDetails rentalPayment landOwners rentalDue").lean();
+  const media = await Media.findById(mediaId).select("mediaDetails rentalPayment landOwners rentalDue arrearsDue").lean(); // ✅ CHANGED — + arrearsDue
   if (!media) return null;
+  // ✅ NEW — months with a CMD approved New Bill / Advance bill (by the bill's own month)
+  const extraBillMonths = { arrears: new Set(), advance: new Set() };
+  (media.arrearsDue || []).forEach((b) => {
+    if (!b || (b.type !== "arrears" && b.type !== "advance") || Number(b.approvalStatus) !== 3) return;
+    const label = b.dueMonth || (b.dueDate ? monthLabelOfKey(monthKey(b.dueDate)) : "");
+    if (label) extraBillMonths[b.type].add(label);
+  });
   const rp = media.rentalPayment || {};
   const ymd = (d) => {
     const dt = d ? new Date(d) : null;
@@ -1759,7 +1791,13 @@ async function revisionSiteBills(mediaId) {
     nextBillingDate: ymd(rp.nextBillingDate),
     nextBillMonth: next ? monthLabelOfKey(monthKey(next)) : "",
     billCount: months.length,
-    bills: months.map((m) => ({ dueMonth: m.dueMonth, withGst: m.withGst, cmdApproved: m.cmdApproved })),
+    bills: months.map((m) => ({
+      dueMonth: m.dueMonth,
+      withGst: m.withGst,
+      cmdApproved: m.cmdApproved,
+      newBillGenerated: extraBillMonths.arrears.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+      advanceGenerated: extraBillMonths.advance.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+    })),
   };
 }
 
@@ -1880,6 +1918,7 @@ exports.getRentRevisionList = async (req, res) => {
         status: r.status,
         currentPendingRole: r.currentPendingRole ?? null,
         currentPendingRoleName: r.currentPendingRole ? ROLE_NAMES[r.currentPendingRole] : null,
+        lastRemark: lastRemarkOf(r.approvalSteps), // ✅ NEW
         approvalSteps: formatSteps(r.approvalSteps),
         arrearsTotal,
         arrearsPaid,
