@@ -1716,8 +1716,15 @@ function revisionSiteBlock(media) {
 // Same-month bills (multi-face) → one row, the highest withGst. null when the
 // site is not found.
 async function revisionSiteBills(mediaId) {
-  const media = await Media.findById(mediaId).select("mediaDetails rentalPayment landOwners rentalDue").lean();
+  const media = await Media.findById(mediaId).select("mediaDetails rentalPayment landOwners rentalDue arrearsDue").lean(); // ✅ CHANGED — + arrearsDue
   if (!media) return null;
+  // ✅ NEW — months with a CMD approved New Bill / Advance bill (by the bill's own month)
+  const extraBillMonths = { arrears: new Set(), advance: new Set() };
+  (media.arrearsDue || []).forEach((b) => {
+    if (!b || (b.type !== "arrears" && b.type !== "advance") || Number(b.approvalStatus) !== 3) return;
+    const label = b.dueMonth || (b.dueDate ? monthLabelOfKey(monthKey(b.dueDate)) : "");
+    if (label) extraBillMonths[b.type].add(label);
+  });
   const rp = media.rentalPayment || {};
   const ymd = (d) => {
     const dt = d ? new Date(d) : null;
@@ -1759,7 +1766,13 @@ async function revisionSiteBills(mediaId) {
     nextBillingDate: ymd(rp.nextBillingDate),
     nextBillMonth: next ? monthLabelOfKey(monthKey(next)) : "",
     billCount: months.length,
-    bills: months.map((m) => ({ dueMonth: m.dueMonth, withGst: m.withGst, cmdApproved: m.cmdApproved })),
+    bills: months.map((m) => ({
+      dueMonth: m.dueMonth,
+      withGst: m.withGst,
+      cmdApproved: m.cmdApproved,
+      newBillGenerated: extraBillMonths.arrears.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+      advanceGenerated: extraBillMonths.advance.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+    })),
   };
 }
 
