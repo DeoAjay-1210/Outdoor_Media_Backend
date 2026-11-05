@@ -105,6 +105,8 @@ const rentalDueEntrySchema = new mongoose.Schema(
     // ── Billing Info ──────────────────────────────────────────
     dueMonth: { type: String, trim: true }, // e.g. "June 2026"
     dueDate: { type: Date, required: true }, // actual due date
+    // ✅ NEW — bill number, given when the bill is created (utils/billNo.js)
+    billNo: { type: String, trim: true, default: null },
 
     netPayable: { type: Number, default: 0, min: 0 },
     withGst: { type: Number, enum: [0,1, 2], default: 0 }, // 1 withGST 2. withOutGST
