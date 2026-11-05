@@ -163,3 +163,74 @@ test("bill flow: clear statuses, never a guess", async () => {
   assert.equal(multi.extractionStatus, "multiple_review_required");
   assert.equal(multi.utr, null);
 });
+
+// ── Direct Bill Number mode (?billNumber=) ──────────────────────────────────
+const direct = (threads, query) => runBillFlow(threads, query);
+const bt = (id, text, extra = {}) => ({ id, subject: extra.subject || "Payment", match: (q) => q.includes("adinn0511202601"), messages: [msg(1, text)] });
+
+test("direct billNumber: no subject / approved-mail lookup, UTR returned with source details", async () => {
+  let subjectSearched = false;
+  const t = bt("D1", "Bill Number : adinn0511202601\nUTR Number: HDFC92023012200543116");
+  const orig = Gmail.searchThreads;
+  const r = await runBillFlow([{ ...t, match: (q) => { if (q.includes("subject:")) subjectSearched = true; return q.includes("adinn0511202601"); } }], { billNumber: "adinn0511202601" });
+  Gmail.searchThreads = orig;
+  assert.equal(subjectSearched, false);
+  assert.equal(r.data.extractionStatus, "found");
+  assert.equal(r.data.utr, "HDFC92023012200543116");
+  assert.equal(r.data.gmailThreadId, "D1");
+  assert.equal(r.data.sourceMessageId, 1);
+  assert.ok(r.data.senderEmail && r.data.messageDate);
+  assert.equal(r.data.approvedMail, undefined);
+});
+
+test("direct billNumber: bill_not_found, utr_not_found, exact match only", async () => {
+  assert.equal((await direct([], { billNumber: "adinn0511202601" })).data.extractionStatus, "bill_not_found");
+  // Gmail returns a thread, but it only contains a LONGER code -> not an exact match
+  const longer = bt("D2", "Bill Number : adinn051120260123\nUTR: HDFC92023012200543116");
+  assert.equal((await direct([longer], { billNumber: "adinn0511202601" })).data.extractionStatus, "bill_not_found");
+  // landlord / subject alone never matches: thread lacks the bill number
+  const unrelated = { id: "D3", subject: "UTR Number", match: () => true, messages: [msg(1, "Landlord Ravi paid. UTR: SBIN12345678901234")] };
+  assert.equal((await direct([unrelated], { billNumber: "adinn0511202601" })).data.extractionStatus, "bill_not_found");
+  assert.equal((await direct([bt("D4", "Bill Number : adinn0511202601 pending")], { billNumber: "adinn0511202601" })).data.extractionStatus, "utr_not_found");
+});
+
+test("direct billNumber: several threads / different UTRs -> review, nothing picked", async () => {
+  const a = bt("D5", "adinn0511202601 UTR: HDFC92023012200543116");
+  const b = bt("D6", "adinn0511202601 UTR: SBIN12345678901234");
+  const diff = (await direct([a, b], { billNumber: "adinn0511202601" })).data;
+  assert.equal(diff.extractionStatus, "multiple_review_required");
+  assert.equal(diff.utr, null);
+  assert.equal(diff.candidates.length, 2);
+  const same = bt("D7", "adinn0511202601 UTR: HDFC92023012200543116");
+  assert.equal((await direct([a, same], { billNumber: "adinn0511202601" })).data.extractionStatus, "multiple_review_required"); // two conversations: still manual
+  const mixed = bt("D8", "Bill Number : adinn0511202601\nBill Number : adinn0611202602\nUTR: HDFC92023012200543116");
+  assert.equal((await direct([mixed], { billNumber: "adinn0511202601" })).data.extractionStatus, "ambiguous_bill_numbers");
+});
+
+test("validation: billNumber cannot be combined with other modes; bad format rejected", async () => {
+  for (const q of [{ billNumber: "adinn0511202601", subject: "Test CMD Approved" }, { billNumber: "adinn0511202601", query: "x" }, { billNumber: "adinn0511202601", threadId: "T" }]) {
+    const r = await direct([], q);
+    assert.equal(r.statusCode, 400);
+    assert.match(r.error || r.message, /cannot be combined|one search mode/);
+  }
+  assert.equal((await direct([], { billNumber: "abc" })).statusCode, 400);
+  assert.equal((await direct([], { billNumber: "no-digits-here" })).statusCode, 400);
+});
+
+test("existing query and threadId modes still work", async () => {
+  const t = { id: "Q1", subject: "Get UTR Number", match: (q) => q.includes("Get UTR Number"), messages: [msg(1, "UTR Number: HDFC92023012200543116")] };
+  const byQuery = (await runBillFlow([t], { query: 'subject:"Get UTR Number"' })).data;
+  assert.equal(byQuery.extractionStatus, "found");
+  assert.equal(byQuery.utr, "HDFC92023012200543116");
+  const byThread = (await runBillFlow([t], { threadId: "Q1" })).data;
+  assert.equal(byThread.threadId, "Q1");
+  assert.equal(byThread.utr, "HDFC92023012200543116");
+  const two = [t, { ...t, id: "Q2" }];
+  const origSummary = Gmail.getThreadSummary;
+  Gmail.getThreadSummary = async (id) => ({ threadId: id });
+  try {
+    assert.equal((await runBillFlow(two, { query: 'subject:"Get UTR Number"' })).data.extractionStatus, "multiple_threads");
+  } finally {
+    Gmail.getThreadSummary = origSummary;
+  }
+});

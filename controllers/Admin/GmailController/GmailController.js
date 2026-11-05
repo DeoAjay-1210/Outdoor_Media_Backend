@@ -6,6 +6,7 @@
  *   GET /api/gmail/oauth/callback   (Google redirect, validated by a signed `state`)
  *   GET /api/gmail/test-utr         (CMD only)  -> thread + extracted UTR, no DB update
  *       ?subject=<CMD Approved subject>  Bill Number flow (approved mail -> Bill Number -> payment thread -> UTR)
+ *       ?billNumber=<Bill Number>        direct Bill Number search (no subject lookup); cannot be combined with the others
  *       ?query= / ?threadId=             plain thread read + UTR extraction
  */
 const jwt = require("jsonwebtoken");
@@ -73,6 +74,57 @@ const escapeQuotes = (v) => String(v).replace(/"/g, "");
 const subjectOf = (thread) => thread.subject || "";
 const brief = (m) => ({ id: m.id, from: m.from, date: m.date, subject: m.subject, bodySource: m.bodySource });
 
+const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
+const regexEscape = (v) => String(v).replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
+// exact match: not part of a longer code (adinn0511202601 must not match adinn051120260123)
+const BILL_CHAR = "[A-Za-z0-9\\-/]";
+const containsExactBill = (text, billNumber) =>
+  new RegExp(`(?<!${BILL_CHAR})${regexEscape(billNumber)}(?!${BILL_CHAR})`, "i").test(text || "");
+
+// Shared by both modes. Finds the conversations that really contain this exact Bill Number and extracts the UTR.
+// Never picks between several candidates. `approved` (optional) is the already-read CMD Approved thread.
+const resolveBill = async (res, billNumber, maxResults, ctx, approved) => {
+  const hits = await Gmail.searchThreads(`"${escapeQuotes(billNumber)}"`, maxResults);
+  const ids = [...new Set([...(approved ? [approved.id] : []), ...hits.map((t) => t.id)])];
+  const threads = [];
+  for (const id of ids) {
+    const th = approved && id === approved.id ? approved : await Gmail.getThread(id);
+    // verified: the exact Bill Number appears in a message body (quoted text counts, a reply quotes the approval)
+    const verified = th.messages.some((m) => containsExactBill(m.bodyText, billNumber));
+    if (!verified) continue;
+    const otherBills = [...new Set(th.messages.flatMap((m) => extractBillNumbers(m.bodyText)))].filter((b) => b.toLowerCase() !== billNumber.toLowerCase());
+    const r = extractUtrFromThread(th.messages);
+    threads.push({ threadId: th.id, subject: subjectOf(th), messageCount: th.messages.length, isApprovedThread: !!approved && th.id === approved.id, otherBillNumbers: otherBills, extractionStatus: r.status, utr: r.utr, utrSource: r.source, candidates: r.candidates });
+  }
+  const matchedThreads = threads.map(({ candidates, ...t }) => t);
+  const common = { ...ctx, billNumber, matchedThreads };
+
+  if (!threads.length) return successResponse(res, "No Gmail conversation contains this exact Bill Number", { ...common, utr: null, extractionStatus: "bill_not_found" });
+
+  const withUtr = threads.filter((t) => t.candidates.length);
+  const allCandidates = withUtr.flatMap((t) => t.candidates.map((c) => ({ ...c, threadId: t.threadId })));
+  const distinct = [...new Set(allCandidates.map((c) => c.utr))];
+
+  if (!distinct.length) return successResponse(res, "Bill Number found, but no UTR in any matching conversation", { ...common, utr: null, extractionStatus: "utr_not_found" });
+  if (distinct.length > 1 || withUtr.length > 1) {
+    return successResponse(res, "More than one UTR / conversation matched; manual review required", { ...common, utr: null, candidates: allCandidates, extractionStatus: "multiple_review_required" });
+  }
+  // the one UTR sits in a conversation that also talks about another Bill Number: it may belong to that one
+  if (withUtr[0].otherBillNumbers.length) {
+    return successResponse(res, "The matching conversation mentions other Bill Numbers too; manual review required", { ...common, utr: null, candidates: allCandidates, extractionStatus: "ambiguous_bill_numbers" });
+  }
+  const src = allCandidates[0];
+  return successResponse(res, "UTR extracted for this Bill Number (read-only, no database update)", {
+    ...common,
+    utr: src.utr,
+    gmailThreadId: src.threadId,
+    sourceMessageId: src.messageId,
+    senderEmail: src.from,
+    messageDate: src.date,
+    extractionStatus: "found",
+  });
+};
+
 // ?subject=Test CMD Approved[&approvedThreadId=...][&maxResults=10]
 // 1 find the CMD Approved mail  2 read its Bill Number  3 find conversations containing that exact Bill Number
 // 4 extract the labelled UTR. Read-only; never picks between several candidates.
@@ -105,52 +157,39 @@ const testUtrByBill = async (req, res, subject, maxResults) => {
   if (billNumbers.length > 1) return successResponse(res, "More than one Bill Number in the CMD Approved mail; nothing chosen", { ...base, approvedMail: approvedInfo, billNumbers, extractionStatus: "multiple_bill_numbers" });
   const billNumber = billNumbers[0];
 
-  // step 3: conversations that mention the exact Bill Number (the approved thread itself is always included)
-  const hits = await Gmail.searchThreads(`"${escapeQuotes(billNumber)}"`, maxResults);
-  const ids = [...new Set([approved.id, ...hits.map((t) => t.id)])];
-  const needle = billNumber.toLowerCase();
-  const threads = [];
-  for (const id of ids) {
-    const th = id === approved.id ? approved : await Gmail.getThread(id);
-    // verified: the Bill Number really appears in a message (quoted text counts, a reply quotes the approval)
-    if (!th.messages.some((m) => m.bodyText.toLowerCase().includes(needle))) continue;
-    const r = extractUtrFromThread(th.messages);
-    threads.push({ threadId: th.id, subject: subjectOf(th), messageCount: th.messages.length, isApprovedThread: th.id === approved.id, extractionStatus: r.status, utr: r.utr, utrSource: r.source, candidates: r.candidates });
-  }
-  const matchedThreads = threads.map(({ candidates, ...t }) => t);
-
-  // step 4: decide, never guess
-  const withUtr = threads.filter((t) => t.candidates.length);
-  const allCandidates = withUtr.flatMap((t) => t.candidates.map((c) => ({ ...c, threadId: t.threadId })));
-  const distinct = [...new Set(allCandidates.map((c) => c.utr))];
-  const common = { ...base, billNumber, approvedMail: approvedInfo, matchedThreads };
-
-  if (!distinct.length) return successResponse(res, "Bill Number found, but no UTR in any matching conversation", { ...common, utr: null, extractionStatus: "utr_not_found" });
-  if (distinct.length > 1 || withUtr.length > 1) {
-    return successResponse(res, "More than one UTR / conversation matched; manual review required", { ...common, utr: null, candidates: allCandidates, extractionStatus: "multiple_review_required" });
-  }
-  const src = allCandidates[0];
-  return successResponse(res, "UTR extracted for this Bill Number (read-only, no database update)", {
-    ...common,
-    utr: src.utr,
-    gmailThreadId: src.threadId,
-    sourceMessageId: src.messageId,
-    senderEmail: src.from,
-    messageDate: src.date,
-    extractionStatus: "found",
-  });
+  return resolveBill(res, billNumber, maxResults, { ...base, approvedMail: approvedInfo }, approved);
 };
+
+// ?billNumber=adinn0511202601[&maxResults=10]  — no subject / CMD Approved lookup at all
+const testUtrByBillNumber = (res, billNumber, maxResults) => resolveBill(res, billNumber, maxResults, {}, null);
 
 // GET /api/gmail/test-utr?query=subject:"Get UTR Number"[&threadId=...][&maxResults=10]
 const testUtr = async (req, res) => {
   if (!isCmd(req)) return errorResponse(res, "Only CMD can use this test API", null, 403);
   const query = String(req.query.query || "").trim();
   const pickedThreadId = String(req.query.threadId || "").trim();
+  const directBill = String(req.query.billNumber || "").trim();
+  const maxResults = Math.min(Math.max(Number(req.query.maxResults) || 10, 1), 25);
+
+  if (directBill) {
+    // validation rule: billNumber is its own search mode; combining it with another mode is rejected, never silently resolved
+    if (req.query.subject || query || pickedThreadId || req.query.approvedThreadId) {
+      return errorResponse(res, "billNumber cannot be combined with subject, query, threadId or approvedThreadId. Use one search mode per request.", null, 400);
+    }
+    if (!BILL_NUMBER_FORMAT.test(directBill) || !/\d/.test(directBill)) {
+      return errorResponse(res, "billNumber must be 6-40 letters/digits (may include - or /) and contain a digit", null, 400);
+    }
+    try {
+      return await testUtrByBillNumber(res, directBill, maxResults);
+    } catch (err) {
+      return fail(res, err, "Gmail test failed");
+    }
+  }
+
   const subject = String(req.query.subject || process.env.GMAIL_CMD_APPROVED_SUBJECT || "").trim();
   if (!query && !pickedThreadId && !subject) {
-    return errorResponse(res, 'Provide ?subject=<CMD Approved subject> (Bill Number flow) or ?query=... (plain thread read)', null, 400);
+    return errorResponse(res, "Provide ?subject=<CMD Approved subject> (Bill Number flow), ?billNumber=<Bill Number> (direct search) or ?query=... (plain thread read)", null, 400);
   }
-  const maxResults = Math.min(Math.max(Number(req.query.maxResults) || 10, 1), 25);
 
   try {
     if (!query && !pickedThreadId) return await testUtrByBill(req, res, subject, maxResults);
