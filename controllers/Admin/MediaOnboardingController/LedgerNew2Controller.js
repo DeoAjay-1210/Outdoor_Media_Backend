@@ -6885,8 +6885,37 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
   mediaId: media._id,
 }));
 
+  // ✅ NEW — every outstanding/balance row carries rentalDueApprovalStatus,
+  // ownerApprovalDate and createdAt (bill-type based: a newBill row gets the
+  // New Bill's createdAt, an advance row the Advance's createdAt, a normal row
+  // its rental due's createdAt). Source: the linked rentalDue / arrearsDue bill
+  // (by rentalDueId / _id), else the normal rentalDue of the same dueMonth.
+  // Existing values on a row are never overwritten.
+  const withApprovalFields = (rows) =>
+    (rows || []).map((row) => {
+      const r = row && typeof row.toObject === "function" ? row.toObject() : { ...row };
+      const linkId = String(r.rentalDueId || r._id || "");
+      const bt = String(r.billType || "").toLowerCase();
+      const isSpecial = bt === "newbill" || bt === "advance";
+      let due =
+        linkId &&
+        [...(media.rentalDue || []), ...(media.arrearsDue || [])].find(
+          (d) => d && String(d._id) === linkId,
+        );
+      if (!due && !isSpecial) {
+        due = (media.rentalDue || []).find((d) => d && d.dueMonth === r.dueMonth);
+      }
+      const pick = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== "");
+      return {
+        ...r,
+        rentalDueApprovalStatus: pick(r.rentalDueApprovalStatus, due?.approvalStatus) ?? null,
+        ownerApprovalDate: pick(r.ownerApprovalDate, due?.ownerApprovalDate) ?? null,
+        createdAt: pick(r.createdAt, due?.createdAt) ?? null,
+      };
+    });
+
   return {
-   
+
     mediaDetails: details,
     rentalPayment: media.rentalPayment,
     landOwners: matchingLandOwners,
@@ -6924,9 +6953,9 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     outStantStatus:
       media.rentalPayment?.outStantStatus ??
       (outstanding.totalOutstandingAmount > 0 ? 1 : 0),
-    gstOutstandingHistory: media.rentalPayment?.gstOutstandingHistory || [],
-    gstBalanceHistory: fullGstBalanceHistory,
-    rentalOutstandingHistory: fullRentalOutstandingHistory,
+    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory),
+    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory),
+    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory),
     previousLedger: media.previousLedger || null,
   };
 }
