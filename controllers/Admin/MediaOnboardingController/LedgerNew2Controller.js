@@ -2064,6 +2064,8 @@ exports.createLedgerEntry = async (req, res) => {
 };
 
 
+const { assignBillNoToNewBill, withBillNos } = require("../../../utils/billNo"); // ✅ NEW
+
 async function atomicallyEnsureRentalDue(mediaId, newEntry) {
   // 1) Try to find an existing entry for this month that IS NOT approved.
   //    If found, we update its dueDate just in case (syncing).
@@ -2102,6 +2104,7 @@ async function atomicallyEnsureRentalDue(mediaId, newEntry) {
     },
     { returnDocument: "after", timestamps: false },
   );
+  if (created) await assignBillNoToNewBill(Media, created, newEntry); // ✅ NEW — bill number
 
   return created
     ? { result: created, action: "created" }
@@ -4578,7 +4581,7 @@ const cityFilter = [
         ...overallOutstandingTotals, // ✅ NEW
         overallLedgerSummary, // ✅ NEW
         // billGroups, // ✅ NEW
-        mediaList: finalMediaListData,
+        mediaList: await withBillNos(Media, finalMediaListData), // ✅ CHANGED — + billNo on bill rows
       },
       200,
     );
@@ -4874,7 +4877,7 @@ exports.getLedgerHistory = async (req, res) => {
           currentMonthResolved: `${String(autoCurrentMonthYM.month).padStart(2, "0")}-${autoCurrentMonthYM.year}`, // ✅ RENAMED from currentMonthAuto — the value actually used (frontend's, or server fallback)
         },
         notFoundMediaIds: notFoundIds,
-        mediaHistoryList,
+        mediaHistoryList: await withBillNos(Media, mediaHistoryList), // ✅ CHANGED — + billNo on bill rows
         billGroups, // ✅ NEW
         summary,
       },
