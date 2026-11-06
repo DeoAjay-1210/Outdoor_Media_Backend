@@ -31,6 +31,7 @@ const { formatDraft } = require("./RentalDueDraftController"); // ✅ NEW — re
 const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema"); // ✅ NEW — rentalDueEntries[].rentRevision
 const { effectiveAppraisalHold } = require("./AppraisalHoldController"); // ✅ NEW — hold shown on later bills too
 const { siteBillDate } = require("../../../utils/billDate"); // ✅ NEW — rentalDueEntries[].billDate
+const { assignBillNoToNewBill } = require("../../../utils/billNo"); // ✅ NEW — bill number assignment
 const { overdueRemarkReceivers, istRemarkEditTimes } = require("./OverdueRemarkChatController"); // ✅ NEW — remark chat moved there
 
 // ✅ NEW — CMD notification helpers. A Rental Executive (STAFF) / Rental
