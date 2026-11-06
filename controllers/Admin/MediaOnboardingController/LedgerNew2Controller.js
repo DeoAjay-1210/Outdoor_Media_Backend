@@ -6894,28 +6894,28 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
   // its rental due's createdAt). Source: the linked rentalDue / arrearsDue bill
   // (by rentalDueId / _id), else the normal rentalDue of the same dueMonth.
   // Existing values on a row are never overwritten.
-  // const withApprovalFields = (rows) =>
-  //   (rows || []).map((row) => {
-  //     const r = row && typeof row.toObject === "function" ? row.toObject() : { ...row };
-  //     const linkId = String(r.rentalDueId || r._id || "");
-  //     const bt = String(r.billType || "").toLowerCase();
-  //     const isSpecial = bt === "newbill" || bt === "advance";
-  //     let due =
-  //       linkId &&
-  //       [...(media.rentalDue || []), ...(media.arrearsDue || [])].find(
-  //         (d) => d && String(d._id) === linkId,
-  //       );
-  //     if (!due && !isSpecial) {
-  //       due = (media.rentalDue || []).find((d) => d && d.dueMonth === r.dueMonth);
-  //     }
-  //     const pick = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== "");
-  //     return {
-  //       ...r,
-  //       rentalDueApprovalStatus: pick(r.rentalDueApprovalStatus, due?.approvalStatus) ?? null,
-  //       ownerApprovalDate: pick(r.ownerApprovalDate, due?.ownerApprovalDate) ?? null,
-  //       createdAt: pick(r.createdAt, due?.createdAt) ?? null,
-  //     };
-  //   });
+   const withApprovalFields = (rows) =>
+     (rows || []).map((row) => {
+       const r = row && typeof row.toObject === "function" ? row.toObject() : { ...row };
+       const linkId = String(r.rentalDueId || r._id || "");
+       const bt = String(r.billType || "").toLowerCase();
+       const isSpecial = bt === "newbill" || bt === "advance";
+       let due =
+         linkId &&
+         [...(media.rentalDue || []), ...(media.arrearsDue || [])].find(
+           (d) => d && String(d._id) === linkId,
+         );
+       if (!due && !isSpecial) {
+         due = (media.rentalDue || []).find((d) => d && d.dueMonth === r.dueMonth);
+       }
+       const pick = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== "");
+       return {
+         ...r,
+         rentalDueApprovalStatus: pick(r.rentalDueApprovalStatus, due?.approvalStatus) ?? null,
+         ownerApprovalDate: pick(r.ownerApprovalDate, due?.ownerApprovalDate) ?? null,
+         createdAt: pick(r.createdAt, due?.createdAt) ?? null,
+       };
+     });
 
   return {
 
