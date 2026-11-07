@@ -1564,7 +1564,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
           const siteObj = {
             mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
             mediaName: activeDetail.mediaName || site.mediaName || "",
-            billNo: siteEntry?.billNo || "", // ✅ NEW — this bill's number
+            billNo: siteEntry?.adinn_ooh_bills || "", // ✅ CHANGED — mail shows the ADINN OOH bill number (adinn_ooh_bills)
           };
 
           if (activeDetail.location || site.location) {
@@ -1677,8 +1677,9 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         data.sites = sitesPayload;
       }
 
-      // ✅ NEW — bill number(s) of the mailed bill(s) (single bill → one number)
-      data.billNo = [...new Set(sitesInGroupData.map((it) => it?.entry?.billNo).filter(Boolean))].join(", ");
+      // ✅ CHANGED — bill number(s) of the mailed bill(s) (single bill → one number):
+      // the ADINN OOH bill number (adinn_ooh_bills, given just before this mail)
+      data.billNo = [...new Set(sitesInGroupData.map((it) => it?.entry?.adinn_ooh_bills).filter(Boolean))].join(", ");
 
       const mailPayload = {
         mailtype: "cmdapproval",
