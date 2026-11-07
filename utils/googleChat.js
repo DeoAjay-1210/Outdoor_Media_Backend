@@ -117,6 +117,16 @@ function rentalDueChatKey(media, entry) {
   return `${String(plain._id || "")}:${month}${isSeparateBill ? `:${String(entryFace._id)}` : ""}`;
 }
 
+// ✅ NEW — "ADNOOHBILL…" of the bill; separate landlord bills → each landlord's
+// number with the landlord name. "" when the bill has no number yet.
+function adinnBillNoText(entry) {
+  const perOwner = (entry?.adinn_ooh_bills_landOwners || []).filter((o) => o && o.adinn_ooh_bills);
+  if (perOwner.length > 1) {
+    return perOwner.map((o) => `${o.adinn_ooh_bills}${o.landOwnerName ? ` (${o.landOwnerName})` : ""}`).join(", ");
+  }
+  return entry?.adinn_ooh_bills || "";
+}
+
 function buildMessage({ media, entry, userType, userName, action, cycleDate, status = "" }) {
   const plain = typeof media?.toObject === "function" ? media.toObject({ virtuals: true }) : media || {};
   // separate bill (siteBillMode 2) → only that face; single bill → the
@@ -149,10 +159,17 @@ function buildMessage({ media, entry, userType, userName, action, cycleDate, sta
   const title = "*Rental Due Approved*";
   const by = `${ROLE_LABEL[Number(userType)] || "User"}${userName ? ` (${userName})` : ""}`;
 
+  // ✅ NEW — ADINN OOH bill number (adinn_ooh_bills), given when the bill is
+  // fully approved; shown on CMD-approved messages and whenever the bill has one
+  const billNoText = adinnBillNoText(entry);
+  const billNoLine =
+    billNoText || (Number(userType) === 3 && action === "approved") ? [`*Bill No:* ${billNoText || "-"}`] : [];
+
   return [
     `${title} — by ${by}`,
     ...(status ? [status] : []),
     `*Site Name:* ${siteName}`,
+    ...billNoLine,
     `*Site Code:* ${siteCode}`,
     `*Landowner Name:* ${landOwnerName}`,
     `*Due Month:* ${dueMonth}`,
