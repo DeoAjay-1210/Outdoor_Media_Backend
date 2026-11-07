@@ -107,6 +107,25 @@ const rentalDueEntrySchema = new mongoose.Schema(
     dueDate: { type: Date, required: true }, // actual due date
     // ✅ NEW — bill number, given when the bill is created (utils/billNo.js)
     billNo: { type: String, trim: true, default: null },
+    // ✅ NEW — lifetime ADINN OOH bill number (utils/adinnOohBills.js), given when
+    // the bill is fully approved: "ADNOOHBILL" + DDMMYYYY (bill date) + lifetime
+    // serial, e.g. ADNOOHBILL05112026367. Never changed once set. Authoritative
+    // copy + uniqueness: AdinnOohBillRegistry collection.
+    adinn_ooh_bills: { type: String, trim: true, default: null },
+    // ✅ NEW — separate-landlord bills only (multiple landlords, landOwnerBillMode 2):
+    // one number per landlord; adinn_ooh_bills above = the first landlord's number.
+    adinn_ooh_bills_landOwners: {
+      type: [
+        {
+          _id: false,
+          landOwnerId: { type: mongoose.Schema.Types.ObjectId, default: null },
+          landOwnerMasterId: { type: mongoose.Schema.Types.ObjectId, default: null },
+          landOwnerName: { type: String, trim: true, default: "" },
+          adinn_ooh_bills: { type: String, trim: true, default: null },
+        },
+      ],
+      default: undefined,
+    },
 
     netPayable: { type: Number, default: 0, min: 0 },
     withGst: { type: Number, enum: [0,1, 2], default: 0 }, // 1 withGST 2. withOutGST
