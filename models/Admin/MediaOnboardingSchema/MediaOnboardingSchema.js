@@ -47,6 +47,19 @@ const rentalAmountHistorySchema = new mongoose.Schema(
     isManualChange: { type: Boolean, default: false },
     isInitial: { type: Boolean, default: false },
     isAppraisal: { type: Boolean, default: false },
+    // ✅ NEW — rent revision rows: normalBillIncrease / normalBillDecrease /
+    // newBill / newBillDecrease / advance, the month changed and the remark.
+    // isRevisionLog → only a month's bill changed (site rent same) — not used
+    // as a rent change (utils/appraisalRent.js)
+    changeType: { type: String, default: undefined },
+    changeLabel: { type: String, default: undefined },
+    month: { type: String, default: undefined },
+    adjustInMonth: { type: String, default: undefined },
+    changeAmount: { type: Number, default: undefined },
+    monthAmountBefore: { type: Number, default: undefined },
+    monthAmountAfter: { type: Number, default: undefined },
+    remark: { type: String, default: undefined },
+    isRevisionLog: { type: Boolean, default: undefined },
   },
   { _id: false },
 );

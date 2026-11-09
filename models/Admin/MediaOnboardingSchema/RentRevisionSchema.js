@@ -30,7 +30,14 @@ const RentRevisionSchema = new mongoose.Schema(
     mediaName: { type: String, trim: true, default: "" },
     // ✅ NEW — BILL: rent increase (arrears) | ADVANCE: advance deducted from the
     // next bill. Old revisions (no billType) → BILL, old pricing.
-    billType: { type: String, enum: ["BILL", "ADVANCE"], default: null, index: true },
+    // ✅ CHANGED — + NORMAL_BILL: bill not CMD approved, increase / decrease saved
+    // and applied at once (no approval)
+    billType: { type: String, enum: ["BILL", "ADVANCE", "NORMAL_BILL"], default: null, index: true },
+    // ✅ NEW — increase (default) | decrease (BILL: CMD approved bill goes down,
+    // after Executive → Manager → CMD; NORMAL_BILL: bill goes down at once)
+    revisionAction: { type: String, enum: ["increase", "decrease"], default: "increase" },
+    // ✅ NEW — normal (Executive → Manager → CMD) | auto (NORMAL_BILL, no approval)
+    approvalType: { type: String, enum: ["normal", "auto"], default: "normal" },
     fromMonth: { type: String, trim: true, required: true }, // "August 2026" (ADVANCE: advanceMonth)
     fromDate: { type: Date, required: true }, // 1st of fromMonth (UTC)
     // ✅ NEW — BILL applyToAllMonths 1: amount added to the site rent from the

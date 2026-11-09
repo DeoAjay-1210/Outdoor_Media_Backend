@@ -3602,7 +3602,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       }
       return [revisionItem(r)];
     };
-    const allRevisions = await RentRevision.find({ status: { $in: ["Pending", "Approved"] } }).lean(); // ✅ CHANGED — also used for pending / approved split
+    const allRevisions = await RentRevision.find({ status: { $in: ["Pending", "Approved"] }, billType: { $ne: "NORMAL_BILL" } }).lean(); // ✅ CHANGED — also used for pending / approved split; NORMAL_BILL (no New Bill) not counted
     const revisionMonthItems = (r) =>
       revisionItems(r).filter((i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey);
     // mediaId → { bill: [items], advance: [items] }
