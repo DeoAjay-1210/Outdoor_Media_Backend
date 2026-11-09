@@ -1569,7 +1569,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
           const siteObj = {
             mediaCode: activeDetail.mediaCode || site.mediaCode || site.siteCode || "",
             mediaName: activeDetail.mediaName || site.mediaName || "",
-            billNo: siteEntry?.billNo || "", // ✅ NEW — this bill's number
+            billNo: siteEntry?.adinn_ooh_bills || "", // ✅ CHANGED — mail shows the ADINN OOH bill number (adinn_ooh_bills)
           };
 
           if (activeDetail.location || site.location) {
@@ -1682,8 +1682,9 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         data.sites = sitesPayload;
       }
 
-      // ✅ NEW — bill number(s) of the mailed bill(s) (single bill → one number)
-      data.billNo = [...new Set(sitesInGroupData.map((it) => it?.entry?.billNo).filter(Boolean))].join(", ");
+      // ✅ CHANGED — bill number(s) of the mailed bill(s) (single bill → one number):
+      // the ADINN OOH bill number (adinn_ooh_bills, given just before this mail)
+      data.billNo = [...new Set(sitesInGroupData.map((it) => it?.entry?.adinn_ooh_bills).filter(Boolean))].join(", ");
 
       // ✅ NEW — extra blocks added to data (e.g. rentRevision for an arrears bill mail)
       if (extraData && typeof extraData === "object") Object.assign(data, extraData);
@@ -2387,6 +2388,8 @@ async function processSingleRentalDue({
 
     if (result.success) {
       await media.save({ timestamps: false });
+      // ✅ NEW — ADINN OOH bill number for a bill fully approved by this save
+      if (result.approvalStatus === 3) await ensureAdinnOohBills(media);
       // ✅ NEW — rental due history, only after the save succeeded
       recordRentalDueChanges({ media, entry: result.entryDoc, changes: changeLog, userId, userName, userType });
       if (!skipMail && userType === ROLE.OWNER && result.approvalStatus === 3) {
@@ -2514,6 +2517,8 @@ async function processSingleRentalDue({
     monthBucket.entries.push({ rentalDueId: savedEntry._id, siteName: media.mediaName, campaignName, reason, dueDate: dueDateObj, netPayable: Number(newEntry.netPayable) || 0, approvalStatus: newEntry.approvalStatus, savedBy: userName, savedByRole: userType, updatedAt: nowIST(), updatedBy: userName });
 
     await media.save({ timestamps: false });
+    // ✅ NEW — ADINN OOH bill number when the bill is fully approved here
+    if (savedEntry.approvalStatus === 3) await ensureAdinnOohBills(media);
     // ✅ NEW — rental due history: initial values of a newly created bill
     if (atomicAction === "created") {
       recordRentalDueChanges({
@@ -2739,6 +2744,8 @@ exports.saveRentalDue = async (req, res) => {
 
         // Save the document ONCE after all updates for its faces/cycles are done
         await media.save({ timestamps: false });
+        // ✅ NEW — ADINN OOH bill numbers for bills of this site fully approved now
+        if (batchApprovedSites.some((s) => s.media === media)) await ensureAdinnOohBills(media);
 
         // ✅ NEW — rental due history, only after the save succeeded
         for (const h of groupHistoryChanges) {
@@ -5087,6 +5094,9 @@ exports.revertRentalApproval = async (req, res) => {
   }
 };
 
+const { assignBillNoToNewBill } = require("../../../utils/billNo"); // ✅ NEW
+const { ensureAdinnOohBills } = require("../../../utils/adinnOohBills"); // ✅ NEW — ADINN OOH bill number
+
 async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
   const updated = await Media.findOneAndUpdate(
     {
@@ -6483,6 +6493,8 @@ const details = (item.mediaDetails || []).map((d) => ({
             mediaCode: face.mediaCode,
             rentalDueId: entry._id, // User requested alias
             billNo: entry.billNo || null, // ✅ NEW — bill number
+            adinn_ooh_bills: entry.adinn_ooh_bills || null, // ✅ NEW — ADINN OOH bill number (null until approved)
+            adinn_ooh_bills_landOwners: entry.adinn_ooh_bills_landOwners || [], // ✅ NEW — separate landlord bills
             campaignStatus: entry.campaignStatus ?? null, // ✅ NEW — 0 / 1, null = not set
             billDate: siteBillDate(item), // ✅ NEW — site bill date slot (5/10/15/20/25/30, default 5)
             totalSqFt: face.totalSqFt,

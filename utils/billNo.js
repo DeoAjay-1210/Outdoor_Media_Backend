@@ -70,9 +70,15 @@ async function withBillNos(Media, list) {
   try {
     if (!Array.isArray(list) || !list.length) return list;
     const ids = [...new Set(list.map((m) => String(m?._id || m?.mediaId || "")).filter(Boolean))];
-    const docs = await Media.find({ _id: { $in: ids } }).select("rentalDue._id rentalDue.billNo").lean();
+    const docs = await Media.find({ _id: { $in: ids } }).select("rentalDue._id rentalDue.billNo rentalDue.adinn_ooh_bills").lean();
     const billNoById = new Map();
-    docs.forEach((d) => (d.rentalDue || []).forEach((r) => billNoById.set(String(r._id), r.billNo || null)));
+    const adinnById = new Map(); // ✅ NEW — ADINN OOH bill number (utils/adinnOohBills.js)
+    docs.forEach((d) =>
+      (d.rentalDue || []).forEach((r) => {
+        billNoById.set(String(r._id), r.billNo || null);
+        adinnById.set(String(r._id), r.adinn_ooh_bills || null);
+      }),
+    );
     if (!billNoById.size) return list;
     const seen = new WeakSet();
     const walk = (node) => {
@@ -80,9 +86,13 @@ async function withBillNos(Media, list) {
       seen.add(node);
       if (Array.isArray(node)) return node.forEach(walk);
       if (node instanceof Date || node._bsontype) return;
+      const key = node.rentalDueId ? String(node.rentalDueId) : node._id ? String(node._id) : null;
       if (node.billNo === undefined) {
-        const key = node.rentalDueId ? String(node.rentalDueId) : node._id ? String(node._id) : null;
         if (key && billNoById.has(key)) node.billNo = billNoById.get(key);
+      }
+      // ✅ NEW — adinn_ooh_bills next to billNo (null until the bill is approved)
+      if (node.adinn_ooh_bills === undefined && key && adinnById.has(key)) {
+        node.adinn_ooh_bills = adinnById.get(key);
       }
       Object.values(node).forEach(walk);
     };
