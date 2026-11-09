@@ -21,6 +21,7 @@ const fcmRoutes = require("./routes/Admin/NotificationRoutes/FcmRoutes");
 const billingDateRevertRoutes = require("./routes/Admin/MediaOnboardingRoutes/BillingDateRevertRoutes");
 const rentRevisionRoutes = require("./routes/Admin/MediaOnboardingRoutes/RentRevisionRoutes"); // ✅ NEW — rent revision + arrears
 const appUpdateRoutes = require("./routes/Admin/AppUpdateRoutes/AppUpdateRoutes");
+const gmailRoutes = require("./routes/Admin/GmailRoutes/GmailRoutes"); // Gmail UTR integration (read-only OAuth)
 const Media = require("./models/Admin/MediaOnboardingSchema/MediaOnboardingSchema")
 // SKIP_STARTUP_MAINTENANCE=true skips the five database maintenance routines below
 // (startup run AND their cron schedules). Default (unset/false): unchanged behaviour.
@@ -118,6 +119,7 @@ app.use("/admin", fcmRoutes);
 app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", rentRevisionRoutes); // ✅ NEW
 app.use("/admin", appUpdateRoutes);
+app.use("/api/gmail", gmailRoutes);
 // Auto-publish a new release/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
 if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
 app.use('/gstdetails', gstDetailRoutes);
