@@ -5094,7 +5094,7 @@ exports.revertRentalApproval = async (req, res) => {
   }
 };
 
-const { assignBillNoToNewBill } = require("../../../utils/billNo"); // ✅ NEW
+// const { assignBillNoToNewBill } = require("../../../utils/billNo"); // ✅ NEW
 const { ensureAdinnOohBills } = require("../../../utils/adinnOohBills"); // ✅ NEW — ADINN OOH bill number
 
 async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
