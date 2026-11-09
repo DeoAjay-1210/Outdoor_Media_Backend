@@ -5065,6 +5065,43 @@ const deleteMedia = async (req, res) => {
   }
 };
 
+const checkMediaCode = async (req, res) => {
+  try {
+    const mediaCode = req.body.mediaCode !== undefined ? req.body.mediaCode : req.query.mediaCode;
+    const mediaId = req.body.mediaId !== undefined ? req.body.mediaId : req.query.mediaId;
+
+    if (!mediaCode || String(mediaCode).trim() === "") {
+      return successResponse(res, "Media code is required", { exists: false, available: true });
+    }
+
+    const code = String(mediaCode).trim();
+    const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^${escapeRegExp(code)}$`, "i");
+
+    const query = {
+      $or: [
+        { mediaCode: regex },
+        { "mediaDetails.mediaCode": regex }
+      ]
+    };
+
+    if (mediaId && mongoose.Types.ObjectId.isValid(mediaId)) {
+      query._id = { $ne: new mongoose.Types.ObjectId(mediaId) };
+    }
+
+    const existing = await MediaOnboarding.findOne(query).select("_id mediaCode mediaDetails.mediaCode");
+
+    const exists = !!existing;
+    return successResponse(res, exists ? "Media code already exists" : "Media code is available", {
+      exists,
+      available: !exists,
+      mediaCode: code,
+    });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
 module.exports = {
   mediaOnboarding,
   mediaList,
@@ -5074,6 +5111,7 @@ module.exports = {
   syncBillingCyclesNow,
   applyDueAppraisals,
   deleteMedia, // ✅ NEW
+  checkMediaCode, // ✅ NEW
   recomputeAppraisalSummary, // ✅ NEW — used by the appraisal hold release (date shift)
   handleAppraisalLogic, // exported for the appraisal revision tests
   recordAppraisalRevision, // exported for the appraisal revision tests
