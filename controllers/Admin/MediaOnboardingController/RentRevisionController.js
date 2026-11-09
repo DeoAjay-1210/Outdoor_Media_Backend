@@ -130,6 +130,21 @@ const parseRevisionWithGst = (value) => {
 };
 const WITH_GST_LABELS = { 0: "As per bill", 1: "GST Hold", 2: "Direct (No Hold)" };
 
+// ✅ NEW — next months amount (applyToAllMonths 1): increase → nextIncreaseAmount,
+// decrease → nextDecreaseAmount (the other key → error). Returns
+// { amount: positive | null (not sent → last listed month's amount) } | { error }
+function parseNextAmount(src, action, prefix = "") {
+  const sentInc = src.nextIncreaseAmount !== undefined && src.nextIncreaseAmount !== null && String(src.nextIncreaseAmount).trim() !== "";
+  const sentDec = src.nextDecreaseAmount !== undefined && src.nextDecreaseAmount !== null && String(src.nextDecreaseAmount).trim() !== "";
+  const at = prefix ? prefix.replace(/\.$/, ": ") : ""; // "sites[0]." → "sites[0]: "
+  if (action === "decrease" && sentInc) return { error: `${at}use nextDecreaseAmount for a decrease` };
+  if (action !== "decrease" && sentDec) return { error: `${at}use nextIncreaseAmount for an increase` };
+  const key = action === "decrease" ? "nextDecreaseAmount" : "nextIncreaseAmount";
+  const amount = parseAmount(src[key]);
+  if (amount === undefined) return { error: `${prefix}${key} must be more than 0` };
+  return { amount };
+}
+
 // ✅ NEW — positive amount or null (not sent); invalid → undefined
 const parseAmount = (value) => {
   if (value === undefined || value === null || String(value).trim() === "") return null;
@@ -719,7 +734,12 @@ function billTypeFields(r, plan = null) {
     billType: r.billType === "NORMAL_BILL" ? "NORMAL_BILL" : "BILL", // ✅ CHANGED
     revisionAction: r.revisionAction || "increase", // ✅ NEW
     approvalType: r.approvalType || "normal", // ✅ NEW
-    ...(r.revisionAction === "decrease" ? { decreaseAmount: Math.abs(increaseAmount) } : {}), // ✅ NEW
+    ...(r.revisionAction === "decrease"
+      ? {
+          decreaseAmount: Math.abs(increaseAmount),
+          nextDecreaseAmount: r.nextIncreaseAmount !== null && r.nextIncreaseAmount !== undefined ? Math.abs(Number(r.nextIncreaseAmount)) : null, // ✅ NEW
+        }
+      : {}), // ✅ NEW
     fromMonth: r.fromMonth,
     oldRent: r.oldRent,
     increaseAmount,
@@ -864,13 +884,13 @@ exports.createRentRevision = async (req, res) => {
       applyToAllMonths = parseApplyToAllMonths(body.applyToAllMonths);
       if (applyToAllMonths === undefined) return errorResponse(res, "applyToAllMonths must be 0 or 1", null, 400);
       if (applyToAllMonths === 1) {
-        nextIncreaseAmount = parseAmount(body.nextIncreaseAmount);
-        if (nextIncreaseAmount === null && (billType === "NORMAL_BILL" || revisionAction === "decrease")) {
-          nextIncreaseAmount = null; // last listed month's amount
-        } else if (nextIncreaseAmount === null) {
+        // ✅ CHANGED — decrease → nextDecreaseAmount (optional); increase → nextIncreaseAmount
+        const next = parseNextAmount(body, revisionAction);
+        if (next.error) return errorResponse(res, next.error, null, 400);
+        nextIncreaseAmount = next.amount;
+        if (nextIncreaseAmount === null && billType !== "NORMAL_BILL" && revisionAction !== "decrease") {
           return errorResponse(res, "nextIncreaseAmount is required when applyToAllMonths is 1", null, 400);
         }
-        if (nextIncreaseAmount === undefined) return errorResponse(res, "nextIncreaseAmount must be more than 0", null, 400);
       }
       fromDate = billMonths[0].date;
       fromLabel = billMonths[0].month;
@@ -1067,13 +1087,18 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
     if (applyToAllMonths === undefined) return errorResponse(res, `${p}.applyToAllMonths must be 0 or 1`, null, 400);
     let nextIncreaseAmount = null;
     if (applyToAllMonths === 1) {
-      nextIncreaseAmount = parseAmount(site.nextIncreaseAmount !== undefined ? site.nextIncreaseAmount : body.nextIncreaseAmount);
-      if (nextIncreaseAmount === null && (billType === "NORMAL_BILL" || siteAction === "decrease")) {
-        nextIncreaseAmount = null; // ✅ NEW — last listed month's amount
-      } else if (nextIncreaseAmount === null) {
+      // ✅ CHANGED — decrease → nextDecreaseAmount (optional); increase → nextIncreaseAmount
+      // (site value, else the top-level value)
+      const nextSrc = {
+        nextIncreaseAmount: site.nextIncreaseAmount !== undefined ? site.nextIncreaseAmount : body.nextIncreaseAmount,
+        nextDecreaseAmount: site.nextDecreaseAmount !== undefined ? site.nextDecreaseAmount : body.nextDecreaseAmount,
+      };
+      const next = parseNextAmount(nextSrc, siteAction, `${p}.`);
+      if (next.error) return errorResponse(res, next.error, null, 400);
+      nextIncreaseAmount = next.amount;
+      if (nextIncreaseAmount === null && billType !== "NORMAL_BILL" && siteAction !== "decrease") {
         return errorResponse(res, `${p}.nextIncreaseAmount is required when applyToAllMonths is 1`, null, 400);
       }
-      if (nextIncreaseAmount === undefined) return errorResponse(res, `${p}.nextIncreaseAmount must be more than 0`, null, 400);
     }
     items.push({
       index: i,

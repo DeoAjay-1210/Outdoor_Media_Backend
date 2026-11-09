@@ -59,7 +59,6 @@ router.post("/media-export-excel", protect, exportMediaExcel);
 router.post("/media-delete", protect, deleteMedia);
 // ✅ NEW — check whether a media code already exists
 router.post("/media-check-code", protect, checkMediaCode);
-router.get("/media-check-code", protect, checkMediaCode);
 router.post("/sync-billing-cycles", syncBillingCyclesNow);
 // router.post("/update-agreement",protect, updateAgreement);
 router.post(
