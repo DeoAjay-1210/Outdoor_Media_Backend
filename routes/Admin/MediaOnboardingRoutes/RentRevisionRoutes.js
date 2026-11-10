@@ -9,6 +9,7 @@ const {
   createRentRevision,
   approveRentRevision,
   getRentRevisionList,
+  revertCancelRevision, // ✅ NEW
 } = require("../../../controllers/Admin/MediaOnboardingController/RentRevisionController");
 
 router.post(
@@ -32,6 +33,8 @@ router.post(
   },
   approveRentRevision,
 );
+// ✅ NEW — CANCEL revert: { revisionId, reason } → bills back to CMD approved
+router.post("/rent-revision/cancel-revert", protect, revertCancelRevision);
 router.get("/rent-revision-list", protect, getRentRevisionList);
 router.post("/rent-revision-list", protect, getRentRevisionList);
 

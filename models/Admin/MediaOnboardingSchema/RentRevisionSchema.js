@@ -30,7 +30,26 @@ const RentRevisionSchema = new mongoose.Schema(
     mediaName: { type: String, trim: true, default: "" },
     // ✅ NEW — BILL: rent increase (arrears) | ADVANCE: advance deducted from the
     // next bill. Old revisions (no billType) → BILL, old pricing.
-    billType: { type: String, enum: ["BILL", "ADVANCE"], default: null, index: true },
+    // ✅ CHANGED — + NORMAL_BILL: bill not CMD approved, increase / decrease saved
+    // and applied at once (no approval)
+    // ✅ CHANGED — + CANCEL: CMD approved bill (no payment) → its approval cancelled
+    // (back to Rental Executive), amount optionally changed, cancel mail sent
+    billType: { type: String, enum: ["BILL", "ADVANCE", "NORMAL_BILL", "CANCEL"], default: null, index: true },
+    // ✅ NEW — increase (default) | decrease (BILL: CMD approved bill goes down,
+    // after Executive → Manager → CMD; NORMAL_BILL: bill goes down at once)
+    revisionAction: { type: String, enum: ["increase", "decrease", "none"], default: "increase" }, // ✅ CHANGED — + none (CANCEL without amount)
+    // ✅ NEW — CANCEL: cancel mail result { mailSent, mailSentAt, months: [...], message }
+    cancelMail: { type: mongoose.Schema.Types.Mixed, default: null },
+    // ✅ NEW — CANCEL reverted (POST /admin/rent-revision/cancel-revert): the
+    // bills are back to CMD approved with the old amount / ADINN OOH number
+    // cancelRevert: { revertedAt, revertedBy, revertedByUserId, revertedByRole, revertedByRoleName, reason, months }
+    cancelReverted: { type: Boolean, default: false },
+    // ✅ NEW — BILL / ADVANCE: ADINN OOH bill number of the New Bill / Advance
+    // bill(s) made on CMD approval (one per revision; also on arrearsDue[])
+    adinn_ooh_bills: { type: String, trim: true, default: null },
+    cancelRevert: { type: mongoose.Schema.Types.Mixed, default: null },
+    // ✅ NEW — normal (Executive → Manager → CMD) | auto (NORMAL_BILL, no approval)
+    approvalType: { type: String, enum: ["normal", "auto"], default: "normal" },
     fromMonth: { type: String, trim: true, required: true }, // "August 2026" (ADVANCE: advanceMonth)
     fromDate: { type: Date, required: true }, // 1st of fromMonth (UTC)
     // ✅ NEW — BILL applyToAllMonths 1: amount added to the site rent from the

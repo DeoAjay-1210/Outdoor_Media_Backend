@@ -26,7 +26,8 @@ const rowEffectiveDate = (h) => h.effectiveFrom || h.updatedAt;
 
 function rentBeforeLaterManualChange(media, dueKey) {
   const rows = (media?.rentalPayment?.rentalAmountHistory || [])
-    .filter((h) => h && Number(h.amount || 0) > 0 && h.updatedAt && monthKey(rowEffectiveDate(h)) !== null)
+    // ✅ CHANGED — rent revision log rows (one month's bill only) are not rent changes
+    .filter((h) => h && !h.isRevisionLog && Number(h.amount || 0) > 0 && h.updatedAt && monthKey(rowEffectiveDate(h)) !== null)
     .slice()
     .sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
   const isAppraisalRow = (h) => /Appraisal/i.test(String(h.updatedBy || ""));

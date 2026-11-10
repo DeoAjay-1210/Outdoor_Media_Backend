@@ -6689,6 +6689,8 @@ const details = (item.mediaDetails || []).map((d) => ({
                       isManualChange: hObj.isManualChange ?? false,
                       isInitial: hObj.isInitial ?? false,
                       isAppraisal: hObj.isAppraisal ?? false,
+                      // ✅ NEW — rent revision rows: type / month / remark (not sent on other rows)
+                      ...(hObj.changeType ? { changeType: hObj.changeType, changeLabel: hObj.changeLabel || "", month: hObj.month || "", ...(hObj.adjustInMonth ? { adjustInMonth: hObj.adjustInMonth } : {}), changeAmount: hObj.changeAmount ?? null, monthAmountBefore: hObj.monthAmountBefore ?? null, monthAmountAfter: hObj.monthAmountAfter ?? null, remark: hObj.remark || "", isRevisionLog: !!hObj.isRevisionLog } : {}),
                     };
                   }),
                   gstApplicable: item.rentalPayment?.gstApplicable || 0,
@@ -6722,6 +6724,8 @@ const details = (item.mediaDetails || []).map((d) => ({
                     isManualChange: hObj.isManualChange ?? false,
                     isInitial: hObj.isInitial ?? false,
                     isAppraisal: hObj.isAppraisal ?? false,
+                    // ✅ NEW — rent revision rows: type / month / remark (not sent on other rows)
+                    ...(hObj.changeType ? { changeType: hObj.changeType, changeLabel: hObj.changeLabel || "", month: hObj.month || "", ...(hObj.adjustInMonth ? { adjustInMonth: hObj.adjustInMonth } : {}), changeAmount: hObj.changeAmount ?? null, monthAmountBefore: hObj.monthAmountBefore ?? null, monthAmountAfter: hObj.monthAmountAfter ?? null, remark: hObj.remark || "", isRevisionLog: !!hObj.isRevisionLog } : {}),
                   };
                 }),
         rentalDueEntries: rentalDueEntries, // ✅ CHANGED: Now contains face-based entries

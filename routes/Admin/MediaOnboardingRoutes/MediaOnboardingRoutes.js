@@ -11,6 +11,7 @@ const {
   getMediaById,
   syncBillingCyclesNow,
   deleteMedia, // ✅ NEW
+  checkMediaCode, // ✅ NEW
 } = require("../../../controllers/Admin/MediaOnboardingController/MediaOnboardingController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -56,6 +57,8 @@ const { exportMediaExcel } = require("../../../controllers/Admin/MediaOnboarding
 router.post("/media-export-excel", protect, exportMediaExcel);
 // ✅ NEW — permanently delete a media (body: { mediaId })
 router.post("/media-delete", protect, deleteMedia);
+// ✅ NEW — check whether a media code already exists
+router.post("/media-check-code", protect, checkMediaCode);
 router.post("/sync-billing-cycles", syncBillingCyclesNow);
 // router.post("/update-agreement",protect, updateAgreement);
 router.post(
