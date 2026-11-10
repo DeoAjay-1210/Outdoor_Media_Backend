@@ -2838,7 +2838,9 @@ function revisionSiteBlock(media) {
 // Same-month bills (multi-face) → one row, the highest withGst. null when the
 // site is not found.
 async function revisionSiteBills(mediaId) {
-  const media = await Media.findById(mediaId).select("mediaDetails rentalPayment landOwners rentalDue arrearsDue").lean(); // ✅ CHANGED — + arrearsDue
+  const media = await Media.findById(mediaId)
+    .select("mediaDetails rentalPayment landOwners rentalDue arrearsDue ledger withGst1Ledger ledgerHistory gstBalanceHistory") // ✅ CHANGED — + arrearsDue, + ledger fields (UTREntry)
+    .lean();
   if (!media) return null;
   // ✅ NEW — months with a CMD approved New Bill / Advance bill (by the bill's own month)
   const extraBillMonths = { arrears: new Set(), advance: new Set() };
@@ -2860,10 +2862,11 @@ async function revisionSiteBills(mediaId) {
     // ✅ NEW — 1 when the month's bill is CMD approved (most approved bill of the month)
     const cmdApproved = Number(b.approvalStatus) === 3 ? 1 : 0;
     const cur = byMonth.get(k);
-    if (!cur) byMonth.set(k, { dueMonth: b.dueMonth || monthLabelOfKey(k), withGst, dueDate: b.dueDate, cmdApproved });
+    if (!cur) byMonth.set(k, { dueMonth: b.dueMonth || monthLabelOfKey(k), withGst, dueDate: b.dueDate, cmdApproved, billIds: [b._id] });
     else {
       if (withGst > cur.withGst) cur.withGst = withGst;
       if (cmdApproved > cur.cmdApproved) cur.cmdApproved = cmdApproved;
+      cur.billIds.push(b._id); // ✅ NEW — UTREntry
     }
   });
   const months = [...byMonth.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
@@ -2894,6 +2897,8 @@ async function revisionSiteBills(mediaId) {
       cmdApproved: m.cmdApproved,
       newBillGenerated: extraBillMonths.arrears.has(m.dueMonth) ? 1 : 0, // ✅ NEW
       advanceGenerated: extraBillMonths.advance.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+      // ✅ NEW — 0 not CMD approved, 1 CMD approved (no payment), 2 ledger / UTR entry done
+      UTREntry: billHasPayment(media, m.billIds) ? 2 : m.cmdApproved ? 1 : 0,
     })),
   };
 }
