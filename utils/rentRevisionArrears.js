@@ -255,6 +255,13 @@ function buildRevisionPlan(media, fromDate, newRent, applyToAllMonths = 1, opts 
     const isIncreaseMonth = increaseFor(monthKey(dueDate)) !== null;
     if (onlyFromMonth || isIncreaseMonth) {
       keptMonths.push({ dueMonth, rent: target, ...(noGst ? { gstRent: monthGstRent } : {}) });
+    } else if (
+      // ✅ FIXED — month already kept by an earlier revision (e.g. NORMAL_BILL) →
+      // kept again at the new rent, else the old kept rent wins and the bill is
+      // priced back to it (ledger / mail / bill recompute)
+      (rp.rentRevisionKeptMonths || []).some((k) => k && k.dueMonth === dueMonth && Number(k.rent) > 0)
+    ) {
+      keptMonths.push({ dueMonth, rent: target });
     }
     monthBills.forEach((bill) => {
       const scale = monthRent > 0 ? target / monthRent : 1;
