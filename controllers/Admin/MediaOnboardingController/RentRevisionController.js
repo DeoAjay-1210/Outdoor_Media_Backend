@@ -30,6 +30,7 @@ const {
   nextBillDateAfter,
 } = require("../../../utils/rentRevisionArrears");
 const { rentPartsForDueDate } = require("../../../utils/appraisalRent"); // ✅ NEW — BILL decrease
+const { ensureRevisionAdinnOohBill } = require("../../../utils/adinnOohBills"); // ✅ NEW — New Bill / Advance bill number
 
 const ROLE_NAMES = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -109,9 +110,11 @@ const parseBillType = (value) => {
   if (value === undefined || value === null || String(value).trim() === "") return "BILL";
   const t = String(value).trim().toUpperCase();
   if (t === "NEW_BILL") return "BILL";
-  return t === "BILL" || t === "ADVANCE" || t === "NORMAL_BILL" ? t : undefined;
+  return t === "BILL" || t === "ADVANCE" || t === "NORMAL_BILL" || t === "CANCEL" ? t : undefined; // ✅ CHANGED — + CANCEL
 };
-const BILL_TYPE_ERROR = "billType must be BILL (NEW_BILL), NORMAL_BILL or ADVANCE";
+const BILL_TYPE_ERROR = "billType must be BILL (NEW_BILL), NORMAL_BILL, CANCEL or ADVANCE";
+// ✅ NEW — billTypes saved and applied at once (no rent revision approval)
+const AUTO_BILL_TYPES = ["NORMAL_BILL", "CANCEL"];
 
 // ✅ NEW — gstOnIncrease: "" / null → null, "0" / "1" (also yes / no); invalid → undefined
 const parseGstOnIncrease = (value) => {
@@ -161,7 +164,8 @@ const sameValue = (a, b) => {
 // ✅ NEW — BILL months: [{ month, amount }] (array or JSON string) →
 // { list: [{ month, amount, key, date }] sorted by month } | { list: null } (not sent) | { error }
 const MONTHS_EXAMPLE = '[{"month":"August 2026","amount":2000}]';
-const parseRevisionMonths = (value) => {
+// ✅ CHANGED — opts.allowNoAmount (CANCEL): a month without an amount → amount 0, action "none"
+const parseRevisionMonths = (value, opts = {}) => {
   if (value === undefined || value === null || (!Array.isArray(value) && String(value).trim() === "")) return { list: null };
   let arr = value;
   if (typeof value === "string") {
@@ -183,6 +187,14 @@ const parseRevisionMonths = (value) => {
       (f) => arr[i]?.[f] !== undefined && arr[i]?.[f] !== null && String(arr[i][f]).trim() !== "",
     );
     if (sent.length > 1) return { error: `months[${i}]: send only one of amount, increaseAmount or decreaseAmount` };
+    if (!sent.length && opts.allowNoAmount) {
+      const k0 = monthKey(date);
+      const m0 = monthLabelOfKey(k0);
+      if (seen.has(k0)) return { error: `${m0} is repeated in months` };
+      seen.add(k0);
+      list.push({ month: m0, amount: 0, key: k0, date, action: "none" });
+      continue;
+    }
     const field = sent[0] || "amount";
     const amount = Number(arr[i]?.[field]);
     if (!Number.isFinite(amount) || amount <= 0) return { error: `months[${i}].${field} must be more than 0` };
@@ -193,11 +205,12 @@ const parseRevisionMonths = (value) => {
     seen.add(key);
     list.push({ month, amount: monthAction === "decrease" ? -round(amount) : round(amount), key, date, action: monthAction });
   }
-  if (new Set(list.map((x) => x.action)).size > 1) {
+  const actions = new Set(list.map((x) => x.action).filter((a) => a !== "none"));
+  if (actions.size > 1) {
     return { error: "months: send all increaseAmount or all decreaseAmount (not both in one request)" };
   }
   list.sort((a, b) => a.key - b.key);
-  return { list, action: list[0] ? list[0].action : "increase" };
+  return { list, action: actions.size ? [...actions][0] : list.length ? "none" : "increase" };
 };
 
 // ✅ NEW — the site already has a Pending revision (same billType) → POST
@@ -376,6 +389,7 @@ async function createOneRevision(mediaId, { fromDate, fromLabel, increaseAmount,
 // negative): BILL → CMD approved bill goes down after approval (applyBillDecrease)
 async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllMonths, nextIncreaseAmount, gstOnIncrease, withGst = 0, reason, invoice, user, billType = "BILL", revisionAction = "increase", dryRun = false }) {
   const isNormal = billType === "NORMAL_BILL";
+  const isCancel = billType === "CANCEL"; // ✅ NEW
   const isDecrease = revisionAction === "decrease";
   const billsOfMonth = (key) => (media.rentalDue || []).filter((b) => b && b.dueDate && monthKey(b.dueDate) === key);
   const missing = billMonths.find((bm) => billsOfMonth(bm.key).length === 0);
@@ -391,10 +405,24 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     const notApproved = billMonths.filter((bm) => !billsOfMonth(bm.key).some((b) => Number(b.approvalStatus) === 3));
     if (notApproved.length) {
       return {
-        error: isDecrease
+        error: isDecrease || isCancel
           ? `${notApproved.map((bm) => bm.month).join(", ")} bill${notApproved.length > 1 ? "s are" : " is"} not CMD approved — use billType NORMAL_BILL`
           : notCmdApprovedError(notApproved.map((bm) => bm.month)),
       };
+    }
+  }
+  // ✅ NEW — CANCEL: no payment on the bill, no rent revision waiting for that month
+  if (isCancel) {
+    const waitingRevisions = mediaId ? await RentRevision.find({ mediaId, status: "Pending" }).lean() : [];
+    for (const bm of billMonths) {
+      const bills = billsOfMonth(bm.key);
+      if (billHasPayment(media, bills.map((b) => b._id))) return { error: `${bm.month} bill already has a payment — cancel not allowed` };
+      const busy = waitingRevisions.some((r) =>
+        r.billType === "ADVANCE"
+          ? r.adjustInMonth === bm.month || r.fromMonth === bm.month
+          : r.fromMonth === bm.month || (r.months || []).some((x) => x && x.month === bm.month),
+      );
+      if (busy) return { error: `A rent revision is waiting for approval for ${bm.month} — approve or reject it first` };
     }
   }
   // ✅ NEW — decrease: less than the month's bill; BILL decrease → not paid, once per bill
@@ -402,7 +430,7 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     for (const bm of billMonths) {
       const monthRent = Number(rentPartsForDueDate(media, bm.date).rent || 0);
       if (-bm.amount >= monthRent) return { error: `decreaseAmount must be less than the ${bm.month} bill amount (${monthRent})` };
-      if (!isNormal) {
+      if (!isNormal && !isCancel) {
         const bills = billsOfMonth(bm.key);
         if (billHasPayment(media, bills.map((b) => b._id))) return { error: `${bm.month} bill already has a payment — decrease not allowed` };
         if (bills.some((b) => b.decreaseRevisionId)) return { error: `${bm.month} bill already decreased once` };
@@ -414,10 +442,10 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
   const last = billMonths[billMonths.length - 1];
   const gstPercentage = gstPercentageFor(media, first.date);
   // ✅ CHANGED — NORMAL_BILL / decrease: no gstOnIncrease needed — GST site → GST on the new amount
-  if (!isNormal && !isDecrease && gstPercentage > 0 && gstOnIncrease === null) {
+  if (!isNormal && !isCancel && !isDecrease && gstPercentage > 0 && gstOnIncrease === null) {
     return { error: "This site has GST — send gstOnIncrease (1 = with GST, 0 = without GST)" };
   }
-  const gstFlag = gstPercentage > 0 ? (isNormal || isDecrease ? 1 : gstOnIncrease) : null;
+  const gstFlag = gstPercentage > 0 ? (isNormal || isCancel || isDecrease ? 1 : gstOnIncrease) : null; // ✅ CHANGED — + CANCEL
 
   const onlyListed = applyToAllMonths === 0;
   // applyToAllMonths not sent → next months take the last listed month's amount
@@ -429,9 +457,12 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
   const newRent = onlyListed ? oldRent : round(oldRent + nextIncrease);
   // ✅ NEW — decrease with applyToAllMonths 1: the site rent must stay above 0
   if (!onlyListed && newRent <= 0) return { error: `Site rent ${oldRent} cannot go down by ${Math.abs(nextIncrease)}` };
-  const plan = buildRevisionPlan(media, first.date, newRent, applyToAllMonths, {
+  // ✅ NEW — CANCEL: the listed months are priced as NOT approved (their
+  // approval is cancelled) → their bills move to the new amount
+  const planMedia = isCancel ? withMonthsNotApproved(media, billMonths.map((bm) => bm.key)) : media;
+  const plan = buildRevisionPlan(planMedia, first.date, newRent, applyToAllMonths, {
     gstOnIncrease: gstFlag,
-    monthIncreases: new Map(billMonths.map((bm) => [bm.key, bm.amount])),
+    monthIncreases: new Map(billMonths.filter((bm) => bm.amount !== 0).map((bm) => [bm.key, bm.amount])),
   });
   if (plan.heldMonth) return { error: `${plan.heldMonth} is on appraisal hold — release it first` };
 
@@ -439,12 +470,12 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     const monthBills = billsOfMonth(bm.key);
     const status = Math.max(...monthBills.map((b) => Number(b.approvalStatus || 1)));
     // ✅ NEW — decrease / NORMAL_BILL: the month's bill before → after (GST on the new amount)
-    if (isDecrease || isNormal) {
+    if (isDecrease || isNormal || isCancel) {
       const monthRent = Number(rentPartsForDueDate(media, bm.date).rent || 0);
       const monthGst = monthBills.reduce((s, b) => s + Number(b.gstAmount || 0), 0);
       const newAmount = round(monthRent + bm.amount);
       const updated = plan.billsUpdated.filter((b) => b.dueMonth === bm.month);
-      const newGst = isNormal && updated.length
+      const newGst = (isNormal || isCancel) && updated.length && bm.amount !== 0
         ? updated.reduce((s, b) => s + Number(b.gstAmount || 0), 0)
         : monthRent > 0 ? round((monthGst * newAmount) / monthRent) : 0;
       return {
@@ -452,11 +483,12 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
         rentalDueId: monthBills[0]._id,
         billStatus: BILL_APPROVAL_LABELS[status] || "Pending",
         currentAmount: monthRent,
-        ...(isDecrease ? { decreaseAmount: -bm.amount } : { increaseAmount: bm.amount }),
+        ...(bm.amount < 0 ? { decreaseAmount: -bm.amount } : bm.amount > 0 ? { increaseAmount: bm.amount } : {}),
         amount: bm.amount,
         newAmount,
         gstAmount: newGst,
-        action: isNormal ? "billUpdate" : "billDecrease",
+        action: isCancel ? "cancelApproval" : isNormal ? "billUpdate" : "billDecrease", // ✅ CHANGED — + cancelApproval
+        ...(isCancel ? { cancelledBillNo: monthBills.map((b) => b.adinn_ooh_bills).find(Boolean) || null } : {}), // ✅ NEW
       };
     }
     const arrears = plan.arrearsBills.filter((b) => b.dueMonth === bm.month || monthKey(b.dueDate) === bm.key);
@@ -488,9 +520,9 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     withGst: gstFlag === 1 ? withGst : 0, // ✅ NEW — no GST → 0
   };
   const derived = {
-    billType: isNormal ? "NORMAL_BILL" : "BILL", // ✅ CHANGED
+    billType: isCancel ? "CANCEL" : isNormal ? "NORMAL_BILL" : "BILL", // ✅ CHANGED
     revisionAction, // ✅ NEW
-    approvalType: isNormal ? "auto" : "normal", // ✅ NEW
+    approvalType: isNormal || isCancel ? "auto" : "normal", // ✅ NEW
     fromMonth: first.month,
     fromDate: first.date,
     toMonth: last.month,
@@ -501,7 +533,7 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     nextBillFromMonth: onlyListed ? "" : nextBillMonthAfter(media, last.date),
     gstPercentage,
     // ✅ CHANGED — decrease / NORMAL_BILL: GST change of the bills (new − old)
-    increaseGstAmount: isDecrease || isNormal
+    increaseGstAmount: isDecrease || isNormal || isCancel
       ? monthsDetail.reduce((s, d) => {
           const oldGst = billsOfMonth(billMonths.find((bm) => bm.month === d.month).key).reduce((t, b) => t + Number(b.gstAmount || 0), 0);
           return s + (Number(d.gstAmount || 0) - oldGst);
@@ -510,6 +542,50 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
   };
 
   if (dryRun) return { dryRun: true };
+
+  // ✅ NEW — CANCEL: saved as Approved (no rent revision approval); the bills'
+  // approval is cancelled (back to Rental Executive), the amount changed (if
+  // sent) and the cancel mail sent
+  if (isCancel) {
+    const now = nowIST();
+    const revision = await RentRevision.create({
+      ...newRevisionBase(mediaId, media, user),
+      status: "Approved",
+      currentPendingRole: null,
+      approvalSteps: [],
+      approvedAt: now,
+      ...compare,
+      ...derived,
+      invoice,
+      reason,
+    });
+    try {
+      const cancelled = await cancelBillApprovals(revision, media, user, monthsDetail);
+      let result = { billsUpdated: [] };
+      if (billMonths.some((bm) => bm.amount !== 0)) {
+        result = await applyRevision(revision, planMedia, user?.userName || "");
+      } else {
+        await pushCancelHistory(revision, media, user?.userName || "", now);
+      }
+      revision.monthsDetail = monthsDetail.map((d) => {
+        const updated = (result.billsUpdated || []).filter((b) => b.dueMonth === d.month);
+        return {
+          ...d,
+          ...(updated.length && d.amount !== 0 ? { gstAmount: updated.reduce((s, b) => s + Number(b.gstAmount || 0), 0) } : {}),
+          billApprovalAfter: { approvalStatus: 1, approvalStatusLabel: "Pending", currentPendingRole: 1, currentPendingRoleName: ROLE_NAMES[1] },
+        };
+      });
+      revision.arrearsTotal = 0;
+      revision.cancelMail = await sendCancelMails(media, revision, cancelled);
+      await revision.save();
+    } catch (e) {
+      console.error("CANCEL rent revision error:", e);
+      revision.cancelMail = { mailSent: false, message: `Cancel stopped: ${e?.message || e}` };
+      await revision.save().catch(() => {});
+      return { error: e?.message || "Bill approval could not be cancelled" };
+    }
+    return { revision, action: "created" };
+  }
 
   // ✅ NEW — NORMAL_BILL: saved as Approved (no approval) and applied at once
   if (isNormal) {
@@ -543,7 +619,7 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
   }
 
   // already a Pending BILL revision on this site → update it (same API)
-  const waiting = await RentRevision.findOne({ mediaId, status: "Pending", billType: { $nin: ["ADVANCE", "NORMAL_BILL"] } });
+  const waiting = await RentRevision.findOne({ mediaId, status: "Pending", billType: { $nin: ["ADVANCE", ...AUTO_BILL_TYPES] } }); // ✅ CHANGED — + CANCEL
   // ✅ NEW — a Pending increase and a decrease (or the other way) are not mixed
   if (waiting && (waiting.revisionAction || "increase") !== revisionAction) {
     return {
@@ -563,6 +639,212 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
   return { revision, action: "created" };
 }
 
+// ✅ NEW — CANCEL: plain copy of the media with the listed months' bills as NOT
+// approved (approvalStatus 1) → buildRevisionPlan moves them to the new amount
+function withMonthsNotApproved(media, keys) {
+  const set = new Set(keys);
+  return {
+    ...media,
+    rentalDue: (media.rentalDue || []).map((b) =>
+      b && b.dueDate && set.has(monthKey(b.dueDate)) ? { ...b, approvalStatus: 1, status: 1 } : b,
+    ),
+  };
+}
+
+// ✅ NEW — CANCEL: every bill of the listed months back to Pending (Rental
+// Executive first, agreement verify again). The old approval (steps, owner
+// approval date, ADINN OOH number, mail flag) → bill.approvalResetHistory[].
+// Unpaid GST balance rows of those bills are removed (made again on
+// re-approval). The ADINN OOH registry entry is closed so re-approval gives a
+// NEW number (the old number is never reused). Returns [{ month, bills }].
+async function cancelBillApprovals(revision, media, user, monthsDetail) {
+  const now = nowIST();
+  const userName = user?.userName || "";
+  const detailByMonth = new Map((monthsDetail || []).map((d) => [d.month, d]));
+  const $set = { updatedAt: now };
+  const $push = {};
+  const arrayFilters = [];
+  const billIds = [];
+  const cancelled = [];
+  let fi = 0;
+  (revision.months || []).forEach((x) => {
+    const date = parseFromMonth(x?.month);
+    if (!date) return;
+    const key = monthKey(date);
+    const bills = (media.rentalDue || []).filter((b) => b && b.dueDate && monthKey(b.dueDate) === key);
+    const d = detailByMonth.get(x.month) || {};
+    bills.forEach((b) => {
+      const u = `c${fi++}`;
+      billIds.push(b._id);
+      const steps = Array.isArray(b.approvalSteps) && b.approvalSteps.length ? b.approvalSteps : [{ role: 1 }, { role: 2 }, { role: 3 }];
+      const resetSteps = steps.map((st) => ({ role: st.role, userId: null, userName: "", approvedAt: null, status: 1, docVerified: false, remarks: "" }));
+      $set[`rentalDue.$[${u}].approvalStatus`] = 1;
+      $set[`rentalDue.$[${u}].status`] = 1;
+      $set[`rentalDue.$[${u}].currentPendingRole`] = Number(resetSteps[0]?.role || 1);
+      $set[`rentalDue.$[${u}].approvalSteps`] = resetSteps;
+      $set[`rentalDue.$[${u}].agreementDocVerified`] = false;
+      $set[`rentalDue.$[${u}].ownerApprovalDate`] = null;
+      $set[`rentalDue.$[${u}].mailSent`] = false;
+      $set[`rentalDue.$[${u}].adinn_ooh_bills`] = null;
+      $set[`rentalDue.$[${u}].adinn_ooh_bills_landOwners`] = [];
+      $set[`rentalDue.$[${u}].gstAddedToBalance`] = false;
+      $set[`rentalDue.$[${u}].ownerGstAddedToBalance`] = false;
+      $set[`rentalDue.$[${u}].updatedBy`] = `${userName} (Approval Cancelled)`;
+      $set[`rentalDue.$[${u}].updatedAt`] = now;
+      $set[`rentalDue.$[${u}].approvalResetHistory`] = [
+        ...(Array.isArray(b.approvalResetHistory) ? b.approvalResetHistory : []),
+        {
+          cancelledAt: now,
+          cancelledBy: userName,
+          cancelledByUserId: mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null,
+          cancelledByRole: Number(user?.userType) || null,
+          cancelledByRoleName: ROLE_NAMES[Number(user?.userType)] || "",
+          reason: revision.reason || "",
+          rentRevisionId: revision._id,
+          amountBefore: Number(b.netPayable || 0),
+          monthAmountBefore: d.currentAmount ?? null,
+          monthAmountAfter: d.newAmount ?? null,
+          previousApprovalStatus: Number(b.approvalStatus || 0),
+          previousApprovalSteps: steps,
+          previousOwnerApprovalDate: b.ownerApprovalDate || null,
+          previousMailSent: !!b.mailSent,
+          adinn_ooh_bills: b.adinn_ooh_bills || null,
+          adinn_ooh_bills_landOwners: b.adinn_ooh_bills_landOwners || [],
+          // ✅ NEW — cancel revert: everything needed to bring the bill back
+          previousStatus: b.status ?? null,
+          previousCurrentPendingRole: b.currentPendingRole ?? null,
+          previousAgreementDocVerified: b.agreementDocVerified ?? null,
+          previousNetPayable: b.netPayable ?? null,
+          previousBaseAmount: b.baseAmount ?? null,
+          previousGstAmount: b.gstAmount ?? null,
+          previousGstAddedToBalance: !!b.gstAddedToBalance,
+          previousOwnerGstAddedToBalance: !!b.ownerGstAddedToBalance,
+          removedGstRows: (media.gstBalanceHistory || []).filter(
+            (g) => g && String(g.rentalDueId) === String(b._id) && !g.isPaid && !g.isUtrEntry && !(Number(g.paidAmount || 0) > 0),
+          ),
+        },
+      ];
+      arrayFilters.push({ [`${u}._id`]: b._id });
+    });
+    cancelled.push({ month: x.month, bills });
+  });
+  if (!billIds.length) return cancelled;
+  await Media.updateOne({ _id: media._id }, Object.keys($push).length ? { $set, $push } : { $set }, { arrayFilters, strict: false });
+
+  // unpaid GST balance rows of the cancelled bills → removed (re-created on re-approval)
+  const idSet = new Set(billIds.map(String));
+  const unpaidGst = (media.gstBalanceHistory || []).filter(
+    (g) => g && idSet.has(String(g.rentalDueId)) && !g.isPaid && !g.isUtrEntry && !(Number(g.paidAmount || 0) > 0),
+  );
+  if (unpaidGst.length) {
+    const drop = unpaidGst.reduce((s, g) => s + Math.max(0, Number(g.gstAmount || 0) - Number(g.paidAmount || 0)), 0);
+    await Media.updateOne(
+      { _id: media._id },
+      {
+        $pull: { gstBalanceHistory: { _id: { $in: unpaidGst.map((g) => g._id) } } },
+        ...(drop > 0 ? { $inc: { "rentalPayment.balanceGstAmount": -drop } } : {}),
+      },
+    );
+  }
+
+  // ADINN OOH registry: close the old entry → re-approval gets a NEW number
+  try {
+    const Registry = require("../../../models/Admin/AdinnOohBillRegistrySchema");
+    await Registry.updateMany(
+      { rentalDueIds: { $in: billIds }, groupKey: { $not: /\|cancelled:/ } },
+      [{ $set: { groupKey: { $concat: ["$groupKey", `|cancelled:${String(revision._id)}`] } } }],
+    );
+  } catch (e) {
+    console.error("CANCEL registry update error:", e.message);
+  }
+  return cancelled;
+}
+
+// ✅ NEW — CANCEL without an amount change: one rentalAmountHistory log row per month
+async function pushCancelHistory(revision, media, userName, now) {
+  const siteRent = Number(media.rentalPayment?.totalRentalAmount || 0);
+  const rows = revisionMonthRows(revision).map((r) =>
+    revisionHistoryRow(revision, { siteRent, ...r, userName, now, extra: { isRevisionLog: true } }),
+  );
+  if (!rows.length) return;
+  await Media.updateOne(
+    { _id: media._id },
+    { $push: { "rentalPayment.rentalAmountHistory": { $each: rows, $sort: { updatedAt: -1 } } } },
+    { strict: false },
+  );
+}
+
+// ✅ NEW — CANCEL mail: a reply to the CMD approval mail (same subject with
+// "Re:") — "This amount was cancelled." + the reason. One mail per month.
+const CMD_APPROVAL_MAIL_URL = "https://adinndigital.com/api/outdoormedia/cmdApprovalSK.php";
+const CMD_CANCEL_MAIL_TYPE = "cmdapprovalcancel";
+function cmdApprovalSubjectFor(media, bills) {
+  const owners = media.landOwners || [];
+  const names = owners.map((o) => String(o.name || "").trim()).filter(Boolean);
+  const ownerPart = owners.length > 1 ? (names.length ? names.join(", ") : "Multiple Landlords") : names[0] || "";
+  const faces = media.mediaDetails || [];
+  const codes = [
+    ...new Set(
+      (bills || [])
+        .map((b) => (faces.find((f) => String(f._id) === String(b.mediaDetailId)) || {}).mediaCode)
+        .filter(Boolean),
+    ),
+  ];
+  const codePart = (codes.length ? codes : faces.filter((f) => Number(f.status) === 1).map((f) => f.mediaCode).filter(Boolean)).join(", ");
+  const parts = [ownerPart, codePart].filter(Boolean);
+  return `CMD Payment Approved${parts.length ? ` - ${parts.join(" - ")}` : ""}`;
+}
+async function sendCancelMails(media, revision, cancelled) {
+  const to = mailEmailList(process.env.T0_EMail);
+  const cc = mailEmailList(process.env.CC_EMail);
+  const mailMode = process.env.MAIL_MODE || "development";
+  const results = [];
+  // ✅ NEW — mail details: bill no / month / media / amount / cancelled by
+  const faces = media.mediaDetails || [];
+  const uniq = (list) => [...new Set(list.filter(Boolean))].join(", ");
+  const roleName = ROLE_NAMES[Number(revision.requestedByRole)] || "";
+  const at = revision.approvedAt || revision.createdAt || nowIST(); // nowIST → IST clock in UTC fields
+  const atD = new Date(at);
+  const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const h24 = atD.getUTCHours();
+  const cancelledAt = `${atD.getUTCDate()} ${MON[atD.getUTCMonth()]} ${atD.getUTCFullYear()} ${h24 % 12 || 12}:${String(atD.getUTCMinutes()).padStart(2, "0")} ${h24 < 12 ? "AM" : "PM"}`;
+  for (const c of cancelled || []) {
+    const billFaces = (c.bills || []).map((b) => faces.find((f) => String(f._id) === String(b.mediaDetailId)) || {});
+    const payload = {
+      mailtype: CMD_CANCEL_MAIL_TYPE,
+      to,
+      ...(cc.length ? { cc } : {}),
+      data: {
+        subject: `Re: ${cmdApprovalSubjectFor(media, c.bills)}`,
+        billNo: uniq((c.bills || []).map((b) => b.adinn_ooh_bills)),
+        month: c.month || "",
+        mediaCode: uniq(billFaces.map((f) => f.mediaCode)),
+        mediaName: uniq(billFaces.map((f) => f.mediaName)),
+        amount: (c.bills || []).reduce((s, b) => s + Number(b.netPayable || 0), 0),
+        gstAmount: (c.bills || []).reduce((s, b) => s + Number(b.gstAmount || 0), 0),
+        cancelledBy: revision.requestedBy || "",
+        cancelledByRoleName: roleName,
+        cancelledAt,
+        reason: revision.reason || "",
+      },
+    };
+    console.log("📧 CMD CANCEL MAIL PAYLOAD:", JSON.stringify(payload, null, 2));
+    if (mailMode !== "production") {
+      results.push({ month: c.month, sent: false, message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent` });
+      continue;
+    }
+    try {
+      const response = await axios.post(CMD_APPROVAL_MAIL_URL, payload, { headers: { "Content-Type": "application/json" } });
+      const sent = !!(response.data && (response.data.status === "success" || response.data.success === true));
+      results.push({ month: c.month, sent, message: sent ? "Cancel mail sent" : response.data?.message || "Cancel mail failed" });
+    } catch (err) {
+      results.push({ month: c.month, sent: false, message: err?.response?.data?.message || err?.message || "Mail error" });
+    }
+  }
+  const sent = results.length > 0 && results.every((r) => r.sent);
+  return { mailtype: CMD_CANCEL_MAIL_TYPE, mailSent: sent, mailSentAt: sent ? nowIST() : null, months: results, message: results.map((r) => `${r.month}: ${r.message}`).join("; ") };
+}
+
 // ✅ NEW — any payment (ledger / GST UTR) on these bills (rentalDue ids)
 function billHasPayment(media, billIds) {
   const ids = new Set((billIds || []).map(String));
@@ -570,6 +852,356 @@ function billHasPayment(media, billIds) {
   if ((media.ledger || []).some(hit) || (media.withGst1Ledger || []).some(hit)) return true;
   if ((media.ledgerHistory || []).some((y) => (y.months || []).some((m) => (m.entries || []).some(hit)))) return true;
   return (media.gstBalanceHistory || []).some((g) => hit(g) && (g.isPaid === true || g.isUtrEntry === true || Number(g.paidAmount || 0) > 0));
+}
+
+// ✅ NEW — CANCEL revert: the bills cancelled by this CANCEL revision go back to
+// CMD approved with their old approval, amount, ADINN OOH number and unpaid GST
+// balance rows (all kept in bill.approvalResetHistory at cancel time). The
+// cancel's amount change is undone (kept months removed, site rent back when the
+// cancel changed it, its arrears bills removed). No mail. Any role.
+// Returns { statusCode, message, data }.
+async function revertCancelRevision(revisionId, { reason, user }) {
+  if (!mongoose.Types.ObjectId.isValid(String(revisionId))) return { statusCode: 400, message: "Invalid revisionId" };
+  const revision = await RentRevision.findById(revisionId);
+  if (!revision || revision.billType !== "CANCEL" || revision.status !== "Approved") {
+    return { statusCode: 400, message: "Only CANCEL revision can be reverted" };
+  }
+  if (revision.cancelReverted) return { statusCode: 400, message: "This cancel is already reverted" };
+  const media = await Media.findById(revision.mediaId).lean();
+  if (!media) return { statusCode: 404, message: "Media not found" };
+
+  const revId = String(revision._id);
+  const userName = user?.userName || "";
+  const role = Number(user?.userType) || null;
+  const now = nowIST();
+  const lastReset = (b) => {
+    const h = Array.isArray(b.approvalResetHistory) ? b.approvalResetHistory : [];
+    return h.length ? h[h.length - 1] : null;
+  };
+
+  // bills of each cancelled month (the ones whose reset history has this revision)
+  const months = (revision.months || [])
+    .map((x) => ({ month: x?.month, date: parseFromMonth(x?.month) }))
+    .filter((x) => x.month && x.date)
+    .map((x) => ({
+      ...x,
+      key: monthKey(x.date),
+      bills: (media.rentalDue || []).filter(
+        (b) => b && Array.isArray(b.approvalResetHistory) && b.approvalResetHistory.some((h) => h && String(h.rentRevisionId) === revId),
+      ).filter((b) => b.dueDate && monthKey(b.dueDate) === monthKey(x.date)),
+    }));
+  if (!months.length) return { statusCode: 400, message: "No cancelled month on this revision" };
+  for (const mo of months) {
+    if (!mo.bills.length) return { statusCode: 400, message: `No cancelled bill for ${mo.month} on this site` };
+    for (const b of mo.bills) {
+      const last = lastReset(b);
+      if (!last || String(last.rentRevisionId) !== revId || last.revertedAt) {
+        return { statusCode: 400, message: `${mo.month} bill was cancelled again later — revert not allowed` };
+      }
+      if (Number(b.approvalStatus) === 3) {
+        return { statusCode: 400, message: `${mo.month} bill already CMD approved again — revert not allowed` };
+      }
+    }
+    if (billHasPayment(media, mo.bills.map((b) => b._id))) {
+      return { statusCode: 400, message: `${mo.month} bill already has a payment — revert not allowed` };
+    }
+  }
+
+  // a later revision on these months (or any later applied one when the cancel changed the site rent)
+  const monthSet = new Set(months.map((mo) => mo.month));
+  const oldRent = Number(revision.oldRent || 0);
+  const newRent = Number(revision.newRent || 0);
+  const siteRentChanged = oldRent > 0 && newRent > 0 && oldRent !== newRent;
+  const later = await RentRevision.find({
+    mediaId: revision.mediaId,
+    _id: { $ne: revision._id },
+    createdAt: { $gt: revision.createdAt },
+    status: { $in: ["Pending", "Approved"] },
+  }).lean();
+  for (const r of later) {
+    const touched = [r.fromMonth, r.adjustInMonth, ...(r.months || []).map((x) => x && x.month)].find((m) => m && monthSet.has(m));
+    if (touched) return { statusCode: 400, message: `${touched} has a later revision — revert not allowed` };
+  }
+  if (siteRentChanged) {
+    if (later.some((r) => r.status === "Approved" && r.billType !== "ADVANCE")) {
+      return { statusCode: 400, message: "A later rent revision was applied on this site — revert not allowed" };
+    }
+    if (Number(media.rentalPayment?.totalRentalAmount || 0) !== newRent) {
+      return { statusCode: 400, message: "Site rent changed after this cancel — revert not allowed" };
+    }
+  }
+
+  // arrears bills made by this cancel (CMD approved months after it) → removed
+  const arrears = (media.arrearsDue || []).filter((a) => a && String(a.rentRevisionId) === revId);
+  if (arrears.some((a) => Number(a.approvalStatus) === 3) || billHasPayment(media, arrears.map((a) => a._id))) {
+    return { statusCode: 400, message: "Arrears bill of this cancel is already approved / paid — revert not allowed" };
+  }
+
+  // ── bills back to CMD approved ──
+  const $set = { updatedAt: now };
+  const arrayFilters = [];
+  const gstRowsBack = [];
+  const resultMonths = [];
+  let fi = 0;
+  const faces = media.mediaDetails || [];
+  const cancelledIds = new Set();
+  for (const mo of months) {
+    const billsOut = [];
+    let monthGstRowsBack = false;
+    for (const b of mo.bills) {
+      cancelledIds.add(String(b._id));
+      const last = lastReset(b);
+      const u = `r${fi++}`;
+      const curNet = Number(b.netPayable || 0);
+      // amount: old values (older cancels: only amountBefore → base / GST scaled)
+      let net = curNet;
+      let base = Number(b.baseAmount || 0);
+      let gst = Number(b.gstAmount || 0);
+      if (last.previousNetPayable !== undefined && last.previousNetPayable !== null) {
+        net = Number(last.previousNetPayable);
+        base = Number(last.previousBaseAmount ?? base);
+        gst = Number(last.previousGstAmount ?? gst);
+      } else if (last.amountBefore !== undefined && last.amountBefore !== null && curNet > 0 && Number(last.amountBefore) !== curNet) {
+        const ratio = Number(last.amountBefore) / curNet;
+        net = Number(last.amountBefore);
+        base = round(base * ratio);
+        gst = round(gst * ratio);
+      }
+      const discardedSteps = (b.approvalSteps || []).filter((s) => s && (s.userName || s.approvedAt));
+
+      $set[`rentalDue.$[${u}].approvalStatus`] = Number(last.previousApprovalStatus || 3);
+      $set[`rentalDue.$[${u}].status`] = last.previousStatus ?? 3;
+      $set[`rentalDue.$[${u}].currentPendingRole`] = last.previousCurrentPendingRole ?? null;
+      $set[`rentalDue.$[${u}].approvalSteps`] = last.previousApprovalSteps || b.approvalSteps || [];
+      $set[`rentalDue.$[${u}].agreementDocVerified`] = last.previousAgreementDocVerified ?? true;
+      $set[`rentalDue.$[${u}].ownerApprovalDate`] = last.previousOwnerApprovalDate || null;
+      $set[`rentalDue.$[${u}].mailSent`] = !!last.previousMailSent;
+      $set[`rentalDue.$[${u}].adinn_ooh_bills`] = last.adinn_ooh_bills || null;
+      $set[`rentalDue.$[${u}].adinn_ooh_bills_landOwners`] = last.adinn_ooh_bills_landOwners || [];
+      $set[`rentalDue.$[${u}].netPayable`] = net;
+      $set[`rentalDue.$[${u}].baseAmount`] = base;
+      $set[`rentalDue.$[${u}].gstAmount`] = gst;
+      $set[`rentalDue.$[${u}].updatedBy`] = `${userName} (Cancel Reverted)`;
+      $set[`rentalDue.$[${u}].updatedAt`] = now;
+
+      // unpaid GST balance rows removed by the cancel → back
+      if (Array.isArray(last.removedGstRows)) {
+        gstRowsBack.push(...last.removedGstRows);
+        $set[`rentalDue.$[${u}].gstAddedToBalance`] = !!last.previousGstAddedToBalance;
+        $set[`rentalDue.$[${u}].ownerGstAddedToBalance`] = !!last.previousOwnerGstAddedToBalance;
+      } else if (Number(b.withGst) === 1 && !monthGstRowsBack) {
+        // older cancel (rows not kept): one GST hold row for the month, like approval
+        const monthGst = mo.bills.reduce((s, x) => s + Number(x === b ? gst : x.gstAmount || 0), 0);
+        const hasRow = (media.gstBalanceHistory || []).some((g) => g && g.dueMonth === b.dueMonth);
+        if (monthGst > 0 && !hasRow) {
+          gstRowsBack.push({
+            rentalDueId: b._id,
+            dueMonth: b.dueMonth,
+            cycle: b.dueDate,
+            gstAmount: monthGst,
+            isPaid: false,
+            paidAmount: 0,
+            paidAt: null,
+            paidBy: "",
+            createdAt: now,
+            createdBy: `${userName} (Cancel Reverted)`,
+            source: "rental",
+            ownerId: null,
+            ownerName: "",
+          });
+        }
+        monthGstRowsBack = true;
+        $set[`rentalDue.$[${u}].gstAddedToBalance`] = true;
+      } else {
+        $set[`rentalDue.$[${u}].gstAddedToBalance`] = Number(b.withGst) === 1;
+      }
+
+      $set[`rentalDue.$[${u}].approvalResetHistory`] = [
+        ...b.approvalResetHistory.slice(0, -1),
+        {
+          ...last,
+          revertedAt: now,
+          revertedBy: userName,
+          revertedByUserId: mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null,
+          revertedByRole: role,
+          revertedByRoleName: ROLE_NAMES[role] || "",
+          revertReason: reason,
+          discardedSteps,
+        },
+      ];
+      arrayFilters.push({ [`${u}._id`]: b._id });
+      billsOut.push({
+        rentalDueId: b._id,
+        mediaCode: (faces.find((f) => String(f._id) === String(b.mediaDetailId)) || {}).mediaCode || "",
+        approvalStatus: Number(last.previousApprovalStatus || 3),
+        amountBeforeRevert: curNet,
+        amountAfterRevert: net,
+        adinn_ooh_bills: last.adinn_ooh_bills || null,
+        discardedSteps,
+      });
+    }
+    resultMonths.push({ month: mo.month, bills: billsOut });
+  }
+
+  // ── site rent back (the cancel changed it) ──
+  const lastListedKey = Math.max(...months.map((mo) => mo.key));
+  if (siteRentChanged) {
+    const s = oldRent / newRent;
+    const scale = (v) => (v === undefined || v === null ? v : round(Number(v) * s));
+    const rp = media.rentalPayment || {};
+    $set["rentalPayment.totalRentalAmount"] = oldRent;
+    if (rp.gstAmount !== undefined && rp.gstAmount !== null) $set["rentalPayment.gstAmount"] = scale(rp.gstAmount);
+    if (rp.totalRentalAmountWithGst !== undefined && rp.totalRentalAmountWithGst !== null) $set["rentalPayment.totalRentalAmountWithGst"] = scale(rp.totalRentalAmountWithGst);
+    if (rp.netPayable !== undefined && rp.netPayable !== null) $set["rentalPayment.netPayable"] = scale(rp.netPayable);
+    if (Number(media.appraisal?.applicable) !== 1 && media.appraisal) {
+      $set["appraisal.currentRent"] = oldRent;
+      $set["appraisal.totalAppraisalAmount"] = oldRent;
+    }
+    $set.landOwners = (media.landOwners || []).map((o) => ({
+      ...o,
+      shareAmount: scale(o.shareAmount),
+      cashAmount: scale(o.cashAmount),
+      onlineAmount: scale(o.onlineAmount),
+      gstAmount: scale(o.gstAmount),
+      tdsAmount: scale(o.tdsAmount),
+      totalAmountWithGst: scale(o.totalAmountWithGst),
+      netPayableToOwner: scale(o.netPayableToOwner),
+      netPayable: scale(o.netPayable),
+      linkedSites: Array.isArray(o.linkedSites)
+        ? o.linkedSites.map((ls) =>
+            String(ls?.mediaId) === String(media._id)
+              ? { ...ls, shareAmount: scale(ls.shareAmount), cashAmount: scale(ls.cashAmount), onlineAmount: scale(ls.onlineAmount) }
+              : ls,
+          )
+        : o.linkedSites,
+    }));
+    // pending bills after the cancelled months (moved to the new rent) → old rent
+    (media.rentalDue || [])
+      .filter(
+        (b) =>
+          b && b.dueDate && monthKey(b.dueDate) > lastListedKey && !cancelledIds.has(String(b._id)) &&
+          Number(b.approvalStatus) !== 3 && !billHasPayment(media, [b._id]),
+      )
+      .forEach((b) => {
+        const u = `p${fi++}`;
+        const oldAmount = Number(b.netPayable || 0);
+        const g = Number(b.gstAmount || 0);
+        const newGst = round(g * s);
+        const gstInNet = Number(b.withGst) === 2 ? g : 0;
+        $set[`rentalDue.$[${u}].netPayable`] = round((oldAmount - gstInNet) * s) + (gstInNet ? newGst : 0);
+        $set[`rentalDue.$[${u}].baseAmount`] = round((Number(b.baseAmount || 0) - g) * s) + newGst;
+        $set[`rentalDue.$[${u}].gstAmount`] = newGst;
+        $set[`rentalDue.$[${u}].updatedBy`] = `${userName} (Cancel Reverted)`;
+        arrayFilters.push({ [`${u}._id`]: b._id });
+      });
+  }
+
+  await Media.updateOne({ _id: media._id }, { $set }, { arrayFilters, strict: false });
+
+  // kept months / arrears of the cancel → removed; GST rows back
+  const gstBack = gstRowsBack.reduce((t, g) => t + Math.max(0, Number(g.gstAmount || 0) - Number(g.paidAmount || 0)), 0);
+  await Media.updateOne(
+    { _id: media._id },
+    {
+      $pull: {
+        "rentalPayment.rentRevisionKeptMonths": { rentRevisionId: revision._id },
+        ...(arrears.length ? { arrearsDue: { _id: { $in: arrears.map((a) => a._id) } } } : {}),
+      },
+    },
+    { strict: false },
+  );
+  if (gstRowsBack.length) {
+    await Media.updateOne(
+      { _id: media._id },
+      { $push: { gstBalanceHistory: { $each: gstRowsBack } }, ...(gstBack > 0 ? { $inc: { "rentalPayment.balanceGstAmount": gstBack } } : {}) },
+      { strict: false },
+    );
+  }
+
+  // rentalAmountHistory: the cancel's site rent row no longer a rent change
+  // (kept as a log) + one revert log row per month
+  const hasRentRow = (media.rentalPayment?.rentalAmountHistory || []).some(
+    (h) => h && String(h.rentRevisionId) === revId && h.isRevisionLog !== true,
+  );
+  if (hasRentRow) {
+    await Media.updateOne(
+      { _id: media._id },
+      { $set: { "rentalPayment.rentalAmountHistory.$[h].isRevisionLog": true, "rentalPayment.rentalAmountHistory.$[h].cancelReverted": true } },
+      { arrayFilters: [{ "h.rentRevisionId": revision._id, "h.isRevisionLog": { $ne: true } }], strict: false },
+    );
+  }
+  const siteRentNow = siteRentChanged ? oldRent : Number(media.rentalPayment?.totalRentalAmount || 0);
+  const detailByMonth = new Map((revision.monthsDetail || []).map((d) => [d && d.month, d]));
+  const historyRows = months.map((mo) => {
+    const d = detailByMonth.get(mo.month) || {};
+    const amt = Number(d.amount || 0);
+    return revisionHistoryRow(revision, {
+      siteRent: siteRentNow,
+      previousSiteRent: siteRentChanged ? newRent : siteRentNow,
+      month: mo.month,
+      changeAmount: amt ? -amt : 0,
+      before: d.newAmount ?? null,
+      after: d.currentAmount ?? null,
+      userName,
+      now,
+      extra: { isRevisionLog: true, changeType: "cancelRevert", changeLabel: CHANGE_LABELS.cancelRevert, remark: reason },
+    });
+  });
+  await Media.updateOne(
+    { _id: media._id },
+    { $push: { "rentalPayment.rentalAmountHistory": { $each: historyRows, $sort: { updatedAt: -1 } } } },
+    { strict: false },
+  );
+
+  // ADINN OOH registry: the closed entry back to its old key (old number again)
+  try {
+    const Registry = require("../../../models/Admin/AdinnOohBillRegistrySchema");
+    const suffix = `|cancelled:${revId}`;
+    const entries = await Registry.find({ groupKey: { $regex: `\\|cancelled:${revId}$` } }).lean();
+    for (const e of entries) {
+      try {
+        await Registry.updateOne({ _id: e._id }, { $set: { groupKey: e.groupKey.slice(0, -suffix.length) } });
+      } catch (err) {
+        console.error("CANCEL revert registry key error:", err.message);
+      }
+    }
+  } catch (e) {
+    console.error("CANCEL revert registry error:", e.message);
+  }
+
+  revision.cancelReverted = true;
+  revision.cancelRevert = {
+    revertedAt: now,
+    revertedBy: userName,
+    revertedByUserId: mongoose.Types.ObjectId.isValid(String(user?.userId)) ? user.userId : null,
+    revertedByRole: role,
+    revertedByRoleName: ROLE_NAMES[role] || "",
+    reason,
+    siteRentReverted: siteRentChanged ? { from: newRent, to: oldRent } : null,
+    arrearsRemoved: arrears.map((a) => a._id),
+    months: resultMonths,
+  };
+  revision.updatedBy = userName;
+  revision.markModified("cancelRevert");
+  await revision.save();
+
+  return {
+    statusCode: 200,
+    message: `Cancel reverted — ${months.map((mo) => mo.month).join(", ")} bill${months.length > 1 ? "s" : ""} back to CMD approved`,
+    data: {
+      revisionId: revision._id,
+      billType: "CANCEL",
+      cancelReverted: true,
+      cancelRevert: {
+        revertedAt: now,
+        revertedBy: userName,
+        revertedByRole: role,
+        revertedByRoleName: ROLE_NAMES[role] || "",
+        reason,
+      },
+      months: resultMonths,
+    },
+  };
 }
 
 // ✅ NEW — advance withGst 1 / 2 vs the bill it is deducted from: that bill's
@@ -731,7 +1363,9 @@ function billTypeFields(r, plan = null) {
   const increaseGstAmount = Number(r.increaseGstAmount || 0);
   const newRent = Number(r.newRent || 0);
   const out = {
-    billType: r.billType === "NORMAL_BILL" ? "NORMAL_BILL" : "BILL", // ✅ CHANGED
+    billType: AUTO_BILL_TYPES.includes(r.billType) ? r.billType : "BILL", // ✅ CHANGED — NORMAL_BILL / CANCEL kept
+    ...(r.billType === "CANCEL" ? { cancelMail: r.cancelMail || null } : {}), // ✅ NEW
+    ...(r.billType === "CANCEL" ? { cancelReverted: !!r.cancelReverted, cancelRevert: r.cancelRevert || null } : {}), // ✅ NEW — cancel revert
     revisionAction: r.revisionAction || "increase", // ✅ NEW
     approvalType: r.approvalType || "normal", // ✅ NEW
     ...(r.revisionAction === "decrease"
@@ -844,16 +1478,16 @@ exports.createRentRevision = async (req, res) => {
     let fromLabel = "";
     let billMonths = null; // ✅ NEW — BILL "months" array
     let revisionAction = "increase"; // ✅ NEW
-    if (billType === "BILL" || billType === "NORMAL_BILL") {
-      const parsedMonths = parseRevisionMonths(body.months);
+    if (billType === "BILL" || AUTO_BILL_TYPES.includes(billType)) {
+      const parsedMonths = parseRevisionMonths(body.months, { allowNoAmount: billType === "CANCEL" });
       if (parsedMonths.error) return errorResponse(res, parsedMonths.error, null, 400);
       billMonths = parsedMonths.list;
       revisionAction = parsedMonths.action || "increase";
     }
-    // ✅ NEW — NORMAL_BILL: months + reason required
-    if (billType === "NORMAL_BILL") {
-      if (!billMonths) return errorResponse(res, `months is required for NORMAL_BILL — send like ${MONTHS_EXAMPLE}`, null, 400);
-      if (!String(body.reason || "").trim()) return errorResponse(res, "reason is required for NORMAL_BILL", null, 400);
+    // ✅ NEW — NORMAL_BILL / CANCEL: months + reason required
+    if (AUTO_BILL_TYPES.includes(billType)) {
+      if (!billMonths) return errorResponse(res, `months is required for ${billType} — send like ${MONTHS_EXAMPLE}`, null, 400);
+      if (!String(body.reason || "").trim()) return errorResponse(res, `reason is required for ${billType}`, null, 400);
     }
     if (billType === "BILL" && !billMonths) {
       if (body.increaseAmount === undefined || body.increaseAmount === null || String(body.increaseAmount).trim() === "") {
@@ -880,15 +1514,16 @@ exports.createRentRevision = async (req, res) => {
     }
     // ✅ NEW — BILL "months": same applyToAllMonths / nextIncreaseAmount rules
     // ✅ CHANGED — + NORMAL_BILL; decrease / NORMAL_BILL → nextIncreaseAmount optional
-    if ((billType === "BILL" || billType === "NORMAL_BILL") && billMonths) {
+    if ((billType === "BILL" || AUTO_BILL_TYPES.includes(billType)) && billMonths) {
       applyToAllMonths = parseApplyToAllMonths(body.applyToAllMonths);
       if (applyToAllMonths === undefined) return errorResponse(res, "applyToAllMonths must be 0 or 1", null, 400);
+      if (revisionAction === "none") applyToAllMonths = 0; // ✅ NEW — CANCEL without amount
       if (applyToAllMonths === 1) {
         // ✅ CHANGED — decrease → nextDecreaseAmount (optional); increase → nextIncreaseAmount
         const next = parseNextAmount(body, revisionAction);
         if (next.error) return errorResponse(res, next.error, null, 400);
         nextIncreaseAmount = next.amount;
-        if (nextIncreaseAmount === null && billType !== "NORMAL_BILL" && revisionAction !== "decrease") {
+        if (nextIncreaseAmount === null && !AUTO_BILL_TYPES.includes(billType) && revisionAction !== "decrease") {
           return errorResponse(res, "nextIncreaseAmount is required when applyToAllMonths is 1", null, 400);
         }
       }
@@ -963,7 +1598,9 @@ exports.createRentRevision = async (req, res) => {
     const pendingRoles = [...new Set(created.map((c) => c.currentPendingRoleName).filter(Boolean))];
     return successResponse(
       res,
-      billType === "NORMAL_BILL" // ✅ NEW
+      billType === "CANCEL" // ✅ NEW
+        ? `Bill approval cancelled (${parts.join(", ")}) — bill sent back to Rental Executive for approval`
+        : billType === "NORMAL_BILL" // ✅ NEW
         ? `Bill updated (${parts.join(", ")}) — not CMD approved, no approval needed`
         : `Rent revision ${parts.join(", ")} — waiting for ${pendingRoles.join(" / ") || "Rental Executive"} approval`,
       { ...revisionTotals(billType, created), created, failed }, // ✅ NEW — totals
@@ -1062,7 +1699,7 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
         400,
       );
     }
-    const parsedMonths = parseRevisionMonths(site.months);
+    const parsedMonths = parseRevisionMonths(site.months, { allowNoAmount: billType === "CANCEL" }); // ✅ CHANGED — CANCEL: month without amount
     if (parsedMonths.error) {
       const err = parsedMonths.error;
       return errorResponse(res, err.startsWith("months") ? `${p}.${err}` : `${p}: ${err}`, null, 400);
@@ -1085,6 +1722,7 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
     }
     let applyToAllMonths = parseApplyToAllMonths(site.applyToAllMonths !== undefined ? site.applyToAllMonths : body.applyToAllMonths);
     if (applyToAllMonths === undefined) return errorResponse(res, `${p}.applyToAllMonths must be 0 or 1`, null, 400);
+    if (siteAction === "none") applyToAllMonths = 0; // ✅ NEW — CANCEL without amount
     let nextIncreaseAmount = null;
     if (applyToAllMonths === 1) {
       // ✅ CHANGED — decrease → nextDecreaseAmount (optional); increase → nextIncreaseAmount
@@ -1096,7 +1734,7 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
       const next = parseNextAmount(nextSrc, siteAction, `${p}.`);
       if (next.error) return errorResponse(res, next.error, null, 400);
       nextIncreaseAmount = next.amount;
-      if (nextIncreaseAmount === null && billType !== "NORMAL_BILL" && siteAction !== "decrease") {
+      if (nextIncreaseAmount === null && !AUTO_BILL_TYPES.includes(billType) && siteAction !== "decrease") {
         return errorResponse(res, `${p}.nextIncreaseAmount is required when applyToAllMonths is 1`, null, 400);
       }
     }
@@ -1117,9 +1755,9 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
       },
     });
   }
-  // ✅ NEW — NORMAL_BILL: reason required
-  if (billType === "NORMAL_BILL" && !String(body.reason || "").trim()) {
-    return errorResponse(res, "reason is required for NORMAL_BILL", null, 400);
+  // ✅ NEW — NORMAL_BILL / CANCEL: reason required
+  if (AUTO_BILL_TYPES.includes(billType) && !String(body.reason || "").trim()) {
+    return errorResponse(res, `reason is required for ${billType}`, null, 400);
   }
 
   // one invoice PDF for all sites → mail gstInvoiceUrl
@@ -1185,7 +1823,9 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
   const pendingRoles = [...new Set(created.map((c) => c.currentPendingRoleName).filter(Boolean))];
   return successResponse(
     res,
-    billType === "NORMAL_BILL" // ✅ NEW
+    billType === "CANCEL" // ✅ NEW
+      ? `Bill approval cancelled (${parts.join(", ")}) — bill sent back to Rental Executive for approval`
+      : billType === "NORMAL_BILL" // ✅ NEW
       ? `Bill updated (${parts.join(", ")}) — not CMD approved, no approval needed`
       : `Rent revision ${parts.join(", ")} — waiting for ${pendingRoles.join(" / ") || "Rental Executive"} approval`,
     { ...revisionTotals(billType, created), created, failed: [] },
@@ -1238,6 +1878,7 @@ async function sendNewBillCmdMail(media, revision, { rows = [], advanceBill = nu
   const data = {
     billType: isAdvance ? "ADVANCE" : "BILL",
     revisionId: String(revision._id),
+    billNo: revision.adinn_ooh_bills || "", // ✅ NEW — ADINN OOH bill number of the New Bill / Advance
     media: {
       mediaCode,
       mediaName,
@@ -1354,12 +1995,15 @@ async function sendNewBillCmdMail(media, revision, { rows = [], advanceBill = nu
 const CHANGE_LABELS = {
   normalBillIncrease: "Bill Increase",
   normalBillDecrease: "Bill Decrease",
+  cancel: "Bill Approval Cancelled", // ✅ NEW
+  cancelRevert: "Bill Approval Cancel Reverted", // ✅ NEW
   newBill: "New Bill",
   newBillDecrease: "Bill Decrease (CMD approved bill)",
   advance: "Advance",
 };
 function revisionChangeType(revision) {
   if (revision.billType === "ADVANCE") return "advance";
+  if (revision.billType === "CANCEL") return "cancel"; // ✅ NEW
   const dec = revision.revisionAction === "decrease";
   if (revision.billType === "NORMAL_BILL") return dec ? "normalBillDecrease" : "normalBillIncrease";
   return dec ? "newBillDecrease" : "newBill";
@@ -1942,6 +2586,24 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
   // revision.mail and each new bill's mailSent. A mail failure does not undo
   // the approval.
   if (!isDecrease) {
+    // ✅ NEW — New Bill / Advance bill → ADINN OOH bill number (one per revision),
+    // given before the mail (mail shows it as Bill No)
+    const newBillIds = (result.arrearsBills || []).map((b) => b._id).filter(Boolean);
+    if (newBillIds.length) {
+      const no = await ensureRevisionAdinnOohBill({
+        mediaId: revision.mediaId,
+        revisionId: revision._id,
+        kind: isAdvance ? "advance" : "newbill",
+        dueMonth: (result.arrearsBills[0] && result.arrearsBills[0].dueMonth) || revision.fromMonth || "",
+        billIds: newBillIds,
+        billDate: new Date(),
+      });
+      if (no) {
+        (result.arrearsBills || []).forEach((b) => (b.adinn_ooh_bills = no));
+        revision.adinn_ooh_bills = no;
+        await revision.save();
+      }
+    }
     const freshMedia = (await Media.findById(revision.mediaId).select(RENT_REVISION_MEDIA_FIELDS).lean()) || media;
     const ownerTotals = new Map();
     const addOwners = (owners) =>
@@ -2044,6 +2706,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
       lastRemark: lastRemarkOf(revision.approvalSteps), // ✅ NEW
       approvalSteps: formatSteps(revision.approvalSteps),
       mail: revision.mail || null, // ✅ NEW — new bill CMD mail result
+      adinn_ooh_bills: revision.adinn_ooh_bills || null, // ✅ NEW — New Bill / Advance bill number
     },
   };
 }
@@ -2065,6 +2728,24 @@ const parseRevisionIds = (value) => {
 
 // ── POST /admin/rent-revision/approve ────────────────────────
 // revisionId: one id (single response) or an array (results[] / failed[])
+// ✅ NEW — POST /admin/rent-revision/cancel-revert { revisionId, reason }
+// CANCEL revision undone: bills back to CMD approved (old approval / amount /
+// ADINN OOH number). Any role (Executive / Manager / CMD). No mail.
+exports.revertCancelRevision = async (req, res) => {
+  try {
+    const revisionId = String(req.body?.revisionId || "").trim();
+    const reason = String(req.body?.reason || "").trim();
+    if (!revisionId) return errorResponse(res, "revisionId is required", null, 400);
+    if (!reason) return errorResponse(res, "reason is required", null, 400);
+    const r = await revertCancelRevision(revisionId, { reason, user: req.user });
+    if (r.statusCode >= 400) return errorResponse(res, r.message, null, r.statusCode);
+    return successResponse(res, r.message, r.data);
+  } catch (err) {
+    console.error("❌ Cancel revert error:", err);
+    return errorResponse(res, err?.message || "Cancel revert failed", null, err?.statusCode || 500);
+  }
+};
+
 exports.approveRentRevision = async (req, res) => {
   try {
     const { remark } = req.body || {};
@@ -2252,8 +2933,8 @@ exports.getRentRevisionList = async (req, res) => {
     // ✅ NEW — billType filter (old revisions without billType are BILL)
     const billTypeFilter = q.billType ? String(q.billType).trim().toUpperCase() : "";
     if (billTypeFilter === "ADVANCE") filter.billType = "ADVANCE";
-    else if (billTypeFilter === "NORMAL_BILL") filter.billType = "NORMAL_BILL"; // ✅ NEW
-    else if (billTypeFilter === "BILL" || billTypeFilter === "NEW_BILL") filter.billType = { $nin: ["ADVANCE", "NORMAL_BILL"] }; // ✅ CHANGED — + NEW_BILL, not NORMAL_BILL
+    else if (AUTO_BILL_TYPES.includes(billTypeFilter)) filter.billType = billTypeFilter; // ✅ NEW — NORMAL_BILL / CANCEL
+    else if (billTypeFilter === "BILL" || billTypeFilter === "NEW_BILL") filter.billType = { $nin: ["ADVANCE", ...AUTO_BILL_TYPES] }; // ✅ CHANGED — + NEW_BILL, not NORMAL_BILL / CANCEL
 
     const [rows, totalCount] = await Promise.all([
       RentRevision.find(filter).sort({ createdAt: -1 }).skip((pageNumber - 1) * count).limit(count).lean(),
@@ -2316,7 +2997,7 @@ exports.getRentRevisionList = async (req, res) => {
         mediaId: r.mediaId,
         mediaCode: r.mediaCode,
         mediaName: r.mediaName,
-        ...billTypeFields({ ...r, billType: isAdvance ? "ADVANCE" : r.billType === "NORMAL_BILL" ? "NORMAL_BILL" : "BILL" }), // ✅ CHANGED — NORMAL_BILL kept
+        ...billTypeFields({ ...r, billType: isAdvance ? "ADVANCE" : AUTO_BILL_TYPES.includes(r.billType) ? r.billType : "BILL" }), // ✅ CHANGED — NORMAL_BILL / CANCEL kept
         ...(isAdvance ? {} : { difference: r.difference }),
         ...advanceFields,
         // ✅ NEW — CMD approval mail of months whose bill was increased (no arrears bill)
@@ -2352,7 +3033,9 @@ exports.getRentRevisionList = async (req, res) => {
           status: arrearsStatus(b),
           mailSent: !!b.mailSent,
           mailSentAt: b.mailSentAt || null,
+          adinn_ooh_bills: b.adinn_ooh_bills || null, // ✅ NEW
         })),
+        adinn_ooh_bills: r.adinn_ooh_bills || null, // ✅ NEW — New Bill / Advance bill number
         // ✅ NEW — every update through POST /admin/rent-revision (oldest first)
         editHistory: r.editHistory || [],
         editCount: (r.editHistory || []).length,
