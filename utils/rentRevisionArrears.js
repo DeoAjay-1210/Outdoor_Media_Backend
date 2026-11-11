@@ -664,7 +664,7 @@ const ownerModePaid = (owner, mode) => (mode === "Cash" ? owner.paidCash : owner
  * Pays an arrears bill (rent or GST). Mutates and returns the bill copy.
  * Throws { message, statusCode } on a bad request.
  */
-function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrNumber, date, userName, parentWithGst, remark = "" }) {
+function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrNumber, date, userName, parentWithGst, remark = "", gstScope = "" }) {
   // shallow copies — keeps ObjectIds as ObjectIds
   const bill = { ...billIn };
   bill.owners = (billIn.owners || []).map((o) => ({ ...o }));
@@ -678,7 +678,27 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
   }
   const saved = [];
 
-  if (entryType === "gst") {
+  if (entryType === "gst" && gstScope === "landlord") {
+    // ✅ NEW — LANDLORD-WISE GST (GST on hold, several landlords): this landlord's own GST share (owners[].gstAmount) is paid
+    // with its own UTR on its own row. Only when the caller asks for it (Gmail UTR automation); the whole-bill GST payment
+    // below is unchanged.
+    if (bill.withGst === 2) throw { message: `${bill.label} GST is paid with the rent (GST included)`, statusCode: 400 };
+    const owner = bill.owners.find((o) => String(o.landOwnerId) === String(landOwnerId) || String(o.landOwnerMasterId) === String(landOwnerId));
+    if (!owner) throw { message: "landOwnerId not found on this arrears bill", statusCode: 400 };
+    const ownerGst = round(Number(owner.gstAmount || 0));
+    if (ownerGst <= 0) throw { message: `${owner.landOwnerName || "Landlord"} has no GST on ${bill.label}`, statusCode: 400 };
+    const already = owner.paidGst === true || bill.payments.some((p) => p.type === "gst" && p.landOwnerId && String(p.landOwnerId) === String(owner.landOwnerId));
+    const gstPending = round(Number(bill.gstAmount || 0) - Number(bill.gstPaid || 0));
+    if (already || gstPending <= 0) throw { message: `${owner.landOwnerName || "Landlord"} GST already paid`, statusCode: 400 };
+    const gstPay = Math.min(ownerGst, gstPending);
+    owner.paidGst = true;
+    bill.gstPaid = round(Number(bill.gstPaid || 0) + gstPay);
+    // every landlord's GST paid → the bill's GST is paid (rounding / site-level difference)
+    if (bill.owners.filter((o) => Number(o.gstAmount || 0) > 0).every((o) => o.paidGst === true)) bill.gstPaid = Number(bill.gstAmount || 0);
+    const grow = { _id: new mongoose.Types.ObjectId(), type: "gst", landOwnerId: owner.landOwnerId, landOwnerName: owner.landOwnerName, amount: gstPay, gstAmount: gstPay, paymentMode: mode || "Online", utrNumber: utrNumber || "", date: payDate, remark: String(remark || "").trim(), createdBy: userName, createdAt: nowIST() };
+    bill.payments.push(grow);
+    saved.push(grow);
+  } else if (entryType === "gst") {
     const gstPending = round(Number(bill.gstAmount || 0) - Number(bill.gstPaid || 0));
     if (Number(bill.gstAmount || 0) <= 0) throw { message: `${bill.label} has no GST`, statusCode: 400 };
     if (gstPending <= 0) throw { message: `${bill.label} GST already paid`, statusCode: 400 };

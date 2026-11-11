@@ -13,6 +13,7 @@ const jwt = require("jsonwebtoken");
 const Gmail = require("../../../utils/gmailService");
 const { lookupUtrByBillNumber, BILL_NUMBER_FORMAT } = require("../../../utils/gmailUtrLookup");
 const { getPendingUtrBills } = require("../../../utils/pendingUtrBills");
+const { getPendingArrearsUtrBills } = require("../../../utils/pendingArrearsUtrBills");
 const { processPendingUtrs, saveEnabled } = require("../../../utils/utrProcessor");
 const { successResponse, errorResponse } = require("../../../utils/response");
 
@@ -106,6 +107,22 @@ const pendingUtrBills = async (req, res) => {
     }
     const currentMonthOnly = String(req.query.currentMonthOnly || "").toLowerCase() === "true";
     const out = await getPendingUtrBills({ limit, sinceDays, currentMonthOnly });
+    // New Bill / Advance Bill (media.arrearsDue[]) — a separate block, the Rental Bill list above is unchanged
+    let ar = { bills: [], totalPending: 0 };
+    let arrearsError;
+    try {
+      ar = await getPendingArrearsUtrBills({ limit, sinceDays, currentMonthOnly });
+    } catch (e) {
+      arrearsError = e.message;
+    }
+    out.newBillAdvance = {
+      totalPending: ar.totalPending,
+      returned: ar.bills.length,
+      safeToAutoSave: ar.bills.filter((b) => b.eligible).length,
+      needsManualReview: ar.bills.filter((b) => !b.eligible).length,
+      ...(arrearsError ? { error: arrearsError } : {}),
+      bills: ar.bills,
+    };
     return successResponse(res, "Pending UTR bills (read-only, nothing was changed)", out);
   } catch (err) {
     return fail(res, err, "Could not read pending UTR bills");

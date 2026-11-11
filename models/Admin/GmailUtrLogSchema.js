@@ -24,6 +24,7 @@ const gmailUtrLogSchema = new mongoose.Schema(
     },
     reason: { type: String, default: "" },
     mediaId: { type: String, default: "" },
+    billKind: { type: String, default: "" }, // "newBill" | "advance" for arrearsDue bills; empty = Rental Bill
     dueMonth: { type: String, default: "" }, // target month of the Bill Number (rentalDue.dueMonth)
     rentalDueIds: [{ type: String }],
     landOwnerId: { type: String, default: "" },
