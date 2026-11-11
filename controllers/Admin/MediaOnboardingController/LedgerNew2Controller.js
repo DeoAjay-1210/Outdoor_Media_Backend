@@ -6221,6 +6221,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             shareAmount: resolvedShareAmount, // ✅ ADDED
             tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
             rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ NEW
+            remark: realEntry.remark ?? "", // ✅ NEW — saved remark (was dropped)
             isVirtual: false,
           });
         } else {
@@ -6437,6 +6438,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           gstAmount: gstDetails.gstAmount,
           amount: entry.amount,
           rentalDueApprovalStatus: matchedDueSpecific?.approvalStatus ?? 0, // ✅ NEW
+          remark: entry.remark ?? "", // ✅ NEW — saved remark (was dropped)
           isVirtual: false,
         };
       });
