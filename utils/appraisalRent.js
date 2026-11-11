@@ -194,16 +194,41 @@ function scaleOwner(owner, ratio, gstRatio = ratio) {
   };
 }
 
+// ✅ NEW — rent revision month payment split (cash / online per owner) kept on
+// the month's rentRevisionKeptMonths entry (ownerSplit: [{ landOwnerId,
+// paymentCategory, shareAmount, cashAmount, onlineAmount }]). Months without
+// it → null (owners priced as before).
+function keptOwnerSplit(media, dueDate) {
+  const dueKey = dueDate ? monthKey(dueDate) : null;
+  if (dueKey === null) return null;
+  const kept = rentRevisionKeptEntry(media, dueKey);
+  return kept && Array.isArray(kept.ownerSplit) && kept.ownerSplit.length ? kept.ownerSplit : null;
+}
+function withOwnerSplit(owner, split) {
+  if (!owner || !split) return owner;
+  const s = split.find((x) => x && String(x.landOwnerId) === String(owner._id));
+  if (!s) return owner;
+  return {
+    ...toPlain(owner),
+    paymentCategory: Number(s.paymentCategory),
+    shareAmount: Number(s.shareAmount || 0),
+    cashAmount: Number(s.cashAmount || 0),
+    onlineAmount: Number(s.onlineAmount || 0),
+  };
+}
+
 function ownerAsOfDate(media, owner, dueDate) {
-  return scaleOwner(owner, getRentRatioForDueDate(media, dueDate), getGstRatioForDueDate(media, dueDate));
+  // ✅ CHANGED — + month payment split (when the month has one)
+  return withOwnerSplit(scaleOwner(owner, getRentRatioForDueDate(media, dueDate), getGstRatioForDueDate(media, dueDate)), keptOwnerSplit(media, dueDate));
 }
 
 function landOwnersAsOfDate(media, dueDate) {
   const owners = media?.landOwners || [];
   const ratio = getRentRatioForDueDate(media, dueDate);
   const gstRatio = getGstRatioForDueDate(media, dueDate);
-  if (ratio === 1 && gstRatio === 1) return owners;
-  return owners.map((o) => scaleOwner(o, ratio, gstRatio));
+  const split = keptOwnerSplit(media, dueDate); // ✅ NEW
+  if (ratio === 1 && gstRatio === 1 && !split) return owners;
+  return owners.map((o) => withOwnerSplit(scaleOwner(o, ratio, gstRatio), split));
 }
 
 // Plain-object view of the media with rent, site GST and owner amounts as
@@ -212,7 +237,8 @@ function mediaAsOfDate(media, dueDate) {
   if (!media) return media;
   const ratio = getRentRatioForDueDate(media, dueDate);
   const gstRatio = getGstRatioForDueDate(media, dueDate);
-  if (ratio === 1 && gstRatio === 1) return media;
+  const split = keptOwnerSplit(media, dueDate); // ✅ NEW — month payment split
+  if (ratio === 1 && gstRatio === 1 && !split) return media;
   const base = toPlain(media);
   const rp = base.rentalPayment || {};
   return {
@@ -225,7 +251,7 @@ function mediaAsOfDate(media, dueDate) {
           ? rp.gstAmount
           : Math.round(Number(rp.gstAmount) * gstRatio),
     },
-    landOwners: (base.landOwners || []).map((o) => scaleOwner(o, ratio, gstRatio)),
+    landOwners: (base.landOwners || []).map((o) => withOwnerSplit(scaleOwner(o, ratio, gstRatio), split)),
   };
 }
 
@@ -239,4 +265,5 @@ module.exports = {
   ownerAsOfDate,
   landOwnersAsOfDate,
   mediaAsOfDate,
+  keptOwnerSplit, // ✅ NEW
 };

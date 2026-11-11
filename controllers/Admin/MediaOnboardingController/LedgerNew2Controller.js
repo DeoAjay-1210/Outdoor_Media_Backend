@@ -5061,6 +5061,7 @@ exports.getLedgerHistory = async (req, res) => {
         parentWithGstById,
         arrearsInRange,
         new Set((media.rentalDue || []).map((r) => r && r.dueMonth).filter(Boolean)), // ✅ NEW — advance adjusted
+        ownerMasterIdFilter, // ✅ NEW — New Bill / advance totals → filtered landowners only
       );
 
       mediaHistoryList.push({
