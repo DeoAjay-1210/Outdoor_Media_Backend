@@ -776,6 +776,10 @@ function arrearsBlock(bills) {
 
 const ownerMode = (o) => (Number(o.onlineAmount || 0) > 0 ? "Online" : "Cash");
 const ownerPaid = (o) => (ownerMode(o) === "Cash" ? o.paidCash === true : o.paidOnline === true);
+// ✅ NEW — modes of an owner on a New Bill / advance: Cash AND Online amounts →
+// both (separate rows), else the one mode (as before)
+const ownerModes = (o) =>
+  Number(o.cashAmount || 0) > 0 && Number(o.onlineAmount || 0) > 0 ? ["Online", "Cash"] : [ownerMode(o)];
 
 // Inserts rows after the last row of the same month (✅ CHANGED — no row of
 // that month: before the first later month, else appends)
@@ -836,16 +840,26 @@ const advanceExtras = (b) =>
 function arrearsLedgerRows(b) {
   const lastPay = (b.payments || []).filter((p) => p.type === "rental").slice(-1)[0];
   const kind = billKind(b);
-  return (b.owners || []).map((o) => {
-    const paid = ownerPaid(o);
+  // ✅ CHANGED — owner with Cash AND Online amounts → one row per mode (own
+  // amount / GST share / paid flag / payment); one mode → one row (as before)
+  return (b.owners || []).flatMap((o) => ownerModes(o).map((md, _i, modes) => {
+    const split = modes.length > 1;
+    const paid = split ? ownerModePaid(o, md) : ownerPaid(o);
+    const modeShare = split ? ownerModeAmount(o, md) : Number(o.shareAmount || 0);
+    const share = Number(o.shareAmount || 0);
+    // ✅ FIXED — this owner's own payment (same mode, else any mode); old
+    // payments without landOwnerId → the bill's last payment (as before)
+    const ownPays = (b.payments || []).filter((p) => p.type === "rental" && p.landOwnerId && String(p.landOwnerId) === String(o.landOwnerId));
+    const pay = ownPays.filter((p) => p.paymentMode === md).slice(-1)[0] || (split ? null : ownPays.slice(-1)[0] || lastPay);
     return {
       landOwnerId: o.landOwnerId,
       landOwnerName: o.landOwnerName,
       paymentCategory: o.paymentCategory,
-      paymentMode: ownerMode(o),
-      utrNumber: paid && lastPay ? lastPay.utrNumber || "" : "",
-      date: paid && lastPay ? lastPay.date : null,
-      remark: paid && lastPay ? lastPay.remark || "" : "", // ✅ NEW
+      paymentMode: md,
+      ...(split ? (md === "Cash" ? { cashAmount: modeShare } : { onlineAmount: modeShare }) : {}), // ✅ NEW
+      utrNumber: paid && pay ? pay.utrNumber || "" : "",
+      date: paid && pay ? pay.date : null,
+      remark: paid && pay ? pay.remark || "" : "", // ✅ NEW
       status: 1,
       dueMonth: b.dueMonth,
       cycle: b.dueDate,
@@ -856,18 +870,23 @@ function arrearsLedgerRows(b) {
       rentRevisionId: b.rentRevisionId,
       ...advanceExtras(b),
       index: null,
-      updatedBy: paid && lastPay ? lastPay.createdBy || "" : "",
-      updatedAt: paid && lastPay ? lastPay.createdAt : null,
-      shareAmount: Number(o.shareAmount || 0),
+      updatedBy: paid && pay ? pay.createdBy || "" : "",
+      updatedAt: paid && pay ? pay.createdAt : null,
+      shareAmount: modeShare, // ✅ CHANGED — split owner → this mode's amount
       tdsAmount: 0, // ✅ CHANGED — no TDS on arrears / advance
       isVirtual: !paid,
       isPaid: paid,
       targetType: kind,
       rentalDueApprovalStatus: 3,
       withGst: Number(b.withGst || 0),
-      gstAmount: Number(o.gstAmount || 0),
+      // ✅ CHANGED — split owner → GST share of this mode (Cash row takes the remainder)
+      gstAmount: !split
+        ? Number(o.gstAmount || 0)
+        : md === "Online"
+          ? (share > 0 ? round((Number(o.gstAmount || 0) * modeShare) / share) : 0)
+          : Number(o.gstAmount || 0) - (share > 0 ? round((Number(o.gstAmount || 0) * ownerModeAmount(o, "Online")) / share) : 0),
     };
-  });
+  }));
 }
 
 // ✅ NEW — New Bill / advance rows: common totals of every bill of the same
@@ -978,7 +997,7 @@ function withArrearsOutstanding(outstanding, bills) {
  * One ledger-list mediaList item + that site's arrears bills / last
  * approved revision → item with the arrears rows and amounts added.
  */
-function decorateLedgerItem(item, arrearsBills, lastRevision, parentWithGstById = new Map(), billMonths = null) {
+function decorateLedgerItemBase(item, arrearsBills, lastRevision, parentWithGstById = new Map(), billMonths = null) {
   const arrears = arrearsBillsWithGst(arrearsBills, parentWithGstById);
   const advances = advanceBillsOf(arrearsBills); // ✅ NEW
   const bills = [...arrears, ...advances];
@@ -1037,17 +1056,20 @@ function decorateLedgerItem(item, arrearsBills, lastRevision, parentWithGstById 
           rentalDueId: b._id,
           ...advanceExtras(b),
           cycle: new Date(Date.UTC(due.getUTCFullYear(), due.getUTCMonth(), 1)),
-          owners: (b.owners || [])
-            .filter((o) => !ownerPaid(o))
-            .map((o) => ({
-              landOwnerId: o.landOwnerId,
-              landOwnerName: o.landOwnerName,
-              paymentCategory: o.paymentCategory,
-              paymentMode: ownerMode(o),
-              ...(ownerMode(o) === "Cash" ? { cashAmount: Number(o.cashAmount || 0) } : { onlineAmount: Number(o.onlineAmount || 0) }),
-              [ownerMode(o) === "Cash" ? "cashEntry" : "onlineEntry"]: false,
-              pendingType: `${kind}Pending`,
-            })),
+          // ✅ CHANGED — owner with Cash AND Online → one entry per unpaid mode
+          owners: (b.owners || []).flatMap((o) =>
+            ownerModes(o)
+              .filter((md) => (ownerModes(o).length > 1 ? !ownerModePaid(o, md) : !ownerPaid(o)))
+              .map((md) => ({
+                landOwnerId: o.landOwnerId,
+                landOwnerName: o.landOwnerName,
+                paymentCategory: o.paymentCategory,
+                paymentMode: md,
+                ...(md === "Cash" ? { cashAmount: Number(o.cashAmount || 0) } : { onlineAmount: Number(o.onlineAmount || 0) }),
+                [md === "Cash" ? "cashEntry" : "onlineEntry"]: false,
+                pendingType: `${kind}Pending`,
+              })),
+          ),
         }],
         b.dueMonth,
       );
@@ -1205,7 +1227,7 @@ function markAdvanceAdjustedHistory(out, advances) {
  */
 // ✅ CHANGED — + ownerMasterIds (ledger-history landOwnerMasterId filter): New
 // Bill / advance totals of rentalOutstandingHistory → those landowners only
-function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWithGstById = new Map(), inRange = () => true, billMonths = null, ownerMasterIds = null) {
+function decorateLedgerHistoryBlockBase(block, arrearsBills, lastRevision, parentWithGstById = new Map(), inRange = () => true, billMonths = null, ownerMasterIds = null) {
   const arrears = arrearsBillsWithGst(arrearsBills, parentWithGstById);
   const advances = advanceBillsOf(arrearsBills); // ✅ NEW
   const bills = [...arrears, ...advances];
@@ -1402,6 +1424,40 @@ function overallArrearsTotals(docs, type = "arrears") {
   });
   return t;
 }
+
+// ✅ NEW — every ledger / GST row has a remark key ("" when none — unpaid /
+// virtual rows and rows saved before remarks); rows with a remark unchanged
+const withRemark = (list) =>
+  Array.isArray(list) ? list.map((r) => (r && typeof r === "object" && r.remark === undefined ? { ...r, remark: "" } : r)) : list;
+const ROW_LISTS = ["ledger", "withGst1Ledger", "allEntries", "gstBalanceHistory", "pendingLedgerHistory"];
+function withRemarkKeys(out) {
+  if (!out || typeof out !== "object") return out;
+  const res = { ...out };
+  ROW_LISTS.forEach((k) => {
+    if (Array.isArray(res[k])) res[k] = withRemark(res[k]);
+  });
+  if (Array.isArray(res.ledgerHistory)) {
+    res.ledgerHistory = res.ledgerHistory.map((y) =>
+      y && Array.isArray(y.months)
+        ? {
+            ...y,
+            months: y.months.map((mo) => {
+              if (!mo || typeof mo !== "object") return mo;
+              const m2 = { ...mo };
+              ROW_LISTS.forEach((k) => {
+                if (Array.isArray(m2[k])) m2[k] = withRemark(m2[k]);
+              });
+              return m2;
+            }),
+          }
+        : y,
+    );
+  }
+  return res;
+}
+// ✅ CHANGED — same as before + remark key on every row
+const decorateLedgerItem = (...args) => withRemarkKeys(decorateLedgerItemBase(...args));
+const decorateLedgerHistoryBlock = (...args) => withRemarkKeys(decorateLedgerHistoryBlockBase(...args));
 
 module.exports = {
   MONTHS,
