@@ -2261,11 +2261,9 @@ function revisionChangeType(revision) {
   if (revision.billType === "NORMAL_BILL") return dec ? "normalBillDecrease" : "normalBillIncrease";
   return dec ? "newBillDecrease" : "newBill";
 }
-// reason + CMD remark ("Rent reduced | CMD: okay")
+// ✅ CHANGED — reason only (CMD remark no longer added: "Rent reduced")
 function revisionRemarkText(revision) {
-  const cmd = (revision.approvalSteps || []).find((s) => Number(s.role) === 3 && s.status === "Approved");
-  const cmdRemark = cmd && cmd.remark ? String(cmd.remark).trim() : "";
-  return [String(revision.reason || "").trim(), cmdRemark ? `CMD: ${cmdRemark}` : ""].filter(Boolean).join(" | ");
+  return String(revision.reason || "").trim();
 }
 // one row; siteRent / previousSiteRent = site rent after / before (same when only the month changed)
 function revisionHistoryRow(revision, { siteRent, previousSiteRent = siteRent, month, changeAmount = null, before = null, after = null, userName, now, effectiveFrom = null, extra = {} }) {
@@ -3292,6 +3290,34 @@ exports.getRentRevisionList = async (req, res) => {
                 }
               : null,
             adjusted: !!(advBill && billMonthsById.get(String(r.mediaId))?.has(advBill.adjustInMonth)),
+            // ✅ NEW — ADVANCE months[] (same shape as BILL): the advance month with its
+            // payment split — sent split, else the advance bill's owners (single
+            // landowner / no split sent too); null before CMD approval without a split
+            months: [
+              {
+                month: r.fromMonth,
+                adjustInMonth: r.adjustInMonth || "",
+                amount: Number(r.advanceAmount || 0),
+                gstAmount: Number(r.advanceGstAmount || 0),
+                totalAmount: Number(r.advanceAmount || 0) + Number(r.advanceGstAmount || 0),
+                action: "advance",
+                payment:
+                  r.advancePayment ||
+                  (advBill && Array.isArray(advBill.owners) && advBill.owners.length
+                    ? {
+                        landOwners: advBill.owners.map((o) => ({
+                          landOwnerId: o.landOwnerId,
+                          landOwnerName: o.landOwnerName || "",
+                          paymentCategory: Number(o.requestedPaymentCategory || o.paymentCategory || 1),
+                          cashAmount: Number(o.cashAmount || 0),
+                          onlineAmount: Number(o.onlineAmount || 0),
+                        })),
+                      }
+                    : null),
+                advanceRentalDueId: advBill ? advBill._id : null,
+                ...(advBill ? { paymentStatus: arrearsStatus(advBill) } : {}),
+              },
+            ],
           }
         : {};
       return {
