@@ -156,4 +156,17 @@ const processPendingUtrsApi = async (req, res) => {
   }
 };
 
-module.exports = { getAuthUrl, oauthCallback, testUtr, pendingUtrBills, processPendingUtrsApi };
+/** GET /api/gmail/utr-corrections?billNumber=X — CMD only. READ-ONLY inspection: does a later Finance reply correct the UTR already stored for this Bill Number? */
+const utrCorrectionsApi = async (req, res) => {
+  if (!isCmd(req)) return errorResponse(res, "Only CMD can use this API", null, 403);
+  const billNumber = String(req.query.billNumber || "").trim();
+  if (!billNumber) return errorResponse(res, "billNumber is required", null, 400);
+  try {
+    const summary = await processPendingUtrs({ dryRun: true, billNumbers: [billNumber], triggeredBy: "api", maxBills: 1 });
+    return successResponse(res, "Correction inspection complete — nothing was saved", { billNumber, corrections: summary.corrections || [] });
+  } catch (err) {
+    return fail(res, err, "UTR correction inspection failed");
+  }
+};
+
+module.exports = { getAuthUrl, oauthCallback, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi };

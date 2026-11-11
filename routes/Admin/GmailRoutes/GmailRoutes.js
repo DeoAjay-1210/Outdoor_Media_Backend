@@ -9,5 +9,6 @@ router.get("/oauth/callback", C.oauthCallback); // Google redirect; protected by
 router.get("/test-utr", protect, C.testUtr); // CMD only; no database writes
 router.get("/pending-utr-bills", protect, C.pendingUtrBills); // CMD only; read-only
 router.post("/process-pending-utrs", protect, C.processPendingUtrsApi); // CMD only; dry run unless saving is enabled
+router.get("/utr-corrections", protect, C.utrCorrectionsApi); // CMD only; read-only: is the stored UTR of a Bill Number corrected by a later reply?
 
 module.exports = router;
