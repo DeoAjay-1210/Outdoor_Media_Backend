@@ -120,6 +120,10 @@ app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", rentRevisionRoutes); // ✅ NEW
 app.use("/admin", appUpdateRoutes);
 app.use("/api/gmail", gmailRoutes);
+
+// Automatic Gmail UTR detection — every 10 minutes (GMAIL_UTR_CRON_ENABLED=true). The cron is a DRY RUN unless
+// GMAIL_UTR_CRON_DRY_RUN=false AND GMAIL_UTR_SAVE_ENABLED=true. See utils/gmailUtrCron.js.
+require("./utils/gmailUtrCron").startGmailUtrCron(cron, { skipMaintenance: SKIP_STARTUP_MAINTENANCE });
 // Auto-publish a new release/apk/app-release.apk for the in-app updater (APP_UPDATE_AUTO_PUBLISH=0 to disable)
 if (process.env.APP_UPDATE_AUTO_PUBLISH !== "0") require("./utils/apkAutoPublish").startApkAutoPublish();
 app.use('/gstdetails', gstDetailRoutes);

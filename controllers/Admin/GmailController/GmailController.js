@@ -5,11 +5,15 @@
  *   GET /api/gmail/oauth/url        (CMD only)  -> { authUrl } to open in the browser
  *   GET /api/gmail/oauth/callback   (Google redirect, validated by a signed `state`)
  *   GET /api/gmail/test-utr?billNumber=<Bill Number>  (CMD only) -> UTR for that Bill Number, no DB update.
+ *   GET /api/gmail/pending-utr-bills                  (CMD only, read-only) -> approved+mailed bills still waiting for a UTR.
+ *   POST /api/gmail/process-pending-utrs              (CMD only) -> dry run by default; saves only when enabled.
  *       The Bill Number is the only search input; Gmail is searched for the exact code.
  */
 const jwt = require("jsonwebtoken");
 const Gmail = require("../../../utils/gmailService");
-const { extractUtrFromThread, extractBillNumbers } = require("../../../utils/utrExtractor");
+const { lookupUtrByBillNumber, BILL_NUMBER_FORMAT } = require("../../../utils/gmailUtrLookup");
+const { getPendingUtrBills } = require("../../../utils/pendingUtrBills");
+const { processPendingUtrs, saveEnabled } = require("../../../utils/utrProcessor");
 const { successResponse, errorResponse } = require("../../../utils/response");
 
 const CMD_ROLE = 3;
@@ -69,60 +73,7 @@ const oauthCallback = async (req, res) => {
 };
 
 
-const escapeQuotes = (v) => String(v).replace(/"/g, "");
-const subjectOf = (thread) => thread.subject || "";
-
-const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
-const regexEscape = (v) => String(v).replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
-// exact match: not part of a longer code (adinn0511202601 must not match adinn051120260123)
-const BILL_CHAR = "[A-Za-z0-9\\-/]";
-const containsExactBill = (text, billNumber) =>
-  new RegExp(`(?<!${BILL_CHAR})${regexEscape(billNumber)}(?!${BILL_CHAR})`, "i").test(text || "");
-
-// Bill Number -> Gmail. The Bill Number is the ONLY search input: Gmail is searched for the exact code, every hit is
-// read in full, and a conversation counts only if the exact Bill Number appears in one of its message bodies.
-// Never picks between several candidates; nothing is written anywhere.
-const findUtrByBillNumber = async (res, billNumber, maxResults) => {
-  const hits = await Gmail.searchThreads(`"${escapeQuotes(billNumber)}"`, maxResults);
-  const threads = [];
-  for (const id of [...new Set(hits.map((t) => t.id))]) {
-    const th = await Gmail.getThread(id);
-    // verified: quoted text counts, because a reply quotes the original mail
-    if (!th.messages.some((m) => containsExactBill(m.bodyText, billNumber))) continue;
-    const otherBills = [...new Set(th.messages.flatMap((m) => extractBillNumbers(m.bodyText)))].filter((b) => b.toLowerCase() !== billNumber.toLowerCase());
-    const r = extractUtrFromThread(th.messages);
-    threads.push({ threadId: th.id, subject: subjectOf(th), messageCount: th.messages.length, otherBillNumbers: otherBills, extractionStatus: r.status, utr: r.utr, utrSource: r.source, candidates: r.candidates });
-  }
-  const matchedThreads = threads.map(({ candidates, ...t }) => t);
-  const common = { billNumber, matchedThreads };
-
-  if (!threads.length) return successResponse(res, "No Gmail conversation contains this exact Bill Number", { ...common, utr: null, extractionStatus: "bill_not_found" });
-
-  const withUtr = threads.filter((t) => t.candidates.length);
-  const allCandidates = withUtr.flatMap((t) => t.candidates.map((c) => ({ ...c, threadId: t.threadId })));
-  const distinct = [...new Set(allCandidates.map((c) => c.utr))];
-
-  if (!distinct.length) return successResponse(res, "Bill Number found, but no UTR in any matching conversation", { ...common, utr: null, extractionStatus: "utr_not_found" });
-  if (distinct.length > 1 || withUtr.length > 1) {
-    return successResponse(res, "More than one UTR / conversation matched; manual review required", { ...common, utr: null, candidates: allCandidates, extractionStatus: "multiple_review_required" });
-  }
-  // the one UTR sits in a conversation that also talks about another Bill Number: it may belong to that one
-  if (withUtr[0].otherBillNumbers.length) {
-    return successResponse(res, "The matching conversation mentions other Bill Numbers too; manual review required", { ...common, utr: null, candidates: allCandidates, extractionStatus: "ambiguous_bill_numbers" });
-  }
-  const src = allCandidates[0];
-  return successResponse(res, "UTR extracted for this Bill Number (read-only, no database update)", {
-    ...common,
-    utr: src.utr,
-    gmailThreadId: src.threadId,
-    sourceMessageId: src.messageId,
-    senderEmail: src.from,
-    messageDate: src.date,
-    extractionStatus: "found",
-  });
-};
-
-// GET /api/gmail/test-utr?billNumber=adinn0511202601[&maxResults=10]
+// GET /api/gmail/test-utr?billNumber=adinnooh0511202601[&maxResults=10]
 const testUtr = async (req, res) => {
   if (!isCmd(req)) return errorResponse(res, "Only CMD can use this test API", null, 403);
   const billNumber = String(req.query.billNumber || "").trim();
@@ -136,10 +87,56 @@ const testUtr = async (req, res) => {
 
   const maxResults = Math.min(Math.max(Number(req.query.maxResults) || 10, 1), 25);
   try {
-    return await findUtrByBillNumber(res, billNumber, maxResults);
+    const r = await lookupUtrByBillNumber(billNumber, maxResults);
+    return successResponse(res, r.message, r.data);
   } catch (err) {
     return fail(res, err, "Gmail UTR search failed");
   }
 };
 
-module.exports = { getAuthUrl, oauthCallback, testUtr };
+// GET /api/gmail/pending-utr-bills[?limit=500][&currentMonthOnly=true][&sinceDays=90]   (CMD only, READ-ONLY)
+// Default: ALL months (late replies / old pending payments are never hidden). currentMonthOnly=true keeps this month only.
+const pendingUtrBills = async (req, res) => {
+  if (!isCmd(req)) return errorResponse(res, "Only CMD can use this API", null, 403);
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 2000);
+    const sinceDays = req.query.sinceDays !== undefined ? Number(req.query.sinceDays) : null;
+    if (sinceDays !== null && (!Number.isFinite(sinceDays) || sinceDays < 1)) {
+      return errorResponse(res, "sinceDays must be a positive number", null, 400);
+    }
+    const currentMonthOnly = String(req.query.currentMonthOnly || "").toLowerCase() === "true";
+    const out = await getPendingUtrBills({ limit, sinceDays, currentMonthOnly });
+    return successResponse(res, "Pending UTR bills (read-only, nothing was changed)", out);
+  } catch (err) {
+    return fail(res, err, "Could not read pending UTR bills");
+  }
+};
+
+// POST /api/gmail/process-pending-utrs  { dryRun?: true, force?: false, maxBills?: 25, billNumbers?: [] }   (CMD only)
+// dryRun defaults to TRUE. Saving needs BOTH dryRun:false in the body AND GMAIL_UTR_SAVE_ENABLED=true.
+const processPendingUtrsApi = async (req, res) => {
+  if (!isCmd(req)) return errorResponse(res, "Only CMD can use this API", null, 403);
+  const body = req.body || {};
+  const dryRun = body.dryRun !== false;
+  if (!dryRun && !saveEnabled()) {
+    return errorResponse(res, "Saving is disabled on this server (GMAIL_UTR_SAVE_ENABLED is not true). Use dryRun:true.", null, 409);
+  }
+  if (body.billNumbers !== undefined && !Array.isArray(body.billNumbers)) {
+    return errorResponse(res, "billNumbers must be an array", null, 400);
+  }
+  try {
+    const summary = await processPendingUtrs({
+      dryRun,
+      force: body.force === true,
+      currentMonthOnly: body.currentMonthOnly === true,
+      maxBills: body.maxBills,
+      billNumbers: body.billNumbers,
+      triggeredBy: "api",
+    });
+    return successResponse(res, dryRun ? "Dry run complete — nothing was saved" : "Processing complete", summary);
+  } catch (err) {
+    return fail(res, err, "UTR processing failed");
+  }
+};
+
+module.exports = { getAuthUrl, oauthCallback, testUtr, pendingUtrBills, processPendingUtrsApi };

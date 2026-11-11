@@ -39,6 +39,14 @@ const stripQuoted = (text) => {
   return kept.join("\n");
 };
 
+// the first labelled UTR on ONE line: { utr, labelStart, end } | null  (used for "Jamuna - UTR: X" landlord lines)
+const LINE_UTR = new RegExp(`\\b(${LABEL})(?![A-Za-z0-9])${SEP}${VALUE}(?![A-Za-z0-9])`, "i");
+const findUtrInLine = (line) => {
+  const m = LINE_UTR.exec(String(line || ""));
+  if (!m || !hasDigits(m[2])) return null;
+  return { utr: m[2].toUpperCase(), labelStart: m.index, end: m.index + m[0].length };
+};
+
 /** All labelled UTR candidates in one text: [{ utr, label }] (document order, may repeat). */
 const findCandidates = (text) => {
   const out = [];
@@ -73,7 +81,7 @@ const extractUtrFromThread = (messages) => {
     for (const c of findCandidates(msg.bodyText)) {
       if (seen.has(c.utr)) continue;
       seen.add(c.utr);
-      candidates.push({ utr: c.utr, label: c.label, messageId: msg.id, from: msg.from, date: msg.date });
+      candidates.push({ utr: c.utr, label: c.label, messageId: msg.id, from: msg.from, date: msg.date, sentAt: msg.sentAt || msg.date });
     }
   }
   const distinct = [...new Set(candidates.map((c) => c.utr))];
@@ -95,4 +103,4 @@ const extractBillNumbers = (text) => {
   return [...found];
 };
 
-module.exports = { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted };
+module.exports = { extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, stripQuoted };

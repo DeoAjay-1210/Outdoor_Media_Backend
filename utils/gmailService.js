@@ -128,6 +128,8 @@ const parseMessage = (msg) => {
   const { plain, html } = collectBodies(msg.payload);
   const bodyText = plain.join("\n").trim() || htmlToText(html.join("\n")).trim();
   const internal = Number(msg.internalDate);
+  const dateHeader = header(msg, "Date");
+  const headerMs = Date.parse(dateHeader);
   return {
     id: msg.id,
     threadId: msg.threadId,
@@ -135,11 +137,24 @@ const parseMessage = (msg) => {
     to: header(msg, "To"),
     subject: header(msg, "Subject"),
     date: internal ? new Date(internal).toISOString() : header(msg, "Date"),
+    dateHeader,
+    messageIdHeader: header(msg, "Message-ID"), // to match a reply with the mail it answers
+    inReplyTo: header(msg, "In-Reply-To"),
+    labelIds: Array.isArray(msg.labelIds) ? msg.labelIds : [],
+    // when the sender sent it: the Date header, else Gmail's own receive time
+    sentAt: Number.isFinite(headerMs) ? new Date(headerMs).toISOString() : internal ? new Date(internal).toISOString() : "",
     snippet: msg.snippet || "",
     bodyText,
     bodySource: plain.join("").trim() ? "text/plain" : html.length ? "text/html" : "empty",
   };
 };
+
+/**
+ * Only mail that was really SENT counts. A reply that is still a draft (typed in the compose box, not sent) is returned by the
+ * Gmail API as part of the thread, so drafts — and anything in Trash or Spam — must never be read as a finance reply.
+ */
+const EXCLUDED_LABELS = ["DRAFT", "TRASH", "SPAM"];
+const isUsableMessage = (m) => !(m && Array.isArray(m.labelIds) && m.labelIds.some((l) => EXCLUDED_LABELS.includes(l)));
 
 /** Threads matching a Gmail search query: [{ id, snippet }]. */
 const searchThreads = async (query, maxResults = 10) => {
@@ -150,8 +165,9 @@ const searchThreads = async (query, maxResults = 10) => {
 /** Real Gmail API thread (id from threads.list, never the browser URL id), messages oldest first. */
 const getThread = async (threadId) => {
   const data = await gmailGet(authorizedClient(), `/threads/${encodeURIComponent(threadId)}`, { format: "full" });
-  const messages = (data.messages || []).map(parseMessage).sort((a, b) => new Date(a.date) - new Date(b.date));
-  return { id: data.id, subject: messages[0]?.subject || "", messages };
+  const all = (data.messages || []).map(parseMessage).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const messages = all.filter(isUsableMessage);
+  return { id: data.id, subject: messages[0]?.subject || "", messages, ignoredMessages: all.filter((m) => !isUsableMessage(m)).map((m) => ({ id: m.id, labelIds: m.labelIds })) };
 };
 
 module.exports = {
@@ -162,6 +178,7 @@ module.exports = {
   getProfile,
   searchThreads,
   getThread,
+  isUsableMessage,
   // exported for unit tests
   parseMessage,
   decodeBase64Url,
