@@ -28,8 +28,9 @@ const {
   gstPercentageFor,
   cycleMonthsOf,
   nextBillDateAfter,
+  splitByWeights, // ✅ NEW — month payment split
 } = require("../../../utils/rentRevisionArrears");
-const { rentPartsForDueDate } = require("../../../utils/appraisalRent"); // ✅ NEW — BILL decrease
+const { rentPartsForDueDate, landOwnersAsOfDate } = require("../../../utils/appraisalRent"); // ✅ NEW — BILL decrease; ✅ CHANGED — + landOwnersAsOfDate (payment split)
 const { ensureRevisionAdinnOohBill } = require("../../../utils/adinnOohBills"); // ✅ NEW — New Bill / Advance bill number
 
 const ROLE_NAMES = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
@@ -161,6 +162,201 @@ const sameValue = (a, b) => {
   return norm(a) === norm(b);
 };
 
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — month payment split (only inside months[]): how the month's
+// increase / decrease / advance amount is paid.
+//   paymentCategory 1 Cash | 2 Online | 3 Cash + Online (cashAmount + onlineAmount)
+//   paymentMode "Cash" / "Online" (optional, must match 1 / 2)
+//   landOwners [{ landOwnerId, paymentCategory, paymentMode, cashAmount, onlineAmount }]
+// Not sent → null (owners' amounts as before).
+// ─────────────────────────────────────────────────────────────
+const PAY_MODE_OF = { 1: "Cash", 2: "Online" };
+const sentVal = (v) => v !== undefined && v !== null && String(v).trim() !== "";
+function parseMonthPayment(raw, label) {
+  if (!raw || typeof raw !== "object") return { payment: null };
+  const hasOwners = raw.landOwners !== undefined && raw.landOwners !== null && raw.landOwners !== "";
+  if (!hasOwners && !["paymentCategory", "paymentMode", "cashAmount", "onlineAmount"].some((f) => sentVal(raw[f]))) return { payment: null };
+  const one = (src, at) => {
+    const pc = Number(src?.paymentCategory);
+    if (![1, 2, 3].includes(pc)) return { error: `${at}paymentCategory must be 1 (Cash), 2 (Online) or 3 (Cash+Online)` };
+    if (sentVal(src.paymentMode) && pc !== 3) {
+      const m = String(src.paymentMode).trim().toLowerCase();
+      const mode = m === "cash" ? "Cash" : m === "online" ? "Online" : null;
+      if (!mode) return { error: `${at}paymentMode must be Cash or Online` };
+      if (mode !== PAY_MODE_OF[pc]) return { error: `${at}paymentMode must be ${PAY_MODE_OF[pc]} for paymentCategory ${pc}` };
+    }
+    const num = (f) => (sentVal(src[f]) ? Number(src[f]) : null);
+    const cash = num("cashAmount");
+    const online = num("onlineAmount");
+    if (cash !== null && (!Number.isFinite(cash) || cash < 0)) return { error: `${at}cashAmount must be 0 or more` };
+    if (online !== null && (!Number.isFinite(online) || online < 0)) return { error: `${at}onlineAmount must be 0 or more` };
+    return { pc, cash, online };
+  };
+  if (hasOwners) {
+    let list = raw.landOwners;
+    if (typeof list === "string") {
+      try {
+        list = JSON.parse(list);
+      } catch (e) {
+        return { error: `${label}: landOwners is invalid` };
+      }
+    }
+    if (!Array.isArray(list) || !list.length) return { error: `${label}: landOwners must be a non-empty array` };
+    if (sentVal(raw.paymentCategory)) return { error: `${label}: send paymentCategory inside landOwners (not both)` };
+    const seen = new Set();
+    const owners = [];
+    for (let i = 0; i < list.length; i++) {
+      const o = list[i] || {};
+      const at = `${label}: landOwners[${i}].`;
+      if (!mongoose.Types.ObjectId.isValid(String(o.landOwnerId || ""))) return { error: `${at}landOwnerId is invalid` };
+      if (seen.has(String(o.landOwnerId))) return { error: `${at}landOwnerId is repeated` };
+      seen.add(String(o.landOwnerId));
+      const r = one(o, at);
+      if (r.error) return r;
+      if (r.pc !== 2 && r.cash === null) return { error: `${at}cashAmount is required for paymentCategory ${r.pc}` };
+      if (r.pc !== 1 && r.online === null) return { error: `${at}onlineAmount is required for paymentCategory ${r.pc}` };
+      owners.push({
+        landOwnerId: String(o.landOwnerId),
+        paymentCategory: r.pc,
+        cashAmount: r.pc === 2 ? 0 : round(r.cash),
+        onlineAmount: r.pc === 1 ? 0 : round(r.online),
+      });
+    }
+    return { payment: { landOwners: owners } };
+  }
+  const r = one(raw, `${label}: `);
+  if (r.error) return r;
+  if (r.pc === 3 && (r.cash === null || r.online === null)) {
+    return { error: `${label}: cashAmount and onlineAmount are required for paymentCategory 3` };
+  }
+  return {
+    payment: {
+      paymentCategory: r.pc,
+      paymentMode: r.pc === 3 ? "Cash+Online" : PAY_MODE_OF[r.pc],
+      ...(r.pc === 3 ? { cashAmount: round(r.cash), onlineAmount: round(r.online) } : {}),
+    },
+  };
+}
+// split amounts must add up to the month amount
+function paymentTotalError(payment, amountAbs, label) {
+  if (!payment) return null;
+  if (payment.landOwners) {
+    const s = payment.landOwners.reduce((t, o) => t + Number(o.cashAmount || 0) + Number(o.onlineAmount || 0), 0);
+    return round(s) === round(amountAbs) ? null : `${label}: landOwners amounts must add up to ${amountAbs}`;
+  }
+  if (payment.paymentCategory === 3 && round(Number(payment.cashAmount) + Number(payment.onlineAmount)) !== round(amountAbs)) {
+    return `${label}: cashAmount + onlineAmount must be ${amountAbs}`;
+  }
+  return null;
+}
+// per owner { landOwnerId, cash, online } of the month amount (negative for a decrease)
+function monthOwnerDeltas(media, date, amount, payment, label) {
+  if (!payment || !Number(amount)) return { deltas: null };
+  const sign = amount < 0 ? -1 : 1;
+  const abs = Math.abs(Number(amount));
+  const owners = landOwnersAsOfDate(media, date) || [];
+  if (!owners.length) return { error: `${label}: this site has no landowner` };
+  if (payment.landOwners) {
+    const bad = payment.landOwners.find((p) => !owners.some((o) => String(o._id) === String(p.landOwnerId)));
+    if (bad) return { error: `${label}: landOwnerId ${bad.landOwnerId} is not a landowner of this site` };
+    return {
+      deltas: owners.map((o) => {
+        const p = payment.landOwners.find((x) => String(x.landOwnerId) === String(o._id)) || {};
+        return { landOwnerId: o._id, cash: sign * Number(p.cashAmount || 0), online: sign * Number(p.onlineAmount || 0) };
+      }),
+    };
+  }
+  const pc = Number(payment.paymentCategory);
+  const cashTotal = pc === 1 ? abs : pc === 2 ? 0 : Number(payment.cashAmount || 0);
+  const onlineTotal = pc === 1 ? 0 : pc === 2 ? abs : Number(payment.onlineAmount || 0);
+  const weights = owners.map((o) => Number(o.shareAmount || 0));
+  const cashParts = splitByWeights(cashTotal, weights);
+  const onlineParts = splitByWeights(onlineTotal, weights);
+  return { deltas: owners.map((o, i) => ({ landOwnerId: o._id, cash: sign * cashParts[i], online: sign * onlineParts[i] })) };
+}
+// owners of a rentalDue month after the change → kept month ownerSplit
+function ownerSplitAfter(media, date, deltas, label) {
+  if (!deltas) return { split: null };
+  const owners = landOwnersAsOfDate(media, date) || [];
+  const split = [];
+  for (const o of owners) {
+    const d = deltas.find((x) => String(x.landOwnerId) === String(o._id)) || { cash: 0, online: 0 };
+    const pc = Number(o.paymentCategory || 1);
+    const share = Number(o.shareAmount || 0);
+    const baseCash = pc === 1 ? share : pc === 2 ? 0 : Number(o.cashAmount || 0);
+    const baseOnline = pc === 2 ? share : pc === 1 ? 0 : Number(o.onlineAmount || 0);
+    const cash = round(baseCash + d.cash);
+    const online = round(baseOnline + d.online);
+    const who = (owners.length > 1 && o.name ? ` (${o.name})` : "");
+    if (cash < 0) return { error: `${label}: Cash amount cannot go below 0${who} (available ${baseCash})` };
+    if (online < 0) return { error: `${label}: Online amount cannot go below 0${who} (available ${baseOnline})` };
+    split.push({
+      landOwnerId: o._id,
+      paymentCategory: cash > 0 && online > 0 ? 3 : online > 0 ? 2 : 1,
+      shareAmount: cash + online,
+      cashAmount: cash,
+      onlineAmount: online,
+    });
+  }
+  return { split };
+}
+// New Bill / Advance bills (media.arrearsDue[] docs, before saving): each
+// owner's cash / online = the split, spread over the bills by their amount
+function applySplitToNewBills(bills, deltas) {
+  if (!deltas || !bills.length) return;
+  const weights = bills.map((b) => Number(b.netPayable || 0));
+  deltas.forEach((d) => {
+    const cashParts = splitByWeights(Math.abs(d.cash), weights);
+    const onlineParts = splitByWeights(Math.abs(d.online), weights);
+    bills.forEach((b, i) => {
+      const o = (b.owners || []).find((x) => String(x.landOwnerId) === String(d.landOwnerId));
+      if (!o) return;
+      o.cashAmount = cashParts[i];
+      o.onlineAmount = onlineParts[i];
+      o.shareAmount = cashParts[i] + onlineParts[i];
+      o.paymentCategory = o.cashAmount > 0 && o.onlineAmount > 0 ? 3 : o.onlineAmount > 0 ? 2 : 1;
+    });
+  });
+  bills.forEach((b) => {
+    b.cashAmount = (b.owners || []).reduce((s, o) => s + Number(o.cashAmount || 0), 0);
+    b.onlineAmount = (b.owners || []).reduce((s, o) => s + Number(o.onlineAmount || 0), 0);
+  });
+}
+
+// ✅ NEW — ADVANCE inside months: [{ month, advanceAmount, adjustInMonth?, payment
+// split }] (one month). null → not sent (advanceMonth / advanceAmount used).
+function parseAdvanceMonths(value, p = "") {
+  if (value === undefined || value === null || (!Array.isArray(value) && String(value).trim() === "")) return null;
+  let arr = value;
+  if (typeof value === "string") {
+    try {
+      arr = JSON.parse(value);
+    } catch (e) {
+      return { error: `${p}months is invalid — send like [{"month":"November 2026","advanceAmount":10000}]` };
+    }
+  }
+  if (!Array.isArray(arr) || arr.length !== 1) {
+    return { error: `${p}months must have one month for ADVANCE — send like [{"month":"November 2026","advanceAmount":10000}]` };
+  }
+  const x = arr[0] || {};
+  const advanceDate = parseFromMonth(x.month);
+  if (!advanceDate) return { error: `${p}months[0].month is invalid — send like "November 2026"` };
+  const raw = sentVal(x.advanceAmount) ? x.advanceAmount : x.amount;
+  const advanceAmount = Number(raw);
+  if (!sentVal(raw) || !Number.isFinite(advanceAmount) || advanceAmount <= 0) return { error: `${p}months[0].advanceAmount must be more than 0` };
+  let adjustInDate = null;
+  if (sentVal(x.adjustInMonth)) {
+    adjustInDate = parseFromMonth(x.adjustInMonth);
+    if (!adjustInDate) return { error: `${p}months[0].adjustInMonth is invalid — send like "September 2026"` };
+  }
+  const label = monthLabelOfKey(monthKey(advanceDate));
+  const pay = parseMonthPayment(x, label);
+  if (pay.error) return { error: `${p}${pay.error}` };
+  const totErr = paymentTotalError(pay.payment, round(advanceAmount), label);
+  if (totErr) return { error: `${p}${totErr}` };
+  return { opts: { advanceDate, advanceLabel: label, advanceAmount: round(advanceAmount), adjustInDate, advancePayment: pay.payment } };
+}
+
 // ✅ NEW — BILL months: [{ month, amount }] (array or JSON string) →
 // { list: [{ month, amount, key, date }] sorted by month } | { list: null } (not sent) | { error }
 const MONTHS_EXAMPLE = '[{"month":"August 2026","amount":2000}]';
@@ -203,7 +399,19 @@ const parseRevisionMonths = (value, opts = {}) => {
     const month = monthLabelOfKey(key);
     if (seen.has(key)) return { error: `${month} is repeated in months` };
     seen.add(key);
-    list.push({ month, amount: monthAction === "decrease" ? -round(amount) : round(amount), key, date, action: monthAction });
+    // ✅ NEW — month payment split (optional)
+    const pay = parseMonthPayment(arr[i], month);
+    if (pay.error) return { error: pay.error };
+    const payTotalErr = paymentTotalError(pay.payment, round(amount), month);
+    if (payTotalErr) return { error: payTotalErr };
+    list.push({
+      month,
+      amount: monthAction === "decrease" ? -round(amount) : round(amount),
+      key,
+      date,
+      action: monthAction,
+      ...(pay.payment ? { payment: pay.payment } : {}),
+    });
   }
   const actions = new Set(list.map((x) => x.action).filter((a) => a !== "none"));
   if (actions.size > 1) {
@@ -438,6 +646,18 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     }
   }
 
+  // ✅ NEW — month payment split: landowners of the site, a decrease cannot take
+  // a mode below 0
+  for (const bm of billMonths) {
+    if (!bm.payment || !bm.amount) continue;
+    const d = monthOwnerDeltas(media, bm.date, bm.amount, bm.payment, bm.month);
+    if (d.error) return { error: d.error };
+    if (bm.amount < 0) {
+      const s = ownerSplitAfter(media, bm.date, d.deltas, bm.month);
+      if (s.error) return { error: s.error };
+    }
+  }
+
   const first = billMonths[0];
   const last = billMonths[billMonths.length - 1];
   const gstPercentage = gstPercentageFor(media, first.date);
@@ -509,9 +729,13 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
     };
   });
   const totalIncreaseAmount = billMonths.reduce((s, bm) => s + bm.amount, 0);
+  // ✅ NEW — month payment split shown on each month
+  monthsDetail.forEach((d, i) => {
+    if (billMonths[i] && billMonths[i].payment && billMonths[i].amount) d.payment = billMonths[i].payment;
+  });
 
   const compare = {
-    months: billMonths.map((bm) => ({ month: bm.month, amount: bm.amount })),
+    months: billMonths.map((bm) => ({ month: bm.month, amount: bm.amount, ...(bm.payment && bm.amount ? { payment: bm.payment } : {}) })), // ✅ CHANGED — + payment split
     oldRent,
     newRent,
     applyToAllMonths,
@@ -1226,10 +1450,15 @@ function withRevisionGst(bill, revision) {
 }
 
 // ✅ NEW — ADVANCE: advanceAmount asked in advanceMonth, deducted from the next bill
-async function createOneAdvance(mediaId, { advanceDate, advanceLabel, advanceAmount, adjustInDate = null, gstOnIncrease, withGst = 0, reason, invoice, user, dryRun = false }) {
+async function createOneAdvance(mediaId, { advanceDate, advanceLabel, advanceAmount, adjustInDate = null, advancePayment = null, gstOnIncrease, withGst = 0, reason, invoice, user, dryRun = false }) { // ✅ CHANGED — + advancePayment
   const loaded = await loadActiveMedia(mediaId);
   if (loaded.error) return loaded;
   const { media } = loaded;
+  // ✅ NEW — month payment split: landowners of the site
+  if (advancePayment) {
+    const d = monthOwnerDeltas(media, advanceDate, advanceAmount, advancePayment, advanceLabel);
+    if (d.error) return { error: d.error };
+  }
 
   const probe = buildAdvancePlan(media, advanceDate, advanceAmount, 0, adjustInDate);
   if (probe.error) return { error: probe.error };
@@ -1250,7 +1479,14 @@ async function createOneAdvance(mediaId, { advanceDate, advanceLabel, advanceAmo
   if (withGstError) return { error: withGstError };
 
   const oldRent = Number(media.rentalPayment?.totalRentalAmount || 0);
-  const compare = { fromMonth: advanceLabel, advanceAmount, gstOnIncrease: gstFlag, adjustInMonth: plan.adjustInMonth, withGst: advWithGst };
+  const compare = {
+    fromMonth: advanceLabel,
+    advanceAmount,
+    gstOnIncrease: gstFlag,
+    adjustInMonth: plan.adjustInMonth,
+    withGst: advWithGst,
+    advancePayment: advancePayment || null, // ✅ NEW — month payment split
+  };
   const derived = {
     billType: "ADVANCE",
     fromDate: advanceDate,
@@ -1336,6 +1572,7 @@ function billTypeFields(r, plan = null) {
       withGstHistory: withGstHistoryOf(r), // ✅ NEW
       advanceGstAmount,
       advanceTotalWithGst: advanceAmount + advanceGstAmount,
+      advancePayment: r.advancePayment || null, // ✅ NEW — payment split
       adjustInMonth: r.adjustInMonth || "",
       ...(plan
         ? {
@@ -1454,7 +1691,11 @@ exports.createRentRevision = async (req, res) => {
     if (withGst === undefined) return errorResponse(res, "withGst must be 0, 1 or 2", null, 400);
 
     let billOpts = null;
-    if (billType === "ADVANCE") {
+    // ✅ NEW — ADVANCE inside months[] (with the payment split)
+    const advMonths = billType === "ADVANCE" ? parseAdvanceMonths(body.months) : null;
+    if (advMonths && advMonths.error) return errorResponse(res, advMonths.error, null, 400);
+    if (advMonths) billOpts = advMonths.opts;
+    else if (billType === "ADVANCE") {
       const advanceAmount = parseAmount(body.advanceAmount);
       const advanceDate = parseFromMonth(body.advanceMonth);
       if (advanceAmount === null || !body.advanceMonth) {
@@ -1673,6 +1914,13 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
       if (siteWithGst === undefined) return errorResponse(res, `${p}.withGst must be 0, 1 or 2`, null, 400);
     }
 
+    // ✅ NEW — ADVANCE inside months[] (with the payment split)
+    const siteAdvMonths = billType === "ADVANCE" ? parseAdvanceMonths(site.months, `${p}.`) : null;
+    if (siteAdvMonths && siteAdvMonths.error) return errorResponse(res, siteAdvMonths.error, null, 400);
+    if (siteAdvMonths) {
+      items.push({ index: i, mediaId, gst: siteGst, withGst: siteWithGst, opts: siteAdvMonths.opts });
+      continue;
+    }
     if (billType === "ADVANCE") {
       const advanceAmount = parseAmount(site.advanceAmount);
       if (advanceAmount === null || !has(site.advanceMonth)) {
@@ -2079,6 +2327,29 @@ async function applyRevision(revision, media, userName) {
 
   const arrearsBills = plan.arrearsBills.map((b) => withRevisionGst(toArrearsBill(b, revision._id, userName, now), revision)); // ✅ CHANGED — + revision withGst
 
+  // ✅ NEW — month payment split: New Bill of the month → owners' cash / online
+  // as per the split; month bill updated (not CMD approved) → kept month ownerSplit
+  const splitOwnersByMonth = new Map(); // dueMonth → ownerSplit
+  for (const x of Array.isArray(revision.months) ? revision.months : []) {
+    const pay = x && x.payment;
+    const date = pay ? parseFromMonth(x.month) : null;
+    if (!date || !Number(x.amount)) continue;
+    const label = monthLabelOfKey(monthKey(date));
+    const d = monthOwnerDeltas(media, date, Number(x.amount), pay, label);
+    if (d.error) throw { message: d.error, statusCode: 400 };
+    const monthNewBills = arrearsBills.filter((b) => b.dueMonth === label);
+    if (monthNewBills.length) {
+      applySplitToNewBills(monthNewBills, d.deltas);
+      continue;
+    }
+    // CMD approved month without a New Bill (BILL decrease) → done by applyBillDecrease
+    const k0 = monthKey(date);
+    if ((media.rentalDue || []).some((b) => b && b.dueDate && monthKey(b.dueDate) === k0 && Number(b.approvalStatus) === 3)) continue;
+    const s = ownerSplitAfter(media, date, d.deltas, label);
+    if (s.error) throw { message: s.error, statusCode: 400 };
+    if (s.split) splitOwnersByMonth.set(label, s.split);
+  }
+
   const landOwners = (media.landOwners || []).map((o) => ({
     ...o,
     shareAmount: scale(o.shareAmount),
@@ -2151,7 +2422,12 @@ async function applyRevision(revision, media, userName) {
   if (plan.keptMonths.length) {
     $push["rentalPayment.rentRevisionKeptMonths"] = {
       // keptAt → an advance approved later is still deducted from the month
-      $each: plan.keptMonths.map((k) => ({ ...k, rentRevisionId: revision._id, keptAt: now })),
+      $each: plan.keptMonths.map((k) => ({
+        ...k,
+        ...(splitOwnersByMonth.has(k.dueMonth) && Number(k.rent) > 0 ? { ownerSplit: splitOwnersByMonth.get(k.dueMonth) } : {}), // ✅ NEW
+        rentRevisionId: revision._id,
+        keptAt: now,
+      })),
     };
   }
   if (arrearsBills.length) $push.arrearsDue = { $each: arrearsBills };
@@ -2179,7 +2455,7 @@ async function applyRevision(revision, media, userName) {
 async function applyBillDecrease(revision, media, userName, opts = {}) {
   const now = nowIST();
   const months = (revision.months || [])
-    .map((x) => ({ month: x?.month, date: parseFromMonth(x?.month), amount: Number(x?.amount || 0) }))
+    .map((x) => ({ month: x?.month, date: parseFromMonth(x?.month), amount: Number(x?.amount || 0), payment: x?.payment || null })) // ✅ CHANGED — + payment split
     .filter((x) => x.date && x.amount < 0);
   const $set = { updatedAt: now };
   const arrayFilters = [];
@@ -2197,9 +2473,19 @@ async function applyBillDecrease(revision, media, userName, opts = {}) {
     const newRent = round(Number(monthRent || 0) + mo.amount);
     if (!(monthRent > 0) || newRent <= 0) throw { message: `decreaseAmount must be less than the ${mo.month} bill amount (${monthRent})`, statusCode: 400 };
     const ratio = newRent / monthRent;
+    // ✅ NEW — month payment split → owners' cash / online of the month
+    let ownerSplit = null;
+    if (mo.payment) {
+      const d = monthOwnerDeltas(media, mo.date, mo.amount, mo.payment, mo.month);
+      if (d.error) throw { message: d.error, statusCode: 400 };
+      const s = ownerSplitAfter(media, mo.date, d.deltas, mo.month);
+      if (s.error) throw { message: s.error, statusCode: 400 };
+      ownerSplit = s.split;
+    }
     keptMonths.push({
       dueMonth: bills[0].dueMonth || mo.month,
       rent: newRent,
+      ...(ownerSplit ? { ownerSplit } : {}),
       ...(monthGstRent !== monthRent ? { gstRent: round(Number(monthGstRent || 0) * ratio) } : {}),
       rentRevisionId: revision._id,
       keptAt: now,
@@ -2321,6 +2607,12 @@ async function applyAdvance(revision, media, userName) {
   const withGstError = advanceWithGstError(media, plan.adjustInMonth, revision.withGst);
   if (withGstError) throw { message: withGstError, statusCode: 400 };
   const bill = withRevisionGst(toAdvanceBill(plan, { revisionId: revision._id, advanceDate: revision.fromDate, advanceAmount }, userName, now), revision); // ✅ CHANGED — + revision withGst
+  // ✅ NEW — month payment split → owners' cash / online of the advance bill
+  if (revision.advancePayment) {
+    const d = monthOwnerDeltas(media, revision.fromDate, advanceAmount, revision.advancePayment, revision.fromMonth);
+    if (d.error) throw { message: d.error, statusCode: 400 };
+    applySplitToNewBills([bill], d.deltas);
+  }
   await Media.updateOne(
     { _id: media._id },
     {

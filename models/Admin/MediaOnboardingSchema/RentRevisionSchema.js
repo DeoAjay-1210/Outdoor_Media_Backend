@@ -82,6 +82,10 @@ const RentRevisionSchema = new mongoose.Schema(
     adjustInMonth: { type: String, trim: true, default: "" }, // bill the advance is deducted from
     adjustInDate: { type: Date, default: null },
     advanceBillId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    // ✅ NEW — ADVANCE months[0] payment split { paymentCategory, paymentMode,
+    // cashAmount, onlineAmount } | { landOwners: [...] } (BILL / NORMAL_BILL /
+    // CANCEL keep it on months[].payment)
+    advancePayment: { type: mongoose.Schema.Types.Mixed, default: null },
     oldRent: { type: Number, required: true },
     newRent: { type: Number, required: true },
     difference: { type: Number, default: 0 },

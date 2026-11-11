@@ -876,7 +876,8 @@ function arrearsLedgerRows(b) {
 //   byOwner → that landowner's share of the bills (ledger rows)
 //   gstOnly → only totalGstAmount (GST rows)
 // Other rows (normal bills) are returned unchanged.
-function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false } = {}) {
+// ✅ NEW — ownerMasterIds (landOwnerMasterId list) → totals of those landowners only
+function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false, ownerMasterIds = null } = {}) {
   if (!Array.isArray(rows) || !rows.length) return rows;
   const groupKey = (b) => `${String(b.rentRevisionId || "")}|${b.dueMonth || ""}`;
   const groups = new Map();
@@ -886,8 +887,18 @@ function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false }
     billById.set(String(b._id), b);
     const k = groupKey(b);
     const g = groups.get(k) || { share: 0, gst: 0, byOwner: new Map() };
-    g.share += Number(b.netPayable || 0);
-    g.gst += Number(b.gstAmount || 0);
+    if (ownerMasterIds) {
+      // ✅ NEW — only the filtered landowners' share / GST
+      (b.owners || [])
+        .filter((o) => ownerMasterIds.includes(String(o.landOwnerMasterId)))
+        .forEach((o) => {
+          g.share += Number(o.shareAmount || 0);
+          g.gst += Number(o.gstAmount || 0);
+        });
+    } else {
+      g.share += Number(b.netPayable || 0);
+      g.gst += Number(b.gstAmount || 0);
+    }
     (b.owners || []).forEach((o) => {
       const ok = String(o.landOwnerId);
       const c = g.byOwner.get(ok) || { share: 0, gst: 0 };
@@ -1192,7 +1203,9 @@ function markAdvanceAdjustedHistory(out, advances) {
  * gstBalanceHistory, outstanding, arrears and rentRevision blocks.
  * inRange(date) → false skips a month outside the requested filter.
  */
-function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWithGstById = new Map(), inRange = () => true, billMonths = null) {
+// ✅ CHANGED — + ownerMasterIds (ledger-history landOwnerMasterId filter): New
+// Bill / advance totals of rentalOutstandingHistory → those landowners only
+function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWithGstById = new Map(), inRange = () => true, billMonths = null, ownerMasterIds = null) {
   const arrears = arrearsBillsWithGst(arrearsBills, parentWithGstById);
   const advances = advanceBillsOf(arrearsBills); // ✅ NEW
   const bills = [...arrears, ...advances];
@@ -1208,9 +1221,26 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
   let ledgerHistory = (out.ledgerHistory || []).map((y) => ({ ...y, months: [...(y.months || [])] }));
   let gstBalanceHistory = out.gstBalanceHistory || [];
 
+  // ✅ NEW — landOwnerMasterId filter → New Bill / advance ledger rows, payments
+  // and GST rows of those landowners only (GST row = their GST share)
+  const ownerFilter = Array.isArray(ownerMasterIds) && ownerMasterIds.length ? ownerMasterIds.map(String) : null;
+  const filteredOwnerIds = (b) =>
+    new Set((b.owners || []).filter((o) => ownerFilter.includes(String(o.landOwnerMasterId))).map((o) => String(o.landOwnerId)));
+  const ownerGstRow = (row, b) => {
+    if (!row || !ownerFilter) return row;
+    const ids = filteredOwnerIds(b);
+    const gst = round((b.owners || []).filter((o) => ids.has(String(o.landOwnerId))).reduce((s, o) => s + Number(o.gstAmount || 0), 0));
+    if (gst <= 0) return null;
+    const total = Number(b.gstAmount || 0);
+    const paid = total > 0 ? round((gst * Number(b.gstPaid || 0)) / total) : 0;
+    return { ...row, gstAmount: gst, paidAmount: paid };
+  };
+
   bills.forEach((b) => {
     const due = new Date(b.dueDate);
     if (Number.isNaN(due.getTime()) || !inRange(due)) return;
+    const ownerIds = ownerFilter ? filteredOwnerIds(b) : null; // ✅ NEW
+    const ownerOk = (id) => !ownerIds || ownerIds.has(String(id)); // ✅ NEW
     const yearKey = String(due.getUTCFullYear());
     const monthName = MONTHS[due.getUTCMonth()];
 
@@ -1235,15 +1265,19 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
     }
     const month = { ...yearEntry.months[mIdx] };
 
-    const rows = arrearsLedgerRows(b).map((r) => ({
-      ...r,
-      month: monthName,
-      amount: r.isPaid ? Number(r.shareAmount || 0) : 0, // ✅ CHANGED — no TDS
-    }));
+    const rows = arrearsLedgerRows(b)
+      .filter((r) => ownerOk(r.landOwnerId)) // ✅ NEW — landowner filter
+      .map((r) => ({
+        ...r,
+        month: monthName,
+        amount: r.isPaid ? Number(r.shareAmount || 0) : 0, // ✅ CHANGED — no TDS
+      }));
     month.ledger = [...(month.ledger || []), ...rows];
 
     // real payments (rent / GST) → allEntries, like saved ledger entries
-    const paidEntries = (b.payments || []).map((p) => ({
+    const paidEntries = (b.payments || [])
+      .filter((p) => p.type === "gst" || !p.landOwnerId || ownerOk(p.landOwnerId)) // ✅ NEW — landowner filter (rent payments)
+      .map((p) => ({
       _id: p._id,
       landOwnerId: p.landOwnerId || null,
       landOwnerName: p.landOwnerName || "",
@@ -1272,7 +1306,7 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
     }));
     month.allEntries = [...(month.allEntries || []), ...paidEntries];
 
-    const gstRow = arrearsGstRow(b);
+    const gstRow = ownerGstRow(arrearsGstRow(b), b); // ✅ CHANGED — landowner filter → their GST share
     if (gstRow) {
       month.gstBalanceHistory = [...(month.gstBalanceHistory || []), gstRow];
       // advance GST rows of the top-level gstBalanceHistory are added in the controller
@@ -1317,11 +1351,13 @@ function decorateLedgerHistoryBlock(block, arrearsBills, lastRevision, parentWit
     months: (y.months || []).map((mo) => ({
       ...mo,
       ledger: addRevisionBillTotals(mo.ledger, bills, { byOwner: true }),
-      gstBalanceHistory: addRevisionBillTotals(mo.gstBalanceHistory, bills, { gstOnly: true }),
+      gstBalanceHistory: addRevisionBillTotals(mo.gstBalanceHistory, bills, { gstOnly: true, ownerMasterIds: ownerFilter }), // ✅ CHANGED — + landowner filter
     })),
   }));
-  out.gstBalanceHistory = addRevisionBillTotals(gstBalanceHistory, bills, { gstOnly: true });
-  out.rentalOutstandingHistory = addRevisionBillTotals(out.rentalOutstandingHistory, bills);
+  out.gstBalanceHistory = addRevisionBillTotals(gstBalanceHistory, bills, { gstOnly: true, ownerMasterIds: ownerFilter }); // ✅ CHANGED — + landowner filter
+  out.rentalOutstandingHistory = addRevisionBillTotals(out.rentalOutstandingHistory, bills, {
+    ownerMasterIds: Array.isArray(ownerMasterIds) && ownerMasterIds.length ? ownerMasterIds.map(String) : null,
+  });
   if (arrears.length) out.outstanding = withArrearsOutstanding(out.outstanding, arrears);
   if (advances.length) out.outstanding = withAdvanceOutstanding(out.outstanding, advances);
   out.arrears = arrearsBlock(arrears);
@@ -1389,4 +1425,5 @@ module.exports = {
   decorateLedgerItem,
   decorateLedgerHistoryBlock,
   overallArrearsTotals,
+  splitByWeights, // ✅ NEW — month payment split
 };
