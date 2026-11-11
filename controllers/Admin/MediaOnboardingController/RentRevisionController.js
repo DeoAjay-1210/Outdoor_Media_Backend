@@ -3247,11 +3247,42 @@ exports.getRentRevisionList = async (req, res) => {
       ? await Media.find({ _id: { $in: mediaIds } })
           .select(
             "arrearsDue rentalPayment.totalRentalAmount rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency " +
-              "rentalDue._id rentalDue.dueMonth rentalDue.dueDate rentalDue.netPayable rentalDue.approvalStatus rentalDue.ownerApprovalDate",
+              "rentalDue._id rentalDue.dueMonth rentalDue.dueDate rentalDue.netPayable rentalDue.approvalStatus rentalDue.ownerApprovalDate " +
+              "landOwners._id landOwners.name landOwners.shareAmount", // ✅ CHANGED — + landowners (payment.landOwners)
           )
           .lean()
       : [];
     const siteById = new Map(medias.map((m) => [String(m._id), revisionSiteBlock(m)]));
+    // ✅ NEW — month payment sent at month level (no landOwners) → + landOwners:
+    // the split per site landowner (one landowner → the whole split; several →
+    // by share). Payment with landOwners / no payment → unchanged.
+    const ownersById = new Map(medias.map((m) => [String(m._id), m.landOwners || []]));
+    const withPaymentOwners = (payment, mediaId, amount) => {
+      if (!payment || typeof payment !== "object" || Array.isArray(payment.landOwners)) return payment;
+      const owners = ownersById.get(String(mediaId)) || [];
+      if (!owners.length) return payment;
+      const abs = Math.abs(Number(amount || 0));
+      const pc = Number(payment.paymentCategory);
+      const cashTotal = pc === 1 ? abs : pc === 2 ? 0 : Number(payment.cashAmount || 0);
+      const onlineTotal = pc === 1 ? 0 : pc === 2 ? abs : Number(payment.onlineAmount || 0);
+      const weights = owners.map((o) => Number(o.shareAmount || 0));
+      const shares = splitByWeights(cashTotal + onlineTotal, weights);
+      const rawCash = splitByWeights(cashTotal, weights);
+      return {
+        ...payment,
+        landOwners: owners.map((o, i) => {
+          const cash = Math.min(rawCash[i], shares[i]);
+          const online = shares[i] - cash;
+          return {
+            landOwnerId: o._id,
+            landOwnerName: o.name || "",
+            paymentCategory: pc === 3 ? 3 : cash > 0 && online > 0 ? 3 : online > 0 ? 2 : 1,
+            cashAmount: cash,
+            onlineAmount: online,
+          };
+        }),
+      };
+    };
     const billsByRevision = new Map();
     medias.forEach((m) =>
       (m.arrearsDue || []).forEach((b) => {
@@ -3302,7 +3333,7 @@ exports.getRentRevisionList = async (req, res) => {
                 totalAmount: Number(r.advanceAmount || 0) + Number(r.advanceGstAmount || 0),
                 action: "advance",
                 payment:
-                  r.advancePayment ||
+                  withPaymentOwners(r.advancePayment, r.mediaId, r.advanceAmount) || // ✅ CHANGED — + landOwners
                   (advBill && Array.isArray(advBill.owners) && advBill.owners.length
                     ? {
                         landOwners: advBill.owners.map((o) => ({
@@ -3333,7 +3364,8 @@ exports.getRentRevisionList = async (req, res) => {
         // ✅ NEW — BILL "months": payment status of each month's arrears bill
         ...(!isAdvance && Array.isArray(r.monthsDetail) && r.monthsDetail.length
           ? {
-              months: r.monthsDetail.map((d) => {
+              months: r.monthsDetail.map((d0) => {
+                const d = d0 && d0.payment ? { ...d0, payment: withPaymentOwners(d0.payment, r.mediaId, d0.amount) } : d0; // ✅ NEW — + payment.landOwners
                 const bill = d.arrearsRentalDueId ? bills.find((b) => String(b._id) === String(d.arrearsRentalDueId)) : null;
                 return bill ? { ...d, paymentStatus: arrearsStatus(bill) } : { ...d };
               }),
