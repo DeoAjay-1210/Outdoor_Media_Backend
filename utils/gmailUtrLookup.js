@@ -11,6 +11,7 @@ const { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted, e
 const { extractExplicitPaymentDates, istDay } = require("./utrPaidDate");
 const { scopeThreadToBill } = require("./gmailReplyLink");
 const { collectBankRows } = require("./bankNarration");
+const { CORRECTION_RE } = require("./utrCorrection");
 const { extractLandlordUtrLines, parseApprovalMailLandlords } = require("./landlordUtrParser");
 
 const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
@@ -138,8 +139,21 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
   }
 
   const withUtr = threads.filter((t) => t.candidates.length);
-  const allCandidates = withUtr.flatMap((t) => t.candidates.map((c) => ({ ...c, threadId: t.threadId })));
-  const distinct = [...new Set(allCandidates.map((c) => c.utr))];
+  let allCandidates = withUtr.flatMap((t) => t.candidates.map((c) => ({ ...c, threadId: t.threadId })));
+  let distinct = [...new Set(allCandidates.map((c) => c.utr))];
+  // Two UTRs in ONE thread and nothing saved yet: if the LAST reply that states a UTR says the earlier one was wrong
+  // ("correct UTR", "previous UTR was incorrect" ...) and states exactly one UTR, that corrected UTR is the one. Otherwise unchanged.
+  let correctedFromEarlier = false;
+  if (distinct.length > 1 && withUtr.length === 1) {
+    const withCand = (withUtr[0]._messages || []).filter((m) => findCandidates(m.bodyText).length);
+    const last = withCand[withCand.length - 1];
+    const lastUtrs = last ? [...new Set(findCandidates(last.bodyText).map((x) => x.utr))] : [];
+    if (lastUtrs.length === 1 && CORRECTION_RE.test(stripQuoted(last.bodyText))) {
+      allCandidates = allCandidates.filter((x) => x.utr === lastUtrs[0]);
+      distinct = [lastUtrs[0]];
+      correctedFromEarlier = true;
+    }
+  }
 
   if (!distinct.length) {
     return { message: "Bill Number found, but no UTR in any matching conversation", data: { ...common, utr: null, extractionStatus: "utr_not_found" } };
@@ -186,8 +200,38 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
       ...(withUtr[0].replyLink ? { replyLink: withUtr[0].replyLink } : {}),
       bankRows: collectBankRows(withUtr[0].bankMessages).rows,
       extractionStatus: "found",
+      ...(correctedFromEarlier ? { correctedFromEarlier: true } : {}),
     },
   };
 };
 
-module.exports = { lookupUtrByBillNumber, lookupLandlordUtrs, BILL_NUMBER_FORMAT, containsExactBill };
+/**
+ * Messages of the ONE conversation of a Bill Number, scoped to that bill's approval mail (In-Reply-To) when the thread holds several
+ * approval mails. Used to look for a CORRECTED UTR after the bill was paid. Read-only.
+ * -> { status: ok | bill_not_found | multiple_review_required | ambiguous_bill_numbers | reply_not_linked, threadId, messages, approval, replyLink }
+ */
+const lookupBillThread = async (billNumber, maxResults = 10) => {
+  const hits = await Gmail.searchThreads(`"${escapeQuotes(billNumber)}"`, maxResults);
+  const found = [];
+  for (const id of [...new Set(hits.map((t) => t.id))]) {
+    const th = await Gmail.getThread(id);
+    th.messages = th.messages.filter(Gmail.isUsableMessage);
+    if (!th.messages.some((m) => containsExactBill(m.bodyText, billNumber))) continue;
+    const others = [...new Set(th.messages.flatMap((m) => extractBillNumbers(m.bodyText)))].filter((b) => b.toLowerCase() !== billNumber.toLowerCase());
+    let replyLink = null;
+    if (others.length) {
+      const s = scopeThreadToBill(th.messages, billNumber);
+      if (s.status === "scoped") { th.messages = s.messages; replyLink = s.link; }
+      else if (s.reason === "reply_not_linked_to_approval_mail") return { status: "reply_not_linked", threadId: th.id };
+      else return { status: "ambiguous_bill_numbers", threadId: th.id };
+    }
+    found.push({ th, replyLink });
+  }
+  if (!found.length) return { status: "bill_not_found" };
+  if (found.length > 1) return { status: "multiple_review_required" };
+  const { th, replyLink } = found[0];
+  const approval = th.messages.find((m) => /Owner Name/i.test(stripQuoted(m.bodyText)) && containsExactBill(stripQuoted(m.bodyText), billNumber)) || null;
+  return { status: "ok", threadId: th.id, messages: th.messages, approval, replyLink };
+};
+
+module.exports = { lookupBillThread, lookupUtrByBillNumber, lookupLandlordUtrs, BILL_NUMBER_FORMAT, containsExactBill };

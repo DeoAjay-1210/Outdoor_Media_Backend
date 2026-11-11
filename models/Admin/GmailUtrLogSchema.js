@@ -13,6 +13,8 @@ const gmailUtrLogSchema = new mongoose.Schema(
       required: true,
       enum: [
         "found_and_saved",
+        "correction_applied",
+        "correction_review",
         "bill_not_found",
         "utr_not_found",
         "already_processed",
@@ -40,6 +42,7 @@ const gmailUtrLogSchema = new mongoose.Schema(
     paidDate: { type: String, default: "" }, // YYYY-MM-DD saved as the Paid Date
     paidDateSource: { type: String, default: "" }, // email_payment_date | email_sent_date
     paymentType: { type: String, default: "" }, // cash | online_rent
+    correction: { type: mongoose.Schema.Types.Mixed, default: null }, // { kind, landlord, oldUtr, newUtr, ... }
     dryRun: { type: Boolean, default: false },
     triggeredBy: { type: String, default: "api" }, // api | cron
     createdAt: { type: Date, default: Date.now, expires: 180 * 24 * 3600 },

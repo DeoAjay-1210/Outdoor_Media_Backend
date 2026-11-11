@@ -21,7 +21,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { getPendingUtrBills, evaluateGroup, billField, isValidBill } = require("./pendingUtrBills");
-const { lookupUtrByBillNumber, lookupLandlordUtrs } = require("./gmailUtrLookup");
+const { lookupUtrByBillNumber, lookupLandlordUtrs, lookupBillThread } = require("./gmailUtrLookup");
+const { storedPayments, utrStatements, planCorrections, buildCorrectionWrite } = require("./utrCorrection");
 const { getPendingArrearsUtrBills, evaluateArrearsGroup } = require("./pendingArrearsUtrBills");
 const { narrationFor } = require("./bankNarration");
 const { senderName } = require("./senderName");
@@ -60,7 +61,7 @@ function writeRunLog(summary) {
 }
 
 /** The run summary that goes to the log file: matched bills (UTR, Paid Date), skipped bills, errors. */
-function buildRunSummary({ ctx, startedAt, started, scope, pendingTotal, results, aborted, skipped, reason, error }) {
+function buildRunSummary({ ctx, startedAt, started, scope, pendingTotal, results, aborted, skipped, reason, error, corrections }) {
   const finished = Date.now();
   const base = { runId: ctx.runId, mode: ctx.dryRun ? "dry-run" : "live", triggeredBy: ctx.triggeredBy, startedAt, finishedAt: new Date(finished).toISOString(), durationMs: finished - started };
   if (skipped) return { ...base, skipped: true, reason };
@@ -74,6 +75,7 @@ function buildRunSummary({ ctx, startedAt, started, scope, pendingTotal, results
     counts,
     blockedBeforeGmail: results.filter((r) => r.preGmail).reduce((a, r) => ((a[r.reason] = (a[r.reason] || 0) + 1), a), {}),
     aborted: aborted || null,
+    ...(corrections && corrections.length ? { corrections: corrections.map((x) => ({ billNumber: x.billNumber, status: x.status, reason: x.reason || "", landlord: x.landlord || "", paymentKind: x.paymentKind || "", existingUtr: maskUtr(x.existingUtr), correctedUtr: maskUtr(x.correctedUtr), eligible: x.eligible ?? null, gmailThreadId: x.gmailThreadId || "", sourceMessageId: x.sourceMessageId || "" })) } : {}),
     matchedBills: results.filter((r) => r.utr || r.landlordMappings || r.splitPayments).map((r) => ({
       billNumber: r.billNumber, dueMonth: r.dueMonth || "", status: r.status, reason: r.reason || "", utr: r.utr, paidDate: r.paidDate || null, paidDateSource: r.paidDateSource || null,
       paymentType: r.paymentType || null, eligibleForSaving: r.eligibleForSaving ?? null, savingBlockedBy: r.savingBlockedBy || [], gmailThreadId: r.gmailThreadId || "", landlordMappings: r.landlordMappings || undefined, splitPayments: r.splitPayments || undefined,
@@ -1043,6 +1045,104 @@ function createUtrProcessor(deps = {}) {
     }
   }
 
+  /**
+   * CORRECTED UTR (see utrCorrection.js): bills the Gmail automation saved in the last GMAIL_UTR_CORRECTION_WINDOW_DAYS days (or the
+   * bills named in opts.billNumbers) are read again; a later reply that clearly replaces the stored UTR of ONE payment overwrites
+   * that payment's UTR. Dry run reports it and writes nothing. Real writes need GMAIL_UTR_SAVE_ENABLED and
+   * GMAIL_UTR_CORRECTION_SAVE_ENABLED. Same engine for the API, the cron and the individual bill test.
+   */
+  const corrChecked = new Map();
+  const correctionSwitch = () => (deps.correctionSaveEnabled ? deps.correctionSaveEnabled() : String(process.env.GMAIL_UTR_CORRECTION_SAVE_ENABLED || "").toLowerCase() === "true");
+  async function processCorrections(ctx, opts, c, started) {
+    const now = deps.now ? deps.now() : Date.now();
+    const explicit = Array.isArray(opts.billNumbers) && opts.billNumbers.length ? opts.billNumbers.map(String) : null;
+    const days = num(process.env.GMAIL_UTR_CORRECTION_WINDOW_DAYS, 7);
+    const recheckMs = num(process.env.GMAIL_UTR_CORRECTION_RECHECK_MIN, 10) * 60000;
+    const maxBills = num(opts.maxCorrectionBills, num(process.env.GMAIL_UTR_CORRECTION_MAX_BILLS, 20));
+    const saveOn = deps.saveEnabled ? deps.saveEnabled() : saveEnabled();
+    const switchOn = saveOn && correctionSwitch();
+    const out = [];
+
+    // candidate bills: the ones this automation saved recently (distinct, newest first), or the named ones
+    const cand = new Map();
+    if (explicit) explicit.forEach((b) => cand.set(b, ""));
+    const rows = await getLog()
+      .find({ status: { $in: ["found_and_saved", "correction_applied"] }, dryRun: false, ...(explicit ? { billNumber: { $in: explicit } } : { createdAt: { $gte: new Date(now - days * 86400000) } }) })
+      .sort({ createdAt: -1 })
+      .select("billNumber mediaId")
+      .lean();
+    rows.forEach((r) => { if (r.billNumber && !cand.get(r.billNumber)) cand.set(r.billNumber, r.mediaId || ""); });
+
+    let handled = 0;
+    for (const [billNumber, logMediaId] of cand) {
+      if (handled >= maxBills || Date.now() - started > c.runBudgetMs) break;
+      if (!explicit && !opts.force && now - (corrChecked.get(billNumber) || 0) < recheckMs) continue;
+      corrChecked.set(billNumber, now);
+      handled += 1;
+      try {
+        let media = null;
+        if (logMediaId) media = await getMedia().findById(logMediaId).lean();
+        if (!media && explicit && getMedia().find) {
+          const found = await getMedia().find({ $or: [{ rentalDue: { $elemMatch: { [billField()]: billNumber } } }, { arrearsDue: { $elemMatch: { adinn_ooh_bills: billNumber } } }] }).lean();
+          media = found && found.length === 1 ? found[0] : null;
+        }
+        if (!media) { out.push({ billNumber, status: "correction_skipped", reason: "bill_not_found_in_database" }); continue; }
+        const stored = storedPayments(media, billNumber, billField());
+        if (!stored.slots.size) continue; // nothing paid with a UTR on this bill: nothing to correct
+        const th = await withTimeout((deps.lookupThread || lookupBillThread)(billNumber), c.gmailTimeoutMs, "Gmail lookup");
+        if (th.status !== "ok") { out.push({ billNumber, status: "correction_skipped", reason: th.status, gmailThreadId: th.threadId || "" }); continue; }
+        const rowOfBill = (media.rentalDue || []).filter((r) => r && String(r[billField()] || "").trim() === billNumber);
+        if (stored.flow === "rental") {
+          const problem = await registryCheck(billNumber, media, rowOfBill);
+          if (problem) { out.push({ billNumber, status: "correction_skipped", reason: problem, gmailThreadId: th.threadId || "" }); continue; }
+        }
+        const plan = planCorrections(utrStatements(th.messages, th.approval), stored);
+        const approvalDate = stored.flow === "rental"
+          ? (rowOfBill[0] || {}).ownerApprovalDate
+          : ((media.arrearsDue || []).find((b) => String(b.adinn_ooh_bills || "").trim() === billNumber) || {}).ownerApprovalDate;
+        const head = { billNumber, mediaId: String(media._id), billKind: stored.flow === "rental" ? "" : stored.flow, dueMonth: (rowOfBill[0] || {}).dueMonth || "", gmailThreadId: th.threadId || "" };
+
+        for (const rv of plan.review) {
+          out.push({ ...head, status: "correction_review", reason: rv.reason, landlord: rv.landlord || rv.name || "", paymentKind: rv.kind || "", sourceMessageId: rv.messageId || "", eligible: false });
+          if (!ctx.dryRun && rv.messageId && !(await getLog().findOne({ billNumber, status: "correction_review", sourceMessageId: rv.messageId, reason: rv.reason }).lean())) {
+            await writeLog({ billNumber, status: "correction_review", reason: rv.reason, mediaId: head.mediaId, billKind: head.billKind, gmailThreadId: head.gmailThreadId, sourceMessageId: rv.messageId, correction: { landlord: rv.landlord || rv.name || "", kind: rv.kind || "" } }, ctx);
+          }
+        }
+        for (const corr of plan.corrections) {
+          const st = corr.statement;
+          const r = {
+            ...head, dueMonth: [...corr.slot.months][0] || head.dueMonth, landlord: corr.slot.landlord, landOwnerId: corr.slot.landOwnerId, paymentKind: corr.slot.kind,
+            existingUtr: corr.from, correctedUtr: corr.to, sourceMessageId: st.messageId, senderEmail: st.from, messageDate: st.at,
+          };
+          if (!UTR_SHAPE.test(corr.to) || !/\d/.test(corr.to)) { out.push({ ...r, status: "correction_review", reason: "invalid_utr", eligible: false }); continue; }
+          if (!ctx.dryRun && (await getLog().findOne({ billNumber, status: "correction_applied", sourceMessageId: st.messageId, landOwnerId: corr.slot.landOwnerId }).lean())) {
+            out.push({ ...r, status: "correction_already_applied", reason: "same_mail_already_processed", eligible: false });
+            continue;
+          }
+          if (utrAlreadyUsed(media, corr.to)) { out.push({ ...r, status: "correction_review", reason: "utr_already_used_on_this_site", eligible: false }); continue; }
+          const w = buildCorrectionWrite(corr, stored, { approvalDate, now });
+          const info = { ...r, eligible: true, wouldUpdate: { records: w.records, paidDate: w.paidDate || "kept", remark: w.narration ? "narration" : "kept", updatedBy: w.updatedBy } };
+          if (ctx.dryRun || !switchOn) {
+            const blocked = [];
+            if (!saveOn) blocked.push("GMAIL_UTR_SAVE_ENABLED is off");
+            if (!correctionSwitch()) blocked.push("GMAIL_UTR_CORRECTION_SAVE_ENABLED is off");
+            out.push({ ...info, status: "correction_found", dryRun: ctx.dryRun, reason: ctx.dryRun ? "dry_run_nothing_saved" : "correction_save_disabled", savingBlockedBy: blocked });
+            continue;
+          }
+          const res = await getMedia().updateOne({ _id: media._id, ...w.filter }, { $set: w.set }, { strict: false });
+          const changed = Number(res && (res.modifiedCount ?? res.nModified ?? 0));
+          if (!changed) { out.push({ ...info, status: "database_error", reason: "changed_concurrently_nothing_written", eligible: false }); continue; }
+          await writeLog({ billNumber, status: "correction_applied", mediaId: head.mediaId, billKind: head.billKind, dueMonth: r.dueMonth, landOwnerId: corr.slot.landOwnerId, utr: corr.to, gmailThreadId: th.threadId || "", sourceMessageId: st.messageId, senderEmail: st.from, messageDate: st.at, paymentType: corr.slot.kind, paidDate: w.paidDate || "", correction: { kind: corr.slot.kind, landlord: corr.slot.landlord, oldUtr: corr.from, newUtr: corr.to, records: w.records, paidDateChanged: !!w.paidDate, remarkChanged: !!w.narration, updatedBy: w.updatedBy } }, ctx);
+          out.push({ ...info, status: "correction_applied", reason: "" });
+        }
+      } catch (err) {
+        out.push({ billNumber, status: "correction_error", reason: err.message || "failed" });
+        if ([401, 403].includes(Number(err.status))) break;
+      }
+    }
+    return out;
+  }
+
   async function processPendingUtrs(opts = {}) {
     const c = cfg();
     const dryRun = opts.dryRun !== false || !(deps.saveEnabled ? deps.saveEnabled() : saveEnabled());
@@ -1106,13 +1206,19 @@ function createUtrProcessor(deps = {}) {
           consecutiveGmailErrors = 0;
         }
       }
+      // paid bills: a later Finance reply may correct the stored UTR (same engine for API / cron / single-bill test); never stops the run
+      let corrections = [];
+      if (opts.corrections !== false && deps.correctionCheck !== false && (deps.correctionCheck || !deps.getPending) && String(process.env.GMAIL_UTR_CORRECTION_CHECK_ENABLED ?? "true").toLowerCase() !== "false" && !aborted) {
+        try { corrections = await processCorrections(ctx, opts, c, started); } catch (err) { logger.error("[gmail-utr] correction check failed:", err.message); }
+      }
       const counts = results.reduce((a, r) => ((a[r.status] = (a[r.status] || 0) + 1), a), {});
-      const summary = buildRunSummary({ ctx, startedAt, started, scope: list.scope, pendingTotal: list.totalPending, results, aborted });
+      const summary = buildRunSummary({ ctx, startedAt, started, scope: list.scope, pendingTotal: list.totalPending, results, aborted, corrections });
       emit(summary);
       logger.log(`[gmail-utr] run ${ctx.runId} ${summary.mode} start=${summary.startedAt} end=${summary.finishedAt} (${summary.durationMs} ms) scope="${list.scope}" pending=${list.totalPending} processed=${results.length} ${JSON.stringify(counts)}${aborted ? ` ABORTED:${aborted}` : ""}`);
       results.filter((r) => !r.preGmail).forEach((r) => logger.log(`[gmail-utr]   ${r.billNumber}${r.dueMonth ? ` [${r.dueMonth}]` : ""} -> ${r.status}${r.reason ? ` (${r.reason})` : ""}${r.utr ? ` utr=${maskUtr(r.utr)} paidDate=${r.paidDate || "-"} [${r.paidDateSource || "-"}] ${r.paymentType || ""}` : ""}${r.landlordMappings ? " " + r.landlordMappings.map((m) => `${m.landlord}=${maskUtr(m.utr)} paid ${m.paidDate} [${m.paidDateSource}] ${m.paymentMode}`).join(" | ") : ""}${r.splitPayments ? " " + r.splitPayments.map((m) => `${m.landlord ? m.landlord + " " : ""}${m.kind}=${maskUtr(m.utr)} paid ${m.paidDate} [${m.paidDateSource}]`).join(" | ") + (r.pendingKinds ? ` (still waiting: ${r.pendingKinds.join(",")})` : "") : ""}`));
+      corrections.filter((x) => x.status !== "correction_skipped").forEach((x) => logger.log(`[gmail-utr]   CORRECTION ${x.billNumber} -> ${x.status}${x.reason ? ` (${x.reason})` : ""}${x.correctedUtr ? ` ${x.landlord} ${x.paymentKind} ${maskUtr(x.existingUtr)} => ${maskUtr(x.correctedUtr)}` : ""}`));
       if (Object.keys(summary.blockedBeforeGmail).length) logger.log(`[gmail-utr]   blocked before Gmail (manual review / switches off, re-checked every run, no Gmail call): ${JSON.stringify(summary.blockedBeforeGmail)}`);
-      return { runId: ctx.runId, dryRun, triggeredBy: ctx.triggeredBy, startedAt: summary.startedAt, finishedAt: summary.finishedAt, scope: list.scope, pendingTotal: list.totalPending, processed: results.length, counts, aborted, results };
+      return { runId: ctx.runId, dryRun, triggeredBy: ctx.triggeredBy, startedAt: summary.startedAt, finishedAt: summary.finishedAt, scope: list.scope, pendingTotal: list.totalPending, processed: results.length, counts, aborted, results, corrections };
     } catch (err) {
       emit(buildRunSummary({ ctx, startedAt, started, error: err.message }));
       logger.error(`[gmail-utr] run ${ctx.runId} FAILED: ${err.message}`);
@@ -1125,7 +1231,7 @@ function createUtrProcessor(deps = {}) {
     }
   }
 
-  return { processPendingUtrs, processOne, reEvaluate };
+  return { processPendingUtrs, processOne, reEvaluate, processCorrections };
 }
 
 let instance = null;
