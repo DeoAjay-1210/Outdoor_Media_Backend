@@ -5656,6 +5656,7 @@ let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistor
     let cycleUnpaid = 0;
     let cycleTds = 0;
     let maxPaymentDate = null;
+    let latestRemark = ""; // ✅ NEW — remark of the latest rent payment of this cycle
     // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
     const cycleMedia = mediaAsOfDate(media, cycleDate);
 const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
@@ -5722,6 +5723,9 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
           if (entry.date) {
             const d = new Date(entry.date);
             if (!maxPaymentDate || d > maxPaymentDate) maxPaymentDate = d;
+            if (entry.remark && (!latestRemark || d >= maxPaymentDate)) latestRemark = entry.remark; // ✅ NEW
+          } else if (entry.remark && !latestRemark) {
+            latestRemark = entry.remark; // ✅ NEW
           }
         } else {
           cycleUnpaid += amt;
@@ -5739,6 +5743,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
       isPaid,
       isVirtual: true,
       date: isPaid ? maxPaymentDate : null,
+      remark: isPaid ? latestRemark : "", // ✅ NEW — remark of the rent payment
       updatedAt: null,
       updatedBy: "",
       cycle: cycleDate,
@@ -6960,9 +6965,10 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     outStantStatus:
       media.rentalPayment?.outStantStatus ??
       (outstanding.totalOutstandingAmount > 0 ? 1 : 0),
-    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory),
-    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory),
-    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory),
+    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "" })), // ✅ CHANGED — + remark key
+    // ✅ CHANGED — + remark key on every row ("" when none)
+    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory).map((r) => ({ ...r, remark: r.remark ?? "" })),
+    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "" })),
     previousLedger: media.previousLedger || null,
   };
 }
