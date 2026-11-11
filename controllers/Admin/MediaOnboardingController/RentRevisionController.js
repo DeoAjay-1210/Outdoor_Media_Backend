@@ -262,7 +262,7 @@ function monthOwnerDeltas(media, date, amount, payment, label) {
     return {
       deltas: owners.map((o) => {
         const p = payment.landOwners.find((x) => String(x.landOwnerId) === String(o._id)) || {};
-        return { landOwnerId: o._id, cash: sign * Number(p.cashAmount || 0), online: sign * Number(p.onlineAmount || 0) };
+        return { landOwnerId: o._id, cash: sign * Number(p.cashAmount || 0), online: sign * Number(p.onlineAmount || 0), requestedPaymentCategory: Number(p.paymentCategory) || null }; // ✅ CHANGED — + requested category
       }),
     };
   }
@@ -272,7 +272,7 @@ function monthOwnerDeltas(media, date, amount, payment, label) {
   const weights = owners.map((o) => Number(o.shareAmount || 0));
   const cashParts = splitByWeights(cashTotal, weights);
   const onlineParts = splitByWeights(onlineTotal, weights);
-  return { deltas: owners.map((o, i) => ({ landOwnerId: o._id, cash: sign * cashParts[i], online: sign * onlineParts[i] })) };
+  return { deltas: owners.map((o, i) => ({ landOwnerId: o._id, cash: sign * cashParts[i], online: sign * onlineParts[i], requestedPaymentCategory: pc || null })) }; // ✅ CHANGED — + requested category
 }
 // owners of a rentalDue month after the change → kept month ownerSplit
 function ownerSplitAfter(media, date, deltas, label) {
@@ -306,8 +306,12 @@ function applySplitToNewBills(bills, deltas) {
   if (!deltas || !bills.length) return;
   const weights = bills.map((b) => Number(b.netPayable || 0));
   deltas.forEach((d) => {
-    const cashParts = splitByWeights(Math.abs(d.cash), weights);
-    const onlineParts = splitByWeights(Math.abs(d.online), weights);
+    // ✅ FIXED — owner share per bill split once; cash rounded, online = share −
+    // cash (cash + online per bill no longer off by 1 on multi-face sites)
+    const shareParts = splitByWeights(Math.abs(d.cash) + Math.abs(d.online), weights);
+    const rawCash = splitByWeights(Math.abs(d.cash), weights);
+    const cashParts = shareParts.map((s, i) => Math.min(rawCash[i], s));
+    const onlineParts = shareParts.map((s, i) => s - cashParts[i]);
     bills.forEach((b, i) => {
       const o = (b.owners || []).find((x) => String(x.landOwnerId) === String(d.landOwnerId));
       if (!o) return;
@@ -315,6 +319,7 @@ function applySplitToNewBills(bills, deltas) {
       o.onlineAmount = onlineParts[i];
       o.shareAmount = cashParts[i] + onlineParts[i];
       o.paymentCategory = o.cashAmount > 0 && o.onlineAmount > 0 ? 3 : o.onlineAmount > 0 ? 2 : 1;
+      if (d.requestedPaymentCategory) o.requestedPaymentCategory = d.requestedPaymentCategory; // ✅ NEW — category sent (3 → Cash + Online rows even when one is 0)
     });
   });
   bills.forEach((b) => {

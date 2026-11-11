@@ -664,7 +664,7 @@ const ownerModePaid = (owner, mode) => (mode === "Cash" ? owner.paidCash : owner
  * Pays an arrears bill (rent or GST). Mutates and returns the bill copy.
  * Throws { message, statusCode } on a bad request.
  */
-function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrNumber, date, userName, parentWithGst, remark = "", gstScope = "" }) {
+function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrNumber, date, userName, parentWithGst, remark = "", gstScope = "", siteOwners = null }) { // ✅ CHANGED — + siteOwners (Cash + Online owner check)
   // shallow copies — keeps ObjectIds as ObjectIds
   const bill = { ...billIn };
   bill.owners = (billIn.owners || []).map((o) => ({ ...o }));
@@ -715,6 +715,34 @@ function applyArrearsPayment(billIn, { entryType, landOwnerId, paymentMode, utrN
       const modes = mode ? [mode] : ["Online", "Cash"];
       modes.forEach((md) => {
         const rentAmount = ownerModeAmount(o, md);
+        // ✅ NEW — Cash + Online owner, this mode 0 (row shown with 0): asked for
+        // this landowner + mode → a 0-amount entry (UTR / date / remark only;
+        // amounts / rentPaid unchanged), once
+        if (rentAmount <= 0 && landOwnerId && mode && !ownerModePaid(o, md)) {
+          const siteCat = (siteOwners || []).find((s) => String(s._id) === String(o.landOwnerId))?.paymentCategory;
+          if (!bothModesOwner({ ...o, sitePaymentCategory: siteCat })) return;
+          if (md === "Cash") o.paidCash = true;
+          else o.paidOnline = true;
+          const zero = {
+            _id: new mongoose.Types.ObjectId(),
+            type: "rental",
+            landOwnerId: o.landOwnerId,
+            landOwnerName: o.landOwnerName,
+            rentAmount: 0,
+            tdsAmount: 0,
+            gstAmount: 0,
+            amount: 0,
+            paymentMode: md,
+            utrNumber: md === "Online" ? utrNumber || "" : "",
+            date: payDate,
+            remark: String(remark || "").trim(),
+            createdBy: userName,
+            createdAt: nowIST(),
+          };
+          bill.payments.push(zero);
+          saved.push(zero);
+          return;
+        }
         if (rentAmount <= 0 || ownerModePaid(o, md)) return;
         const share = Number(o.shareAmount || 0);
         const tds = 0; // ✅ CHANGED — no TDS on arrears / advance (full amount paid)
@@ -799,7 +827,25 @@ const ownerPaid = (o) => (ownerMode(o) === "Cash" ? o.paidCash === true : o.paid
 // ✅ NEW — modes of an owner on a New Bill / advance: Cash AND Online amounts →
 // both (separate rows), else the one mode (as before)
 const ownerModes = (o) =>
-  Number(o.cashAmount || 0) > 0 && Number(o.onlineAmount || 0) > 0 ? ["Online", "Cash"] : [ownerMode(o)];
+  Number(o.cashAmount || 0) > 0 && Number(o.onlineAmount || 0) > 0 ? ["Online", "Cash"] : bothModesOwner(o) ? ["Online", "Cash"] : [ownerMode(o)]; // ✅ CHANGED — + Cash + Online category owner
+// ✅ NEW — Cash + Online owner (category 3 sent on the revision, or the site
+// landowner's category is 3): both rows always, the 0-amount mode row too
+function bothModesOwner(o) {
+  // only when the bill has the owner's Cash / Online amounts (old bills without them → as before)
+  if (Number(o.cashAmount || 0) + Number(o.onlineAmount || 0) <= 0) return false;
+  return Number(o.requestedPaymentCategory) === 3 || Number(o.sitePaymentCategory) === 3;
+}
+// ✅ NEW — site landowner category on each New Bill / advance owner (ledger
+// rows only; the saved bill is not changed)
+function withSiteOwnerCategory(bills, siteOwners) {
+  const catById = new Map((siteOwners || []).map((o) => [String(o._id), Number(o.paymentCategory || 0)]));
+  if (!catById.size) return bills || [];
+  return (bills || []).map((b) =>
+    b && Array.isArray(b.owners)
+      ? { ...b, owners: b.owners.map((o) => ({ ...o, sitePaymentCategory: catById.get(String(o.landOwnerId)) ?? null })) }
+      : b,
+  );
+}
 
 // Inserts rows after the last row of the same month (✅ CHANGED — no row of
 // that month: before the first later month, else appends)
@@ -864,8 +910,9 @@ function arrearsLedgerRows(b) {
   // amount / GST share / paid flag / payment); one mode → one row (as before)
   return (b.owners || []).flatMap((o) => ownerModes(o).map((md, _i, modes) => {
     const split = modes.length > 1;
-    const paid = split ? ownerModePaid(o, md) : ownerPaid(o);
     const modeShare = split ? ownerModeAmount(o, md) : Number(o.shareAmount || 0);
+    const zeroRow = split && modeShare <= 0; // ✅ NEW — Cash + Online owner, this mode 0 → nothing to pay
+    const paid = zeroRow ? true : split ? ownerModePaid(o, md) : ownerPaid(o);
     const share = Number(o.shareAmount || 0);
     // ✅ FIXED — this owner's own payment (same mode, else any mode); old
     // payments without landOwnerId → the bill's last payment (as before)
@@ -874,13 +921,16 @@ function arrearsLedgerRows(b) {
     return {
       landOwnerId: o.landOwnerId,
       landOwnerName: o.landOwnerName,
-      paymentCategory: o.paymentCategory,
+      paymentCategory: bothModesOwner(o) ? 3 : o.paymentCategory, // ✅ CHANGED — Cash + Online owner → 3
       paymentMode: md,
-      ...(split ? (md === "Cash" ? { cashAmount: modeShare } : { onlineAmount: modeShare }) : {}), // ✅ NEW
-      utrNumber: paid && pay ? pay.utrNumber || "" : "",
+      // ✅ CHANGED — owner's Cash / Online amounts (totals of the revision month on
+      // ledger rows, see addRevisionBillTotals)
+      cashAmount: Number(o.cashAmount || 0),
+      onlineAmount: Number(o.onlineAmount || 0),
+      utrNumber: paid && pay ? pay.utrNumber || "" : "", // ✅ CHANGED — 0 row: its own 0-amount entry
       date: paid && pay ? pay.date : null,
       remark: paid && pay ? pay.remark || "" : "", // ✅ NEW
-      status: 1,
+      status: zeroRow && !pay ? 0 : 1, // ✅ CHANGED — 0-amount row: 0 until its entry is saved
       dueMonth: b.dueMonth,
       cycle: b.dueDate,
       rentalDueId: b._id,
@@ -940,9 +990,11 @@ function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false, 
     }
     (b.owners || []).forEach((o) => {
       const ok = String(o.landOwnerId);
-      const c = g.byOwner.get(ok) || { share: 0, gst: 0 };
+      const c = g.byOwner.get(ok) || { share: 0, gst: 0, cash: 0, online: 0 };
       c.share += Number(o.shareAmount || 0);
       c.gst += Number(o.gstAmount || 0);
+      c.cash += Number(o.cashAmount || 0); // ✅ NEW
+      c.online += Number(o.onlineAmount || 0); // ✅ NEW
       g.byOwner.set(ok, c);
     });
     groups.set(k, g);
@@ -958,6 +1010,8 @@ function addRevisionBillTotals(rows, bills, { byOwner = false, gstOnly = false, 
     return {
       ...r,
       ...extra,
+      // ✅ NEW — ledger rows: owner's Cash / Online total of the revision month
+      ...(byOwner ? { cashAmount: round(t.cash || 0), onlineAmount: round(t.online || 0) } : {}),
       totalShareAmount: round(t.share),
       totalTdsAmount: 0, // no TDS on New Bill / advance
       totalGstAmount: round(t.gst),
@@ -1079,11 +1133,12 @@ function decorateLedgerItemBase(item, arrearsBills, lastRevision, parentWithGstB
           // ✅ CHANGED — owner with Cash AND Online → one entry per unpaid mode
           owners: (b.owners || []).flatMap((o) =>
             ownerModes(o)
-              .filter((md) => (ownerModes(o).length > 1 ? !ownerModePaid(o, md) : !ownerPaid(o)))
+              // ✅ CHANGED — a 0-amount mode is never pending
+              .filter((md) => (ownerModes(o).length > 1 ? ownerModeAmount(o, md) > 0 && !ownerModePaid(o, md) : !ownerPaid(o)))
               .map((md) => ({
                 landOwnerId: o.landOwnerId,
                 landOwnerName: o.landOwnerName,
-                paymentCategory: o.paymentCategory,
+                paymentCategory: bothModesOwner(o) ? 3 : o.paymentCategory, // ✅ CHANGED
                 paymentMode: md,
                 ...(md === "Cash" ? { cashAmount: Number(o.cashAmount || 0) } : { onlineAmount: Number(o.onlineAmount || 0) }),
                 [md === "Cash" ? "cashEntry" : "onlineEntry"]: false,
@@ -1480,6 +1535,7 @@ const decorateLedgerItem = (...args) => withRemarkKeys(decorateLedgerItemBase(..
 const decorateLedgerHistoryBlock = (...args) => withRemarkKeys(decorateLedgerHistoryBlockBase(...args));
 
 module.exports = {
+  withSiteOwnerCategory, // ✅ NEW
   MONTHS,
   monthKey,
   monthLabelOfKey,
