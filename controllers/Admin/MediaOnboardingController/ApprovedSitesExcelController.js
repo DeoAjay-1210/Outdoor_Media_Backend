@@ -46,14 +46,24 @@ const formatDate = (value) => {
   return `${String(d.getUTCDate()).padStart(2, "0")} ${SHORT_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 };
 
-const joinUnique = (arr) => [...new Set(arr.filter((v) => v !== undefined && v !== null && v !== ""))].join(", ");
+// ✅ NEW — "21 Sep 2026 1:33 PM" from an IST-held date (approval cells)
+const formatDateTime = (value) => {
+  const date = formatDate(value);
+  if (!date) return "";
+  const d = new Date(value);
+  const h = d.getUTCHours();
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${date} ${h % 12 || 12}:${mm} ${h < 12 ? "AM" : "PM"}`;
+};
+
+const joinUnique =(arr) => [...new Set(arr.filter((v) => v !== undefined && v !== null && v !== ""))].join(", ");
 
 // "Approved – 21 Sep 2026 (cmd)" / "Skipped" / "Pending" / "-"
 const stepText = (step) => {
   if (!step) return "-";
   if (Number(step.status) === STEP_APPROVED) {
     const by = step.userName ? ` (${step.userName})` : "";
-    return `Approved – ${formatDate(step.approvedAt)}${by}`;
+    return `Approved – ${formatDateTime(step.approvedAt)}${by}`; // ✅ CHANGED — + time
   }
   return STEP_STATUS_LABEL[Number(step.status)] || "-";
 };
