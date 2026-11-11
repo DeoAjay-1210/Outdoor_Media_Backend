@@ -74,12 +74,16 @@ test("L5. a UTR reply without In-Reply-To cannot be linked -> manual review", ()
   assert.deepEqual(s.replyMessageIds, ["mR1"]);
 });
 
-test("L6. a reply to another reply (not to an approval mail) cannot be linked -> manual review", () => {
+test("L6. a reply to another reply is linked through the chain to the approval mail it ends at; a chain that never reaches one is not", () => {
   const second = reply("mR2", UTR2, "mR1", "2026-11-10T05:00:00.000Z");
-  second.inReplyTo = "<mR1@mail.gmail.com>";
+  second.inReplyTo = "<mR1@mail.gmail.com>"; // R2 -> R1 -> approval A (Finance chain: approval -> Payment Uploaded -> Approved -> UTR)
   const s = scopeThreadToBill([A(), B(), R1(), second], AUG);
-  assert.equal(s.status, "unlinked");
-  assert.deepEqual(s.replyMessageIds, ["mR2"]);
+  assert.equal(s.status, "scoped");
+  assert.deepEqual(s.messages.map((m) => m.id), ["mA", "mR1", "mR2"]);
+  assert.equal(scopeThreadToBill([A(), B(), R1(), second], SEP).messages.length, 1); // September has none of them
+  const orphan = reply("mR3", UTR2, "mR9", "2026-11-10T05:00:00.000Z");
+  orphan.inReplyTo = "<mR9@mail.gmail.com>"; // parent is not in the thread
+  assert.equal(scopeThreadToBill([A(), B(), orphan], AUG).status, "unlinked");
 });
 
 test("L7. In-Reply-To pointing at a message that is not in the thread cannot be linked", () => {

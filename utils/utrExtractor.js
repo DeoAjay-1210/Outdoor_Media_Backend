@@ -103,4 +103,25 @@ const extractBillNumbers = (text) => {
   return [...found];
 };
 
-module.exports = { extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, stripQuoted };
+// ── CASH payments have NO UTR: the reply only says the payment was made in cash (and, optionally, the paid date) ──
+// "Cash", "Cash - Paid Date: 10-Nov-2026", "Landlord1 - NewBill - Cash - Paid Date: 10-Nov-2026". The word Cash must END the
+// name part and only a paid-date phrase (or nothing) may follow, so "Cash Amount ₹ 0" / "Payment Category: Cash Mode" of an
+// approval mail are never a payment. A line that carries a UTR is a UTR line, never a Cash line.
+const { extractExplicitPaymentDates } = require("./utrPaidDate");
+const CASH_WORD = /\bcash\b/i;
+const CASH_REST = /^\s*(?:[-–—:|,;]\s*)*(?:(?:paid|payment|done|completed|received)\b.*|\d{1,2}[-\/. ][A-Za-z0-9]{1,9}[-\/. ]\d{2,4}\s*)?$/i;
+function extractCashLines(text) {
+  const out = [];
+  for (const raw of stripQuoted(text).split("\n")) {
+    if (findUtrInLine(raw)) continue;
+    const m = CASH_WORD.exec(raw);
+    if (!m) continue;
+    const rest = raw.slice(m.index + m[0].length);
+    if (!CASH_REST.test(rest)) continue;
+    const name = raw.slice(0, m.index + m[0].length).replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").trim();
+    out.push({ name, utr: "", cash: true, dates: extractExplicitPaymentDates(rest).map((d) => ({ date: d.date, label: d.label })), line: raw.trim() });
+  }
+  return out;
+}
+
+module.exports = { extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, stripQuoted, extractCashLines };

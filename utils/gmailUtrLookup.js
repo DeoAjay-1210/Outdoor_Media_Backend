@@ -7,9 +7,10 @@
  * bodies. It never picks between several candidates and writes nothing.
  */
 const Gmail = require("./gmailService");
-const { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted } = require("./utrExtractor");
+const { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted, extractCashLines } = require("./utrExtractor");
 const { extractExplicitPaymentDates, istDay } = require("./utrPaidDate");
 const { scopeThreadToBill } = require("./gmailReplyLink");
+const { collectBankRows } = require("./bankNarration");
 const { extractLandlordUtrLines, parseApprovalMailLandlords } = require("./landlordUtrParser");
 
 const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
@@ -38,10 +39,12 @@ const lookupLandlordUtrs = async (billNumber, maxResults = 10) => {
     const otherBillNumbers = [...new Set(th.messages.flatMap((m) => extractBillNumbers(m.bodyText)))].filter((b) => b.toLowerCase() !== billNumber.toLowerCase());
     let nearBills = otherBillNumbers;
     let replyLink = null;
+    let bankMessages = null;
     if (otherBillNumbers.length) {
       // several approval mails in one thread: the reply is tied to its bill by In-Reply-To, never by order
       const s = scopeThreadToBill(th.messages, billNumber);
       if (s.status === "scoped") {
+        bankMessages = s.bankMessages;
         th.messages = s.messages;
         replyLink = s.link;
         nearBills = [...new Set(th.messages.flatMap((m) => extractBillNumbers(m.bodyText)))].filter((b) => b.toLowerCase() !== billNumber.toLowerCase());
@@ -50,13 +53,13 @@ const lookupLandlordUtrs = async (billNumber, maxResults = 10) => {
         continue;
       } // else: not an approval-mail layout (one message printing other Bill Numbers): stays ambiguous_bill_numbers as before
     }
-    found.push({ th, otherBillNumbers: nearBills, replyLink });
+    found.push({ th, otherBillNumbers: nearBills, replyLink, bankMessages });
   }
   const common = { billNumber, matchedThreads: found.map((f) => ({ threadId: f.th.id, messageCount: f.th.messages.length, otherBillNumbers: f.otherBillNumbers })) };
   if (unlinked) return { message: "A reply in the conversation cannot be tied to one approval mail; manual review required", data: { ...common, extractionStatus: "reply_not_linked", linkReason: unlinked.reason, replyMessageIds: unlinked.replyMessageIds } };
   if (!found.length) return { message: "No Gmail conversation contains this exact Bill Number", data: { ...common, extractionStatus: "bill_not_found" } };
   if (found.length > 1) return { message: "More than one conversation matched; manual review required", data: { ...common, extractionStatus: "multiple_review_required" } };
-  const { th, otherBillNumbers, replyLink } = found[0];
+  const { th, otherBillNumbers, replyLink, bankMessages } = found[0];
   if (otherBillNumbers.length) return { message: "The conversation mentions other Bill Numbers too; manual review required", data: { ...common, extractionStatus: "ambiguous_bill_numbers" } };
 
   // the original approval mail = the message that carries the bill's own landlord blocks
@@ -65,11 +68,19 @@ const lookupLandlordUtrs = async (billNumber, maxResults = 10) => {
     .filter((m) => m !== approval)
     .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), lines: extractLandlordUtrLines(m.bodyText) }))
     .filter((r) => r.lines.length > 0);
+  // Cash payments have no UTR: "<landlord> - Cash [- Paid Date: ...]" lines (never read from the approval mail itself)
+  const cashReplies = th.messages
+    .filter((m) => m !== approval && !/Owner Name/i.test(stripQuoted(m.bodyText)))
+    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), cashLines: extractCashLines(m.bodyText) }))
+    .filter((r) => r.cashLines.length > 0);
   return {
     message: replies.length ? "Landlord UTR lines found (read-only, no database update)" : "Bill Number found, but no landlord UTR line in any reply",
-    data: { ...common, threadId: th.id, extractionStatus: replies.length ? "found" : "utr_not_found", ...(replyLink ? { replyLink } : {}), approvalMailLandlords: approval ? parseApprovalMailLandlords(approval.bodyText) : [], replies },
+    data: { ...common, threadId: th.id, extractionStatus: replies.length ? "found" : "utr_not_found", cashReplies, bankRows: bankRowsOf(bankMessages || th.messages, approval), ...(replyLink ? { replyLink } : {}), approvalMailLandlords: approval ? parseApprovalMailLandlords(approval.bodyText) : [], replies },
   };
 };
+
+/** Bank table rows of the Finance payment confirmation(s) of this bill's thread (never the approval mail itself). */
+const bankRowsOf = (messages, approval) => collectBankRows((messages || []).filter((m) => m !== approval && !/Owner Name/i.test(stripQuoted(m.bodyText)))).rows;
 
 /** Returns { message, data } where data.extractionStatus is one of
  *  bill_not_found | utr_not_found | multiple_review_required | ambiguous_bill_numbers | found. */
@@ -86,10 +97,12 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
       (b) => b.toLowerCase() !== billNumber.toLowerCase()
     );
     let replyLink = null;
+    let bankMessages = null;
     if (otherBills.length) {
       // several approval mails in one thread: the reply is tied to its bill by In-Reply-To, never by order
       const s = scopeThreadToBill(th.messages, billNumber);
       if (s.status === "scoped") {
+        bankMessages = s.bankMessages;
         th.messages = s.messages;
         replyLink = s.link;
         otherBills = [...new Set(th.messages.flatMap((m) => extractBillNumbers(m.bodyText)))].filter((b) => b.toLowerCase() !== billNumber.toLowerCase());
@@ -108,11 +121,12 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
       utr: r.utr,
       utrSource: r.source,
       replyLink,
+      bankMessages: bankMessages || th.messages.filter((m) => !/Owner Name/i.test(stripQuoted(m.bodyText))),
       candidates: r.candidates,
       _messages: th.messages, // only used below to find the payment date; never returned
     });
   }
-  const matchedThreads = threads.map(({ candidates, _messages, replyLink, ...t }) => t);
+  const matchedThreads = threads.map(({ candidates, _messages, replyLink, bankMessages, ...t }) => t);
   const common = { billNumber, matchedThreads };
 
   if (unlinked) {
@@ -170,6 +184,7 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
       messageDate: src.date,
       paidDateInfo,
       ...(withUtr[0].replyLink ? { replyLink: withUtr[0].replyLink } : {}),
+      bankRows: collectBankRows(withUtr[0].bankMessages).rows,
       extractionStatus: "found",
     },
   };

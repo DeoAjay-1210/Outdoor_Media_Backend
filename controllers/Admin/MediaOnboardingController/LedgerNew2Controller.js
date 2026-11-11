@@ -1322,7 +1322,8 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
     if (Number(bill.approvalStatus) !== 3) throw new Error(`Rent revision not approved yet — ${kind} cannot be paid`);
     const paid = applyArrearsPayment(bill, {
       entryType: entryType === "gst" ? "gst" : "rental",
-      landOwnerId: entryType === "gst" ? null : item.landOwnerId,
+      landOwnerId: entryType === "gst" && item.gstScope !== "landlord" ? null : item.landOwnerId, // ✅ CHANGED — landlord-wise GST only when asked
+      gstScope: entryType === "gst" && item.gstScope === "landlord" ? "landlord" : "",
       paymentMode: item.paymentMode,
       utrNumber: item.utrNumber,
       date: entryDate,

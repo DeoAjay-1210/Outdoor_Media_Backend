@@ -22,7 +22,12 @@ const fs = require("fs");
 const path = require("path");
 const { getPendingUtrBills, evaluateGroup, billField, isValidBill } = require("./pendingUtrBills");
 const { lookupUtrByBillNumber, lookupLandlordUtrs } = require("./gmailUtrLookup");
-const { mapLandlords, mapLandlordKinds, mapPaymentKinds, validateAgainstMail, matchLandlord } = require("./landlordUtrParser");
+const { getPendingArrearsUtrBills, evaluateArrearsGroup } = require("./pendingArrearsUtrBills");
+const { narrationFor } = require("./bankNarration");
+const { senderName } = require("./senderName");
+// the Finance reply a payment was read from -> its sender name (ledger updatedBy)
+const actorOf = (d, messageId) => { const r = [...(d.replies || []), ...(d.cashReplies || [])].find((x) => x.messageId === messageId); return senderName(r ? r.from : d.senderEmail); };
+const { splitCashName, mapLandlords, mapLandlordKinds, mapArrearsLines, mapPaymentKinds, validateAgainstMail, matchLandlord } = require("./landlordUtrParser");
 const { resolvePaidDate } = require("./utrPaidDate");
 
 const LOCK_ID = "gmail_utr_lock";
@@ -33,12 +38,14 @@ const BLOCKED_BEFORE_GMAIL = new Set([
   "rows_in_different_months", "separate_bill_site_rows", "no_rent_payment_pending", "no_single_rent_slot",
   "landlord_with_two_open_payments", "mapping_not_safe", "multi_landlord_auto_save_disabled", "cash_auto_save_disabled",
   "gst_split_auto_save_disabled", "no_gst_row", "multiple_gst_rows",
+  "multiple_arrears_bills", "bill_kind_mixed", "no_landlord_on_bill",
 ]);
 
 // One run at a time inside this process (dry or live). A LIVE run additionally takes the cross-instance DB lock;
 // a DRY run writes nothing to MongoDB at all (no lock row, no log row).
 let activeRun = false;
 
+const idStrOf = (v) => (v === null || v === undefined ? "" : String(v));
 const maskUtr = (u) => (u ? String(u).slice(0, 4) + "***" + String(u).slice(-3) : u);
 
 /** One JSON line per run: logs/gmail-utr-runs.jsonl (or GMAIL_UTR_RUN_LOG_FILE). Never throws. */
@@ -77,6 +84,22 @@ function buildRunSummary({ ctx, startedAt, started, scope, pendingTotal, results
 }
 const UTR_SHAPE = /^[A-Za-z0-9]{12,30}$/;
 
+/**
+ * Bank Narration of the Finance "Payment Uploaded" table -> p.narration (saved as the ledger remark instead of the static text).
+ * Only what is certain: one landlord = the thread's one narration; several landlords = a row that names the landlord (account / name).
+ * When nothing is certain p.narration stays "" (the default remark is kept) and p.narrationNote says why.
+ */
+function attachNarration(plan, d, landlords) {
+  const idOf = (p) => (p.slot ? p.slot.landOwnerId : p.slots && p.slots[0] ? p.slots[0].landOwnerId : "");
+  const count = new Map();
+  plan.forEach((p) => count.set(idOf(p), (count.get(idOf(p)) || 0) + 1));
+  for (const p of plan) {
+    const n = narrationFor(d.bankRows || [], landlords || [], { landOwnerId: idOf(p), amount: p.amount ?? p.gstAmount ?? p.rentAmount ?? null, siblings: count.get(idOf(p)) });
+    p.narration = n.narration;
+    if (!n.narration && n.reason && n.reason !== "no_narration_in_thread") p.narrationNote = n.reason;
+  }
+}
+
 const saveEnabled = () => String(process.env.GMAIL_UTR_SAVE_ENABLED || "").toLowerCase() === "true";
 const gstSaveEnabledEnv = () => String(process.env.GMAIL_UTR_GST_SAVE_ENABLED || "").toLowerCase() === "true";
 const multiSaveEnabledEnv = () => String(process.env.GMAIL_UTR_MULTI_LANDLORD_SAVE_ENABLED || "").toLowerCase() === "true";
@@ -89,7 +112,22 @@ const cfg = () => ({
   gmailTimeoutMs: num(process.env.GMAIL_UTR_GMAIL_TIMEOUT_MS, 30000),
   runBudgetMs: num(process.env.GMAIL_UTR_RUN_BUDGET_MS, 8 * 60000),
   lockTtlMs: num(process.env.GMAIL_UTR_LOCK_TTL_MIN, 15) * 60000,
+  // Retry policy. A bill whose approval mail EXISTS in Gmail (utr_not_found) is waiting for Finance's reply: it is re-read on EVERY run
+  // (0 = no wait; GMAIL_UTR_THREAD_RETRY_SEC can throttle it) so a new reply is found in the next cron run. A bill whose approval mail
+  // is NOT in Gmail (bill_not_found) backs off with the age of the bill: every run for a freshly approved one (mail delay / indexing),
+  // GMAIL_UTR_NOT_FOUND_COOLDOWN_MIN up to 6 hours, GMAIL_UTR_OLD_NOT_FOUND_COOLDOWN_MIN after that. A reply that could not be matched
+  // (ambiguous) is re-read after GMAIL_UTR_REVIEW_RETRY_SEC because Finance corrects within minutes.
+  threadRetryMs: num(process.env.GMAIL_UTR_THREAD_RETRY_SEC, 0) * 1000,
+  newBillWindowMs: num(process.env.GMAIL_UTR_NEW_BILL_WINDOW_MIN, 30) * 60000,
+  oldNotFoundMs: num(process.env.GMAIL_UTR_OLD_NOT_FOUND_COOLDOWN_MIN, 60) * 60000,
+  reviewRetryMs: num(process.env.GMAIL_UTR_REVIEW_RETRY_SEC, 60) * 1000,
 });
+
+// age of a bill since its CMD approval (ownerApprovalDate is stored as IST wall-clock in a UTC field); Infinity when unknown
+const billAgeMs = (item) => {
+  const t = item && item.approvalDate ? new Date(item.approvalDate).getTime() - 330 * 60000 : NaN;
+  return Number.isFinite(t) ? Date.now() - t : Infinity;
+};
 
 const withTimeout = (promise, ms, label) =>
   Promise.race([
@@ -122,13 +160,17 @@ const istDate = (value) => {
 };
 
 /** Is this UTR already stored anywhere on the site (ledger, history, GST, outstanding)? */
-function utrAlreadyUsed(media, utr) {
+function utrAlreadyUsed(media, utr, opts = {}) {
   const same = (v) => String(v || "").trim().toLowerCase() === utr.toLowerCase();
   if ((media.ledger || []).some((e) => same(e.utrNumber))) return true;
   if ((media.withGst1Ledger || []).some((e) => same(e.utrNumber))) return true;
   if ((media.gstBalanceHistory || []).some((e) => same(e.utrNumber))) return true;
   for (const y of media.ledgerHistory || []) {
     for (const m of y.months || []) if ((m.entries || []).some((e) => same(e.utrNumber))) return true;
+  }
+  // New Bill / Advance Bill payments live in arrearsDue[].payments[]
+  for (const b of media.arrearsDue || []) {
+    if ((b.payments || []).some((p) => same(p.utrNumber) && !(opts.except && opts.except(b, p)))) return true;
   }
   return false;
 }
@@ -145,7 +187,7 @@ function createUtrProcessor(deps = {}) {
   const logger = deps.logger || console;
   const saver =
     deps.saver ||
-    ((batch) => require("../controllers/Admin/MediaOnboardingController/LedgerNew2Controller").executeBulkPaymentBatch({ user: { userName: "Gmail UTR Auto" } }, batch));
+    ((batch, actor) => require("../controllers/Admin/MediaOnboardingController/LedgerNew2Controller").executeBulkPaymentBatch({ user: { userName: actor || "Gmail UTR Auto" } }, batch));
 
   /** Fresh read of one bill from MongoDB, evaluated with the same rules as the pending list. */
   async function reEvaluate(item) {
@@ -190,13 +232,20 @@ function createUtrProcessor(deps = {}) {
   /** Skip bills whose last non-dry-run result is recent (saves Gmail quota). */
   async function inCooldown(item, c) {
     const last = await getLog().findOne({ billNumber: item.billNumber, dryRun: false }).sort({ createdAt: -1 }).lean();
+    item._last = last ? { status: last.status, reason: last.reason || "" } : null; // lets done() skip a log row that says nothing new
     if (!last) return false;
     const age = Date.now() - new Date(last.createdAt).getTime();
-    // Outcomes that came from READING Gmail (no UTR yet, a reply that could not be matched, several UTRs ...) are re-checked
-    // after the SHORT cooldown, because finance corrects replies within minutes. Only blocks decided BEFORE Gmail is touched
-    // (GST, several landlords with the switch off, ...) use the long cooldown: they cost no Gmail call and nothing can change soon.
-    if (["bill_not_found", "utr_not_found", "gmail_error", "multiple_review_required"].includes(last.status)) return age < c.notFoundCooldownMs;
-    if (last.status === "ambiguous_mapping") return BLOCKED_BEFORE_GMAIL.has(last.reason) ? false : age < c.notFoundCooldownMs;
+    // utr_not_found: the approval mail is in Gmail and Finance has not replied yet -> look again on every run (cheap: one thread).
+    if (last.status === "utr_not_found") return age < c.threadRetryMs;
+    // bill_not_found: no approval mail in Gmail -> a fresh bill is looked for on every run, an old one backs off (see cfg).
+    if (last.status === "bill_not_found") {
+      const billAge = billAgeMs(item);
+      const wait = billAge < c.newBillWindowMs ? 0 : billAge < 6 * 3600000 ? c.notFoundCooldownMs : c.oldNotFoundMs;
+      return age < wait;
+    }
+    if (["gmail_error", "multiple_review_required"].includes(last.status)) return age < c.notFoundCooldownMs;
+    // a reply that could not be matched: Finance corrects within minutes. Blocks decided BEFORE Gmail are re-evaluated every run.
+    if (last.status === "ambiguous_mapping") return BLOCKED_BEFORE_GMAIL.has(last.reason) ? false : age < c.reviewRetryMs;
     return false;
   }
 
@@ -288,6 +337,7 @@ function createUtrProcessor(deps = {}) {
         slot,
       });
     }
+    attachNarration(plan, d, pm.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slot, ...rest }) => rest);
 
     if (ctx.dryRun) {
@@ -317,11 +367,11 @@ function createUtrProcessor(deps = {}) {
         siteBillMode: fresh.current.siteBillMode,
         entryType: "rental",
         date: p.paidDate,
-        remark: `UTR auto-saved from Gmail reply (Bill ${item.billNumber}, thread ${d.threadId}, landlord ${p.landlord}). Paid date from ${p.paidDateSource === "email_payment_date" ? "the payment date stated in the email" : "the email sent date — verify"}`,
+        remark: p.narration || "", // Bank Narration only; no narration -> empty remark
         payments: [{ mediaId: fresh.current.mediaId, landOwnerId: p.slot.landOwnerId, rentalDueId: p.slot.rentalDueId, targetType: p.slot.targetType, paymentMode: p.slot.paymentMode, utrNumber: p.utr }],
       };
       try {
-        const result = await saver(batch);
+        const result = await saver(batch, senderName(reply.from));
         const saved = (result?.data?.savedEntries || []).filter((e) => e.status === "saved");
         if (Number(result?.data?.sitesFailed || 0) > 0 || saved.length !== 1) {
           const why = (result?.data?.savedEntries || []).find((e) => e.status === "failed")?.error || "save_not_confirmed";
@@ -416,6 +466,7 @@ function createUtrProcessor(deps = {}) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
       return done("utr_not_found", "", extra);
     }
+    attachNarration(plan, d, [sm.landlord]); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slot, ...rest }) => rest);
 
     if (ctx.dryRun) {
@@ -435,11 +486,11 @@ function createUtrProcessor(deps = {}) {
         siteBillMode: fresh.current.siteBillMode,
         entryType: isGst ? "gst" : "rental",
         date: p.paidDate,
-        remark: `${isGst ? "GST" : "Rent"} UTR auto-saved from Gmail reply (Bill ${item.billNumber}, thread ${d.threadId}). Paid date from ${p.paidDateSource === "email_payment_date" ? "the payment date stated in the email" : "the email sent date — verify"}`,
+        remark: p.narration || "", // Bank Narration only; no narration -> empty remark
         payments: [{ mediaId: fresh.current.mediaId, landOwnerId: p.slot.landOwnerId, rentalDueId: p.slot.rentalDueId, targetType: p.slot.targetType, paymentMode: p.slot.paymentMode || "Online", utrNumber: p.utr }],
       };
       try {
-        const result = await saver(batch);
+        const result = await saver(batch, actorOf(d, p.sourceMessageId));
         const saved = (result?.data?.savedEntries || []).filter((e) => e.status === "saved");
         if (Number(result?.data?.sitesFailed || 0) > 0 || saved.length !== 1) {
           const why = (result?.data?.savedEntries || []).find((e) => e.status === "failed")?.error || "save_not_confirmed";
@@ -547,6 +598,7 @@ function createUtrProcessor(deps = {}) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
       return done("utr_not_found", "", extra);
     }
+    attachNarration(plan, d, mg.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slot, ...rest }) => rest);
 
     if (ctx.dryRun) {
@@ -568,11 +620,11 @@ function createUtrProcessor(deps = {}) {
         siteBillMode: fresh.current.siteBillMode,
         entryType: isGst ? "gst" : "rental",
         date: p.paidDate,
-        remark: `${p.landlord} ${isGst ? "GST" : "Rent"} UTR auto-saved from Gmail reply (Bill ${item.billNumber}, thread ${d.threadId}). Paid date from ${p.paidDateSource === "email_payment_date" ? "the payment date stated in the email" : "the email sent date — verify"}`,
+        remark: p.narration || "", // Bank Narration only; no narration -> empty remark
         payments: [{ mediaId: fresh.current.mediaId, landOwnerId: p.slot.landOwnerId, rentalDueId: p.slot.rentalDueId, targetType: p.slot.targetType, paymentMode: p.slot.paymentMode || "Online", utrNumber: p.utr }],
       };
       try {
-        const result = await saver(batch);
+        const result = await saver(batch, actorOf(d, p.sourceMessageId));
         const saved = (result?.data?.savedEntries || []).filter((e) => e.status === "saved");
         if (Number(result?.data?.sitesFailed || 0) > 0 || saved.length !== 1) {
           const why = (result?.data?.savedEntries || []).find((e) => e.status === "failed")?.error || "save_not_confirmed";
@@ -587,16 +639,297 @@ function createUtrProcessor(deps = {}) {
     return done("found_and_saved", "", { ...extra, paymentType: "multi_landlord_rent_gst", splitPayments: ordered.map(({ slot, ...rest }) => rest), savedAmount: ordered.reduce((s, p) => s + (p.savedAmount || 0), 0) });
   }
 
+  /**
+   * NEW BILL / ADVANCE BILL (media.arrearsDue[]). The Finance reply is tied to the approval mail by In-Reply-To (same lookup as
+   * the Rental flow); the Bill Number of THAT mail picks the bill(s), the registry + the bills' own dueMonth confirm it. Lines are
+   *     [Landlord - ]NewBill|Advance [- Rent|GST] - UTR : <value>          (Online rent, GST)
+   *     [Landlord - ]NewBill|Advance - Cash [- Paid Date: <date>]           (Cash rent: NO UTR, only the paid date is stored)
+   * One payment per landlord and kind: Rent (Online or Cash) and, when GST is on hold, GST (landlord-wise for several
+   * landlords, one for a single landlord). Several arrears bills under ONE Bill Number (months / faces) are covered by that one
+   * payment, like the faces of a Rental Bill: the same UTR (or Cash paid date) is saved on each of them. A New Bill line is never
+   * an Advance payment and vice versa. Every payment is saved as soon as ITS line exists; any doubt keeps the payment (or the
+   * bill) in manual review. Real saving: GMAIL_UTR_SAVE_ENABLED + the multi-landlord switch (several landlords) + the GST switch
+   * (GST on hold) + the Cash switch (Cash rent).
+   */
+  async function registryCheckArrears(billNumber, media, bills, kind) {
+    const reg = await getRegistry().findOne({ adinn_ooh_bills: billNumber }).lean();
+    if (!reg) return "registry_record_missing";
+    if (String(reg.mediaId) !== String(media._id)) return "registry_media_mismatch";
+    const want = kind === "advance" ? "advance" : "newbill";
+    if (!String(reg.groupKey || "").includes(`|${want}:`) || (reg.billMode && reg.billMode !== (kind === "advance" ? "advance" : "new_bill"))) return "registry_kind_mismatch";
+    // the registry month is the first bill's month: it must be the month of one of this Bill Number's own bills
+    if (!bills.some((b) => String(b.dueMonth || "").trim() === String(reg.dueMonth || "").trim())) return "registry_month_mismatch";
+    const listed = new Set((reg.rentalDueIds || []).map(String));
+    if (!bills.every((b) => listed.has(String(b._id)))) return "registry_rows_mismatch";
+    return null;
+  }
+
+  async function reEvaluateArrears(item) {
+    const media = await getMedia().findById(item.mediaId).lean();
+    if (!media) return { media: null, current: null };
+    const entries = (media.arrearsDue || [])
+      .filter((b) => b && String(b.adinn_ooh_bills || "").trim() === item.billNumber && Number(b.approvalStatus) === 3 && b.mailSent === true)
+      .map((bill) => ({ media, bill }));
+    if (!entries.length) return { media, current: null };
+    const current = evaluateArrearsGroup(item.billNumber, entries);
+    if (!current) return { media, current: null };
+    const registryProblem = await registryCheckArrears(item.billNumber, media, entries.map((e) => e.bill), current.billKind);
+    return { media, current, ...(registryProblem ? { registryProblem } : {}) };
+  }
+
+  async function processArrears(item, ctx, c, done) {
+    if (!item.eligible) return done("ambiguous_mapping", item.skipReason || "mapping_not_safe");
+    const multiOn = deps.multiLandlordSaveEnabled ? deps.multiLandlordSaveEnabled() : multiSaveEnabledEnv();
+    const gstOn = deps.gstSaveEnabled ? deps.gstSaveEnabled() : gstSaveEnabledEnv();
+    const cashOn = deps.cashSaveEnabled ? deps.cashSaveEnabled() : cashSaveEnabledEnv();
+    if (!ctx.dryRun) {
+      if (item.landlords.length > 1 && !multiOn) return done("ambiguous_mapping", "multi_landlord_auto_save_disabled");
+      if (item.slots.some((s) => s.kind === "gst") && !gstOn) return done("ambiguous_mapping", "gst_split_auto_save_disabled");
+      if (item.slots.some((s) => s.paymentMode === "Cash") && !cashOn) return done("ambiguous_mapping", "cash_auto_save_disabled");
+    }
+
+    let found;
+    try {
+      found = await withTimeout(lookupLandlords(item.billNumber), c.gmailTimeoutMs, "Gmail lookup");
+    } catch (err) {
+      const e = await done("gmail_error", err.message, { httpStatus: err.status || 0 });
+      e.fatal = [401, 403].includes(Number(err.status));
+      return e;
+    }
+    const d = found.data || {};
+    if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
+    if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
+    if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
+    if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
+    const replies = d.extractionStatus === "found" ? d.replies || [] : [];
+    const cashReplies = d.cashReplies || [];
+    if (!replies.length && !cashReplies.length) return done("utr_not_found");
+    const gm = { gmailThreadId: d.threadId || "", ...(d.replyLink ? { replyLink: d.replyLink } : {}) };
+
+    // ── re-check against MongoDB immediately before saving ──
+    let fresh;
+    try {
+      fresh = await reEvaluateArrears(item);
+    } catch (err) {
+      return done("database_error", `recheck_failed: ${err.message}`, gm);
+    }
+    if (!fresh.current) return done("already_processed", "no_longer_pending", gm);
+    if (fresh.registryProblem) return done("ambiguous_mapping", fresh.registryProblem, gm);
+    const cur = fresh.current;
+    if (!cur.eligible) return done("ambiguous_mapping", cur.skipReason || "mapping_not_safe", gm);
+    if (cur.billKind !== item.billKind) return done("ambiguous_mapping", "bill_kind_mismatch", gm);
+    const mail = validateAgainstMail(d.approvalMailLandlords, cur.landlords);
+    if (mail.status === "mismatch") return done("ambiguous_mapping", mail.problems[0].reason, { ...gm, landlordMappingProblems: mail.problems });
+
+    // UTR replies and Cash replies of the thread, side by side (a reply can carry both kinds of lines)
+    const merged = new Map();
+    replies.forEach((r) => merged.set(r.messageId, { ...r }));
+    cashReplies.forEach((r) => merged.set(r.messageId, { ...(merged.get(r.messageId) || r), cashLines: r.cashLines }));
+    const map = mapArrearsLines([...merged.values()], cur.landlords, { billType: cur.billKind, gstHold: cur.gstHold });
+    if (map.problems.length) return done("ambiguous_mapping", map.problems[0].reason, { ...gm, landlordMappingProblems: map.problems, ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) });
+    // one UTR can pay only one payment: the same UTR on two payments blocks the whole bill (Cash lines have no UTR)
+    const byUtr = new Map();
+    for (const [key, list] of map.byKey) for (const u of new Set(list.map((x) => x.utr.toUpperCase()).filter(Boolean))) byUtr.set(u, [...(byUtr.get(u) || []), key]);
+    const dup = [...byUtr.entries()].find(([, keys]) => keys.length > 1);
+    if (dup) return done("ambiguous_mapping", "duplicate_utr", { ...gm, landlordMappingProblems: [{ reason: "duplicate_utr", payments: dup[1] }] });
+
+    const now = deps.now ? deps.now() : Date.now();
+    const keyOf = (s) => `${s.landOwnerId}|${s.kind === "gst" ? "gst" : s.paymentMode === "Cash" ? "cash" : "rent"}`;
+    const groups = new Map(); // one payment per landlord and kind; every bill of the Bill Number that still owes it is a part
+    for (const s of cur.slots) {
+      const k = keyOf(s);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(s);
+    }
+    const plan = [];
+    const notYet = [];
+    const blocked = [];
+    for (const [key, gslots] of groups) {
+      const first = gslots[0];
+      const isCash = key.endsWith("|cash");
+      const who = { landlord: first.landOwnerName, kind: first.kind, ...(isCash ? { cash: true } : {}) };
+      const list = map.byKey.get(key) || [];
+      if (!list.length) { notYet.push(who); continue; } // no line yet: this payment simply stays pending
+      const parts = gslots.map((s) => ({ billId: s.rentalDueId, dueMonth: s.dueMonth, amount: s.amount }));
+      const common = { kind: first.kind, landlord: first.landOwnerName, paymentType: first.paymentType, paymentMode: first.paymentMode, bills: parts, amount: gslots.reduce((t, s) => t + Number(s.amount || 0), 0), ...(first.kind === "gst" ? { gstScope: first.scope } : {}), slots: gslots };
+
+      if (isCash) {
+        // Cash: NO UTR. Only the paid date is taken (the line's explicit date, else the reply's sent date); lines must agree.
+        const dates = list.map((m) => ({ m, paid: resolvePaidDate({ explicitDates: m.line.dates, sentDate: m.reply.sentDate }, { approvalDate: cur.approvalDate, now }) }));
+        if (dates.some((x) => !x.paid.date)) { blocked.push({ ...who, reason: "paid_date_not_determined" }); continue; }
+        if (new Set(dates.map((x) => x.paid.date)).size > 1) { blocked.push({ ...who, reason: "conflicting_cash_paid_date" }); continue; }
+        const { m, paid } = dates[0];
+        plan.push({ ...common, utr: "", paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, sourceMessageId: m.reply.messageId });
+        continue;
+      }
+
+      const distinct = [...new Set(list.map((x) => x.utr.toUpperCase()))];
+      if (distinct.length > 1) { blocked.push({ ...who, reason: "conflicting_utr_for_landlord_payment" }); continue; }
+      const m = list[0];
+      if (!UTR_SHAPE.test(m.utr) || !/\d/.test(m.utr)) { blocked.push({ ...who, reason: "invalid_utr" }); continue; }
+      // a UTR already stored by THIS payment on another bill of the same Bill Number (earlier partial save) is not a duplicate
+      const groupIds = new Set(cur.arrearsBillIds);
+      const ownPart = (b, p) =>
+        groupIds.has(String(b._id)) && p.type === (first.kind === "gst" ? "gst" : "rental") &&
+        (idStrOf(p.landOwnerId) === first.landOwnerId || (!p.landOwnerId && first.scope === "bill"));
+      if (utrAlreadyUsed(fresh.media, m.utr, { except: ownPart })) { blocked.push({ ...who, reason: "utr_already_used_on_this_site" }); continue; }
+      const paid = resolvePaidDate({ explicitDates: m.line.dates, sentDate: m.reply.sentDate }, { approvalDate: cur.approvalDate, now });
+      if (!paid.date) { blocked.push({ ...who, reason: "paid_date_not_determined" }); continue; }
+      plan.push({ ...common, utr: m.utr, paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, sourceMessageId: m.reply.messageId });
+    }
+    const unused = [...map.byKey.keys()].filter((k) => !groups.has(k));
+    const ignoredLines = [...map.ignored, ...unused.map((k) => ({ key: k, reason: "no_open_payment_for_line" }))];
+    const extra = { ...gm, billKind: cur.billKind, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(ignoredLines.length ? { ignoredLines } : {}) };
+    if (!plan.length) {
+      if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
+      return done("utr_not_found", "", extra);
+    }
+    attachNarration(plan, d, cur.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
+    const summary = plan.map(({ slots, ...rest }) => rest);
+    const paymentType = cur.billKind === "advance" ? "advance_rent_gst" : "new_bill_rent_gst";
+
+    if (ctx.dryRun) {
+      const blockedBy = [];
+      if (!(deps.saveEnabled ? deps.saveEnabled() : saveEnabled())) blockedBy.push("GMAIL_UTR_SAVE_ENABLED is off");
+      if (cur.landlords.length > 1 && !multiOn) blockedBy.push("GMAIL_UTR_MULTI_LANDLORD_SAVE_ENABLED is off");
+      if (plan.some((p) => p.kind === "gst") && !gstOn) blockedBy.push("GMAIL_UTR_GST_SAVE_ENABLED is off");
+      if (plan.some((p) => p.paymentMode === "Cash") && !cashOn) blockedBy.push("GMAIL_UTR_CASH_SAVE_ENABLED is off");
+      return { ...base0(item), status: "found_and_saved", dryRun: true, reason: "dry_run_nothing_saved", ...extra, paymentType, mappingStatus: "per_landlord_payment_verified", eligibleForSaving: true, savingBlockedBy: blockedBy, splitPayments: summary };
+    }
+
+    // live: every rent first, then every GST — one ledger-save call per bill part (entryType and date are per call). A failure is
+    // reported; parts already saved are no longer open, so the retry only does the rest.
+    const ordered = [...plan.filter((p) => p.kind === "rent"), ...plan.filter((p) => p.kind === "gst")];
+    const total = ordered.reduce((t, p) => t + p.slots.length, 0);
+    let savedCount = 0;
+    for (const p of ordered) {
+      const isGst = p.kind === "gst";
+      for (const s of p.slots) {
+        const batch = {
+          siteBillMode: 1,
+          entryType: isGst ? "gst" : "rental",
+          date: p.paidDate,
+          remark: p.narration || "", // Bank Narration only; no narration -> empty remark
+          payments: [{
+            mediaId: cur.mediaId,
+            landOwnerId: s.landOwnerId,
+            rentalDueId: s.rentalDueId, // the arrears / advance bill's own id (the engine routes it to media.arrearsDue[])
+            targetType: cur.billKind, // "newBill" | "advance"
+            paymentMode: s.paymentMode || "Online",
+            utrNumber: p.utr, // "" for Cash
+            ...(isGst && s.scope === "landlord" ? { gstScope: "landlord" } : {}),
+          }],
+        };
+        try {
+          const result = await saver(batch, actorOf(d, p.sourceMessageId));
+          const saved = (result?.data?.savedEntries || []).filter((e) => e.status === "saved");
+          if (Number(result?.data?.sitesFailed || 0) > 0 || saved.length !== 1) {
+            const why = (result?.data?.savedEntries || []).find((e) => e.status === "failed")?.error || "save_not_confirmed";
+            return done("database_error", `partial_save ${savedCount}/${total} (${p.landlord} ${p.kind} ${s.dueMonth}: ${why}); saved payments are skipped on retry`, { ...extra, splitPayments: summary });
+          }
+          p.savedAmount = (p.savedAmount || 0) + Number(saved[0].amount || 0);
+          savedCount += 1;
+        } catch (err) {
+          return done("database_error", `partial_save ${savedCount}/${total} (${p.landlord} ${p.kind} ${s.dueMonth}: ${err.message || "save_failed"}); saved payments are skipped on retry`, { ...extra, splitPayments: summary });
+        }
+      }
+    }
+    return done("found_and_saved", "", { ...extra, paymentType, splitPayments: ordered.map(({ slots, ...rest }) => rest), savedAmount: ordered.reduce((t, p) => t + (p.savedAmount || 0), 0) });
+  }
+
+  /**
+   * RENTAL BILL, one landlord paid in CASH: a Cash payment has no UTR. When the thread has no UTR (the normal Cash case) a line
+   * "Cash [- Paid Date: ...]" / "<landlord> - Cash [- Paid Date: ...]" of a reply says it was paid; only the paid date is stored.
+   * Same checks as the UTR path: registry, mapping still safe, Paid Date window, Cash switch.
+   */
+  async function processCashLine(item, ctx, c, done) {
+    let found;
+    try {
+      found = await withTimeout(lookupLandlords(item.billNumber), c.gmailTimeoutMs, "Gmail lookup");
+    } catch (err) {
+      const e = await done("gmail_error", err.message, { httpStatus: err.status || 0 });
+      e.fatal = [401, 403].includes(Number(err.status));
+      return e;
+    }
+    const d = found.data || {};
+    if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_utr_or_conversation");
+    if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
+    if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
+    const landlord = item.landlords[0];
+    const lines = [];
+    const ignored = [];
+    for (const r of d.cashReplies || []) {
+      for (const l of r.cashLines || []) {
+        const sc = splitCashName(l.name);
+        // a name before "Cash" must be this landlord's; anything else is not a payment line
+        if (!sc || (sc.landlord && matchLandlord(sc.landlord, [{ landOwnerId: landlord.landOwnerId, name: landlord.name }]).error)) { ignored.push({ messageId: r.messageId, name: l.name, reason: "cash_line_not_for_this_landlord" }); continue; }
+        lines.push({ l, r });
+      }
+    }
+    if (!lines.length) return done("utr_not_found", "", ignored.length ? { ignoredLines: ignored } : {});
+    const gm = { gmailThreadId: d.threadId || "", ...(d.replyLink ? { replyLink: d.replyLink } : {}), sourceMessageId: lines[0].r.messageId || "" };
+
+    let fresh;
+    try {
+      fresh = await reEvaluate(item);
+    } catch (err) {
+      return done("database_error", `recheck_failed: ${err.message}`, gm);
+    }
+    if (!fresh.current) return done("already_processed", "no_longer_pending", gm);
+    if (fresh.registryProblem) return done("ambiguous_mapping", fresh.registryProblem, gm);
+    if (!fresh.current.mappingSafe) return done("ambiguous_mapping", fresh.current.skipReason, gm);
+    const slot = fresh.current.pendingPayments.find((p) => p.autoProcess);
+    if (!slot || slot.paymentType !== "cash") return done("ambiguous_mapping", "no_auto_processable_payment", gm);
+
+    const now = deps.now ? deps.now() : Date.now();
+    const dates = lines.map((x) => resolvePaidDate({ explicitDates: x.l.dates, sentDate: x.r.sentDate }, { approvalDate: fresh.current.approvalDate, now }));
+    if (dates.some((x) => !x.date)) return done("ambiguous_mapping", "paid_date_not_determined", gm);
+    if (new Set(dates.map((x) => x.date)).size > 1) return done("ambiguous_mapping", "conflicting_cash_paid_date", gm);
+    const paid = dates[0];
+    const nar = narrationFor(d.bankRows || [], item.landlords || [], { landOwnerId: slot.landOwnerId });
+    const dateInfo = { paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, narration: nar.narration };
+    const summary = [{ kind: "rent", landlord: slot.landOwnerName, utr: "", paymentType: "cash", paymentMode: "Cash", ...dateInfo, sourceMessageId: lines[0].r.messageId }];
+    const batch = {
+      siteBillMode: fresh.current.siteBillMode,
+      entryType: "rental",
+      date: paid.date,
+      remark: nar.narration || "", // Bank Narration only; no narration -> empty remark
+      payments: [{ mediaId: fresh.current.mediaId, landOwnerId: slot.landOwnerId, rentalDueId: slot.rentalDueId, targetType: slot.targetType, paymentMode: "Cash", utrNumber: "" }],
+    };
+    if (ctx.dryRun) {
+      const blockedBy = [];
+      if (!(deps.saveEnabled ? deps.saveEnabled() : saveEnabled())) blockedBy.push("GMAIL_UTR_SAVE_ENABLED is off");
+      if (!(deps.cashSaveEnabled ? deps.cashSaveEnabled() : cashSaveEnabledEnv())) blockedBy.push("GMAIL_UTR_CASH_SAVE_ENABLED is off");
+      return { ...base0(item), status: "found_and_saved", dryRun: true, reason: "dry_run_nothing_saved", ...gm, paymentType: "cash", mappingStatus: "safe", eligibleForSaving: true, savingBlockedBy: blockedBy, ...dateInfo, splitPayments: summary, wouldSave: { ...batch.payments[0], date: paid.date } };
+    }
+    try {
+      const result = await saver(batch, actorOf(d, lines[0].r.messageId));
+      const saved = (result?.data?.savedEntries || []).filter((e) => e.status === "saved");
+      if (Number(result?.data?.sitesFailed || 0) > 0 || saved.length !== 1) {
+        const why = (result?.data?.savedEntries || []).find((e) => e.status === "failed")?.error || "save_not_confirmed";
+        return done("database_error", why, gm);
+      }
+      return done("found_and_saved", "", { ...gm, ...dateInfo, paymentType: "cash", splitPayments: summary, savedAmount: Number(saved[0].amount || 0) });
+    } catch (err) {
+      return done("database_error", err.message || "save_failed", gm);
+    }
+  }
+
   async function processOne(item, ctx, c) {
-    const base = { billNumber: item.billNumber, dueMonth: item.dueMonth || "", mediaId: item.mediaId, rentalDueIds: item.rentalDueIds, landOwnerId: (item.pendingPayments || []).find((p) => p.autoProcess)?.landOwnerId || item.pendingPayments?.[0]?.landOwnerId || "" };
+    const base = { billNumber: item.billNumber, ...(item.billKind ? { billKind: item.billKind } : {}), dueMonth: item.dueMonth || "", mediaId: item.mediaId, rentalDueIds: item.rentalDueIds, landOwnerId: (item.pendingPayments || []).find((p) => p.autoProcess)?.landOwnerId || item.pendingPayments?.[0]?.landOwnerId || "" };
     const done = async (status, reason = "", extra = {}) => {
       const entry = { ...base, status, reason, ...extra };
       // A block decided BEFORE Gmail is touched (list rules, switches) is re-evaluated on every run: it costs no Gmail call, so it
       // is neither logged nor put in a cooldown (a stale "blocked" log must never hide a bill after a switch or rule changes).
       if (status === "ambiguous_mapping" && BLOCKED_BEFORE_GMAIL.has(reason)) entry.preGmail = true;
-      else await writeLog(entry, ctx);
+      else if (item._last && ["utr_not_found", "ambiguous_mapping"].includes(status) && item._last.status === status && item._last.reason === (reason || "")) {
+        // re-read on every run and still the same answer: no new log row (bill_not_found is always logged: its backoff reads the log time)
+      } else await writeLog(entry, ctx);
       return entry;
     };
+
+    // New Bill / Advance Bill (media.arrearsDue[]): its own pending source, lookup mapping and save payload
+    if (item.source === "arrears") return processArrears(item, ctx, c, done);
 
     // several landlords: per-landlord matching (dry run always, real save only behind its own switch)
     if (item.perLandlordMapping && item.perLandlordMapping.eligible) return processMulti(item, ctx, c, done);
@@ -626,7 +959,11 @@ function createUtrProcessor(deps = {}) {
     const gm = { gmailThreadId: d.gmailThreadId || "", ...(d.replyLink ? { replyLink: d.replyLink } : {}), sourceMessageId: d.sourceMessageId || "", senderEmail: d.senderEmail || "", messageDate: d.messageDate || "" };
 
     if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
-    if (d.extractionStatus === "utr_not_found") return done("utr_not_found");
+    if (d.extractionStatus === "utr_not_found") {
+      // a Cash payment has NO UTR: look for "Cash [- Paid Date: ..]" in the thread (only the paid date is stored)
+      if (planned?.paymentType === "cash") return processCashLine(item, ctx, c, done);
+      return done("utr_not_found");
+    }
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_utr_or_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
@@ -653,13 +990,14 @@ function createUtrProcessor(deps = {}) {
     // Paid Date: explicit payment date in the reply, else the reply's sent date — never "now". Same window as the UI date picker.
     const paid = resolvePaidDate(d.paidDateInfo || {}, { approvalDate: fresh.current.approvalDate, now: deps.now ? deps.now() : Date.now() });
     if (!paid.date) return done("ambiguous_mapping", "paid_date_not_determined", { utr, ...gm, paidDateNote: paid.note });
-    const dateInfo = { paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, ...(paid.rejected.length ? { paidDateRejected: paid.rejected } : {}) };
+    const nar = narrationFor(d.bankRows || [], fresh.current.landlords || item.landlords || [], { landOwnerId: slot.landOwnerId });
+    const dateInfo = { paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, narration: nar.narration, ...(nar.narration || !nar.reason || nar.reason === "no_narration_in_thread" ? {} : { narrationNote: nar.reason }), ...(paid.rejected.length ? { paidDateRejected: paid.rejected } : {}) };
 
     const batch = {
       siteBillMode: fresh.current.siteBillMode,
       entryType: "rental",
       date: paid.date,
-      remark: `UTR auto-saved from Gmail reply (Bill ${item.billNumber}, thread ${d.gmailThreadId}). Paid date from ${paid.source === "email_payment_date" ? "the payment date stated in the email" : "the email sent date — verify"}`,
+      remark: nar.narration || "", // Bank Narration only; no narration -> empty remark
       payments: [
         {
           mediaId: fresh.current.mediaId,
@@ -693,7 +1031,7 @@ function createUtrProcessor(deps = {}) {
     }
 
     try {
-      const result = await saver(batch);
+      const result = await saver(batch, senderName(d.senderEmail));
       const saved = (result?.data?.savedEntries || []).filter((e) => e.status === "saved");
       if (Number(result?.data?.sitesFailed || 0) > 0 || saved.length !== 1) {
         const why = (result?.data?.savedEntries || []).find((e) => e.status === "failed")?.error || "save_not_confirmed";
@@ -738,7 +1076,16 @@ function createUtrProcessor(deps = {}) {
     try {
       // all months by default; current month only when asked (body currentMonthOnly:true, or env GMAIL_UTR_CURRENT_MONTH_ONLY=true)
       const currentMonthOnly = opts.currentMonthOnly === true || String(process.env.GMAIL_UTR_CURRENT_MONTH_ONLY || "").toLowerCase() === "true";
-      const list = await pending({ billNumbers: opts.billNumbers, limit: 2000, currentMonthOnly }, deps.pendingDeps || {});
+      let list = await pending({ billNumbers: opts.billNumbers, limit: 2000, currentMonthOnly }, deps.pendingDeps || {});
+      // New Bill / Advance Bill (media.arrearsDue[]) are processed in the same run; a failure here never stops the Rental Bills
+      if (deps.getPendingArrears || !deps.getPending) {
+        try {
+          const ar = await (deps.getPendingArrears || getPendingArrearsUtrBills)({ billNumbers: opts.billNumbers, limit: 2000, currentMonthOnly }, deps.pendingDeps || {});
+          if (ar && ar.bills && ar.bills.length) list = { ...list, bills: [...list.bills, ...ar.bills], totalPending: Number(list.totalPending || 0) + Number(ar.totalPending || 0) };
+        } catch (err) {
+          logger.error("[gmail-utr] New Bill / Advance list failed:", err.message);
+        }
+      }
       const maxBills = Math.min(num(opts.maxBills, c.maxBills), 500);
       let handled = 0;
       for (const item of list.bills) {

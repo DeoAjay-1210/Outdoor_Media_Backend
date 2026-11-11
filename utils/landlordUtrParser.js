@@ -198,11 +198,108 @@ function mapLandlordKinds(replies, landlords) {
 }
 
 /**
+ * NEW BILL / ADVANCE reply lines: "<landlord> - NewBill|Advance - Rent|GST - UTR : X".
+ * name -> { landlord, kind: "rent"|"gst"|null, billType: "newBill"|"advance"|null }.
+ *   "NewBill"                   -> landlord "",          kind null,  billType newBill
+ *   "NewBill - Rent"            -> landlord "",          kind rent,  billType newBill
+ *   "Landlord1 - NewBill - GST" -> landlord "Landlord1", kind gst,   billType newBill
+ *   "Landlord1 - Advance"       -> landlord "Landlord1", kind null,  billType advance
+ * A name without NewBill / Advance has billType null (such a line is never used for these bills).
+ */
+const BILL_TOKEN = /^(.*?)(?:[\s\-–—:|,]+|^)(new\s*bill|advance)\s*$/i;
+/** "Landlord1 - Cash" / "Cash" -> { landlord: "Landlord1" | "" }, anything not ending in Cash -> null */
+function splitCashName(name) {
+  const m = String(name || "").match(/^(.*?)(?:[\s\-–—:|,]+|^)cash\s*$/i);
+  return m ? { landlord: m[1].trim() } : null;
+}
+
+function splitArrearsName(name) {
+  const k = splitNameKind(name);
+  let landlord = k.landlord;
+  let kind = k.kind;
+  if (!kind) {
+    const c = splitCashName(k.landlord); // "Landlord1 - NewBill - Cash" -> kind "cash" (no UTR)
+    if (c) { landlord = c.landlord; kind = "cash"; }
+  }
+  const m = String(landlord || "").match(BILL_TOKEN);
+  if (!m) return { landlord, kind, billType: null };
+  return { landlord: m[1].trim(), kind, billType: /^advance$/i.test(m[2]) ? "advance" : "newBill" };
+}
+
+/**
+ * Reply lines of a New Bill / Advance bill -> payments.
+ * replies  : [{ messageId, sentDate, lines }] of the (In-Reply-To scoped) thread
+ * landlords: [{ landOwnerId, name, bankName, accountLast4 }]
+ * opts     : { billType: "newBill"|"advance", gstHold: bool }
+ * -> { byKey: Map("<landOwnerId>|rent|gst" -> [{ utr, line, reply, landlord }]), problems, ignored }
+ *  - the line must carry the SAME bill type as the bill (a New Bill UTR is never an Advance UTR): another type = problem,
+ *    none = ignored (reported)
+ *  - a line without a landlord name is accepted only when the bill has ONE landlord
+ *  - a line without Rent / GST is rent when the bill has no GST on hold, otherwise ignored (it could be either)
+ *  - unknown / ambiguous / initial-only landlord names are problems (nothing is saved for the bill)
+ */
+function mapArrearsLines(replies, landlords, { billType, gstHold }) {
+  const problems = [];
+  const ignored = [];
+  const byKey = new Map();
+  for (const r of replies || []) {
+    // UTR lines and Cash lines ("<landlord> - NewBill - Cash [- Paid Date: ..]", no UTR) of the same reply
+    for (const l of [...(r.lines || []), ...(r.cashLines || [])]) {
+      const p = splitArrearsName(l.name);
+      if (l.cash && p.kind !== "cash") { ignored.push({ messageId: r.messageId, name: l.name, reason: "cash_line_without_cash_label" }); continue; }
+      if (!l.cash && p.kind === "cash") { ignored.push({ messageId: r.messageId, name: l.name, reason: "cash_line_with_utr" }); continue; } // a Cash payment has no UTR
+      if (!p.billType) { ignored.push({ messageId: r.messageId, name: l.name, reason: "no_bill_type_label" }); continue; }
+      if (p.billType !== billType) { problems.push({ reason: "bill_type_mismatch", name: l.name }); continue; }
+      let landlord;
+      if (!p.landlord) {
+        if (landlords.length !== 1) { problems.push({ reason: "unnamed_utr_line", name: l.name }); continue; }
+        landlord = landlords[0];
+      } else {
+        const m = matchLandlord(p.landlord, landlords);
+        if (m.error) { problems.push({ reason: m.error, name: l.name }); continue; }
+        landlord = m.landlord;
+      }
+      const kind = p.kind || (gstHold ? null : "rent");
+      if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: "no_rent_or_gst_label" }); continue; }
+      if (l.accountLast4 && landlord.accountLast4 && l.accountLast4 !== landlord.accountLast4) problems.push({ reason: "account_mismatch_in_reply", name: landlord.name });
+      if (l.bank && landlord.bankName && !bankMatches(l.bank, landlord.bankName)) problems.push({ reason: "bank_mismatch_in_reply", name: landlord.name });
+      const key = `${landlord.landOwnerId}|${kind}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({ utr: l.utr, line: l, reply: r, landlord });
+    }
+  }
+  return { byKey, problems, ignored };
+}
+
+/**
  * Landlord blocks of the ORIGINAL approval mail (HTML turned into text):
  *   "Owner Name | NAME | Phone | … | Bank Name | BANK | IFSC Code | … | Account No | 0123456789 | PAN Number | …"
  * -> [{ name, bank, accountLast4 }]  ([] when the mail has no such block)
  */
+function parseApprovalMailLandlordsPlain(text) {
+  // text/plain layout: "Owner Name new 1" / "Bank Name JF" / "Account No 5676..." on their own lines (New Bill / Advance mail)
+  const out = [];
+  let cur = null;
+  for (const raw of String(text || "").replace(/\r\n?/g, "\n").split("\n")) {
+    const line = raw.trim();
+    const o = line.match(/^Owner Name\s*[:|]?\s*(.+)$/i);
+    if (o) { cur = { name: o[1].replace(/\s*\|.*$/, "").trim(), bank: "", accountLast4: null }; out.push(cur); continue; }
+    if (/^LAND OWNER \d+/i.test(line)) { cur = null; continue; }
+    if (!cur) continue;
+    const b = line.match(/^Bank Name\s*[:|]?\s*(.+)$/i);
+    if (b && !cur.bank) cur.bank = b[1].replace(/\s*\|.*$/, "").trim();
+    const a = line.match(/^Account No\.?\s*[:|]?\s*([0-9Xx*\- ]+)$/i);
+    if (a && !cur.accountLast4) { const d = a[1].replace(/\D/g, ""); if (d.length >= 4) cur.accountLast4 = d.slice(-4); }
+  }
+  return out.filter((l) => l.name);
+}
+
 function parseApprovalMailLandlords(text) {
+  const piped = parseApprovalMailLandlordsPiped(text);
+  return piped.length ? piped : parseApprovalMailLandlordsPlain(text);
+}
+
+function parseApprovalMailLandlordsPiped(text) {
   const flat = String(text || "").replace(/\s*\|\s*/g, " | ").replace(/\s+/g, " ");
   const parts = flat.split(/Owner Name\s*\|/i).slice(1);
   return parts.map((p) => {
@@ -228,4 +325,4 @@ function validateAgainstMail(mailLandlords, landlords) {
   return { status: problems.length ? "mismatch" : "ok", problems };
 }
 
-module.exports = { splitNameKind, mapLandlordKinds, classifyPaymentLabel, mapPaymentKinds, nameTokens, matchLandlord, extractLandlordUtrLines, mapLandlords, parseApprovalMailLandlords, validateAgainstMail, replyExtras };
+module.exports = { splitCashName, splitArrearsName, mapArrearsLines, splitNameKind, mapLandlordKinds, classifyPaymentLabel, mapPaymentKinds, nameTokens, matchLandlord, extractLandlordUtrLines, mapLandlords, parseApprovalMailLandlords, validateAgainstMail, replyExtras };

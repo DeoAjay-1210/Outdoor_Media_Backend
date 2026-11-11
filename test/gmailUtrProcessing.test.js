@@ -619,8 +619,10 @@ test("R12. cooldown: a recently 'not found' bill is not searched again; force ov
   assert.equal(blocked.Log.rows.length, 1); // only the old seeded row, nothing new
   const fromGmail = setup({ log: fakeProcLog([logOf("ambiguous_mapping", "landlord_name_not_found", 90)]) });
   assert.equal((await fromGmail.p.processPendingUtrs({ dryRun: false })).processed, 1);
-  const fromGmailRecent = setup({ log: fakeProcLog([logOf("ambiguous_mapping", "landlord_name_not_found", 5)]) });
-  assert.equal((await fromGmailRecent.p.processPendingUtrs({ dryRun: false })).processed, 0); // still inside the short cooldown
+  const fromGmailRecent = setup({ log: fakeProcLog([logOf("ambiguous_mapping", "landlord_name_not_found", 0.5)]) });
+  assert.equal((await fromGmailRecent.p.processPendingUtrs({ dryRun: false })).processed, 0); // still inside the short retry wait (60 s)
+  const fromGmailRetry = setup({ log: fakeProcLog([logOf("ambiguous_mapping", "landlord_name_not_found", 5)]) });
+  assert.equal((await fromGmailRetry.p.processPendingUtrs({ dryRun: false })).processed, 1); // Finance corrects within minutes: re-read after 60 s
   const severalUtrs = setup({ log: fakeProcLog([logOf("multiple_review_required", "more_than_one_utr_or_conversation", 90)]) });
   assert.equal((await severalUtrs.p.processPendingUtrs({ dryRun: false })).processed, 1);
 });
@@ -895,14 +897,14 @@ test("T3. real save sends the resolved Paid Date to the ledger engine and record
   const exp = setup({ lookup: dated({ explicitDates: [{ date: "2026-11-05" }] }) });
   await exp.p.processPendingUtrs({ dryRun: false });
   assert.equal(exp.calls.saver[0].date, "2026-11-05");
-  assert.match(exp.calls.saver[0].remark, /payment date stated in the email/);
+  assert.equal(exp.calls.saver[0].remark, ""); // no bank narration -> empty remark
   assert.equal(exp.Log.rows[0].paidDate, "2026-11-05");
   assert.equal(exp.Log.rows[0].paidDateSource, "email_payment_date");
 
   const sent = setup({ lookup: dated({}) });
   await sent.p.processPendingUtrs({ dryRun: false });
   assert.equal(sent.calls.saver[0].date, "2026-11-09");
-  assert.match(sent.calls.saver[0].remark, /email sent date — verify/);
+  assert.equal(sent.calls.saver[0].remark, "");
   assert.equal(sent.Log.rows[0].paidDateSource, "email_sent_date");
 });
 
@@ -1526,8 +1528,8 @@ test("G11. a Paid Date written on a line wins; the other payment uses its own re
 test("G12. the GST save is a GST entry on the GST row's bill row, Online; rent stays a rental entry — never mixed", async () => {
   const x = await runS({ lookupLandlords: lkS([rep2("R1", `Rent - UTR: ${RU}\nGST - UTR: ${GU}`, RENT_AT)]) });
   assert.deepEqual(x.calls.saver.map((b) => [b.entryType, b.siteBillMode, b.payments.length, b.payments[0].landOwnerId, b.payments[0].targetType]), [["rental", 1, 1, "oV", "current"], ["gst", 1, 1, "oV", "current"]]);
-  assert.match(x.calls.saver[1].remark, /^GST UTR auto-saved/);
-  assert.match(x.calls.saver[0].remark, /^Rent UTR auto-saved/);
+  assert.equal(x.calls.saver[1].remark, "");
+  assert.equal(x.calls.saver[0].remark, "");
 });
 
 test("G13. the approval mail must still match RMS (name / bank / account)", async () => {
@@ -1658,4 +1660,48 @@ test("REG7. the Bill Number's DDMMYYYY is never used: a number whose date is ano
   assert.equal(r.counts.found_and_saved, 1);
   assert.equal(r.results[0].dueMonth, "November 2026");
   assert.equal(calls.saver[0].payments[0].rentalDueId, "r1");
+});
+
+// ───────────────────────── retry policy: a new Finance reply is found in the NEXT run ─────────────────────────
+const logAt = (status, minutesAgo, reason = "") => ({ billNumber: BILL, status, reason, dryRun: false, createdAt: new Date(Date.now() - minutesAgo * 60000) });
+
+test("RT1. utr_not_found (approval mail is in Gmail, no reply yet) has NO cooldown: a reply sent a minute later is read in the next run", async () => {
+  let replied = false;
+  const x = setup({ log: fakeProcLog([logAt("utr_not_found", 0.2)]), lookup: async () => (replied ? foundReply() : { data: { billNumber: BILL, extractionStatus: "utr_not_found" } }) });
+  const a = await x.p.processPendingUtrs({ dryRun: false });
+  assert.equal(a.processed, 1); // checked although the last answer was 12 seconds ago
+  assert.equal(a.results[0].status, "utr_not_found");
+  assert.equal(x.Log.rows.length, 1); // same answer again: no new log row (the log would grow by a row per bill per minute)
+  replied = true; // Finance replies
+  const b = await x.p.processPendingUtrs({ dryRun: false });
+  assert.equal(b.results[0].status, "found_and_saved"); // found in the very next run, no waiting
+  assert.equal(x.calls.saver.length, 1);
+});
+
+test("RT2. bill_not_found backs off with the age of the bill: fresh = every run, a few hours = the normal cooldown, old = long", async () => {
+  const approvedAgo = (min) => new Date(Date.now() - min * 60000 + 330 * 60000); // stored as IST wall-clock in a UTC field
+  const doc = (min) => [site({ rentalDue: [row({ ownerApprovalDate: approvedAgo(min) })] })];
+  // approved 5 minutes ago: the mail may just be arriving -> looked for on every run
+  const fresh = setup({ docs: doc(5), log: fakeProcLog([logAt("bill_not_found", 0.2)]) });
+  assert.equal((await fresh.p.processPendingUtrs({ dryRun: false })).processed, 1);
+  // approved 2 hours ago: the normal not-found cooldown (default 30 min unless the env says otherwise)
+  const mid = setup({ docs: doc(120), log: fakeProcLog([logAt("bill_not_found", 5)]) });
+  assert.equal((await mid.p.processPendingUtrs({ dryRun: false })).processed, 0);
+  const midLater = setup({ docs: doc(120), log: fakeProcLog([logAt("bill_not_found", 40)]) });
+  assert.equal((await midLater.p.processPendingUtrs({ dryRun: false })).processed, 1);
+  // approved days ago and never found: 60 minutes
+  const old = setup({ docs: doc(3 * 24 * 60), log: fakeProcLog([logAt("bill_not_found", 40)]) });
+  assert.equal((await old.p.processPendingUtrs({ dryRun: false })).processed, 0);
+  const oldLater = setup({ docs: doc(3 * 24 * 60), log: fakeProcLog([logAt("bill_not_found", 70)]) });
+  assert.equal((await oldLater.p.processPendingUtrs({ dryRun: false })).processed, 1);
+});
+
+test("RT3. bill_not_found is always logged (its backoff reads the log time); a new answer after utr_not_found is logged", async () => {
+  const a = setup({ log: fakeProcLog([logAt("bill_not_found", 90)]) });
+  await a.p.processPendingUtrs({ dryRun: false });
+  assert.equal(a.Log.rows.length, 2); // bill_not_found again -> a fresh row so the 60 minutes start again
+  const b = setup({ log: fakeProcLog([logAt("bill_not_found", 90)]), lookup: async () => ({ data: { billNumber: BILL, extractionStatus: "utr_not_found" } }) });
+  await b.p.processPendingUtrs({ dryRun: false });
+  assert.equal(b.Log.rows.length, 2); // a different answer (the approval mail appeared) is logged
+  assert.equal(b.Log.rows[1].status, "utr_not_found");
 });
