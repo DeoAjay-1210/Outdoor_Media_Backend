@@ -176,15 +176,15 @@ test("T3b. a correction mail is applied ONCE: if the UTR is edited back by hand,
   assert.equal(x.media().ledger[0].utrNumber, U1);
 });
 
-test("T4. a different UTR WITHOUT correction wording is never applied: manual review (logged once)", async () => {
-  const x = setup({ thread: [approval(), reply(1, `UTR : ${U1}`, "04"), reply(2, `UTR : ${U2}`, "06")] });
+test("T4. a later reply with just a different UTR (no wording at all) overwrites the old UTR; the same UTR again changes nothing", async () => {
+  const x = setup({ thread: [approval(), reply(1, `UTR : ${U1}`, "04"), reply(2, `UTR : ${U2}`, "06", "Sathishkumar D <srbedev@adinn.co.in>")] });
   const r = await x.run();
-  assert.equal(corrOf(r).status, "correction_review");
-  assert.equal(corrOf(r).reason, "different_utr_without_correction_wording");
-  assert.equal(x.media().ledger[0].utrNumber, U1);
-  assert.equal(x.calls.updates.length, 0);
+  assert.equal(corrOf(r).status, "correction_applied");
+  assert.equal(x.media().ledger[0].utrNumber, U2);
+  assert.equal(history0(x)[0].utrNumber, U2);
+  assert.equal(x.media().ledger[0].updatedBy, "Sathishkumar D");
   await x.run();
-  assert.equal(x.logRows.filter((l) => l.status === "correction_review").length, 1);
+  assert.equal(x.logRows.filter((l) => l.status === "correction_applied").length, 1);
 });
 
 test("T5. several correction replies: the LATEST clearly identified correction wins", async () => {
@@ -192,11 +192,10 @@ test("T5. several correction replies: the LATEST clearly identified correction w
   const r = await x.run();
   assert.equal(corrOf(r).correctedUtr, U3);
   assert.equal(x.media().ledger[0].utrNumber, U3);
-  // and a plain different UTR AFTER a correction is not applied on top of it
-  const y = setup({ thread: [approval(), reply(1, `UTR : ${U1}`, "04"), reply(2, `Correct UTR: ${U2}`, "05"), reply(3, `UTR: ${U3}`, "06")] });
-  const r2 = await y.run();
-  assert.equal(corrOf(r2).reason, "different_utr_without_correction_wording");
-  assert.equal(y.media().ledger[0].utrNumber, U1);
+  // plain UTR lines only: the last one wins
+  const y = setup({ thread: [approval(), reply(1, `UTR : ${U1}`, "04"), reply(2, `UTR: ${U2}`, "05"), reply(3, `UTR: ${U3}`, "06")] });
+  await y.run();
+  assert.equal(y.media().ledger[0].utrNumber, U3);
 });
 
 test("T5b. an OLDER reply never overwrites: a correction followed by the stored UTR again keeps the stored one", async () => {
@@ -364,7 +363,7 @@ const stubGmail = (messages) => {
   Gmail.getThread = async () => ({ id: "T1", subject: "s", messages: messages.map((m) => ({ ...m })), ignoredMessages: [] });
   return () => { Gmail.searchThreads = saved.s; Gmail.getThread = saved.g; };
 };
-test("T18. nothing saved yet and the thread has two UTRs: the last reply's explicit correction is the UTR; without wording it stays manual", async () => {
+test("T18. nothing saved yet and the thread has two UTRs in one conversation: the last reply's UTR is the one (wording or not)", async () => {
   const off = stubGmail([approval(), reply(1, `UTR : ${U1}`, "04"), reply(2, `Previous UTR was incorrect.\nUTR: ${U2}`, "06")]);
   try {
     const r = await lookupUtrByBillNumber(BILL);
@@ -374,6 +373,6 @@ test("T18. nothing saved yet and the thread has two UTRs: the last reply's expli
   } finally { off(); }
   const off2 = stubGmail([approval(), reply(1, `UTR : ${U1}`, "04"), reply(2, `UTR: ${U2}`, "06")]);
   try {
-    assert.equal((await lookupUtrByBillNumber(BILL)).data.extractionStatus, "multiple_review_required");
+    assert.equal((await lookupUtrByBillNumber(BILL)).data.utr, U2);
   } finally { off2(); }
 });

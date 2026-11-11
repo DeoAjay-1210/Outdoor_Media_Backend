@@ -184,8 +184,8 @@ test("5. several different UTRs require manual review", async () => {
   assert.equal(across.data.extractionStatus, "multiple_review_required");
   assert.equal(across.data.candidates.length, 2);
   const within = await call({ billNumber: BILL }, [th("A", `${BILL}`, "UTR: HDFC92023012200543116", "UTR: SBIN12345678901234")]); // a different UTR WITHOUT correction wording stays manual (with wording see gmailUtrCorrection.test.js T18)
-  assert.equal(within.data.extractionStatus, "multiple_review_required");
-  assert.equal(within.data.utr, null);
+  assert.equal(within.data.extractionStatus, "found"); // one conversation: the LATER reply's UTR replaces the earlier one
+  assert.equal(within.data.utr, "SBIN12345678901234");
 });
 
 test("6. several Bill Numbers in one conversation -> ambiguous_bill_numbers", async () => {

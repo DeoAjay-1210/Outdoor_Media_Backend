@@ -91,9 +91,9 @@ test("MG-B2. a site-level (landlord-less) GST row, or two GST rows for one landl
   assert.equal((await pending([two])).bills[0].landlordGstMapping.eligible, false);
 });
 
-test("MG-B3. a Cash+Online landlord (two open rent payments) is not eligible", async () => {
+test("MG-B3. a Cash+Online landlord (two open rent payments) is a payment pair: eligible", async () => {
   const s = makeSite({ landOwners: [landlord("o1", "Landlord1", "111111111111", { paymentCategory: 3 }), landlord("o2", "Landlord2", "222222222222")] });
-  assert.equal((await pending([s])).bills[0].landlordGstMapping.eligible, false);
+  assert.equal((await pending([s])).bills[0].landlordGstMapping.eligible, true);
 });
 
 // ───────────────────────── processor ─────────────────────────
@@ -356,4 +356,30 @@ test("MG14. Aug + Sep approval mails in one thread: the four lines replying to t
     assert.equal(x.calls.saver.length, 4);
     assert.ok(x.calls.saver.every((c) => simple(c).rentalDueId === "rA"));
   } finally { Gmail.searchThreads = saved.s; Gmail.getThread = saved.g; }
+});
+
+const { extractCashLines } = require("../utils/utrExtractor");
+const cashLn = (id, text, at = "2026-11-09T10:30:00.000Z") => ({ messageId: id, from: "Finance <f@x.com>", sentAt: at, sentDate: at.slice(0, 10), cashLines: extractCashLines(text) });
+test("MG-C1. GST hold, several landlords: Landlord1 Cash + Online (Rent UTR -> Online, Cash takes the mail date), Landlord2 Online; GST UTRs as usual", async () => {
+  const s = makeSite({ landOwners: [landlord("o1", "Landlord1", "111111111111", { paymentCategory: 3 }), landlord("o2", "Landlord2", "222222222222")] });
+  const x = setup({ docs: [s], cash: true, replies: [reply("m1", FOUR)] });
+  assert.equal(one(await x.p.processPendingUtrs({ dryRun: false })).status, "found_and_saved");
+  const got = x.calls.saver.map((b) => [b.entryType, simple(b).landOwnerId, simple(b).paymentMode, simple(b).utrNumber, b.date].join("|"));
+  assert.equal(got.length, 5);
+  assert.ok(got.includes("rental|o1|Cash||2026-11-09"));
+  assert.ok(got.includes("rental|o1|Online|" + U.r1 + "|2026-11-09"));
+  assert.ok(got.includes("gst|o2|Online|" + U.g2 + "|2026-11-09"));
+  const off = setup({ docs: [s], cash: false, replies: [reply("m1", FOUR)] });
+  assert.equal(one(await off.p.processPendingUtrs({ dryRun: false })).reason, "cash_auto_save_disabled");
+  assert.equal(off.calls.saver.length, 0);
+});
+test("MG-C2. GST hold, several landlords: a Cash-ONLY landlord needs a Cash line (his UTR line is never used)", async () => {
+  const s = makeSite({ landOwners: [landlord("o1", "Landlord1", "111111111111", { paymentCategory: 1 }), landlord("o2", "Landlord2", "222222222222")] });
+  const noLine = setup({ docs: [s], cash: true, replies: [reply("m1", FOUR)] });
+  await noLine.p.processPendingUtrs({ dryRun: false });
+  assert.ok(!noLine.calls.saver.some((b) => b.entryType === "rental" && simple(b).landOwnerId === "o1"), "no rent saved for the Cash landlord from a UTR line");
+  const text = `Landlord2 - Rent - UTR : ${U.r2}\nLandlord1 - GST - UTR : ${U.g1}\nLandlord2 - GST - UTR : ${U.g2}`;
+  const withLine = setup({ docs: [s], cash: true, lookupLandlords: async (b) => ({ data: { billNumber: b, extractionStatus: "found", threadId: "T1", approvalMailLandlords: [], replies: [reply("m1", text)], cashReplies: [cashLn("c1", "Landlord1 - Cash - Paid Date: 08-Nov-2026")] } }) });
+  assert.equal(one(await withLine.p.processPendingUtrs({ dryRun: false })).status, "found_and_saved");
+  assert.ok(withLine.calls.saver.some((b) => simple(b).landOwnerId === "o1" && simple(b).paymentMode === "Cash" && simple(b).utrNumber === "" && b.date === "2026-11-08"));
 });

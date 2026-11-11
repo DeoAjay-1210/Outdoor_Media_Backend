@@ -1339,8 +1339,10 @@ test("M19. API 1: a multi-landlord bill stays mappingSafe:false (multiple_landlo
   const single = (await pending([site()])).bills[0];
   assert.equal(single.perLandlordMapping, null);
   const twice = (await pending([multiDoc({ landOwners: [owner({ _id: "oJ", name: "K. Jamuna", paymentCategory: 3 }), ...LL().slice(1)] })])).bills[0];
-  assert.equal(twice.perLandlordMapping.eligible, false);
-  assert.ok(twice.perLandlordMapping.reasons.includes("landlord_with_two_open_payments"));
+  // Cash + Online for one landlord is a payment PAIR now (Rent UTR -> Online, Cash takes the mail date), not a block
+  assert.equal(twice.perLandlordMapping.eligible, true);
+  assert.equal(twice.perLandlordMapping.landlords[0].cashCompanion, true);
+  assert.equal(twice.perLandlordMapping.landlords[0].paymentType, "online_rent");
 });
 
 test("M20. a reply naming nobody of THIS bill (pasted from another bill) is ignored and reported; two relevant replies still block", async () => {
@@ -1419,7 +1421,7 @@ test("G1. API 1: a GST-on-hold bill (one landlord) stays mappingSafe:false but e
   // not eligible: no GST row, several landlords, a landlord with two open rent payments; GST included (withGst 2) has no split at all
   assert.equal((await pending([splitDoc({ gstBalanceHistory: [] })])).bills[0].gstSplitMapping.eligible, false);
   assert.equal((await pending([splitDoc({ landOwners: [owner({ _id: "oV", name: "A" }), owner({ _id: "oW", name: "B" })] })])).bills[0].gstSplitMapping.eligible, false);
-  assert.equal((await pending([splitDoc({ landOwners: [owner({ _id: "oV", name: "A", paymentCategory: 3 })] })])).bills[0].gstSplitMapping.eligible, false);
+  assert.equal((await pending([splitDoc({ landOwners: [owner({ _id: "oV", name: "A", paymentCategory: 3 })] })])).bills[0].gstSplitMapping.eligible, true); // Cash + Online: Rent UTR -> Online, Cash date from the mail
   assert.equal((await pending([site({ rentalDue: [row({ withGst: 2 })] })])).bills[0].gstSplitMapping, null);
 });
 
@@ -1704,4 +1706,84 @@ test("RT3. bill_not_found is always logged (its backoff reads the log time); a n
   await b.p.processPendingUtrs({ dryRun: false });
   assert.equal(b.Log.rows.length, 2); // a different answer (the approval mail appeared) is logged
   assert.equal(b.Log.rows[1].status, "utr_not_found");
+});
+
+// ── GST on hold, one landlord: Rent paid in CASH + GST Online ──
+const { extractCashLines } = require("../utils/utrExtractor");
+const cashRep = (id, text, sentAt) => ({ messageId: id, from: "Finance <f@x.com>", sentAt, sentDate: sentAt.slice(0, 10), cashLines: extractCashLines(text) });
+const lkC = (replies, cash) => () => ({ data: { billNumber: SPLIT_BILL, extractionStatus: replies.length ? "found" : "utr_not_found", threadId: "TS", approvalMailLandlords: MAILV(), replies, cashReplies: cash } });
+const cashDocG = () => splitDoc({ landOwners: [owner({ _id: "oV", landOwnerMasterId: "mV", name: "VENKATESAN PRASANNA KUMAR", paymentCategory: 1, bankName: "INDIAN OVERSEAS BANK", accountNumber: "1400000004565" })] });
+
+test("G10. rent Cash + GST Online: 'Cash' line saves the rent as Cash (no UTR), 'GST - UTR' saves the GST", async () => {
+  const x = setup({ docs: [cashDocG()], gstSave: true, cashSave: true, lookupLandlords: lkC([rep2("R1", `GST - UTR: ${GU}`, GST_AT)], [cashRep("C1", "Rent - Cash - Paid Date: 04-Nov-2026", GST_AT)]) });
+  const r = (await x.p.processPendingUtrs({ dryRun: false, force: true })).results[0];
+  assert.equal(r.status, "found_and_saved");
+  assert.deepEqual(kinds(x.calls), [["rental", "", "Cash", "s1", "2026-11-04"], ["gst", GU, "Online", "s1", "2026-11-09"]]);
+});
+
+test("G11. plain 'Cash' line works for the rent; a cash line alone saves the rent and GST waits", async () => {
+  const x = setup({ docs: [cashDocG()], gstSave: true, cashSave: true, lookupLandlords: lkC([], [cashRep("C1", "Cash", RENT_AT)]) });
+  const r = (await x.p.processPendingUtrs({ dryRun: false, force: true })).results[0];
+  assert.equal(r.status, "found_and_saved");
+  assert.deepEqual(kinds(x.calls), [["rental", "", "Cash", "s1", "2026-11-03"]]);
+  assert.deepEqual(r.pendingKinds, ["gst"]);
+});
+
+test("G12. 'GST - Cash' is never a payment; the Cash switch is required for a real save; dry run shows it", async () => {
+  const a = setup({ docs: [cashDocG()], gstSave: true, cashSave: true, lookupLandlords: lkC([], [cashRep("C1", "GST - Cash", RENT_AT)]) });
+  assert.equal((await a.p.processPendingUtrs({ dryRun: false, force: true })).results[0].status, "utr_not_found");
+  assert.equal(a.calls.saver.length, 0);
+  const off = setup({ docs: [cashDocG()], gstSave: true, cashSave: false, lookupLandlords: lkC([], [cashRep("C1", "Cash", RENT_AT)]) });
+  assert.equal((await off.p.processPendingUtrs({ dryRun: false, force: true })).results[0].reason, "cash_auto_save_disabled");
+  const dry = setup({ docs: [cashDocG()], gstSave: false, cashSave: false, lookupLandlords: lkC([], [cashRep("C1", "Cash", RENT_AT)]) });
+  const d = (await dry.p.processPendingUtrs({})).results[0];
+  assert.equal(d.dryRun, true);
+  assert.deepEqual(d.splitPayments.map((q) => [q.kind, q.utr, q.paymentMode]), [["rent", "", "Cash"]]);
+  assert.equal(dry.calls.saver.length, 0);
+});
+
+test("G13. Cash + Online + GST hold: Rent UTR -> Online, Cash takes the mail date, GST UTR -> GST (three saves)", async () => {
+  const doc = () => splitDoc({ landOwners: [owner({ _id: "oV", landOwnerMasterId: "mV", name: "VENKATESAN PRASANNA KUMAR", paymentCategory: 3, bankName: "INDIAN OVERSEAS BANK", accountNumber: "1400000004565" })] });
+  const x = setup({ docs: [doc()], gstSave: true, cashSave: true, lookupLandlords: lkS([rep2("R1", `Rent - UTR: ${RU}
+GST - UTR: ${GU}`, RENT_AT)]) });
+  const r = (await x.p.processPendingUtrs({ dryRun: false, force: true })).results[0];
+  assert.equal(r.status, "found_and_saved");
+  assert.deepEqual(kinds(x.calls).sort(), [["gst", GU, "Online", "s1", "2026-11-03"], ["rental", "", "Cash", "s1", "2026-11-03"], ["rental", RU, "Online", "s1", "2026-11-03"]].sort());
+  // Rent UTR only: Cash + Online rent saved, GST waits; no Rent line at all: nothing saved
+  const y = setup({ docs: [doc()], gstSave: true, cashSave: true, lookupLandlords: lkS([rep2("R1", `Rent - UTR: ${RU}`, RENT_AT)]) });
+  const ry = (await y.p.processPendingUtrs({ dryRun: false, force: true })).results[0];
+  assert.equal(y.calls.saver.length, 2);
+  assert.deepEqual(ry.pendingKinds, ["gst"]);
+  const z = setup({ docs: [doc()], gstSave: true, cashSave: true, lookupLandlords: lkS([rep2("R1", `GST - UTR: ${GU}`, GST_AT)]) });
+  await z.p.processPendingUtrs({ dryRun: false, force: true });
+  assert.deepEqual(kinds(z.calls).map((k) => k[0]), ["gst"]);
+  // Cash switch off: nothing is saved
+  const off = setup({ docs: [doc()], gstSave: true, cashSave: false, lookupLandlords: lkS([rep2("R1", `Rent - UTR: ${RU}`, RENT_AT)]) });
+  assert.equal((await off.p.processPendingUtrs({ dryRun: false, force: true })).results[0].reason, "cash_auto_save_disabled");
+  assert.equal(off.calls.saver.length, 0);
+});
+
+// ── several landlords (Rental, no GST): Cash + Online pair, Cash only ──
+const cashLn = (id, text, at = "2026-11-09T10:30:00.000Z") => ({ messageId: id, from: "Finance <f@x.com>", sentAt: at, sentDate: at.slice(0, 10), cashLines: extractCashLines(text) });
+const pairOwners = (cat) => [owner({ _id: "oJ", landOwnerMasterId: "mJ", name: "K. Jamuna", paymentCategory: cat, bankName: "SBI", accountNumber: "43765128647" }), ...LL().slice(1)];
+const sorted = (calls) => calls.saver.map((b) => [b.payments[0].landOwnerId, b.payments[0].paymentMode, b.payments[0].utrNumber, b.date].join("|")).sort();
+test("M21. several landlords: a Cash + Online landlord - his UTR line saves the Online part, the Cash part takes the mail date", async () => {
+  const x = await run({ doc: { landOwners: pairOwners(3) }, cashSave: true, lookupLandlords: reply(THREE) });
+  assert.equal(one(x.r).status, "found_and_saved");
+  assert.deepEqual(sorted(x.calls), ["oJ|Cash||2026-11-09", "oJ|Online|" + U.J + "|2026-11-09", "oM|Online|" + U.M + "|2026-11-09", "oS|Online|" + U.S + "|2026-11-09"]);
+  const off = await run({ doc: { landOwners: pairOwners(3) }, cashSave: false, lookupLandlords: reply(THREE) });
+  assert.equal(one(off.r).reason, "cash_auto_save_disabled");
+  assert.equal(off.calls.saver.length, 0);
+});
+test("M22. several landlords: a Cash-ONLY landlord needs a Cash line; a UTR line for him or no line = manual review, nothing saved", async () => {
+  const two = `Suresh - UTR: ${U.S}\nMurali - UTR: ${U.M}`;
+  const ok = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(two, { cashReplies: [cashLn("C1", "Jamuna - Cash - Paid Date: 08-Nov-2026")] }) });
+  assert.equal(one(ok.r).status, "found_and_saved");
+  assert.deepEqual(sorted(ok.calls), ["oJ|Cash||2026-11-08", "oM|Online|" + U.M + "|2026-11-09", "oS|Online|" + U.S + "|2026-11-09"]);
+  const none = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(two) });
+  assert.equal(one(none.r).reason, "missing_landlord_cash_line");
+  assert.equal(none.calls.saver.length, 0);
+  const utr = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(THREE) });
+  assert.equal(one(utr.r).status, "ambiguous_mapping");
+  assert.equal(utr.calls.saver.length, 0);
 });

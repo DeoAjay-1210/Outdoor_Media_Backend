@@ -11,7 +11,6 @@ const { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted, e
 const { extractExplicitPaymentDates, istDay } = require("./utrPaidDate");
 const { scopeThreadToBill } = require("./gmailReplyLink");
 const { collectBankRows } = require("./bankNarration");
-const { CORRECTION_RE } = require("./utrCorrection");
 const { extractLandlordUtrLines, parseApprovalMailLandlords } = require("./landlordUtrParser");
 
 const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
@@ -148,7 +147,7 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
     const withCand = (withUtr[0]._messages || []).filter((m) => findCandidates(m.bodyText).length);
     const last = withCand[withCand.length - 1];
     const lastUtrs = last ? [...new Set(findCandidates(last.bodyText).map((x) => x.utr))] : [];
-    if (lastUtrs.length === 1 && CORRECTION_RE.test(stripQuoted(last.bodyText))) {
+    if (lastUtrs.length === 1) {
       allCandidates = allCandidates.filter((x) => x.utr === lastUtrs[0]);
       distinct = [lastUtrs[0]];
       correctedFromEarlier = true;
