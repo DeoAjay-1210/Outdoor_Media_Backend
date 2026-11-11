@@ -87,7 +87,12 @@ function evaluateArrearsGroup(billNumber, entries) {
     perBillOwner.set(k1, (perBillOwner.get(k1) || 0) + 1);
     modesByKey.set(x.landOwnerId, new Set([...(modesByKey.get(x.landOwnerId) || []), x.paymentMode]));
   });
-  if ([...perBillOwner.values()].some((n) => n > 1) || [...modesByKey.values()].some((m) => m.size > 1)) reasons.push("landlord_with_two_open_payments");
+  // Cash + Online open for a landlord is a payment PAIR (Online = the UTR line, Cash takes the mail date) when EVERY bill of the
+  // Bill Number that owes this landlord rent owes both; Cash on one bill and Online on another stays manual review
+  const modesAt = new Map();
+  slots.filter((x) => x.kind === "rent").forEach((x) => { if (!modesAt.has(x.landOwnerId)) modesAt.set(x.landOwnerId, new Map()); const m = modesAt.get(x.landOwnerId); m.set(x.rentalDueId, new Set([...(m.get(x.rentalDueId) || []), x.paymentMode])); });
+  const pairBroken = [...modesAt.values()].some((m) => { const sets = [...m.values()]; const modes = new Set(sets.flatMap((s) => [...s])); return modes.size > 1 && !sets.every((s) => s.size === 2); });
+  if (pairBroken) reasons.push("landlord_with_two_open_payments");
 
   const siteOwners = media.landOwners || [];
   const byId = new Map();

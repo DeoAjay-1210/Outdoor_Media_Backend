@@ -195,8 +195,12 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
   // (finance reply, one line per landlord) when that is the ONLY thing in the way and no landlord has two open payments.
   const slotCount = new Map();
   rentSlots.forEach((p) => slotCount.set(p.landOwnerId, (slotCount.get(p.landOwnerId) || 0) + 1));
+  // a landlord with BOTH a Cash and an Online rent payment open (paymentCategory 3) is one payment pair, not "two open payments":
+  // the "Rent - UTR" line is the Online part, the Cash part takes its Paid Date from the mail that carries it
+  const pairOwner = (id) => { const s = rentSlots.filter((p) => p.landOwnerId === id); return s.length === 2 && s.some((p) => p.paymentType === "cash") && s.some((p) => p.paymentType === "online_rent"); };
+  const twoOpen = [...slotCount.entries()].some(([id, n]) => n > 1 && !pairOwner(id));
   const otherBlockers = reasons.filter((r) => r !== "multiple_landlords" && r !== "no_single_rent_slot");
-  if ([...slotCount.values()].some((n) => n > 1)) otherBlockers.push("landlord_with_two_open_payments");
+  if (twoOpen) otherBlockers.push("landlord_with_two_open_payments");
   const perLandlordEligible = owners.length > 1 && reasons.includes("multiple_landlords") && otherBlockers.length === 0 && rentSlots.length > 0;
   const perLandlordMapping =
     owners.length > 1
@@ -204,7 +208,7 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
           eligible: perLandlordEligible,
           reasons: perLandlordEligible ? [] : otherBlockers,
           landlords: owners.map((o) => {
-            const slot = rentSlots.find((p) => p.landOwnerId === idStr(o._id));
+            const slot = rentSlots.find((p) => p.landOwnerId === idStr(o._id) && p.paymentType === "online_rent") || rentSlots.find((p) => p.landOwnerId === idStr(o._id));
             const digits = String(o.accountNumber || "").replace(/\D/g, "");
             return {
               landOwnerId: idStr(o._id),
@@ -213,6 +217,7 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
               bankName: o.bankName || "",
               accountLast4: digits.length >= 4 ? digits.slice(-4) : null,
               state: slot ? "pending" : "settled",
+              cashCompanion: pairOwner(idStr(o._id)),
               paymentType: slot ? slot.paymentType : null,
               paymentMode: slot ? slot.paymentMode : null,
               rentalDueId: idStr(primary._id),
@@ -229,7 +234,8 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
   const gstRowsAll = holdBill ? linkedGstRows(media, rows) : [];
   const gstOpen = pendingPayments.filter((p) => p.paymentType === "gst");
   const splitBlockers = reasons.filter((r) => !["gst_separate_utr", "no_single_rent_slot", "no_rent_payment_pending"].includes(r));
-  if (rentSlots.length > 1) splitBlockers.push("no_single_rent_slot");
+  // one landlord with BOTH a Cash and an Online rent payment open (paymentCategory 3) is fine: Rent UTR -> Online, Cash gets its date from the mail
+  if (rentSlots.length > 2 || (rentSlots.length === 2 && !(rentSlots.some((p) => p.paymentType === "cash") && rentSlots.some((p) => p.paymentType === "online_rent") && new Set(rentSlots.map((p) => p.landOwnerId)).size === 1))) splitBlockers.push("no_single_rent_slot");
   if (gstRowsAll.length !== 1) splitBlockers.push(gstRowsAll.length ? "multiple_gst_rows" : "no_gst_row");
   const splitEligible = holdBill && owners.length === 1 && splitBlockers.length === 0;
   const gstSplitMapping = holdBill
@@ -251,7 +257,7 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
   // landlord). Eligible for the "<landlord> - Rent|GST - UTR" matching when that is the only thing in the way.
   const multiHold = holdBill && owners.length > 1;
   const mgBlockers = reasons.filter((r) => !["multiple_landlords", "gst_separate_utr", "no_single_rent_slot", "no_rent_payment_pending"].includes(r));
-  if ([...slotCount.values()].some((n) => n > 1)) mgBlockers.push("landlord_with_two_open_payments");
+  if (twoOpen) mgBlockers.push("landlord_with_two_open_payments");
   if (multiHold) {
     const perOwner = new Map();
     gstRowsAll.forEach((g) => {

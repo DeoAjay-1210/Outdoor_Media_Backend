@@ -187,7 +187,7 @@ function planCorrections(statements, stored) {
     const latest = other[other.length - 1];
     const restated = list.some((s) => sameUtr(s.utr, current) && (new Date(s.at).getTime() > new Date(latest.at).getTime() || (s.at === latest.at && s.idx > latest.idx)));
     if (restated) { unchanged += 1; continue; } // the stored UTR was stated again after it: it stands
-    if (!latest.wording) { review.push({ slot, reason: "different_utr_without_correction_wording", landlord: slot.landlord, kind: slot.kind, messageId: latest.messageId, to: latest.utr }); continue; }
+    // a later reply with a different UTR replaces it, with or without correction wording (statement.wording only says whether it was explicit)
     // every statement of the same landlord / kind in the SAME message that differs must agree
     const sameMsg = other.filter((s) => s.messageId === latest.messageId && !sameUtr(s.utr, latest.utr));
     if (sameMsg.length) { review.push({ slot, reason: "correction_mail_states_two_utrs", landlord: slot.landlord, kind: slot.kind, messageId: latest.messageId }); continue; }

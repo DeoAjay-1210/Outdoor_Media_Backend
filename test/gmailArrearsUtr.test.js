@@ -630,3 +630,29 @@ test("C6. the real Gmail path: a Cash reply linked by In-Reply-To to the New Bil
     assert.deepEqual(x.bill(B_AD).payments, []);
   } finally { off(); }
 });
+
+// ───────────────────────── Cash + Online for one landlord (a payment PAIR) ─────────────────────────
+const bothOwner = (id, master, name, over = {}) => arrOwner(id, master, name, { onlineAmount: 2500, cashAmount: 1000, ...over });
+test("P1. New Bill / Advance, Cash + Online landlord: the Rent UTR line saves the Online part; the Cash part takes the mail date (no Cash line needed)", async () => {
+  for (const isAdvance of [false, true]) {
+    const k = kindOf(isAdvance);
+    const bill = scenario({ isAdvance, n: 1, over: { owners: [bothOwner(O1, M1, "Landlord1")] } });
+    const x = setup({ docs: [site([bill], 1)], cash: true, replies: [reply("m1", k.word + " - UTR: " + U.b, "2026-11-10T04:00:00.000Z")] });
+    assert.equal(res(await run(x), k.number).status, "found_and_saved");
+    const b = x.bill(k.billId);
+    assert.deepEqual(b.payments.map((p) => [p.paymentMode, p.utrNumber, p.date.toISOString().slice(0, 10)].join("|")).sort(), ["Cash||2026-11-10", "Online|" + U.b + "|2026-11-10"]);
+    assert.equal(b.status, 3);
+    const off = setup({ docs: [site([bill], 1)], cash: false, replies: [reply("m1", k.word + " - UTR: " + U.b)] });
+    assert.equal(res(await run(off), k.number).reason, "cash_auto_save_disabled");
+    assert.equal(off.calls.saver.length, 0);
+  }
+});
+test("P2. several landlords: Landlord1 Cash + Online, Landlord2 Cash only (needs a Cash line)", async () => {
+  const bill = scenario({ n: 2, over: { owners: [bothOwner(O1, M1, "Landlord1"), cashOwner(O2, M2, "Landlord2")] } });
+  const noCash = setup({ docs: [site([bill])], cash: true, replies: [reply("m1", "Landlord1 - NewBill - Rent - UTR: " + U.b)] });
+  await run(noCash);
+  assert.deepEqual(noCash.bill(B_NB).payments.map((p) => [p.landOwnerName, p.paymentMode].join("|")).sort(), ["Landlord1|Cash", "Landlord1|Online"]);
+  const full = setup({ docs: [site([bill])], cash: true, lookupLandlords: async (b) => ({ data: { billNumber: b, extractionStatus: "found", threadId: "T", approvalMailLandlords: [], replies: [reply("m1", "Landlord1 - NewBill - Rent - UTR: " + U.b)], cashReplies: [{ messageId: "m2", sentDate: "2026-11-10", sentAt: "2026-11-10T05:00:00.000Z", cashLines: [{ name: "Landlord2 - NewBill - Cash", utr: "", cash: true, dates: [], line: "x" }] }] } }) });
+  await run(full);
+  assert.deepEqual(full.bill(B_NB).payments.map((p) => [p.landOwnerName, p.paymentMode, p.utrNumber].join("|")).sort(), ["Landlord1|Cash|", "Landlord1|Online|" + U.b, "Landlord2|Cash|"]);
+});
