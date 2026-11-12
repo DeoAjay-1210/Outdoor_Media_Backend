@@ -3291,17 +3291,20 @@ async function revisionSiteBills(mediaId) {
   const mainLabels = new Set(months.map((m) => m.dueMonth));
   [...monthBillsOf.keys()]
     .filter((label) => !mainLabels.has(label))
-    .forEach((label) =>
+    .forEach((label) => {
+      // ✅ CHANGED — no main bill: month values from its New Bill / Advance bills
+      const list = monthBillsOf.get(label) || [];
+      const maxOf = (f) => list.reduce((mx, x) => Math.max(mx, Number(x[f] || 0)), 0);
       billMonthRows.push({
         dueMonth: label,
-        withGst: 0,
-        cmdApproved: 0,
+        withGst: maxOf("withGst"),
+        cmdApproved: maxOf("cmdApproved"),
         newBillGenerated: extraBillMonths.arrears.has(label) ? 1 : 0,
         advanceGenerated: extraBillMonths.advance.has(label) ? 1 : 0,
-        UTREntry: 0,
-        monthBills: monthBillsOf.get(label),
-      }),
-    );
+        UTREntry: maxOf("UTREntry"),
+        monthBills: list,
+      });
+    });
   billMonthRows.sort((a, b) => (monthKeyOfLabel.get(a.dueMonth) ?? 0) - (monthKeyOfLabel.get(b.dueMonth) ?? 0));
   // ✅ NEW — owner GST % site → owner %, eg. 18 (not the effective rate)
   const ownerGstPct = Math.max(
