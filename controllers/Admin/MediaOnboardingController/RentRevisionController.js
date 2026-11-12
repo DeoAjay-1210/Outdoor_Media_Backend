@@ -29,6 +29,7 @@ const {
   cycleMonthsOf,
   nextBillDateAfter,
   splitByWeights, // ✅ NEW — month payment split
+  monthGstWithSplit, // ✅ NEW — month GST from the payment split
 } = require("../../../utils/rentRevisionArrears");
 const { rentPartsForDueDate, landOwnersAsOfDate } = require("../../../utils/appraisalRent"); // ✅ NEW — BILL decrease; ✅ CHANGED — + landOwnersAsOfDate (payment split)
 const { ensureRevisionAdinnOohBill } = require("../../../utils/adinnOohBills"); // ✅ NEW — New Bill / Advance bill number
@@ -700,9 +701,16 @@ async function createOneMonthsRevision(mediaId, media, { billMonths, applyToAllM
       const monthGst = monthBills.reduce((s, b) => s + Number(b.gstAmount || 0), 0);
       const newAmount = round(monthRent + bm.amount);
       const updated = plan.billsUpdated.filter((b) => b.dueMonth === bm.month);
-      const newGst = (isNormal || isCancel) && updated.length && bm.amount !== 0
+      let newGst = (isNormal || isCancel) && updated.length && bm.amount !== 0
         ? updated.reduce((s, b) => s + Number(b.gstAmount || 0), 0)
         : monthRent > 0 ? round((monthGst * newAmount) / monthRent) : 0;
+      // ✅ NEW — payment split + owner GST % → GST from the split (Online part)
+      if (bm.payment && bm.amount !== 0 && monthGst > 0) {
+        const dd = monthOwnerDeltas(media, bm.date, bm.amount, bm.payment, bm.month);
+        const ss = dd.deltas ? ownerSplitAfter(media, bm.date, dd.deltas, bm.month) : null;
+        const splitGst = ss && ss.split ? monthGstWithSplit(media, bm.date, ss.split) : null;
+        if (splitGst !== null) newGst = splitGst;
+      }
       return {
         month: bm.month,
         rentalDueId: monthBills[0]._id,
@@ -2386,6 +2394,26 @@ async function applyRevision(revision, media, userName) {
     $set["appraisal.totalAppraisalAmount"] = newRent;
   }
 
+  // ✅ NEW — month with a payment split + owner GST % → the month's GST from the
+  // split (GST on the Online part), not by the rent ratio (e.g. Online −2000 at
+  // 18% → GST −360, not −216). Spread over the month's bills by their GST.
+  splitOwnersByMonth.forEach((split, label) => {
+    const monthBills = plan.billsUpdated.filter((b) => b.dueMonth === label);
+    if (!monthBills.length) return;
+    const date = parseFromMonth(label);
+    const target = date ? monthGstWithSplit(media, date, split) : null;
+    if (target === null) return;
+    const parts = splitByWeights(target, monthBills.map((b) => Number(b.gstAmount || 0) || Number(b.newAmount || 0)));
+    monthBills.forEach((b, i) => {
+      const src = (media.rentalDue || []).find((d) => String(d._id) === String(b.rentalDueId));
+      const gstInNet = src && Number(src.withGst) === 2;
+      const diff = parts[i] - Number(b.gstAmount || 0);
+      b.gstAmount = parts[i];
+      b.baseAmount = round(Number(b.baseAmount || 0) + diff);
+      if (gstInNet) b.newAmount = round(Number(b.newAmount || 0) + diff);
+    });
+  });
+
   const arrayFilters = [];
   plan.billsUpdated.forEach((b, i) => {
     $set[`rentalDue.$[u${i}].netPayable`] = b.newAmount;
@@ -2493,12 +2521,23 @@ async function applyBillDecrease(revision, media, userName, opts = {}) {
       rentRevisionId: revision._id,
       keptAt: now,
     });
+    // ✅ NEW — payment split + owner GST % → GST from the split (Online part),
+    // not by the rent ratio; no split / no owner GST % → as before
+    let gstRatio = ratio;
+    if (ownerSplit) {
+      const oldMonthGst = bills.reduce((s, b) => s + Number(b.gstAmount || 0), 0);
+      const target = monthGstWithSplit(media, mo.date, ownerSplit);
+      if (target !== null && oldMonthGst > 0) gstRatio = target / oldMonthGst;
+    }
     bills.forEach((b) => {
       const u = `d${fi++}`;
       const oldNet = Number(b.netPayable || 0);
-      $set[`rentalDue.$[${u}].netPayable`] = round(oldNet * ratio);
-      $set[`rentalDue.$[${u}].baseAmount`] = round(Number(b.baseAmount || 0) * ratio);
-      $set[`rentalDue.$[${u}].gstAmount`] = round(Number(b.gstAmount || 0) * ratio);
+      const oldGst = Number(b.gstAmount || 0);
+      const gstInNet = Number(b.withGst) === 2 ? oldGst : 0;
+      const splitGst = gstRatio !== ratio; // ✅ NEW
+      $set[`rentalDue.$[${u}].netPayable`] = splitGst ? round((oldNet - gstInNet) * ratio + gstInNet * gstRatio) : round(oldNet * ratio);
+      $set[`rentalDue.$[${u}].baseAmount`] = splitGst ? round((Number(b.baseAmount || 0) - oldGst) * ratio + oldGst * gstRatio) : round(Number(b.baseAmount || 0) * ratio);
+      $set[`rentalDue.$[${u}].gstAmount`] = round(oldGst * gstRatio); // ✅ CHANGED — split GST ratio (same as ratio without a split)
       $set[`rentalDue.$[${u}].originalAmount`] = oldNet;
       $set[`rentalDue.$[${u}].decreasedAmount`] = oldNet - round(oldNet * ratio);
       $set[`rentalDue.$[${u}].decreaseRevisionId`] = revision._id;
@@ -2508,7 +2547,7 @@ async function applyBillDecrease(revision, media, userName, opts = {}) {
       (media.gstBalanceHistory || [])
         .filter((g) => g && String(g.rentalDueId) === String(b._id) && !g.isPaid && !g.isUtrEntry)
         .forEach((g) => {
-          const newGst = round(Number(g.gstAmount || 0) * ratio);
+          const newGst = round(Number(g.gstAmount || 0) * gstRatio); // ✅ CHANGED — split GST ratio
           gstBalanceDrop += Number(g.gstAmount || 0) - newGst;
           gstRowUpdates.push({ id: g._id, gstAmount: newGst });
         });
@@ -3248,11 +3287,42 @@ exports.getRentRevisionList = async (req, res) => {
           .select(
             "arrearsDue rentalPayment.totalRentalAmount rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency " +
               "rentalDue._id rentalDue.dueMonth rentalDue.dueDate rentalDue.netPayable rentalDue.approvalStatus rentalDue.ownerApprovalDate " +
-              "landOwners._id landOwners.name landOwners.shareAmount", // ✅ CHANGED — + landowners (payment.landOwners)
+              "landOwners._id landOwners.name landOwners.shareAmount " + // ✅ CHANGED — + landowners (payment.landOwners)
+              "rentalDue.currentPendingRole rentalDue.approvalResetHistory.cancelledAt rentalDue.approvalResetHistory.previousOwnerApprovalDate", // ✅ NEW — CANCEL status from the bill's re-approval
           )
           .lean()
       : [];
     const siteById = new Map(medias.map((m) => [String(m._id), revisionSiteBlock(m)]));
+    // ✅ NEW — CANCEL (not reverted): Pending until every cancelled bill is CMD
+    // approved again (after the cancel) → then Approved, approvedAt = that CMD
+    // approval time; pending role = the bill's. Saved revision not changed.
+    const rentalDueById = new Map(medias.map((m) => [String(m._id), m.rentalDue || []]));
+    const cancelStatusOf = (r) => {
+      if (r.billType !== "CANCEL" || r.cancelReverted) return null;
+      const months = new Set((r.monthsDetail || []).map((d) => d && d.month).filter(Boolean));
+      const monthBills = (rentalDueById.get(String(r.mediaId)) || []).filter((b) => b && months.has(b.dueMonth));
+      if (!monthBills.length) return null;
+      const since = r.requestedAt ? new Date(r.requestedAt).getTime() : 0;
+      // CMD re-approval of a bill after this cancel: a later cancel's snapshot
+      // (previousOwnerApprovalDate) or the bill's current approval
+      const reApprovedAt = (b) => {
+        const times = (b.approvalResetHistory || [])
+          .filter((h) => h && h.cancelledAt && new Date(h.cancelledAt).getTime() > since && h.previousOwnerApprovalDate)
+          .map((h) => new Date(h.previousOwnerApprovalDate).getTime())
+          .filter((t) => t >= since);
+        if (Number(b.approvalStatus) === 3 && b.ownerApprovalDate && new Date(b.ownerApprovalDate).getTime() >= since) {
+          times.push(new Date(b.ownerApprovalDate).getTime());
+        }
+        return times.length ? Math.min(...times) : null;
+      };
+      const ats = monthBills.map(reApprovedAt);
+      if (ats.every((t) => t !== null)) {
+        return { status: "Approved", approvedAt: new Date(Math.max(...ats)), currentPendingRole: null };
+      }
+      const pending = monthBills.find((b) => Number(b.approvalStatus) !== 3) || monthBills[0];
+      const role = [1, 2, 3].includes(Number(pending.currentPendingRole)) ? Number(pending.currentPendingRole) : 1;
+      return { status: "Pending", approvedAt: null, currentPendingRole: role };
+    };
     // ✅ NEW — month payment sent at month level (no landOwners) → + landOwners:
     // the split per site landowner (one landowner → the whole split; several →
     // by share). Payment with landOwners / no payment → unchanged.
@@ -3301,6 +3371,7 @@ exports.getRentRevisionList = async (req, res) => {
       const arrearsPaid = bills.reduce((s, b) => s + Number(b.rentPaid || 0), 0);
       const arrearsTotal = Number(r.arrearsTotal || 0);
       const isAdvance = r.billType === "ADVANCE";
+      const cancel = cancelStatusOf(r); // ✅ NEW — CANCEL status from the bill's re-approval
       // ✅ NEW — ADVANCE: its advance bill + whether the next bill already took the deduction
       const advBill = isAdvance ? bills.find((b) => b.type === "advance") || null : null;
       const advanceFields = isAdvance
@@ -3376,6 +3447,15 @@ exports.getRentRevisionList = async (req, res) => {
         status: r.status,
         currentPendingRole: r.currentPendingRole ?? null,
         currentPendingRoleName: r.currentPendingRole ? ROLE_NAMES[r.currentPendingRole] : null,
+        // ✅ NEW — CANCEL: status / pending role from the bill's CMD re-approval
+        ...(cancel
+          ? {
+              status: cancel.status,
+              currentPendingRole: cancel.currentPendingRole,
+              currentPendingRoleName: cancel.currentPendingRole ? ROLE_NAMES[cancel.currentPendingRole] : null,
+              cancelledAt: r.approvedAt || r.requestedAt || null,
+            }
+          : {}),
         lastRemark: lastRemarkOf(r.approvalSteps), // ✅ NEW
         approvalSteps: formatSteps(r.approvalSteps),
         arrearsTotal,
@@ -3402,11 +3482,17 @@ exports.getRentRevisionList = async (req, res) => {
         approvalHistory: r.approvalHistory || [], // ✅ NEW — approvals replaced by a re-approval
         site: siteById.get(String(r.mediaId)) || null, // ✅ NEW — rent, payment frequency, last CMD-approved bill
         updatedBy: r.updatedBy || "",
-        updatedAt: r.updatedAt || null,
+        // ✅ CHANGED — IST like requestedAt / approvedAt (Mongoose timestamp is real
+        // UTC → +5:30); CANCEL re-approved later → that CMD approval time
+        updatedAt: (() => {
+          const ist = r.updatedAt ? new Date(new Date(r.updatedAt).getTime() + 330 * 60000) : null;
+          const re = cancel && cancel.approvedAt ? new Date(cancel.approvedAt) : null;
+          return re && (!ist || re > ist) ? re : ist;
+        })(),
         requestedBy: r.requestedBy,
         requestedByRole: r.requestedByRole,
         requestedAt: r.requestedAt,
-        approvedAt: r.approvedAt || null,
+        approvedAt: cancel ? cancel.approvedAt : r.approvedAt || null, // ✅ CHANGED — CANCEL: CMD re-approval time
         rejectedAt: r.rejectedAt || null,
       };
     });

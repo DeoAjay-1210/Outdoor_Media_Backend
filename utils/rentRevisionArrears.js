@@ -12,7 +12,7 @@
 // the arrears bill's id as rentalDueId, and are shown in ledger-list.
 // ─────────────────────────────────────────────────────────────
 const mongoose = require("mongoose");
-const { getRentForDueDate, mediaAsOfDate, rentPartsForDueDate, advanceDeductionFor } = require("./appraisalRent");
+const { getRentForDueDate, mediaAsOfDate, rentPartsForDueDate, advanceDeductionFor, landOwnersAsOfDate, withOwnerSplit } = require("./appraisalRent"); // ✅ CHANGED — + landOwnersAsOfDate, withOwnerSplit
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
@@ -359,6 +359,18 @@ const cycleMonthsOf = (rp) => {
   if (f === 6) return Number(rp?.customPaymentFrequency) || 1;
   return FREQUENCY_MONTHS[f] || 1;
 };
+
+// ✅ NEW — month GST after a payment split (ownerSplit of the month): owner GST
+// on the split's Online part / share (withOwnerSplit). null → the site's GST is
+// not owner GST with a percentage (callers keep the old rent-ratio GST).
+function monthGstWithSplit(media, dueDate, split) {
+  if (!Array.isArray(split) || !split.length) return null;
+  const m = toPlain(media) || {};
+  const owners = landOwnersAsOfDate(m, dueDate) || [];
+  if (!owners.some((o) => Number(o.gstApplicable) === 1 && Number(o.gstPercentage || 0) > 0)) return null;
+  const monthMedia = toPlain(mediaAsOfDate(m, dueDate)) || {};
+  return round(monthGst({ ...monthMedia, landOwners: owners.map((o) => withOwnerSplit(o, split)) }));
+}
 
 // GST % of the site for a month (0 → site has no GST)
 function gstPercentageFor(media, dueDate) {
@@ -1547,6 +1559,7 @@ module.exports = {
   toAdvanceBill, // ✅ NEW
   nextBillDateAfter, // ✅ NEW
   gstPercentageFor, // ✅ NEW
+  monthGstWithSplit, // ✅ NEW
   cycleMonthsOf, // ✅ NEW
   advanceBlock, // ✅ NEW
   arrearsStatus,

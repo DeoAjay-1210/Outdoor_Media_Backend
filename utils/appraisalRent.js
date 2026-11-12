@@ -208,13 +208,23 @@ function withOwnerSplit(owner, split) {
   if (!owner || !split) return owner;
   const s = split.find((x) => x && String(x.landOwnerId) === String(owner._id));
   if (!s) return owner;
-  return {
+  const out = {
     ...toPlain(owner),
     paymentCategory: Number(s.paymentCategory),
     shareAmount: Number(s.shareAmount || 0),
     cashAmount: Number(s.cashAmount || 0),
     onlineAmount: Number(s.onlineAmount || 0),
   };
+  // ✅ NEW — owner GST from the split (same rule as landOwnerMaster): GST on the
+  // Online part (category 3), the share (2), none (1). Only when the owner has
+  // GST with a percentage; else the GST stays as before.
+  const pct = Number(owner.gstPercentage || 0);
+  if (Number(owner.gstApplicable) === 1 && pct > 0) {
+    const pc = out.paymentCategory;
+    const base = pc === 2 ? out.shareAmount : pc === 3 ? out.onlineAmount : 0;
+    out.gstAmount = base > 0 ? Math.floor((base * pct) / 100) : 0;
+  }
+  return out;
 }
 
 function ownerAsOfDate(media, owner, dueDate) {
@@ -266,4 +276,5 @@ module.exports = {
   landOwnersAsOfDate,
   mediaAsOfDate,
   keptOwnerSplit, // ✅ NEW
+  withOwnerSplit, // ✅ NEW
 };

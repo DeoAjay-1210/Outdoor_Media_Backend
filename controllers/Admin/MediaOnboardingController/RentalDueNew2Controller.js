@@ -19,7 +19,7 @@ const {
   getMonthLabel,
 } = require("../../../utils/Datehelpers");
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
-const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
+const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate, keptOwnerSplit, withOwnerSplit } = require("../../../utils/appraisalRent"); // ✅ CHANGED — + keptOwnerSplit, withOwnerSplit
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const {
   createRentalApprovalNotification,
@@ -1826,8 +1826,12 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
 
   const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
   const ownerRowsToAdd = [];
+  // ✅ NEW — month with a Cash / Online payment split (rent revision) → owner GST
+  // of that split (GST on the Online part); no split → as before
+  const monthSplit = entry.dueDate ? keptOwnerSplit(media, entry.dueDate) : null;
 
-  media.landOwners.forEach((owner) => {
+  media.landOwners.forEach((rawOwner) => {
+    const owner = monthSplit ? withOwnerSplit(rawOwner, monthSplit) : rawOwner; // ✅ CHANGED
     const ownerGstApplicable = Number(owner.gstApplicable || 0);
     const ownerGstAmount = Number(owner.gstAmount || 0);
 
