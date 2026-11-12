@@ -169,4 +169,26 @@ const utrCorrectionsApi = async (req, res) => {
   }
 };
 
-module.exports = { getAuthUrl, oauthCallback, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi };
+/** GET /api/gmail/utr-tracker/export?from=YYYY-MM-DD&to=YYYY-MM-DD — CMD only. READ-ONLY Excel: every bill CMD-approved in the range, per landlord and payment part, with the UTR (or "-"), status, error and the exact reply format. */
+const utrTrackerExport = async (req, res) => {
+  if (!isCmd(req)) return errorResponse(res, "Only CMD can use this API", null, 403);
+  const from = String(req.query.from || "").trim();
+  const to = String(req.query.to || "").trim();
+  const ymd = /^\d{4}-\d{2}-\d{2}$/;
+  if (!ymd.test(from) || !ymd.test(to) || Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) return errorResponse(res, "from and to are required as YYYY-MM-DD", null, 400);
+  if (from > to) return errorResponse(res, "from must not be after to", null, 400);
+  if ((Date.parse(to) - Date.parse(from)) / 86400000 > 400) return errorResponse(res, "Date range is too long (max 400 days)", null, 400);
+  try {
+    const { buildUtrTracker, trackerWorkbook } = require("../../../utils/utrTracker");
+    const data = await buildUtrTracker({ from, to });
+    const buffer = trackerWorkbook(data);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="utr-tracker-${from}_to_${to}.xlsx"`);
+    res.setHeader("X-Tracker-Summary", JSON.stringify(data.summary));
+    return res.status(200).send(buffer);
+  } catch (err) {
+    return fail(res, err, "UTR tracker export failed");
+  }
+};
+
+module.exports = { getAuthUrl, oauthCallback, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi, utrTrackerExport };
