@@ -1723,6 +1723,12 @@ exports.createRentRevision = async (req, res) => {
         if (!adjustInDate) return errorResponse(res, 'adjustInMonth is invalid — send like "September 2026"', null, 400);
       }
       billOpts = { advanceDate, advanceLabel: monthLabelOfKey(monthKey(advanceDate)), advanceAmount, adjustInDate };
+      // ✅ NEW — payment split sent with advanceMonth / advanceAmount → saved (was ignored)
+      const advPay = parseMonthPayment(body, billOpts.advanceLabel);
+      if (advPay.error) return errorResponse(res, advPay.error, null, 400);
+      const advTotErr = paymentTotalError(advPay.payment, round(advanceAmount), billOpts.advanceLabel);
+      if (advTotErr) return errorResponse(res, advTotErr, null, 400);
+      if (advPay.payment) billOpts.advancePayment = advPay.payment;
     }
 
     let increaseAmount = 0;
@@ -1947,7 +1953,17 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
         adjustInDate = parseFromMonth(site.adjustInMonth);
         if (!adjustInDate) return errorResponse(res, `${p}.adjustInMonth is invalid — send like "September 2026"`, null, 400);
       }
-      items.push({ index: i, mediaId, gst: siteGst, withGst: siteWithGst, opts: { advanceDate, advanceLabel: monthLabelOfKey(monthKey(advanceDate)), advanceAmount, adjustInDate } });
+      // ✅ NEW — payment split sent with advanceMonth / advanceAmount (paymentCategory,
+      // cashAmount, onlineAmount or landOwners) → saved like months[] (was ignored)
+      const siteAdvLabel = monthLabelOfKey(monthKey(advanceDate));
+      const siteAdvPay = parseMonthPayment(site, siteAdvLabel);
+      if (siteAdvPay.error) return errorResponse(res, `${p}.${siteAdvPay.error}`, null, 400);
+      const siteAdvTotErr = paymentTotalError(siteAdvPay.payment, round(advanceAmount), siteAdvLabel);
+      if (siteAdvTotErr) return errorResponse(res, `${p}.${siteAdvTotErr}`, null, 400);
+      items.push({
+        index: i, mediaId, gst: siteGst, withGst: siteWithGst,
+        opts: { advanceDate, advanceLabel: siteAdvLabel, advanceAmount, adjustInDate, ...(siteAdvPay.payment ? { advancePayment: siteAdvPay.payment } : {}) },
+      });
       continue;
     }
 
@@ -3234,6 +3250,8 @@ async function revisionSiteBills(mediaId) {
       // ✅ NEW — 0 not CMD approved, 1 CMD approved (no payment), 2 ledger / UTR entry done
       UTREntry: billHasPayment(media, m.billIds) ? 2 : m.cmdApproved ? 1 : 0,
     })),
+    // ✅ NEW — the next (future) bill month only; null when no next bill
+    futureMonthBill: next ? { dueMonth: monthLabelOfKey(monthKey(next)) } : null,
   };
 }
 
@@ -3288,6 +3306,7 @@ exports.getRentRevisionList = async (req, res) => {
             "arrearsDue rentalPayment.totalRentalAmount rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency " +
               "rentalDue._id rentalDue.dueMonth rentalDue.dueDate rentalDue.netPayable rentalDue.approvalStatus rentalDue.ownerApprovalDate " +
               "landOwners._id landOwners.name landOwners.shareAmount " + // ✅ CHANGED — + landowners (payment.landOwners)
+              "landOwners.gstApplicable landOwners.gstPercentage " + // ✅ NEW — owner GST % (gstPercentage shown)
               "rentalDue.currentPendingRole rentalDue.approvalResetHistory.cancelledAt rentalDue.approvalResetHistory.previousOwnerApprovalDate", // ✅ NEW — CANCEL status from the bill's re-approval
           )
           .lean()
@@ -3428,6 +3447,17 @@ exports.getRentRevisionList = async (req, res) => {
         mediaCode: r.mediaCode,
         mediaName: r.mediaName,
         ...billTypeFields({ ...r, billType: isAdvance ? "ADVANCE" : AUTO_BILL_TYPES.includes(r.billType) ? r.billType : "BILL" }), // ✅ CHANGED — NORMAL_BILL / CANCEL kept
+        // ✅ NEW — owner GST % site (landOwnerMaster gstPercentage, eg. 18) → that %
+        // shown instead of the effective rate (eg. 10.8); others unchanged
+        ...(() => {
+          const pct = Math.max(
+            0,
+            ...(ownersById.get(String(r.mediaId)) || [])
+              .filter((o) => Number(o.gstApplicable) === 1)
+              .map((o) => Number(o.gstPercentage || 0)),
+          );
+          return pct > 0 && Number(r.gstPercentage || 0) > 0 ? { gstPercentage: pct } : {};
+        })(),
         ...(isAdvance ? {} : { difference: r.difference }),
         ...advanceFields,
         // ✅ NEW — CMD approval mail of months whose bill was increased (no arrears bill)

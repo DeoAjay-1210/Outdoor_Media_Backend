@@ -202,7 +202,20 @@ function keptOwnerSplit(media, dueDate) {
   const dueKey = dueDate ? monthKey(dueDate) : null;
   if (dueKey === null) return null;
   const kept = rentRevisionKeptEntry(media, dueKey);
-  return kept && Array.isArray(kept.ownerSplit) && kept.ownerSplit.length ? kept.ownerSplit : null;
+  if (kept && Array.isArray(kept.ownerSplit) && kept.ownerSplit.length) return kept.ownerSplit;
+  // ✅ NEW — latest kept entry has no split (eg. an arrears revision re-kept the
+  // month at the same rent): use the split of an earlier entry of the same month
+  // and same rent, so the owner Cash/Online (and GST) stay as approved.
+  if (!kept) return null;
+  const list = media?.rentalPayment?.rentRevisionKeptMonths || [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const k = list[i];
+    if (
+      k && k.dueMonth === kept.dueMonth && Number(k.rent) === Number(kept.rent) &&
+      Array.isArray(k.ownerSplit) && k.ownerSplit.length
+    ) return k.ownerSplit;
+  }
+  return null;
 }
 function withOwnerSplit(owner, split) {
   if (!owner || !split) return owner;
