@@ -19,7 +19,7 @@ const {
   getMonthLabel,
 } = require("../../../utils/Datehelpers");
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
-const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate } = require("../../../utils/appraisalRent");
+const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate, keptOwnerSplit, withOwnerSplit } = require("../../../utils/appraisalRent"); // ✅ CHANGED — + keptOwnerSplit, withOwnerSplit
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const {
   createRentalApprovalNotification,
@@ -1015,6 +1015,71 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
 }
 
 
+ // ✅ NEW — CMD approval mail notes from rent revisions of each mailed bill month:
+ // [{ code (site mediaCode), text }]
+ async function rentRevisionMailNotes(items) {
+    const inr = (n) => `Rs. ${Math.abs(Math.round(Number(n || 0))).toLocaleString("en-IN")}`;
+    const list = (items || []).filter((it) => it && it.media && it.entry && it.entry.dueMonth);
+    if (!list.length) return [];
+    const codeOf = (it) => {
+      const ds = it.media.mediaDetails || [];
+      const d = ds.find((x) => String(x._id) === String(it.entry.mediaDetailId)) || ds.find((x) => Number(x.status) === 1) || ds[0] || {};
+      return d.mediaCode || it.media.mediaCode || "";
+    };
+    const mediaIds = [...new Set(list.map((it) => String(it.media._id)))];
+    const monthLabels = [...new Set(list.map((it) => it.entry.dueMonth))];
+    const revisions = await RentRevision.find({
+      mediaId: { $in: mediaIds },
+      status: "Approved",
+      cancelReverted: { $ne: true },
+      "monthsDetail.month": { $in: monthLabels },
+    })
+      .select("mediaId monthsDetail approvedAt createdAt")
+      .sort({ createdAt: 1 })
+      .lean();
+    const notes = [];
+    list.forEach((it) => {
+      const code = codeOf(it);
+      const month = it.entry.dueMonth;
+      const arrears = it.media.arrearsDue || [];
+      const billNoOf = (id) => {
+        const b = id ? arrears.find((x) => x && String(x._id) === String(id)) : null;
+        return b && b.adinn_ooh_bills ? ` (Bill No ${b.adinn_ooh_bills})` : "";
+      };
+      // Advance deducted from this month's bill
+      arrears
+        .filter((b) => b && b.type === "advance" && Number(b.approvalStatus) === 3 && (b.adjustInMonth || b.dueMonth) === month)
+        .forEach((b) => {
+          const advMonth = b.dueMonth || month;
+          notes.push({
+            code,
+            text:
+              `${month}: ${inr(b.netPayable)} taken as advance${advMonth !== month ? ` for ${advMonth}` : ""}` +
+              `${b.adinn_ooh_bills ? ` (Bill No ${b.adinn_ooh_bills})` : ""}. This amount is deducted from this bill.`,
+          });
+        });
+      // rent increased / decreased by a revision
+      revisions
+        .filter((r) => String(r.mediaId) === String(it.media._id))
+        .forEach((r) =>
+          (r.monthsDetail || [])
+            .filter((d) => d && d.month === month && Number(d.amount || 0) !== 0)
+            .forEach((d) => {
+              const amt = Number(d.amount);
+              const inc = amt > 0;
+              const cur = Number(d.currentAmount || 0);
+              const nw = Number(d.newAmount || 0);
+              const range = cur > 0 && nw > 0 ? ` (${inr(cur)} → ${inr(nw)})` : "";
+              const newBill = inc && d.arrearsRentalDueId
+                ? ` The increased ${inr(amt)} is raised as a separate New Bill${billNoOf(d.arrearsRentalDueId)}.`
+                : "";
+              notes.push({ code, text: `${month}: rent ${inc ? "increased" : "decreased"} by ${inr(amt)}${range}.${newBill}` });
+            }),
+        );
+    });
+    return notes;
+  }
+
  async function sendRentalDueApprovalMail(media, entry, batchSites = null, extraData = null) {
     try {
       const toMail = process.env.T0_EMail;
@@ -1686,6 +1751,25 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
       // the ADINN OOH bill number (adinn_ooh_bills, given just before this mail)
       data.billNo = [...new Set(sitesInGroupData.map((it) => it?.entry?.adinn_ooh_bills).filter(Boolean))].join(", ");
 
+      // ✅ NEW — rent revision notes of the mailed bill month(s): Advance deducted,
+      // rent increased (New Bill) / decreased. data.notes (all) + sites[].notes
+      // (that site's). Not sent when the month has no revision.
+      try {
+        const revNotes = await rentRevisionMailNotes(sitesInGroupData);
+        if (revNotes.length) {
+          const multi = new Set(revNotes.map((n) => n.code)).size > 1;
+          data.notes = [...new Set(revNotes.map((n) => (multi && n.code ? `${n.code} – ${n.text}` : n.text)))];
+          if (Array.isArray(data.sites)) {
+            data.sites.forEach((s) => {
+              const own = [...new Set(revNotes.filter((n) => n.code === s.mediaCode).map((n) => n.text))];
+              if (own.length) s.notes = own;
+            });
+          }
+        }
+      } catch (noteErr) {
+        console.error("rent revision mail notes error:", noteErr?.message || noteErr);
+      }
+
       // ✅ NEW — extra blocks added to data (e.g. rentRevision for an arrears bill mail)
       if (extraData && typeof extraData === "object") Object.assign(data, extraData);
 
@@ -1826,8 +1910,12 @@ function addOwnerGstToBalanceIfApplicable(media, entry, userName) {
 
   const billMode = Number((media.landOwners || [])[0]?.agreementBillMode || 1);
   const ownerRowsToAdd = [];
+  // ✅ NEW — month with a Cash / Online payment split (rent revision) → owner GST
+  // of that split (GST on the Online part); no split → as before
+  const monthSplit = entry.dueDate ? keptOwnerSplit(media, entry.dueDate) : null;
 
-  media.landOwners.forEach((owner) => {
+  media.landOwners.forEach((rawOwner) => {
+    const owner = monthSplit ? withOwnerSplit(rawOwner, monthSplit) : rawOwner; // ✅ CHANGED
     const ownerGstApplicable = Number(owner.gstApplicable || 0);
     const ownerGstAmount = Number(owner.gstAmount || 0);
 
@@ -6690,7 +6778,7 @@ const details = (item.mediaDetails || []).map((d) => ({
                       isInitial: hObj.isInitial ?? false,
                       isAppraisal: hObj.isAppraisal ?? false,
                       // ✅ NEW — rent revision rows: type / month / remark (not sent on other rows)
-                      ...(hObj.changeType ? { changeType: hObj.changeType, changeLabel: hObj.changeLabel || "", month: hObj.month || "", ...(hObj.adjustInMonth ? { adjustInMonth: hObj.adjustInMonth } : {}), changeAmount: hObj.changeAmount ?? null, monthAmountBefore: hObj.monthAmountBefore ?? null, monthAmountAfter: hObj.monthAmountAfter ?? null, remark: hObj.remark || "", isRevisionLog: !!hObj.isRevisionLog } : {}),
+                      ...(hObj.changeType ? { changeType: hObj.changeType, changeLabel: hObj.changeLabel || "", month: hObj.month || "", ...(hObj.adjustInMonth ? { adjustInMonth: hObj.adjustInMonth } : {}), changeAmount: hObj.changeAmount ?? null, monthAmountBefore: hObj.monthAmountBefore ?? null, monthAmountAfter: hObj.monthAmountAfter ?? null, remark: hObj.rentRevisionId ? String(hObj.remark || "").replace(/\s*\|\s*CMD:.*$/, "") /* ✅ CHANGED — old rows: CMD remark removed */ : hObj.remark || "", isRevisionLog: !!hObj.isRevisionLog } : {}),
                     };
                   }),
                   gstApplicable: item.rentalPayment?.gstApplicable || 0,
@@ -6725,7 +6813,7 @@ const details = (item.mediaDetails || []).map((d) => ({
                     isInitial: hObj.isInitial ?? false,
                     isAppraisal: hObj.isAppraisal ?? false,
                     // ✅ NEW — rent revision rows: type / month / remark (not sent on other rows)
-                    ...(hObj.changeType ? { changeType: hObj.changeType, changeLabel: hObj.changeLabel || "", month: hObj.month || "", ...(hObj.adjustInMonth ? { adjustInMonth: hObj.adjustInMonth } : {}), changeAmount: hObj.changeAmount ?? null, monthAmountBefore: hObj.monthAmountBefore ?? null, monthAmountAfter: hObj.monthAmountAfter ?? null, remark: hObj.remark || "", isRevisionLog: !!hObj.isRevisionLog } : {}),
+                    ...(hObj.changeType ? { changeType: hObj.changeType, changeLabel: hObj.changeLabel || "", month: hObj.month || "", ...(hObj.adjustInMonth ? { adjustInMonth: hObj.adjustInMonth } : {}), changeAmount: hObj.changeAmount ?? null, monthAmountBefore: hObj.monthAmountBefore ?? null, monthAmountAfter: hObj.monthAmountAfter ?? null, remark: hObj.rentRevisionId ? String(hObj.remark || "").replace(/\s*\|\s*CMD:.*$/, "") /* ✅ CHANGED — old rows: CMD remark removed */ : hObj.remark || "", isRevisionLog: !!hObj.isRevisionLog } : {}),
                   };
                 }),
         rentalDueEntries: rentalDueEntries, // ✅ CHANGED: Now contains face-based entries

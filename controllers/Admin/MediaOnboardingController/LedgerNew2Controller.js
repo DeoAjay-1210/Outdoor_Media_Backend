@@ -4,7 +4,7 @@ const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardi
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 // ✅ NEW — rent revision arrears (paid via ledger-save, shown in ledger-list)
 const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema");
-const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst, newBillLabel } = require("../../../utils/rentRevisionArrears");
+const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst, newBillLabel, withSiteOwnerCategory } = require("../../../utils/rentRevisionArrears"); // ✅ CHANGED — + withSiteOwnerCategory
 const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
   getRentForDueDate,
@@ -1222,7 +1222,7 @@ async function payArrearsBillIfArrears(req, res) {
   if (!rentalDueId || !mongoose.Types.ObjectId.isValid(String(rentalDueId))) return null;
   if (!mediaId || !mongoose.Types.ObjectId.isValid(String(mediaId))) return null;
   const billId = new mongoose.Types.ObjectId(String(rentalDueId));
-  const media = await Media.findOne({ _id: mediaId, "arrearsDue._id": billId }).select("arrearsDue rentalDue._id rentalDue.withGst").lean();
+  const media = await Media.findOne({ _id: mediaId, "arrearsDue._id": billId }).select("arrearsDue rentalDue._id rentalDue.withGst landOwners._id landOwners.paymentCategory").lean();
   if (!media) return null;
   const bill = (media.arrearsDue || []).find((b) => String(b._id) === String(billId));
   if (!bill) return null;
@@ -1242,6 +1242,7 @@ async function payArrearsBillIfArrears(req, res) {
       userName: req.user?.userName || "",
       remark: remarkText(remark), // ✅ NEW
       parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
+      siteOwners: media.landOwners || [], // ✅ NEW — Cash + Online owner: 0-mode entry allowed
     });
   } catch (e) {
     if (e && e.statusCode) return errorResponse(res, e.message, null, e.statusCode);
@@ -1315,7 +1316,7 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
     rentalDueId: billId,
   };
   try {
-    const media = await Media.findById(mediaId).select("arrearsDue rentalDue._id rentalDue.withGst").lean();
+    const media = await Media.findById(mediaId).select("arrearsDue rentalDue._id rentalDue.withGst landOwners._id landOwners.paymentCategory").lean();
     const bill = (media?.arrearsDue || []).find((b) => String(b._id) === billId);
     if (!bill) throw new Error("Arrears / advance bill not found");
     const kind = bill.type === "advance" ? "advance" : "newBill"; // ✅ CHANGED — was "arrears"
@@ -1330,6 +1331,7 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
       userName: updatedBy,
       remark, // ✅ NEW
       parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
+      siteOwners: media.landOwners || [], // ✅ NEW — Cash + Online owner: 0-mode entry allowed
     });
     await Media.updateOne(
       { _id: mediaId },
@@ -4763,11 +4765,12 @@ const cityFilter = [
     {
       const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
       const [pageArrearsDocs, lastRevisions, allArrearsDocs] = await Promise.all([
-        Media.find({ _id: { $in: pageIds }, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue._id rentalDue.withGst rentalDue.dueMonth").lean(),
+        Media.find({ _id: { $in: pageIds }, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue._id rentalDue.withGst rentalDue.dueMonth landOwners._id landOwners.paymentCategory").lean(), // ✅ CHANGED — + landowner category
         RentRevision.find({ mediaId: { $in: pageIds }, status: "Approved" }).sort({ approvedAt: -1 }).lean(),
         Media.find({ "mediaDetails.status": 1, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue.dueMonth").lean(),
       ]);
-      const arrearsById = new Map(pageArrearsDocs.map((d) => [String(d._id), d.arrearsDue || []]));
+      // ✅ CHANGED — + site landowner category (Cash + Online owner → both rows)
+      const arrearsById = new Map(pageArrearsDocs.map((d) => [String(d._id), withSiteOwnerCategory(d.arrearsDue || [], d.landOwners)]));
       const parentWithGstById = new Map();
       pageArrearsDocs.forEach((d) => (d.rentalDue || []).forEach((r) => parentWithGstById.set(String(r._id), r.withGst)));
       // ✅ NEW — bill months per site (advance adjusted = its bill is generated)
@@ -5056,7 +5059,7 @@ exports.getLedgerHistory = async (req, res) => {
       const parentWithGstById = new Map((media.rentalDue || []).map((r) => [String(r._id), r.withGst]));
       const blockWithArrears = decorateLedgerHistoryBlock(
         block,
-        media.arrearsDue || [],
+        withSiteOwnerCategory(media.arrearsDue || [], media.landOwners), // ✅ CHANGED — + site landowner category
         historyRevisionById.get(String(media._id)) || null,
         parentWithGstById,
         arrearsInRange,
@@ -5656,6 +5659,7 @@ let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistor
     let cycleUnpaid = 0;
     let cycleTds = 0;
     let maxPaymentDate = null;
+    let latestRemark = ""; // ✅ NEW — remark of the latest rent payment of this cycle
     // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
     const cycleMedia = mediaAsOfDate(media, cycleDate);
 const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
@@ -5722,6 +5726,9 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
           if (entry.date) {
             const d = new Date(entry.date);
             if (!maxPaymentDate || d > maxPaymentDate) maxPaymentDate = d;
+            if (entry.remark && (!latestRemark || d >= maxPaymentDate)) latestRemark = entry.remark; // ✅ NEW
+          } else if (entry.remark && !latestRemark) {
+            latestRemark = entry.remark; // ✅ NEW
           }
         } else {
           cycleUnpaid += amt;
@@ -5739,6 +5746,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
       isPaid,
       isVirtual: true,
       date: isPaid ? maxPaymentDate : null,
+      remark: isPaid ? latestRemark : "", // ✅ NEW — remark of the rent payment
       updatedAt: null,
       updatedBy: "",
       cycle: cycleDate,
@@ -6222,6 +6230,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             shareAmount: resolvedShareAmount, // ✅ ADDED
             tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
             rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ NEW
+            remark: realEntry.remark ?? "", // ✅ NEW — saved remark (was dropped)
             isVirtual: false,
           });
         } else {
@@ -6438,6 +6447,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           gstAmount: gstDetails.gstAmount,
           amount: entry.amount,
           rentalDueApprovalStatus: matchedDueSpecific?.approvalStatus ?? 0, // ✅ NEW
+          remark: entry.remark ?? "", // ✅ NEW — saved remark (was dropped)
           isVirtual: false,
         };
       });
@@ -6958,9 +6968,10 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     outStantStatus:
       media.rentalPayment?.outStantStatus ??
       (outstanding.totalOutstandingAmount > 0 ? 1 : 0),
-    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory),
-    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory),
-    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory),
+    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "" })), // ✅ CHANGED — + remark key
+    // ✅ CHANGED — + remark key on every row ("" when none)
+    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory).map((r) => ({ ...r, remark: r.remark ?? "" })),
+    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "" })),
     previousLedger: media.previousLedger || null,
   };
 }
