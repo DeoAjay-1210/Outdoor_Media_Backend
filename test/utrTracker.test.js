@@ -76,7 +76,7 @@ test("T4. GST on hold: Rent AND GST share ONE row (rent, GST, total, Rent UTR, G
   const lines = r["Reply Format (exact)"].split("\n");
   assert.ok(lines.includes("Landlord1 - Rent - UTR : <UTR>"));
   assert.ok(lines.includes("Landlord1 - GST - UTR : <UTR>"));
-  assert.ok(lines.some((l) => l.startsWith("Landlord2 - Rent - Cash")));
+  assert.ok(!lines.some((l) => /Cash/.test(l))); // Cash-only landlord: no Cash line to write (date from the "Approved through this bank" mail)
   assert.ok(lines.includes("Landlord2 - GST - UTR : <UTR>"));
   // rent saved, GST still open -> Partially saved: the rent UTR and an empty GST UTR
   const half = media({ landOwners: [owner("o1", "Landlord1")], rentalDue: [dueRow({ withGst: 1 })], ledger: [paid("o1", "Online", "UTR111111111111")], gstBalanceHistory: [m.gstBalanceHistory[0]] });
@@ -110,7 +110,7 @@ test("T6. New Bill with a Cash + Online landlord: ONE row, the Online line needs
   };
   const rows = (await run([media({ rentalDue: [{ _id: "p1", withGst: 2 }], arrearsDue: [bill] })])).rows;
   assert.equal(rows.length, 1);
-  assert.deepEqual([rows[0]["Bill Type"], rows[0]["Payment Category"], rows[0]["Total Rental Amount"], rows[0]["Reply Format (exact)"]], ["New Bill", "Cash + Online", 3500, "NewBill - UTR : <UTR>"]);
+  assert.deepEqual([rows[0]["Bill Type"], rows[0]["Payment Category"], rows[0]["Total Rental Amount"], rows[0]["Reply Format (exact)"]], ["New Bill", "Cash + Online", 3500, "UTR : <UTR>"]);
 });
 
 test("T7. several sites on one bill: site codes and names are written side by side", async () => {

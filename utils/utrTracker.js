@@ -91,12 +91,12 @@ const REVIEW_STATUSES = new Set(["ambiguous_mapping", "multiple_review_required"
 /** Exact reply line Finance must write for ONE open payment (the same lines the processor reads). */
 function replyFormat({ flow, word, single, hold, part, mode, name, paired }) {
   const lead = single ? "" : `${name} - `;
-  const bill = flow === "rental" ? "" : `${word} - `;
+  const bill = ""; // the NewBill / Advance word is no longer needed in the reply (bill type comes from the bill)
   if (part === "gst") return `${lead}${bill}GST - UTR : <UTR>`;
   const label = hold ? "Rent - " : "";
   if (mode === "Cash") {
     if (paired) return `AUTO - taken from the date of the mail that carries the Online Rent UTR (different date: ${lead}${bill}${label}Cash - Paid Date: 08-Nov-2026)`;
-    return `${lead}${bill}${label}Cash   (with a date: ${lead}${bill}${label}Cash - Paid Date: 08-Nov-2026)`;
+    return `AUTO - no Cash line needed: Paid Date = date of Finance's "Approved through this bank" mail (different date: ${lead}${bill}${label}Cash - Paid Date: 08-Nov-2026)`;
   }
   return `${lead}${bill}${label}UTR : <UTR>`;
 }
@@ -105,7 +105,7 @@ const exampleOf = (fmt, part) => (fmt.startsWith("AUTO") || fmt.startsWith("Manu
 /** Saved payment: the reply line in the format that was used, with the saved UTR in it ("UTR : X", "Landlord1 - UTR : X", "Landlord1 - Rent - UTR : X", "Cash" ...). */
 function savedLine(r) {
   const fmt = replyFormat({ flow: r.flow, word: r._word, single: r._single, hold: r._hold, part: r._part, mode: r.paymentMode, name: r.landlordName, paired: false });
-  if (r.paymentMode === "Cash") return fmt.split("   (")[0];
+  if (r.paymentMode === "Cash") return "Cash";
   return r.utr && r.utr !== "-" ? fmt.replace("<UTR>", r.utr) : "-";
 }
 

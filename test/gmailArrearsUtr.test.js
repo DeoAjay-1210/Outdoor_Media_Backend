@@ -149,7 +149,7 @@ test("AP2. a line of the OTHER bill type is a problem, a line without any type i
   const L = [{ landOwnerId: O1, name: "Landlord1" }, { landOwnerId: O2, name: "Landlord2" }];
   const m = (t, billType) => mapArrearsLines([{ messageId: "m", lines: extractLandlordUtrLines(t) }], L, { billType, gstHold: false });
   assert.equal(m(`Landlord1 - Advance - Rent - UTR : ${U.a}`, "newBill").problems[0].reason, "bill_type_mismatch");
-  assert.equal(m(`Landlord1 - Rent - UTR : ${U.a}`, "newBill").ignored[0].reason, "no_bill_type_label");
+  assert.equal(m(`Landlord1 - Rent - UTR : ${U.a}`, "newBill").byKey.get(`${O1}|rent`)[0].utr, U.a); // the word is optional now
   assert.equal(m(`Landlord1 - NewBill - Rent - UTR : ${U.a}`, "newBill").byKey.get(`${O1}|rent`)[0].utr, U.a);
 });
 
@@ -655,4 +655,22 @@ test("P2. several landlords: Landlord1 Cash + Online, Landlord2 Cash only (needs
   const full = setup({ docs: [site([bill])], cash: true, lookupLandlords: async (b) => ({ data: { billNumber: b, extractionStatus: "found", threadId: "T", approvalMailLandlords: [], replies: [reply("m1", "Landlord1 - NewBill - Rent - UTR: " + U.b)], cashReplies: [{ messageId: "m2", sentDate: "2026-11-10", sentAt: "2026-11-10T05:00:00.000Z", cashLines: [{ name: "Landlord2 - NewBill - Cash", utr: "", cash: true, dates: [], line: "x" }] }] } }) });
   await run(full);
   assert.deepEqual(full.bill(B_NB).payments.map((p) => [p.landOwnerName, p.paymentMode, p.utrNumber].join("|")).sort(), ["Landlord1|Cash|", "Landlord1|Online|" + U.b, "Landlord2|Cash|"]);
+});
+
+test("C9. Cash-only New Bill / Advance with NO Cash line: the date of the 'Approved through this bank' mail is the Paid Date; several mails = the LAST one", async () => {
+  for (const isAdvance of [false, true]) {
+    const k = kindOf(isAdvance);
+    const bill = () => scenario({ isAdvance, n: 1, over: { owners: [cashOwner(O1, M1, "Landlord1")] } });
+    const lk = (approvedBank) => async (b) => ({ data: { billNumber: b, extractionStatus: "utr_not_found", threadId: "T1", approvalMailLandlords: [], replies: [], cashReplies: [], approvedBank } });
+    const mail = (id, day) => ({ messageId: id, from: "Finance <fin@x.com>", sentAt: `${day}T04:00:00.000Z`, sentDate: day });
+    const x = setup({ docs: [site([bill()], 1)], cash: true, replies: [], lookupLandlords: lk([mail("a1", "2026-11-10")]) });
+    const r = await run(x);
+    assert.equal(res(r, k.number).status, "found_and_saved");
+    assert.deepEqual([x.calls.saver[0].payments[0].paymentMode, x.calls.saver[0].payments[0].utrNumber, x.calls.saver[0].date], ["Cash", "", "2026-11-10"]);
+    const two = setup({ docs: [site([bill()], 1)], cash: true, replies: [], lookupLandlords: lk([mail("a1", "2026-11-09"), mail("a2", "2026-11-10")]) });
+    assert.equal(res(await run(two), k.number).status, "found_and_saved");
+    assert.equal(two.calls.saver[0].date, "2026-11-10");
+    const none = setup({ docs: [site([bill()], 1)], cash: true, replies: [], lookupLandlords: lk([]) });
+    assert.notEqual(res(await run(none), k.number).status, "found_and_saved");
+  }
 });

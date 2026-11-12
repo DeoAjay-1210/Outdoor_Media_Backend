@@ -67,12 +67,22 @@ function classifyPaymentLabel(name) {
  * Only lines labelled Rent / GST count; an unlabelled "UTR : X" is never used (it could be either) and is reported.
  * -> { byKind: { rent, gst }  (each { utr, line, reply } | null), conflicts: [kind], dupBoth, ignored: [...] }
  */
-function mapPaymentKinds(replies) {
+function mapPaymentKinds(replies, landlord) {
   const found = { rent: [], gst: [] };
   const ignored = [];
   for (const r of replies || []) {
     for (const l of r.lines || []) {
-      const kind = classifyPaymentLabel(l.name);
+      let kind = classifyPaymentLabel(l.name);
+      if (!kind && !r.billExplicit && landlord && l.name) {
+        const k0 = splitNameKind(l.name, [landlord]);
+        if (k0.kind && k0.landlord && !matchLandlord(k0.landlord, [landlord]).error) kind = k0.kind; // "L1 with gst - Rent", "L1 with gst - GST"
+      }
+      if (!kind && r.billExplicit) {
+        // a line that names its Bill Number: "<landlord>" = Rent, "<landlord> - GST" = GST; the landlord must be the bill's landlord
+        const k = splitNameKind(l.name, landlord ? [landlord] : null);
+        if (k.landlord && landlord && matchLandlord(k.landlord, [landlord]).error) { ignored.push({ messageId: r.messageId, name: l.name, reason: "landlord_name_not_found" }); continue; }
+        kind = k.kind || "rent";
+      }
       if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: l.name ? "label_is_not_rent_or_gst" : "unlabelled_utr_line" }); continue; }
       found[kind].push({ line: l, reply: r });
     }
@@ -93,7 +103,12 @@ function mapPaymentKinds(replies) {
  * The payment label is the LAST part of the name; without it kind is null (the line could be rent or GST).
  */
 const NAME_KIND = /^(.*?)[\s\-–—:|,]+((?:base\s+)?rent(?:al)?(?:\s+amount)?|gst(?:\s+amount)?)\s*$/i;
-function splitNameKind(name) {
+function splitNameKind(name, landlords) {
+  // a landlord whose OWN name ends in "gst" / "rent" ("L1 with gst"): when the whole text is exactly a landlord of the bill, it is that landlord (no label)
+  if (landlords && landlords.length && String(name || "").trim()) {
+    const w = matchLandlord(name, landlords);
+    if (!w.error && w.matchedBy === "full_name") return { landlord: String(name).trim(), kind: null };
+  }
   const m = String(name || "").match(NAME_KIND);
   if (!m || !m[1].trim()) return { landlord: String(name || "").trim(), kind: null };
   return { landlord: m[1].trim(), kind: classifyPaymentLabel(m[2]) };
@@ -183,7 +198,9 @@ function mapLandlordKinds(replies, landlords) {
   const byKey = new Map();
   for (const r of replies || []) {
     for (const l of r.lines || []) {
-      const { landlord: nm, kind } = splitNameKind(l.name);
+      const sk = splitNameKind(l.name, landlords);
+      const nm = sk.landlord;
+      const kind = sk.kind || (r.billExplicit && nm ? "rent" : null); // a line naming its Bill Number without GST = the Rent UTR
       if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: nm ? "no_rent_or_gst_label" : "unnamed_utr_line" }); continue; }
       const m = matchLandlord(nm, landlords);
       if (m.error) { problems.push({ reason: m.error, name: l.name }); continue; }
@@ -213,8 +230,8 @@ function splitCashName(name) {
   return m ? { landlord: m[1].trim() } : null;
 }
 
-function splitArrearsName(name) {
-  const k = splitNameKind(name);
+function splitArrearsName(name, landlords) {
+  const k = splitNameKind(name, landlords);
   let landlord = k.landlord;
   let kind = k.kind;
   if (!kind) {
@@ -245,11 +262,11 @@ function mapArrearsLines(replies, landlords, { billType, gstHold }) {
   for (const r of replies || []) {
     // UTR lines and Cash lines ("<landlord> - NewBill - Cash [- Paid Date: ..]", no UTR) of the same reply
     for (const l of [...(r.lines || []), ...(r.cashLines || [])]) {
-      const p = splitArrearsName(l.name);
+      const p = splitArrearsName(l.name, landlords);
       if (l.cash && p.kind !== "cash") { ignored.push({ messageId: r.messageId, name: l.name, reason: "cash_line_without_cash_label" }); continue; }
       if (!l.cash && p.kind === "cash") { ignored.push({ messageId: r.messageId, name: l.name, reason: "cash_line_with_utr" }); continue; } // a Cash payment has no UTR
-      if (!p.billType) { ignored.push({ messageId: r.messageId, name: l.name, reason: "no_bill_type_label" }); continue; }
-      if (p.billType !== billType) { problems.push({ reason: "bill_type_mismatch", name: l.name }); continue; }
+      // the NewBill / Advance word is OPTIONAL: the bill type comes from the bill itself; a word naming the OTHER type is still a problem
+      if (p.billType && p.billType !== billType) { problems.push({ reason: "bill_type_mismatch", name: l.name }); continue; }
       let landlord;
       if (!p.landlord) {
         if (landlords.length !== 1) { problems.push({ reason: "unnamed_utr_line", name: l.name }); continue; }
@@ -259,7 +276,7 @@ function mapArrearsLines(replies, landlords, { billType, gstHold }) {
         if (m.error) { problems.push({ reason: m.error, name: l.name }); continue; }
         landlord = m.landlord;
       }
-      const kind = p.kind || (gstHold ? null : "rent");
+      const kind = p.kind || (gstHold && !r.billExplicit ? null : "rent");
       if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: "no_rent_or_gst_label" }); continue; }
       if (l.accountLast4 && landlord.accountLast4 && l.accountLast4 !== landlord.accountLast4) problems.push({ reason: "account_mismatch_in_reply", name: landlord.name });
       if (l.bank && landlord.bankName && !bankMatches(l.bank, landlord.bankName)) problems.push({ reason: "bank_mismatch_in_reply", name: landlord.name });

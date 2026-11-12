@@ -9,6 +9,7 @@
  *   approval_message_not_found | approval_mail_has_several_bills | reply_not_linked_to_approval_mail
  */
 const { extractBillNumbers, stripQuoted, findCandidates, extractCashLines } = require("./utrExtractor");
+const { extractBillLines, billLinesAsReply, commonUtrBills } = require("./billLines");
 
 const normId = (v) => String(v || "").trim().replace(/^<|>$/g, "").toLowerCase();
 const ownBills = (m) => [...new Set(extractBillNumbers(stripQuoted(m.bodyText)))];
@@ -44,6 +45,11 @@ function scopeThreadToBill(messages, billNumber) {
     return null;
   };
 
+  // Replies that LIST Bill Numbers ("Landlord1 - <BillNo> : UTR..."): the Bill Number is the key, not In-Reply-To. They are used for a bill only
+  // through the lines that name it (rewritten as ordinary reply lines, flagged explicitBill), never "linked" by position or by chain.
+  const known = [...new Set(approvals.flatMap(ownBills))];
+  const explicit = [];
+  const commonUtr = {};
   const linked = [];
   const unlinked = [];
   const bankMessages = []; // every message of THIS approval's chain (the bank table is in the "Payment Uploaded" mail, not in the UTR reply)
@@ -51,6 +57,13 @@ function scopeThreadToBill(messages, billNumber) {
     if (approvalIds.has(m.id)) continue;
     const root = rootApproval(m);
     if (root && root.id === approval.id) bankMessages.push(m);
+    const bl = extractBillLines(m.bodyText, known);
+    if (bl.length) {
+      Object.entries(commonUtrBills(bl)).forEach(([u, bs]) => { commonUtr[u] = [...new Set([...(commonUtr[u] || []), ...bs])]; });
+      const mine = bl.filter((x) => x.bill.toLowerCase() === billNumber.toLowerCase());
+      if (mine.length) explicit.push({ ...m, bodyText: billLinesAsReply(mine), explicitBill: true });
+      continue;
+    }
     if (!findCandidates(stripQuoted(m.bodyText)).length && !extractCashLines(m.bodyText).length) continue; // no UTR / Cash line in it: not a payment reply
     if (!root) {
       unlinked.push(m.id);
@@ -59,11 +72,13 @@ function scopeThreadToBill(messages, billNumber) {
     if (root.id === approval.id) linked.push(m);
   }
   if (unlinked.length) return { status: "unlinked", reason: "reply_not_linked_to_approval_mail", replyMessageIds: unlinked };
+  const order = new Map(messages.map((m, i) => [m.id, i]));
+  const mine = [...linked, ...explicit].sort((a, b) => order.get(a.id) - order.get(b.id));
   return {
     status: "scoped",
-    messages: [approval, ...linked],
+    messages: [approval, ...mine],
     bankMessages,
-    link: { mode: "in_reply_to", approvalMessageId: approval.id, replyMessageIds: linked.map((m) => m.id) },
+    link: { mode: "in_reply_to", approvalMessageId: approval.id, replyMessageIds: mine.map((m) => m.id), ...(explicit.length ? { explicitBillReplyIds: explicit.map((m) => m.id), commonUtrBills: commonUtr } : {}) },
   };
 }
 

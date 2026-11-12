@@ -477,7 +477,7 @@ test("R4. Gmail results that are not a single clear UTR are never saved", async 
     [{ extractionStatus: "utr_not_found", utr: null }, "utr_not_found"],
     [{ extractionStatus: "multiple_review_required", utr: null }, "multiple_review_required"],
     [{ extractionStatus: "ambiguous_bill_numbers", utr: null }, "ambiguous_mapping"],
-    [{ utr: "SHORT1" }, "utr_not_found"], // invalid UTR
+    [{ utr: "ABC" }, "utr_not_found"], // invalid UTR (too short, no digit)
     [{ utr: "ABCDEFGHIJKLMNOP" }, "utr_not_found"], // no digit
   ];
   for (const [data, status] of cases) {
@@ -1786,4 +1786,17 @@ test("M22. several landlords: a Cash-ONLY landlord needs a Cash line; a UTR line
   const utr = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(THREE) });
   assert.equal(one(utr.r).status, "ambiguous_mapping");
   assert.equal(utr.calls.saver.length, 0);
+});
+
+test("M23. several landlords: a Cash-only landlord needs NO Cash line when 'Approved through this bank' mail exists - its date is the Paid Date (an explicit Cash line wins)", async () => {
+  const two = `Suresh - UTR: ${U.S}\nMurali - UTR: ${U.M}`;
+  const bank = [{ messageId: "B1", from: "Finance <f@x.com>", sentAt: "2026-11-09T08:00:00.000Z", sentDate: "2026-11-09" }];
+  const ok = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(two, { approvedBank: bank }) });
+  assert.equal(one(ok.r).status, "found_and_saved");
+  assert.deepEqual(sorted(ok.calls), ["oJ|Cash||2026-11-09", "oM|Online|" + U.M + "|2026-11-09", "oS|Online|" + U.S + "|2026-11-09"]);
+  const typed = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(two, { approvedBank: bank, cashReplies: [cashLn("C1", "Jamuna - Cash - Paid Date: 08-Nov-2026")] }) });
+  assert.deepEqual(sorted(typed.calls)[0], "oJ|Cash||2026-11-08");
+  const split = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(two, { approvedBank: [...bank, { ...bank[0], messageId: "B2", sentDate: "2026-11-10", sentAt: "2026-11-10T08:00:00.000Z" }] }) });
+  assert.equal(one(split.r).status, "found_and_saved"); // two mails on different days: the LAST one (10-Nov) is used
+  assert.ok(sorted(split.calls).includes("oJ|Cash||2026-11-10"));
 });

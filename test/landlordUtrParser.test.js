@@ -33,7 +33,9 @@ test("P2. other ways to write a line: bullets, numbers, colon / dash separators,
   const lines = extractLandlordUtrLines([`1. Jamuna : UTR Number: ${J}`, `- Suresh – UTR : ${S}`, `* Murali - Transaction Reference Number: ${M}`, `UTR : HDFC92023012200543999`].join("\n"));
   assert.deepEqual(lines.map((l) => l.name), ["Jamuna", "Suresh", "Murali", ""]);
   assert.equal(findUtrInLine("nothing here"), null);
-  assert.equal(findUtrInLine("UTR: 12345"), null); // too short is not a UTR
+  assert.equal(findUtrInLine("UTR: 1234"), null); // 4 characters is too short to be a UTR
+  assert.equal(findUtrInLine("UTR: pending"), null); // letters only is never a UTR
+  for (const v of ["12345", "UTR7843274", "jfiew4343", "1325ASD"]) assert.equal(findUtrInLine("UTR : " + v).utr, v.toUpperCase()); // any value after the UTR label
 });
 
 test("P3. optional bank / account typed on the line are read", () => {

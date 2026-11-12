@@ -30,6 +30,29 @@ const { senderName } = require("./senderName");
 const actorOf = (d, messageId) => { const r = [...(d.replies || []), ...(d.cashReplies || [])].find((x) => x.messageId === messageId); return senderName(r ? r.from : d.senderEmail); };
 const { splitCashName, splitNameKind, classifyPaymentLabel, mapLandlords, mapLandlordKinds, mapArrearsLines, mapPaymentKinds, validateAgainstMail, matchLandlord } = require("./landlordUtrParser");
 const { resolvePaidDate } = require("./utrPaidDate");
+/**
+ * CASH-ONLY landlords need no "Cash" line any more: Finance's "Approved through this bank" mail of the bill's chain is the approval and
+ * its Gmail Date is the Paid Date. For every named Cash-only landlord WITHOUT an explicit Cash line of its own, a "<name> - Cash" line is
+ * added to d.cashReplies (dated by that mail), so every flow below reads it exactly like a typed Cash line. An explicit Cash line wins.
+ * Normally there is ONE such mail; if there are several, the LAST one (latest Gmail Date) is used.
+ */
+function addBankApprovedCash(d, names) {
+  const ab = d.approvedBank || [];
+  if (!ab.length || !names.length) return;
+  const first = [...ab].sort((x, y) => new Date(y.sentAt).getTime() - new Date(x.sentAt).getTime())[0]; // the LAST "Approved through this bank" mail
+  const lines = [];
+  for (const name of [...new Set(names)]) {
+    const me = [{ landOwnerId: "x", name }];
+    const typed = (d.cashReplies || []).some((r) => (r.cashLines || []).some((cl) => {
+      const sc = splitCashName(cl.name); if (!sc) return false;
+      const kn = splitNameKind(sc.landlord, me);
+      if (kn.kind === "gst") return false;
+      return !kn.landlord || !matchLandlord(kn.landlord, me).error;
+    }));
+    if (!typed) lines.push({ name: `${name} - Cash`, utr: "", cash: true, dates: [], line: "(Approved through this bank)", fromBankApproval: true });
+  }
+  if (lines.length) d.cashReplies = [...(d.cashReplies || []), { messageId: first.messageId, from: first.from, sentAt: first.sentAt, sentDate: first.sentDate, cashLines: lines }];
+}
 
 const LOCK_ID = "gmail_utr_lock";
 
@@ -84,7 +107,7 @@ function buildRunSummary({ ctx, startedAt, started, scope, pendingTotal, results
     errors: results.filter((r) => r.status === "gmail_error" || r.status === "database_error").map((r) => ({ billNumber: r.billNumber, dueMonth: r.dueMonth || "", status: r.status, reason: r.reason || "" })),
   };
 }
-const UTR_SHAPE = /^[A-Za-z0-9]{12,30}$/;
+const UTR_SHAPE = /^[A-Za-z0-9]{5,30}$/;
 
 /**
  * Bank Narration of the Finance "Payment Uploaded" table -> p.narration (saved as the ledger remark instead of the static text).
@@ -165,18 +188,26 @@ const istDate = (value) => {
 /** Is this UTR already stored anywhere on the site (ledger, history, GST, outstanding)? */
 function utrAlreadyUsed(media, utr, opts = {}) {
   const same = (v) => String(v || "").trim().toLowerCase() === utr.toLowerCase();
-  if ((media.ledger || []).some((e) => same(e.utrNumber))) return true;
-  if ((media.withGst1Ledger || []).some((e) => same(e.utrNumber))) return true;
-  if ((media.gstBalanceHistory || []).some((e) => same(e.utrNumber))) return true;
+  // ONE UTR listed by Finance for several Bill Numbers of the same thread ("Landlord1 - <BillNo1> : X", "Landlord1 - <BillNo2> : X"):
+  // a stored copy of it is not a duplicate when it sits on one of THOSE bills (opts.allowBills = their Bill Numbers, lower-case).
+  const allow = opts.allowBills && opts.allowBills.length ? new Set(opts.allowBills.map((b) => String(b).toLowerCase())) : null;
+  const billOfDue = new Map();
+  if (allow) for (const r of media.rentalDue || []) billOfDue.set(String(r._id), String(r.adinn_ooh_bills || "").toLowerCase());
+  const used = (e) => same(e.utrNumber) && !(allow && allow.has(billOfDue.get(String(e.rentalDueId)) || "\u0000"));
+  if ((media.ledger || []).some(used)) return true;
+  if ((media.withGst1Ledger || []).some(used)) return true;
+  if ((media.gstBalanceHistory || []).some(used)) return true;
   for (const y of media.ledgerHistory || []) {
-    for (const m of y.months || []) if ((m.entries || []).some((e) => same(e.utrNumber))) return true;
+    for (const m of y.months || []) if ((m.entries || []).some(used)) return true;
   }
   // New Bill / Advance Bill payments live in arrearsDue[].payments[]
   for (const b of media.arrearsDue || []) {
-    if ((b.payments || []).some((p) => same(p.utrNumber) && !(opts.except && opts.except(b, p)))) return true;
+    if ((b.payments || []).some((p) => same(p.utrNumber) && !(opts.except && opts.except(b, p)) && !(allow && allow.has(String(b.adinn_ooh_bills || "").toLowerCase())))) return true;
   }
   return false;
 }
+/** Bill Numbers the reply lists together with this UTR (empty when it was not listed for several bills). */
+const commonBillsOf = (d, utr) => ((d && d.commonUtrBills) || {})[String(utr || "").toUpperCase()] || [];
 
 function createUtrProcessor(deps = {}) {
   const getMedia = () => deps.Media || require("../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
@@ -283,6 +314,7 @@ function createUtrProcessor(deps = {}) {
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
+    addBankApprovedCash(d, item.perLandlordMapping.landlords.filter((l) => l.state === "pending" && l.paymentMode === "Cash" && !l.cashCompanion).map((l) => l.name));
     const cashReps = d.cashReplies || [];
     if (!(d.replies || []).length && !cashReps.length) return done("utr_not_found");
     // A reply whose lines name NOBODY of this bill (every name is "not found", e.g. a mail pasted from another bill) is not
@@ -323,7 +355,7 @@ function createUtrProcessor(deps = {}) {
       const utr = mp.line.utr;
       const who = mp.landlord.name;
       if (!UTR_SHAPE.test(utr) || !/\d/.test(utr)) return done("utr_not_found", "invalid_utr", { ...gm, landlordMappingProblems: [{ reason: "invalid_utr", name: who }] });
-      if (utrAlreadyUsed(fresh.media, utr)) return done("ambiguous_mapping", "utr_already_used_on_this_site", { ...gm, landlordMappingProblems: [{ reason: "utr_already_used_on_this_site", name: who }] });
+      if (utrAlreadyUsed(fresh.media, utr, { allowBills: commonBillsOf(d, utr) })) return done("ambiguous_mapping", "utr_already_used_on_this_site", { ...gm, landlordMappingProblems: [{ reason: "utr_already_used_on_this_site", name: who }] });
       const slot = fresh.current.pendingPayments.find((p) => p.landOwnerId === mp.landlord.landOwnerId && p.paymentType === "online_rent") || fresh.current.pendingPayments.find((p) => p.landOwnerId === mp.landlord.landOwnerId && p.paymentType === "cash");
       if (!slot) return done("ambiguous_mapping", "no_auto_processable_payment", { ...gm, landlordMappingProblems: [{ reason: "no_open_payment", name: who }] });
       const paid = resolvePaidDate({ explicitDates: mp.line.dates, sentDate: reply.sentDate }, { approvalDate: fresh.current.approvalDate, now });
@@ -356,7 +388,7 @@ function createUtrProcessor(deps = {}) {
       const found = [];
       for (const r of d.cashReplies || []) for (const cl of r.cashLines || []) {
         const sc = splitCashName(cl.name); if (!sc) continue;
-        const kn = splitNameKind(sc.landlord); if (kn.kind === "gst" || !kn.landlord) continue;
+        const kn = splitNameKind(sc.landlord, pm.landlords); if (kn.kind === "gst" || !kn.landlord) continue;
         const m = matchLandlord(kn.landlord, pm.landlords);
         if (!m.error && m.landlord.landOwnerId === l.landOwnerId) found.push({ line: cl, reply: r });
       }
@@ -448,6 +480,7 @@ function createUtrProcessor(deps = {}) {
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
     // a Cash rent has no UTR: "Cash" / "Rent - Cash [- Paid Date: ..]" lines are enough for the rent payment
+    if (item.gstSplitMapping.slots.some((x) => x.kind === "rent" && x.paymentMode === "Cash") && !item.gstSplitMapping.slots.some((x) => x.kind === "rent" && x.paymentMode === "Online") && item.gstSplitMapping.landlord) addBankApprovedCash(d, [item.gstSplitMapping.landlord.name]);
     const cashSlotOpen = item.gstSplitMapping.slots.some((x) => x.kind === "rent" && x.paymentMode === "Cash");
     const cashAvail = cashSlotOpen && (d.cashReplies || []).length > 0;
     if (!cashAvail && (d.extractionStatus !== "found" || !(d.replies || []).length)) return done("utr_not_found");
@@ -467,7 +500,7 @@ function createUtrProcessor(deps = {}) {
     const mail = validateAgainstMail(d.approvalMailLandlords, sm.landlord ? [sm.landlord] : []);
     if (mail.status === "mismatch") return done("ambiguous_mapping", mail.problems[0].reason, { ...gm, splitProblems: mail.problems });
 
-    const map = mapPaymentKinds(d.replies);
+    const map = mapPaymentKinds(d.replies, sm.landlord);
     // Cash lines of the thread that belong to the RENT payment: "Cash", "Rent - Cash", "<landlord> - Cash", "<landlord> - Rent - Cash".
     // "GST - Cash" (or any other label) is never a payment: GST is always an Online UTR.
     const cashRent = [];
@@ -480,7 +513,7 @@ function createUtrProcessor(deps = {}) {
         if (part !== null) {
           if (part === "" || classifyPaymentLabel(part) === "rent") ok = true;
           else if (classifyPaymentLabel(part) !== "gst") {
-            const kn = splitNameKind(part);
+            const kn = splitNameKind(part, sm.landlord ? [sm.landlord] : null);
             ok = (kn.kind === null || kn.kind === "rent") && !!sm.landlord && !matchLandlord(kn.landlord, [sm.landlord]).error;
           }
         }
@@ -514,7 +547,7 @@ function createUtrProcessor(deps = {}) {
       const m = map.byKind[slot.kind];
       if (!m) { notYet.push(slot.kind); continue; } // no labelled line yet: this payment simply stays pending
       if (!UTR_SHAPE.test(m.utr) || !/\d/.test(m.utr)) { blocked.push({ kind: slot.kind, reason: "invalid_utr" }); continue; }
-      if (utrAlreadyUsed(fresh.media, m.utr)) { blocked.push({ kind: slot.kind, reason: "utr_already_used_on_this_site" }); continue; }
+      if (utrAlreadyUsed(fresh.media, m.utr, { allowBills: commonBillsOf(d, m.utr) })) { blocked.push({ kind: slot.kind, reason: "utr_already_used_on_this_site" }); continue; }
       const paid = resolvePaidDate({ explicitDates: m.line.dates, sentDate: m.reply.sentDate }, { approvalDate: fresh.current.approvalDate, now });
       if (!paid.date) { blocked.push({ kind: slot.kind, reason: "paid_date_not_determined" }); continue; }
       plan.push({
@@ -615,6 +648,7 @@ function createUtrProcessor(deps = {}) {
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
+    addBankApprovedCash(d, item.landlordGstMapping.slots.filter((s) => s.kind === "rent" && s.paymentMode === "Cash" && !item.landlordGstMapping.slots.some((x) => x.kind === "rent" && x.landOwnerId === s.landOwnerId && x.paymentMode === "Online")).map((s) => s.landOwnerName));
     if (!(d.replies || []).length && !(d.cashReplies || []).length) return done("utr_not_found");
     const gm = { gmailThreadId: d.threadId || "", ...(d.replyLink ? { replyLink: d.replyLink } : {}) };
 
@@ -644,7 +678,7 @@ function createUtrProcessor(deps = {}) {
     const cashBy = new Map();
     for (const r of d.cashReplies || []) for (const cl of r.cashLines || []) {
       const sc = splitCashName(cl.name); if (!sc) continue;
-      const kn = splitNameKind(sc.landlord); if (kn.kind === "gst" || !kn.landlord) continue;
+      const kn = splitNameKind(sc.landlord, mg.landlords); if (kn.kind === "gst" || !kn.landlord) continue;
       const m = matchLandlord(kn.landlord, mg.landlords);
       if (m.error) continue;
       cashBy.set(m.landlord.landOwnerId, [...(cashBy.get(m.landlord.landOwnerId) || []), { line: cl, reply: r }]);
@@ -677,7 +711,7 @@ function createUtrProcessor(deps = {}) {
       if (distinct.length > 1) { blocked.push({ ...who, reason: "conflicting_utr_for_landlord_payment" }); continue; }
       const m = list[0];
       if (!UTR_SHAPE.test(m.utr) || !/\d/.test(m.utr)) { blocked.push({ ...who, reason: "invalid_utr" }); continue; }
-      if (utrAlreadyUsed(fresh.media, m.utr)) { blocked.push({ ...who, reason: "utr_already_used_on_this_site" }); continue; }
+      if (utrAlreadyUsed(fresh.media, m.utr, { allowBills: commonBillsOf(d, m.utr) })) { blocked.push({ ...who, reason: "utr_already_used_on_this_site" }); continue; }
       const paid = resolvePaidDate({ explicitDates: m.line.dates, sentDate: m.reply.sentDate }, { approvalDate: fresh.current.approvalDate, now });
       if (!paid.date) { blocked.push({ ...who, reason: "paid_date_not_determined" }); continue; }
       plan.push({
@@ -811,6 +845,7 @@ function createUtrProcessor(deps = {}) {
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
     const replies = d.extractionStatus === "found" ? d.replies || [] : [];
+    addBankApprovedCash(d, item.slots.filter((s) => s.kind !== "gst" && s.paymentMode === "Cash" && !item.slots.some((x) => x.kind !== "gst" && x.landOwnerId === s.landOwnerId && x.paymentMode !== "Cash")).map((s) => s.landOwnerName));
     const cashReplies = d.cashReplies || [];
     if (!replies.length && !cashReplies.length) return done("utr_not_found");
     const gm = { gmailThreadId: d.threadId || "", ...(d.replyLink ? { replyLink: d.replyLink } : {}) };
@@ -883,7 +918,7 @@ function createUtrProcessor(deps = {}) {
       const ownPart = (b, p) =>
         groupIds.has(String(b._id)) && p.type === (first.kind === "gst" ? "gst" : "rental") &&
         (idStrOf(p.landOwnerId) === first.landOwnerId || (!p.landOwnerId && first.scope === "bill"));
-      if (utrAlreadyUsed(fresh.media, m.utr, { except: ownPart })) { blocked.push({ ...who, reason: "utr_already_used_on_this_site" }); continue; }
+      if (utrAlreadyUsed(fresh.media, m.utr, { except: ownPart, allowBills: commonBillsOf(d, m.utr) })) { blocked.push({ ...who, reason: "utr_already_used_on_this_site" }); continue; }
       const paid = resolvePaidDate({ explicitDates: m.line.dates, sentDate: m.reply.sentDate }, { approvalDate: cur.approvalDate, now });
       if (!paid.date) { blocked.push({ ...who, reason: "paid_date_not_determined" }); continue; }
       plan.push({ ...common, utr: m.utr, paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, sourceMessageId: m.reply.messageId });
@@ -975,6 +1010,7 @@ function createUtrProcessor(deps = {}) {
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
     const landlord = item.landlords[0];
+    addBankApprovedCash(d, [landlord.name]);
     const lines = [];
     const ignored = [];
     for (const r of d.cashReplies || []) {
@@ -1101,7 +1137,7 @@ function createUtrProcessor(deps = {}) {
     if (!fresh.current) return done("already_processed", "no_longer_pending", { utr, ...gm });
     if (fresh.registryProblem) return done("ambiguous_mapping", fresh.registryProblem, { utr, ...gm });
     if (!fresh.current.mappingSafe) return done("ambiguous_mapping", fresh.current.skipReason, { utr, ...gm });
-    if (utrAlreadyUsed(fresh.media, utr)) return done("ambiguous_mapping", "utr_already_used_on_this_site", { utr, ...gm });
+    if (utrAlreadyUsed(fresh.media, utr, { allowBills: commonBillsOf(d, utr) })) return done("ambiguous_mapping", "utr_already_used_on_this_site", { utr, ...gm });
 
     const slot = fresh.current.pendingPayments.find((p) => p.autoProcess); // exactly one rent slot (Cash or Online); never GST
     if (!slot) return done("ambiguous_mapping", "no_auto_processable_payment", { utr, ...gm });

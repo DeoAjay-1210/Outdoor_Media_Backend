@@ -123,11 +123,11 @@ function mapLineToSlot(line, stored) {
   const only = classifyPaymentLabel(name); // "GST" / "Rent" alone (no landlord named)
   if (only) { landlordName = ""; kind = only; }
   else if (stored.flow === "rental") {
-    const k = splitNameKind(name);
+    const k = splitNameKind(name, stored.landlords);
     landlordName = k.landlord;
     kind = k.kind;
   } else {
-    const k = splitArrearsName(name);
+    const k = splitArrearsName(name, stored.landlords);
     if (k.billType && k.billType !== stored.flow) return { error: "bill_type_mismatch" };
     landlordName = k.landlord;
     kind = k.kind === "cash" ? "cash" : k.kind;
@@ -139,6 +139,8 @@ function mapLineToSlot(line, stored) {
     if (m.error) return { error: m.error };
     pool = pool.filter((s) => s.landOwnerId === m.landlord.landOwnerId);
   } else if (new Set(pool.map((s) => s.landOwnerId)).size > 1) return { error: "unnamed_utr_line_with_several_landlords" };
+  // a line that names its Bill Number without GST ("Aran - <BillNo> : UTR") is the RENT UTR of that bill
+  if (!kind && landlordName && line.message && line.message.explicitBill) kind = "rent";
   if (kind) pool = pool.filter((s) => s.kind === kind);
   if (pool.length !== 1) return { error: pool.length ? "line_matches_several_payments" : "line_matches_no_paid_payment" };
   return { slot: pool[0] };

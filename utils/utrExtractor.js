@@ -13,13 +13,13 @@ const LABEL =
   "(?:UTR(?:\\s*(?:No\\.?|Number|Num|Ref(?:erence)?(?:\\s*(?:No\\.?|Number))?|#))?|Transaction\\s+Ref(?:erence)?(?:\\s*(?:No\\.?|Number|Num|ID))?|Txn\\s*Ref(?:erence)?(?:\\s*(?:No\\.?|Number))?|Bank\\s+Ref(?:erence)?\\s*(?:No\\.?|Number))";
 // separator between label and value: ":", "-", "–", "=", "|" or just spaces / tab
 const SEP = "[ \\t]*(?:[:=|\\-–—]+)?[ \\t]*";
-// 12-30 alphanumerics with at least one digit (HDFC92023012200543116, 412345678901, SBIN...)
-const VALUE = "([A-Za-z0-9]{12,30})";
+// ANY value Finance writes after the UTR label: 5-30 alphanumerics with at least one digit (SBIN92023012200543116, 412345678901, UTR7843274, jfiew4343, 1325ASD)
+const VALUE = "([A-Za-z0-9]{5,30})";
 const SAME_LINE = new RegExp(`\\b${LABEL}(?![A-Za-z0-9])${SEP}${VALUE}(?![A-Za-z0-9])`, "gi");
 const LABEL_ONLY_LINE = new RegExp(`^\\W*${LABEL}\\W*$`, "i");
 const VALUE_ONLY_LINE = new RegExp(`^\\W*${VALUE}\\W*$`);
 
-const hasDigits = (s) => /\d/.test(s) && /\d{6,}/.test(s);
+const hasDigits = (s) => /\d/.test(s); // letters only ("UTR : pending", "UTR: NA") is never a UTR
 
 /** Drops quoted history: ">" lines and everything after an "On ... wrote:" / "From:" header. */
 const stripQuoted = (text) => {

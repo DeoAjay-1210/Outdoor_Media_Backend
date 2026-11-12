@@ -66,18 +66,29 @@ const lookupLandlordUtrs = async (billNumber, maxResults = 10) => {
   const approval = th.messages.find((m) => /Owner Name/i.test(stripQuoted(m.bodyText)) && containsExactBill(stripQuoted(m.bodyText), billNumber));
   const replies = th.messages
     .filter((m) => m !== approval)
-    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), lines: extractLandlordUtrLines(m.bodyText) }))
+    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), ...(m.explicitBill ? { billExplicit: true } : {}), lines: extractLandlordUtrLines(m.bodyText) }))
     .filter((r) => r.lines.length > 0);
   // Cash payments have no UTR: "<landlord> - Cash [- Paid Date: ...]" lines (never read from the approval mail itself)
   const cashReplies = th.messages
     .filter((m) => m !== approval && !/Owner Name/i.test(stripQuoted(m.bodyText)))
-    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), cashLines: extractCashLines(m.bodyText) }))
+    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), ...(m.explicitBill ? { billExplicit: true } : {}), cashLines: extractCashLines(m.bodyText) }))
     .filter((r) => r.cashLines.length > 0);
   return {
     message: replies.length ? "Landlord UTR lines found (read-only, no database update)" : "Bill Number found, but no landlord UTR line in any reply",
-    data: { ...common, threadId: th.id, extractionStatus: replies.length ? "found" : "utr_not_found", cashReplies, bankRows: bankRowsOf(bankMessages || th.messages, approval), ...(replyLink ? { replyLink } : {}), approvalMailLandlords: approval ? parseApprovalMailLandlords(approval.bodyText) : [], replies },
+    data: { ...common, threadId: th.id, extractionStatus: replies.length ? "found" : "utr_not_found", cashReplies, approvedBank: approvedBankOf(bankMessages || th.messages, approval), ...(replyLink && replyLink.commonUtrBills ? { commonUtrBills: replyLink.commonUtrBills } : {}), bankRows: bankRowsOf(bankMessages || th.messages, approval), ...(replyLink ? { replyLink } : {}), approvalMailLandlords: approval ? parseApprovalMailLandlords(approval.bodyText) : [], replies },
   };
 };
+
+/**
+ * Finance's "Approved through this bank" mail(s) of this bill's chain (never the approval mail itself): the Paid Date of a CASH-ONLY
+ * payment is the Gmail Date header of that mail. -> [{ messageId, from, sentAt, sentDate }]
+ */
+// "Approved through this bank", "Approved thro axis bank", "Approved thru HDFC bank", "Approved via the bank" ... (up to 3 words, e.g. the bank name, before "bank")
+const APPROVED_BANK = /\bapproved\s+(?:through|thru|thro|via|by|from)\.?\s+(?:[A-Za-z&.()-]+\s+){0,3}?bank\b/i;
+const approvedBankOf = (messages, approval) =>
+  (messages || [])
+    .filter((m) => m !== approval && !/Owner Name/i.test(stripQuoted(m.bodyText)) && APPROVED_BANK.test(stripQuoted(m.bodyText)))
+    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date) }));
 
 /** Bank table rows of the Finance payment confirmation(s) of this bill's thread (never the approval mail itself). */
 const bankRowsOf = (messages, approval) => collectBankRows((messages || []).filter((m) => m !== approval && !/Owner Name/i.test(stripQuoted(m.bodyText)))).rows;
@@ -197,6 +208,7 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
       messageDate: src.date,
       paidDateInfo,
       ...(withUtr[0].replyLink ? { replyLink: withUtr[0].replyLink } : {}),
+      ...(withUtr[0].replyLink && withUtr[0].replyLink.commonUtrBills ? { commonUtrBills: withUtr[0].replyLink.commonUtrBills } : {}),
       bankRows: collectBankRows(withUtr[0].bankMessages).rows,
       extractionStatus: "found",
       ...(correctedFromEarlier ? { correctedFromEarlier: true } : {}),
@@ -233,4 +245,4 @@ const lookupBillThread = async (billNumber, maxResults = 10) => {
   return { status: "ok", threadId: th.id, messages: th.messages, approval, replyLink };
 };
 
-module.exports = { lookupBillThread, lookupUtrByBillNumber, lookupLandlordUtrs, BILL_NUMBER_FORMAT, containsExactBill };
+module.exports = { approvedBankOf, APPROVED_BANK, lookupBillThread, lookupUtrByBillNumber, lookupLandlordUtrs, BILL_NUMBER_FORMAT, containsExactBill };
