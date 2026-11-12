@@ -3221,6 +3221,93 @@ async function revisionSiteBills(mediaId) {
   });
   const months = [...byMonth.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
   const lastBill = months[months.length - 1] || null;
+  // ✅ NEW — every bill of a month (main bill / New Bill / Advance) with its own
+  // status → bills[].monthBills; a month with only a New Bill / Advance (no main
+  // bill yet) gets its own row too
+  const billRow = (billType, b, paid) => {
+    const cmd = Number(b.approvalStatus) === 3 ? 1 : 0;
+    return {
+      billType,
+      rentalDueId: b._id,
+      adinn_ooh_bills: b.adinn_ooh_bills || null,
+      amount: Number(b.netPayable || 0),
+      withGst: Number(b.withGst || 0),
+      cmdApproved: cmd,
+      newBillGenerated: billType === "newBill" ? 1 : 0,
+      advanceGenerated: billType === "advance" ? 1 : 0,
+      UTREntry: paid ? 2 : cmd ? 1 : 0,
+    };
+  };
+  const monthBillsOf = new Map(); // dueMonth label → rows
+  const addMonthBill = (label, row) => {
+    if (!monthBillsOf.has(label)) monthBillsOf.set(label, []);
+    monthBillsOf.get(label).push(row);
+  };
+  const monthKeyOfLabel = new Map(); // label → monthKey (sort)
+  (media.rentalDue || [])
+    .filter((b) => b && monthKey(b.dueDate) !== null && monthKey(b.dueDate) !== undefined)
+    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))
+    .forEach((b) => {
+      const k = monthKey(b.dueDate);
+      const label = byMonth.get(k)?.dueMonth || b.dueMonth || monthLabelOfKey(k);
+      monthKeyOfLabel.set(label, k);
+      addMonthBill(label, billRow("bill", b, billHasPayment(media, [b._id])));
+    });
+  (media.arrearsDue || []).forEach((b) => {
+    if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+    const k = b.dueDate ? monthKey(b.dueDate) : null;
+    const label = b.dueMonth || (k !== null ? monthLabelOfKey(k) : "");
+    if (!label) return;
+    if (!monthKeyOfLabel.has(label) && k !== null) monthKeyOfLabel.set(label, k);
+    const paid =
+      (b.payments || []).length > 0 || Number(b.rentPaid || 0) > 0 || Number(b.gstPaid || 0) > 0;
+    addMonthBill(label, billRow(b.type === "advance" ? "advance" : "newBill", b, paid));
+  });
+  // ✅ NEW — months changed by a rent revision
+  const revisedMonths = new Set([...extraBillMonths.arrears, ...extraBillMonths.advance]);
+  (media.arrearsDue || []).forEach((b) => {
+    if (b && (b.type === "arrears" || b.type === "advance") && b.dueMonth) revisedMonths.add(b.dueMonth);
+  });
+  (rp.rentRevisionKeptMonths || []).forEach((k) => k && k.dueMonth && revisedMonths.add(k.dueMonth));
+  (media.rentalDue || []).forEach((b) => {
+    if (!b) return;
+    const changed =
+      b.decreaseRevisionId ||
+      (Array.isArray(b.approvalResetHistory) && b.approvalResetHistory.some((h) => h && h.cancelledAt));
+    if (changed) revisedMonths.add(byMonth.get(monthKey(b.dueDate))?.dueMonth || b.dueMonth);
+  });
+  const billMonthRows = months.map((m) => ({
+    dueMonth: m.dueMonth,
+    withGst: m.withGst,
+    cmdApproved: m.cmdApproved,
+    newBillGenerated: extraBillMonths.arrears.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+    advanceGenerated: extraBillMonths.advance.has(m.dueMonth) ? 1 : 0, // ✅ NEW
+    // ✅ NEW — 0 not CMD approved, 1 CMD approved (no payment), 2 ledger / UTR entry done
+    UTREntry: billHasPayment(media, m.billIds) ? 2 : m.cmdApproved ? 1 : 0,
+    // ✅ CHANGED — only a month changed by a revision (New Bill / Advance, or the
+    // bill decreased / cancelled / kept by a revision); else []
+    monthBills: revisedMonths.has(m.dueMonth) ? monthBillsOf.get(m.dueMonth) || [] : [],
+  }));
+  const mainLabels = new Set(months.map((m) => m.dueMonth));
+  [...monthBillsOf.keys()]
+    .filter((label) => !mainLabels.has(label))
+    .forEach((label) =>
+      billMonthRows.push({
+        dueMonth: label,
+        withGst: 0,
+        cmdApproved: 0,
+        newBillGenerated: extraBillMonths.arrears.has(label) ? 1 : 0,
+        advanceGenerated: extraBillMonths.advance.has(label) ? 1 : 0,
+        UTREntry: 0,
+        monthBills: monthBillsOf.get(label),
+      }),
+    );
+  billMonthRows.sort((a, b) => (monthKeyOfLabel.get(a.dueMonth) ?? 0) - (monthKeyOfLabel.get(b.dueMonth) ?? 0));
+  // ✅ NEW — owner GST % site → owner %, eg. 18 (not the effective rate)
+  const ownerGstPct = Math.max(
+    0,
+    ...(media.landOwners || []).filter((o) => Number(o.gstApplicable) === 1).map((o) => Number(o.gstPercentage || 0)),
+  );
   const next = nextBillDateAfter(media, lastBill ? lastBill.dueDate : new Date());
   const freq = Number(rp.paymentFrequency) || null;
   const gstPercentage = gstPercentageFor(media, lastBill ? lastBill.dueDate : new Date());
@@ -3230,7 +3317,7 @@ async function revisionSiteBills(mediaId) {
     mediaCode,
     mediaName,
     currentRent: Number(rp.totalRentalAmount || 0),
-    gstPercentage,
+    gstPercentage: ownerGstPct > 0 && gstPercentage > 0 ? ownerGstPct : gstPercentage, // ✅ CHANGED — owner %
     siteHasGst: gstPercentage > 0,
     paymentFrequency: freq,
     paymentFrequencyLabel: freq ? PAYMENT_FREQUENCY_LABELS[freq] || "" : "",
@@ -3241,15 +3328,7 @@ async function revisionSiteBills(mediaId) {
     nextBillingDate: ymd(rp.nextBillingDate),
     nextBillMonth: next ? monthLabelOfKey(monthKey(next)) : "",
     billCount: months.length,
-    bills: months.map((m) => ({
-      dueMonth: m.dueMonth,
-      withGst: m.withGst,
-      cmdApproved: m.cmdApproved,
-      newBillGenerated: extraBillMonths.arrears.has(m.dueMonth) ? 1 : 0, // ✅ NEW
-      advanceGenerated: extraBillMonths.advance.has(m.dueMonth) ? 1 : 0, // ✅ NEW
-      // ✅ NEW — 0 not CMD approved, 1 CMD approved (no payment), 2 ledger / UTR entry done
-      UTREntry: billHasPayment(media, m.billIds) ? 2 : m.cmdApproved ? 1 : 0,
-    })),
+    bills: billMonthRows, // ✅ CHANGED — + monthBills, + New Bill / Advance only months
     // ✅ NEW — the next (future) bill month only; null when no next bill
     futureMonthBill: next ? { dueMonth: monthLabelOfKey(monthKey(next)) } : null,
   };
