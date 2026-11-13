@@ -206,6 +206,15 @@ function utrAlreadyUsed(media, utr, opts = {}) {
   }
   return false;
 }
+/** The reply lines of a thread as Finance wrote them (name - UTR / Cash), for the manual-review report. */
+function replyLinesOf(d) {
+  const out = [];
+  for (const r of d.replies || []) for (const l of r.lines || []) out.push(l.line ? String(l.line) : `${l.name ? l.name + " - " : ""}UTR : ${l.utr}`);
+  for (const r of d.cashReplies || []) for (const l of r.cashLines || []) if (!l.fromBankApproval) out.push(String(l.line || l.name));
+  if (!out.length && d.utr) { const names = d.utrLineNames && d.utrLineNames.length ? d.utrLineNames : [""]; names.forEach((n) => out.push(`${n ? n + " - " : ""}UTR : ${d.utr}`)); }
+  if (!out.length) (d.wrongNames || []).forEach((w) => out.push(`${w.name ? w.name + " - " : ""}UTR : ${w.utr}`));
+  return [...new Set(out)].slice(0, 12);
+}
 /** Bill Numbers the reply lists together with this UTR (empty when it was not listed for several bills). */
 const commonBillsOf = (d, utr) => ((d && d.commonUtrBills) || {})[String(utr || "").toUpperCase()] || [];
 
@@ -310,6 +319,7 @@ function createUtrProcessor(deps = {}) {
       return e;
     }
     const d = found.data || {};
+    item._d = d;
     if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
@@ -477,6 +487,7 @@ function createUtrProcessor(deps = {}) {
       return e;
     }
     const d = found.data || {};
+    item._d = d;
     if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
@@ -576,6 +587,9 @@ function createUtrProcessor(deps = {}) {
     const extra = { ...gm, ...(notYet.length ? { pendingKinds: notYet } : {}), ...(blocked.length ? { blockedKinds: blocked } : {}), ...(map.ignored.length || cashIgnored.length ? { ignoredLines: [...map.ignored, ...cashIgnored] } : {}) };
     if (!plan.length) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
+      // only lines naming somebody who is not this bill's landlord: nothing is saved, and it is reported (a later reply with the right name still saves)
+      const wrongNames = map.ignored.filter((x) => x.reason === "landlord_name_not_found");
+      if (wrongNames.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: wrongNames });
       return done("utr_not_found", "", extra);
     }
     attachNarration(plan, d, [sm.landlord]); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
@@ -646,6 +660,7 @@ function createUtrProcessor(deps = {}) {
       return e;
     }
     const d = found.data || {};
+    item._d = d;
     if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
@@ -669,7 +684,10 @@ function createUtrProcessor(deps = {}) {
     if (mail.status === "mismatch") return done("ambiguous_mapping", mail.problems[0].reason, { ...gm, landlordMappingProblems: mail.problems });
 
     const map = mapLandlordKinds(d.replies, mg.landlords);
-    if (map.problems.length) return done("ambiguous_mapping", map.problems[0].reason, { ...gm, landlordMappingProblems: map.problems, ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) });
+    // a line naming nobody of this bill (a wrong name, a later reply may carry the right one) never blocks the correct lines; it only decides when NOTHING can be saved
+    const nameOnly = map.problems.filter((p) => p.reason === "landlord_name_not_found");
+    const hardProblems = map.problems.filter((p) => p.reason !== "landlord_name_not_found");
+    if (hardProblems.length) return done("ambiguous_mapping", hardProblems[0].reason, { ...gm, landlordMappingProblems: hardProblems, ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) });
     // one UTR can pay only one payment: the same UTR on two payments blocks the whole bill
     const owners = new Map();
     for (const [key, list] of map.byKey) for (const u of new Set(list.map((x) => x.utr.toUpperCase()))) owners.set(u, [...(owners.get(u) || []), key]);
@@ -741,6 +759,7 @@ function createUtrProcessor(deps = {}) {
     const extra = { ...gm, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) };
     if (!plan.length) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
+      if (nameOnly.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: nameOnly });
       return done("utr_not_found", "", extra);
     }
     attachNarration(plan, d, mg.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
@@ -842,6 +861,7 @@ function createUtrProcessor(deps = {}) {
       return e;
     }
     const d = found.data || {};
+    item._d = d;
     if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
@@ -872,7 +892,10 @@ function createUtrProcessor(deps = {}) {
     replies.forEach((r) => merged.set(r.messageId, { ...r }));
     cashReplies.forEach((r) => merged.set(r.messageId, { ...(merged.get(r.messageId) || r), cashLines: r.cashLines }));
     const map = mapArrearsLines([...merged.values()], cur.landlords, { billType: cur.billKind, gstHold: cur.gstHold });
-    if (map.problems.length) return done("ambiguous_mapping", map.problems[0].reason, { ...gm, landlordMappingProblems: map.problems, ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) });
+    // same rule as the other flows: a wrong name never blocks the lines that carry the right name
+    const nameOnly = map.problems.filter((p) => p.reason === "landlord_name_not_found");
+    const hardProblems = map.problems.filter((p) => p.reason !== "landlord_name_not_found");
+    if (hardProblems.length) return done("ambiguous_mapping", hardProblems[0].reason, { ...gm, landlordMappingProblems: hardProblems, ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) });
     // one UTR can pay only one payment: the same UTR on two payments blocks the whole bill (Cash lines have no UTR)
     const byUtr = new Map();
     for (const [key, list] of map.byKey) for (const u of new Set(list.map((x) => x.utr.toUpperCase()).filter(Boolean))) byUtr.set(u, [...(byUtr.get(u) || []), key]);
@@ -938,6 +961,7 @@ function createUtrProcessor(deps = {}) {
     const extra = { ...gm, billKind: cur.billKind, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(ignoredLines.length ? { ignoredLines } : {}) };
     if (!plan.length) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
+      if (nameOnly.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: nameOnly });
       return done("utr_not_found", "", extra);
     }
     attachNarration(plan, d, cur.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
@@ -1008,6 +1032,7 @@ function createUtrProcessor(deps = {}) {
       return e;
     }
     const d = found.data || {};
+    item._d = d;
     if (d.extractionStatus === "multiple_review_required") return done("multiple_review_required", "more_than_one_utr_or_conversation");
     if (d.extractionStatus === "ambiguous_bill_numbers") return done("ambiguous_mapping", "thread_mentions_other_bill_numbers");
     if (d.extractionStatus === "reply_not_linked") return done("ambiguous_mapping", d.linkReason || "reply_not_linked_to_approval_mail", { gmailThreadId: d.threadId || "", replyMessageIds: d.replyMessageIds || [] });
@@ -1076,6 +1101,7 @@ function createUtrProcessor(deps = {}) {
     const base = { billNumber: item.billNumber, ...(item.billKind ? { billKind: item.billKind } : {}), dueMonth: item.dueMonth || "", mediaId: item.mediaId, rentalDueIds: item.rentalDueIds, landOwnerId: (item.pendingPayments || []).find((p) => p.autoProcess)?.landOwnerId || item.pendingPayments?.[0]?.landOwnerId || "" };
     const done = async (status, reason = "", extra = {}) => {
       const entry = { ...base, status, reason, ...extra };
+      if (["ambiguous_mapping", "multiple_review_required"].includes(status) && item._d) { const rl = replyLinesOf(item._d); if (rl.length) entry.replyLines = rl; }
       // A block decided BEFORE Gmail is touched (list rules, switches) is re-evaluated on every run: it costs no Gmail call, so it
       // is neither logged nor put in a cooldown (a stale "blocked" log must never hide a bill after a switch or rule changes).
       if (status === "ambiguous_mapping" && BLOCKED_BEFORE_GMAIL.has(reason)) entry.preGmail = true;
@@ -1106,16 +1132,18 @@ function createUtrProcessor(deps = {}) {
 
     let found;
     try {
-      found = await withTimeout(lookup(item.billNumber), c.gmailTimeoutMs, "Gmail lookup");
+      found = await withTimeout(lookup(item.billNumber, undefined, { landlords: (item.landlords || []).map((l) => ({ landOwnerId: l.landOwnerId, name: l.name })) }), c.gmailTimeoutMs, "Gmail lookup");
     } catch (err) {
       const e = await done("gmail_error", err.message, { httpStatus: err.status || 0 });
       e.fatal = [401, 403].includes(Number(err.status)); // auth problem: every next bill would fail too
       return e;
     }
     const d = found.data || {};
+    item._d = d;
     const gm = { gmailThreadId: d.gmailThreadId || "", ...(d.replyLink ? { replyLink: d.replyLink } : {}), sourceMessageId: d.sourceMessageId || "", senderEmail: d.senderEmail || "", messageDate: d.messageDate || "" };
 
     if (d.extractionStatus === "bill_not_found") return done("bill_not_found");
+    if (d.extractionStatus === "wrong_landlord_name") return done("ambiguous_mapping", "landlord_name_not_found", { landlordMappingProblems: (d.wrongNames || []).map((w) => ({ reason: "landlord_name_not_found", name: w.name })) });
     if (d.extractionStatus === "utr_not_found") {
       // a Cash payment has NO UTR: look for "Cash [- Paid Date: ..]" in the thread (only the paid date is stored)
       if (planned?.paymentType === "cash") return processCashLine(item, ctx, c, done);
@@ -1128,6 +1156,17 @@ function createUtrProcessor(deps = {}) {
 
     const utr = String(d.utr).trim();
     if (!UTR_SHAPE.test(utr) || !/\d/.test(utr)) return done("utr_not_found", "invalid_utr", { utr, ...gm });
+    // a landlord name written on the UTR line must be THE landlord of this bill, otherwise nothing is saved (no name = old format, accepted)
+    // (a wrong-name line is simply ignored when a line with the RIGHT name, or no name, states the same UTR)
+    const nameErrors = [];
+    let nameOk = !(d.utrLineNames || []).length;
+    for (const nm of d.utrLineNames || []) {
+      const who = splitNameKind(nm, item.landlords || []).landlord;
+      if (!who || classifyPaymentLabel(who)) { nameOk = true; continue; }
+      const mm = matchLandlord(who, (item.landlords || []).map((l) => ({ landOwnerId: l.landOwnerId, name: l.name })));
+      if (mm.error) nameErrors.push({ reason: mm.error, name: nm }); else nameOk = true;
+    }
+    if (!nameOk && nameErrors.length) return done("ambiguous_mapping", nameErrors[0].reason, { utr, ...gm, landlordMappingProblems: nameErrors });
 
     // ── re-check against MongoDB immediately before saving ──
     let fresh;

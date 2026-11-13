@@ -11,7 +11,7 @@ const { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted, e
 const { extractExplicitPaymentDates, istDay } = require("./utrPaidDate");
 const { scopeThreadToBill } = require("./gmailReplyLink");
 const { collectBankRows } = require("./bankNarration");
-const { extractLandlordUtrLines, parseApprovalMailLandlords } = require("./landlordUtrParser");
+const { extractLandlordUtrLines, parseApprovalMailLandlords, splitNameKind, classifyPaymentLabel, matchLandlord } = require("./landlordUtrParser");
 
 const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
 
@@ -95,7 +95,9 @@ const bankRowsOf = (messages, approval) => collectBankRows((messages || []).filt
 
 /** Returns { message, data } where data.extractionStatus is one of
  *  bill_not_found | utr_not_found | multiple_review_required | ambiguous_bill_numbers | found. */
-const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
+const lookupUtrByBillNumber = async (billNumber, maxResults = 10, opts = {}) => {
+  const landlordsOfBill = (opts && opts.landlords) || [];
+  const wrongName = []; // UTRs stated only with a landlord name that is not a landlord of this bill: never candidates
   const hits = await Gmail.searchThreads(`"${escapeQuotes(billNumber)}"`, maxResults);
   const threads = [];
   let unlinked = null;
@@ -123,6 +125,20 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
       } // else: not an approval-mail layout (one message printing other Bill Numbers): stays ambiguous_bill_numbers as before
     }
     const r = extractUtrFromThread(th.messages);
+    if (landlordsOfBill.length) {
+      // a UTR written ONLY with a name that is not this bill's landlord is dropped (a later reply with the right name then decides)
+      const bodyOf = new Map(th.messages.map((m) => [m.id, m.bodyText]));
+      r.candidates = r.candidates.filter((cd) => {
+        const names = extractLandlordUtrLines(bodyOf.get(cd.messageId)).filter((l) => l.utr === cd.utr).map((l) => l.name);
+        if (!names.length) return true;
+        const ok = names.some((nm) => {
+          const who = splitNameKind(nm, landlordsOfBill).landlord;
+          return !who || !!classifyPaymentLabel(who) || !matchLandlord(who, landlordsOfBill).error;
+        });
+        if (!ok) wrongName.push({ utr: cd.utr, name: names[0] });
+        return ok;
+      });
+    }
     threads.push({
       threadId: th.id,
       subject: th.subject || "",
@@ -165,6 +181,9 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
     }
   }
 
+  if (!distinct.length && wrongName.length) {
+    return { message: "The UTR was written with a landlord name that is not a landlord of this bill", data: { ...common, utr: null, extractionStatus: "wrong_landlord_name", wrongNames: wrongName } };
+  }
   if (!distinct.length) {
     return { message: "Bill Number found, but no UTR in any matching conversation", data: { ...common, utr: null, extractionStatus: "utr_not_found" } };
   }
@@ -196,12 +215,16 @@ const lookupUtrByBillNumber = async (billNumber, maxResults = 10) => {
   const sourceMsg = msgs.find((m) => m.id === src.messageId) || msgs[0];
   const sentAt = sourceMsg?.sentAt || src.sentAt || src.date || "";
   const paidDateInfo = { explicitDates: explicit, sentAt, sentDate: istDay(sentAt), sourceMessageId: src.messageId };
+  // the name written before the UTR on the line that states it ("Aran - UTR : X" -> "Aran"); "" when the line has no name
+  const utrLineNames = [];
+  msgs.forEach((m) => extractLandlordUtrLines(m.bodyText).forEach((l) => { if (l.utr === src.utr) utrLineNames.push(l.name || ""); }));
 
   return {
     message: "UTR extracted for this Bill Number (read-only, no database update)",
     data: {
       ...common,
       utr: src.utr,
+      utrLineNames,
       gmailThreadId: src.threadId,
       sourceMessageId: src.messageId,
       senderEmail: src.from,

@@ -199,7 +199,9 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
   // the "Rent - UTR" line is the Online part, the Cash part takes its Paid Date from the mail that carries it
   const pairOwner = (id) => { const s = rentSlots.filter((p) => p.landOwnerId === id); return s.length === 2 && s.some((p) => p.paymentType === "cash") && s.some((p) => p.paymentType === "online_rent"); };
   const twoOpen = [...slotCount.entries()].some(([id, n]) => n > 1 && !pairOwner(id));
-  const otherBlockers = reasons.filter((r) => r !== "multiple_landlords" && r !== "no_single_rent_slot");
+  // separate_landlord_bills (every landlord has his own Bill Number, but ONE approval mail / ONE bill row carries them all) does not block the per-landlord
+  // matching: the approval mail must list every landlord (validateAgainstMail), the reply names each landlord, and the payments sit on this one row
+  const otherBlockers = reasons.filter((r) => r !== "multiple_landlords" && r !== "no_single_rent_slot" && r !== "separate_landlord_bills");
   if (twoOpen) otherBlockers.push("landlord_with_two_open_payments");
   // ONE landlord with BOTH a Cash and an Online rent payment open (no GST hold): the same pair rule as for several landlords - his UTR line saves the
   // Online part, the Cash part takes its Paid Date from the mail that carries it (GST-hold bills have their own mapping below)

@@ -63,8 +63,8 @@ test("MM5. mappers: a bill-numbered line without GST is the RENT UTR of a GST-on
   assert.equal(mk.byKey.get("o1|gst")[0].utr, G);
   const ma = mapArrearsLines(rep(`Landlord1 - UTR : ${U}`), [L], { billType: "newBill", gstHold: true });
   assert.equal(ma.byKey.get("o1|rent")[0].utr, U);
-  // an ordinary (not bill-numbered) unlabelled line is still never used on a GST-hold bill
-  const plain = mapArrearsLines([{ messageId: "m", lines: extractLandlordUtrLines(`Landlord1 - UTR : ${U}`) }], [L], { billType: "newBill", gstHold: true });
+  // a line with NO name at all is still never used on a GST-hold bill
+  const plain = mapArrearsLines([{ messageId: "m", lines: extractLandlordUtrLines(`UTR : ${U}`) }], [L], { billType: "newBill", gstHold: true });
   assert.equal(plain.byKey.size, 0);
 });
 
@@ -84,7 +84,7 @@ test("MM7. a landlord whose OWN name ends in 'gst' ('L1 with gst'): its Rent lin
   const rep = (t) => [{ messageId: "m", lines: extractLandlordUtrLines(t) }];
   const keys = (m) => [...m.byKey.entries()].map(([k, v]) => [k, v.map((x) => x.utr)]);
   assert.deepEqual(keys(mapLandlordKinds(rep(`L1 with gst - Rent - UTR : ${U}\nL1 with gst - GST - UTR : ${G}`), L)), [["o1|rent", [U]], ["o1|gst", [G]]]);
-  assert.deepEqual(keys(mapLandlordKinds(rep(`L1 with gst - UTR : ${U}`), L)), []); // unlabelled on a GST-hold bill: never GST, simply not used
+  assert.deepEqual(keys(mapLandlordKinds(rep(`L1 with gst - UTR : ${U}`), L)), [["o1|rent", [U]]]); // named, no GST word: the RENT UTR, never GST
   assert.deepEqual(keys(mapArrearsLines(rep(`L1 with gst - Rent - UTR : ${U}\nL1 with gst - GST - UTR : ${G}`), L, { billType: "newBill", gstHold: true })), [["o1|rent", [U]], ["o1|gst", [G]]]);
   const k = mapPaymentKinds(rep(`L1 with gst - Rent - UTR : ${U}\nL1 with gst - GST - UTR : ${G}`), L[0]);
   assert.deepEqual([k.byKind.rent.utr, k.byKind.gst.utr], [U, G]);
@@ -103,5 +103,63 @@ test("MM9. correction check: a bill-numbered line (no GST word) is the RENT UTR 
   const line = (name, explicit) => ({ name, message: { explicitBill: explicit } });
   assert.equal(mapLineToSlot(line("Aran", true), stored).slot.key, "o1|rent");
   assert.equal(mapLineToSlot(line("Aran - GST", true), stored).slot.key, "o1|gst");
-  assert.equal(mapLineToSlot(line("Aran", false), stored).error, "line_matches_several_payments"); // an ordinary unlabelled line stays ambiguous
+  assert.equal(mapLineToSlot(line("Aran", false), stored).slot.key, "o1|rent"); // named, no GST word: Rent
+  assert.equal(mapLineToSlot(line("", false), stored).error, "line_matches_several_payments"); // no name and no label: ambiguous
+});
+
+test("MM10. a reply that answers an OLDER non-approval mail of the thread is not about this bill: it is ignored, it does not block the bill", () => {
+  const old = { id: "x0", messageIdHeader: "<x0@x>", inReplyTo: "", bodyText: "CMD Payment Approved - cancelled mail, no bill number" };
+  const stray = reply("x1", "x0", `Dhoni - UTR : ${U}`);
+  const msgs = [old, stray, approval("a3", B3)];
+  const s = scopeThreadToBill(msgs, B3);
+  assert.equal(s.status, "scoped");
+  assert.equal(s.messages.length, 1); // only the approval mail: the stray UTR is not used for it
+  // a reply with NO traceable parent still blocks (unknown)
+  const lost = { ...reply("x2", "nope", `Dhoni - UTR : ${U}`) };
+  assert.equal(scopeThreadToBill([old, lost, approval("a3", B3)], B3).status, "unlinked");
+});
+
+test("MM11. wrong landlord name first, right name later: the wrong-name UTR is dropped, the later correct one is taken; wrong names only = nothing", async () => {
+  const Gmail = require("../utils/gmailService");
+  const { lookupUtrByBillNumber } = require("../utils/gmailUtrLookup");
+  const keep = [Gmail.searchThreads, Gmail.getThread, Gmail.isUsableMessage];
+  const appr = { id: "a", messageIdHeader: "<a@x>", inReplyTo: "", bodyText: `Owner Name | TEST 1 | Bank Name | SBI\nBill Number : ${B3}`, sentAt: "2026-11-13T04:00:00.000Z" };
+  const mk = (id, text, at) => ({ id, messageIdHeader: `<${id}@x>`, inReplyTo: "<a@x>", bodyText: text, sentAt: at, date: at, from: "F <f@x.com>" });
+  const run = async (msgs) => {
+    Gmail.searchThreads = async () => [{ id: "T" }];
+    Gmail.getThread = async () => ({ id: "T", messages: [appr, ...msgs] });
+    Gmail.isUsableMessage = () => true;
+    return lookupUtrByBillNumber(B3, 10, { landlords: [{ landOwnerId: "o1", name: "TEST 1" }] });
+  };
+  try {
+    const both = await run([mk("r1", "Dhoni - UTR : UTR1111111111", "2026-11-13T05:30:00.000Z"), mk("r2", "TEST 1 - UTR : UTR2222222222", "2026-11-13T05:40:00.000Z")]);
+    assert.equal(both.data.extractionStatus, "found");
+    assert.equal(both.data.utr, "UTR2222222222");
+    const only = await run([mk("r1", "Dhoni - UTR : UTR1111111111", "2026-11-13T05:30:00.000Z")]);
+    assert.equal(only.data.extractionStatus, "wrong_landlord_name");
+  } finally { [Gmail.searchThreads, Gmail.getThread, Gmail.isUsableMessage] = keep; }
+});
+
+test("MM12. GST hold, ONE landlord ('Landlord with gst'): 'Name - UTR : X' is the Rent UTR and 'Name - GST - UTR : Y' the GST UTR; the correction check never turns the GST UTR into the Rent one", () => {
+  const { mapLineToSlot } = require("../utils/utrCorrection");
+  const L = { landOwnerId: "o1", name: "Landlord with gst" };
+  const rep = (t) => [{ messageId: "m", lines: extractLandlordUtrLines(t) }];
+  const k = mapPaymentKinds(rep(`Landlord with gst - UTR : RENT743847348\nLandlord with gst - GST - UTR : GST84397438434`), L);
+  assert.deepEqual([k.byKind.rent.utr, k.byKind.gst.utr], ["RENT743847348", "GST84397438434"]);
+  const stored = { flow: "rental", landlords: [L], slots: new Map([["o1|gst", { key: "o1|gst", landOwnerId: "o1", kind: "gst", utrs: ["GST84397438434"] }]]) };
+  // only the GST payment is stored so far: the Rent line must NOT be matched to it
+  assert.equal(mapLineToSlot({ name: "Landlord with gst", message: {} }, stored).error, "line_matches_no_paid_payment");
+  assert.equal(mapLineToSlot({ name: "Landlord with gst - GST", message: {} }, stored).slot.key, "o1|gst");
+});
+
+test("MM13. the GST / Rent word is read only AFTER the landlord name: 'gst' inside the name is never a label", () => {
+  const { splitNameKind } = require("../utils/landlordUtrParser");
+  const L = [{ landOwnerId: "o1", name: "Landlord with gst" }, { landOwnerId: "o2", name: "A-B Traders" }];
+  const k = (n) => { const r = splitNameKind(n, L); return [r.landlord, r.kind]; };
+  assert.deepEqual(k("Landlord with gst"), ["Landlord with gst", null]);
+  assert.deepEqual(k("Landlord with gst - GST"), ["Landlord with gst", "gst"]);
+  assert.deepEqual(k("Landlord with gst-GST"), ["Landlord with gst", "gst"]);
+  assert.deepEqual(k("Landlord with gst - Rent"), ["Landlord with gst", "rent"]);
+  assert.deepEqual(k("Landlord with - GST"), ["Landlord with", "gst"]); // partial name + GST: still GST
+  assert.deepEqual(k("A-B Traders"), ["A-B Traders", null]);
 });

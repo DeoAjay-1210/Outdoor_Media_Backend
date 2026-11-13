@@ -674,3 +674,86 @@ test("C9. Cash-only New Bill / Advance with NO Cash line: the date of the 'Appro
     assert.notEqual(res(await run(none), k.number).status, "found_and_saved");
   }
 });
+
+test("C10. New Bill / Advance: a WRONG landlord name first, the RIGHT name in a later reply: the right one is saved (same or different UTR); a wrong name alone saves nothing", async () => {
+  for (const isAdvance of [false, true]) {
+    const k = kindOf(isAdvance);
+    const mk = () => scenario({ isAdvance, n: 1 });
+    for (const second of [U.a, U.b]) { // the later reply repeats the UTR, or gives another one
+      const x = setup({ docs: [site([mk()], 1)], replies: [reply("m1", `Dhoni - UTR: ${U.a}`), reply("m2", `Landlord1 - UTR: ${second}`, "2026-11-10T04:30:00.000Z")] });
+      assert.equal(res(await run(x), k.number).status, "found_and_saved", `${k.word} ${second}`);
+      assert.equal(x.calls.saver.length, 1);
+      assert.equal(x.calls.saver[0].payments[0].utrNumber, second);
+    }
+    const only = setup({ docs: [site([mk()], 1)], replies: [reply("m1", `Dhoni - UTR: ${U.a}`)] });
+    const r = res(await run(only), k.number);
+    assert.equal(r.status, "ambiguous_mapping");
+    assert.equal(r.reason, "landlord_name_not_found");
+    assert.equal(only.calls.saver.length, 0);
+  }
+});
+
+// ───────────────────────── PARITY: every fix made for the Normal bill also holds for New Bill and Advance ─────────────────────────
+const gstOwnerName = "Landlord with gst";
+const gstSite = (bills) => site(bills, 1, { landOwners: [{ ...landlords[0], name: gstOwnerName }] });
+const gstBill = (isAdvance) => scenario({ isAdvance, n: 1, hold: true, over: { owners: [arrOwner(O1, M1, gstOwnerName, { gstAmount: 450 })] } });
+
+test("C11. GST hold + a landlord whose OWN name ends in 'gst': 'Name - UTR' is the Rent UTR, 'Name - GST - UTR' the GST UTR (never swapped) - New Bill and Advance", async () => {
+  for (const isAdvance of [false, true]) {
+    const k = kindOf(isAdvance);
+    const x = setup({ docs: [gstSite([gstBill(isAdvance)])], replies: [reply("m1", `${gstOwnerName} - UTR : ${U.a}\n${gstOwnerName} - GST - UTR : ${U.b}`)] });
+    assert.equal(res(await run(x), k.number).status, "found_and_saved");
+    assert.deepEqual(pays(x.bill(k.billId)).sort(), [`gst:-:450:${U.b}`, `rental:${gstOwnerName}:2500:${U.a}`].sort() /* a bill-level GST payment carries no landlord name */);
+    // Rent line only: Rent is saved, GST waits (the Rent UTR is never taken for GST)
+    const y = setup({ docs: [gstSite([gstBill(isAdvance)])], replies: [reply("m1", `${gstOwnerName}-UTR:${U.a}`)] });
+    await run(y);
+    assert.deepEqual(pays(y.bill(k.billId)), [`rental:${gstOwnerName}:2500:${U.a}`]);
+  }
+});
+
+test("C12. line wrapping / odd spaces / no spaces / any UTR value: read as one line - New Bill and Advance", async () => {
+  for (const isAdvance of [false, true]) {
+    const k = kindOf(isAdvance);
+    for (const text of [`Landlord1 - UTR :\n${U.a},`, `Landlord1\u00a0-\u00a0UTR\u00a0:\u00a0${U.a}`, `Landlord1-UTR:${U.a}`, `Landlord1 -\nUTR : ${U.a}`, "Landlord1 - UTR : 1325ASD"]) {
+      const x = setup({ docs: [site([scenario({ isAdvance, n: 1 })], 1)], replies: [reply("m1", text)] });
+      assert.equal(res(await run(x), k.number).status, "found_and_saved", JSON.stringify(text));
+      assert.equal(x.calls.saver.length, 1);
+    }
+  }
+});
+
+test("C13. ONE reply with the Bill Numbers of the New Bill AND the Advance (one thread): each bill gets its own line, same UTR allowed, wrong name saves nothing", async () => {
+  const docs = () => [site([scenario({ n: 1 }), scenario({ isAdvance: true, n: 1 })], 1)];
+  const mails = (text) => [...twoMails(), msg("mR", "midR", text, "2026-11-10T04:00:00.000Z", "midB")];
+  let off = stubGmail(mails(`Landlord1 - ${NB} : ${U.c}\nLandlord1 -\n${AD} : ${U.c}`));
+  try {
+    const x = setup({ docs: docs() });
+    const r = await run(x);
+    assert.equal(res(r, NB).status, "found_and_saved");
+    assert.equal(res(r, AD).status, "found_and_saved");
+    assert.deepEqual(pays(x.bill(B_NB)), [`rental:Landlord1:2500:${U.c}`]);
+    assert.deepEqual(pays(x.bill(B_AD)), [`rental:Landlord1:2500:${U.c}`]);
+  } finally { off(); }
+  off = stubGmail(mails(`Dhoni - ${NB} : ${U.c}\nLandlord1 - ${AD} : ${U.d}`));
+  try {
+    const x = setup({ docs: docs() });
+    const r = await run(x);
+    assert.equal(res(r, NB).status, "ambiguous_mapping");
+    assert.equal(res(r, NB).reason, "landlord_name_not_found");
+    assert.deepEqual(pays(x.bill(B_NB)), []); // the wrong name saves nothing
+    assert.deepEqual(pays(x.bill(B_AD)), [`rental:Landlord1:2500:${U.d}`]); // the Advance line is still its own
+  } finally { off(); }
+});
+
+test("C14. correction check for New Bill / Advance: a named line without GST is the Rent slot, with GST the GST slot; nameless with two payments is ambiguous", () => {
+  const { mapLineToSlot } = require("../utils/utrCorrection");
+  for (const flow of ["newBill", "advance"]) {
+    const L = [{ landOwnerId: "o", name: gstOwnerName }];
+    const stored = { flow, landlords: L, slots: new Map([["o|rent", { key: "o|rent", landOwnerId: "o", kind: "rent", utrs: [U.a] }], ["o|gst", { key: "o|gst", landOwnerId: "o", kind: "gst", utrs: [U.b] }]]) };
+    const at = (name) => { const r = mapLineToSlot({ name, message: {} }, stored); return r.slot ? r.slot.key : r.error; };
+    assert.equal(at(gstOwnerName), "o|rent");
+    assert.equal(at(`${gstOwnerName} - GST`), "o|gst");
+    assert.equal(at(`${gstOwnerName} - ${flow === "advance" ? "Advance" : "NewBill"} - GST`), "o|gst");
+    assert.equal(at(""), "line_matches_several_payments");
+  }
+});

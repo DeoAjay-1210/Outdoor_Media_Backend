@@ -260,7 +260,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
     const Log = deps.Log || require("../models/Admin/GmailUtrLogSchema");
     const nos = [...new Set(out.map((r) => r.billNumber))];
     if (nos.length) {
-      const logs = await Log.find({ billNumber: { $in: nos }, dryRun: false }).sort({ createdAt: -1 }).select("billNumber status reason createdAt").lean();
+      const logs = await Log.find({ billNumber: { $in: nos }, dryRun: false }).sort({ createdAt: -1 }).select("billNumber status reason createdAt replyLines").lean();
       logs.forEach((l) => latest.has(l.billNumber) || latest.set(l.billNumber, l));
     }
   } catch (_) { /* a missing log never breaks the report */ }
@@ -320,7 +320,8 @@ async function buildUtrTracker(opts = {}, deps = {}) {
       "Rent UTR": rentUtr.join(", "), "GST UTR": first.gstLabel === "Yes - On hold" ? gstUtr.join(", ") : "-",
       "Status": status,
       "Error": uniq(open.map((p) => p.errorText)).join("\n"),
-      "Reply Format (exact)": uniq(list.map((p) => p.line)).join("\n"),
+      // a bill that needs review: show what Finance ACTUALLY replied (e.g. "Dhoni - UTR : …"), not the format that was expected
+      "Reply Format (exact)": status === "Needs review" && (latest.get(billNumber) || {}).replyLines && latest.get(billNumber).replyLines.length ? latest.get(billNumber).replyLines.join("\n") : uniq(list.map((p) => p.line)).join("\n"),
       "Reply Example": uniq(open.map((p) => p.example)).join("\n"),
       "Error Code": uniq(open.map((p) => p.code).filter((c) => c !== "not_checked_yet")).join(", "),
       _monthKey: first.monthKey, _monthMs: monthDate(first.monthKey), _approvedMs: first.approvedMs || 0,

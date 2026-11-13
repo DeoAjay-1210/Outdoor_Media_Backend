@@ -12,7 +12,7 @@
  *   account_mismatch_in_reply | bank_mismatch_in_reply | not_listed_in_approval_mail |
  *   account_mismatch_approval_mail | bank_mismatch_approval_mail
  */
-const { findUtrInLine, stripQuoted } = require("./utrExtractor");
+const { findUtrInLine, stripQuoted, joinWrappedValues } = require("./utrExtractor");
 const { extractExplicitPaymentDates } = require("./utrPaidDate");
 
 const alnum = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -38,7 +38,7 @@ function replyExtras(rest) {
  */
 function extractLandlordUtrLines(text) {
   const out = [];
-  for (const raw of stripQuoted(text).split("\n")) {
+  for (const raw of joinWrappedValues(stripQuoted(text)).split("\n")) {
     const hit = findUtrInLine(raw);
     if (!hit) continue;
     const name = raw
@@ -75,7 +75,8 @@ function mapPaymentKinds(replies, landlord) {
       let kind = classifyPaymentLabel(l.name);
       if (!kind && !r.billExplicit && landlord && l.name) {
         const k0 = splitNameKind(l.name, [landlord]);
-        if (k0.kind && k0.landlord && !matchLandlord(k0.landlord, [landlord]).error) kind = k0.kind; // "L1 with gst - Rent", "L1 with gst - GST"
+        // "L1 with gst - Rent" / "- GST"; and "<landlord> - UTR : X" with the landlord's name and NO label = the RENT UTR
+        if (k0.landlord && !matchLandlord(k0.landlord, [landlord]).error) kind = k0.kind || "rent";
       }
       if (!kind && r.billExplicit) {
         // a line that names its Bill Number: "<landlord>" = Rent, "<landlord> - GST" = GST; the landlord must be the bill's landlord
@@ -83,7 +84,7 @@ function mapPaymentKinds(replies, landlord) {
         if (k.landlord && landlord && matchLandlord(k.landlord, [landlord]).error) { ignored.push({ messageId: r.messageId, name: l.name, reason: "landlord_name_not_found" }); continue; }
         kind = k.kind || "rent";
       }
-      if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: l.name ? "label_is_not_rent_or_gst" : "unlabelled_utr_line" }); continue; }
+      if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: l.name ? (landlord ? "landlord_name_not_found" : "label_is_not_rent_or_gst") : "unlabelled_utr_line" }); continue; }
       found[kind].push({ line: l, reply: r });
     }
   }
@@ -106,8 +107,12 @@ const NAME_KIND = /^(.*?)[\s\-–—:|,]+((?:base\s+)?rent(?:al)?(?:\s+amount)?|
 function splitNameKind(name, landlords) {
   // a landlord whose OWN name ends in "gst" / "rent" ("L1 with gst"): when the whole text is exactly a landlord of the bill, it is that landlord (no label)
   if (landlords && landlords.length && String(name || "").trim()) {
-    const w = matchLandlord(name, landlords);
-    if (!w.error && w.matchedBy === "full_name") return { landlord: String(name).trim(), kind: null };
+    // the text is EXACTLY a landlord's name, word for word and in order ("Landlord with gst"): no label. "Landlord with - GST" is not (GST comes after the name).
+    const nt = nameTokens(name).join(" ");
+    const flatName = (v) => String(v || "").toLowerCase().replace(/s+/g, " ").trim();
+    const typed = flatName(name);
+    const hasSep = /[-–—:|,]/.test(String(name)); // a separator inside the text means something follows the name ("Landlord with - GST")
+    if (landlords.some((l) => flatName(l.name) === typed || (!hasSep && nameTokens(l.name).join(" ") === nt))) return { landlord: String(name).trim(), kind: null };
   }
   const m = String(name || "").match(NAME_KIND);
   if (!m || !m[1].trim()) return { landlord: String(name || "").trim(), kind: null };
@@ -143,10 +148,12 @@ const bankMatches = (a, b) => { const x = alnum(a); const y = alnum(b); return !
  */
 function mapLandlords(lines, landlords) {
   const reasons = [];
+  const nameNotFound = []; // lines naming nobody of this bill: harmless when every landlord has his own correct line, otherwise reported
   const byLandlord = new Map();
 
   for (const l of lines) {
     const m = matchLandlord(l.name, landlords);
+    if (m.error === "landlord_name_not_found") { nameNotFound.push({ reason: m.error, name: l.name }); continue; }
     if (m.error) { reasons.push({ reason: m.error, name: l.name }); continue; }
     const id = m.landlord.landOwnerId;
     const prev = byLandlord.get(id);
@@ -181,6 +188,7 @@ function mapLandlords(lines, landlords) {
       reasons.push({ reason: "settled_landlord_utr_mismatch", name: l.name });
     }
   }
+  if (reasons.some((r) => r.reason === "missing_landlord_utr")) reasons.unshift(...nameNotFound); // a landlord has no line: the wrong name is the likely reason
   return { ok: reasons.length === 0, reasons, mappings: [...byLandlord.values()] };
 }
 
@@ -199,8 +207,8 @@ function mapLandlordKinds(replies, landlords) {
   for (const r of replies || []) {
     for (const l of r.lines || []) {
       const sk = splitNameKind(l.name, landlords);
-      const nm = sk.landlord;
-      const kind = sk.kind || (r.billExplicit && nm ? "rent" : null); // a line naming its Bill Number without GST = the Rent UTR
+      const nm = classifyPaymentLabel(sk.landlord) ? "" : sk.landlord; // a bare "GST" / "Rent" is not a name
+      const kind = sk.kind || (nm ? "rent" : null); // "<landlord> - UTR : X" (landlord named, no GST word) = the Rent UTR
       if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: nm ? "no_rent_or_gst_label" : "unnamed_utr_line" }); continue; }
       const m = matchLandlord(nm, landlords);
       if (m.error) { problems.push({ reason: m.error, name: l.name }); continue; }
@@ -276,7 +284,7 @@ function mapArrearsLines(replies, landlords, { billType, gstHold }) {
         if (m.error) { problems.push({ reason: m.error, name: l.name }); continue; }
         landlord = m.landlord;
       }
-      const kind = p.kind || (gstHold && !r.billExplicit ? null : "rent");
+      const kind = p.kind || (gstHold && !r.billExplicit && !p.landlord ? null : "rent"); // a NAMED line without GST = Rent
       if (!kind) { ignored.push({ messageId: r.messageId, name: l.name, reason: "no_rent_or_gst_label" }); continue; }
       if (l.accountLast4 && landlord.accountLast4 && l.accountLast4 !== landlord.accountLast4) problems.push({ reason: "account_mismatch_in_reply", name: landlord.name });
       if (l.bank && landlord.bankName && !bankMatches(l.bank, landlord.bankName)) problems.push({ reason: "bank_mismatch_in_reply", name: landlord.name });

@@ -43,6 +43,7 @@ const gmailUtrLogSchema = new mongoose.Schema(
     paidDateSource: { type: String, default: "" }, // email_payment_date | email_sent_date
     paymentType: { type: String, default: "" }, // cash | online_rent
     correction: { type: mongoose.Schema.Types.Mixed, default: null }, // { kind, landlord, oldUtr, newUtr, ... }
+    replyLines: { type: [String], default: undefined }, // what Finance actually wrote (name + UTR / Cash lines) when the reply needed manual review
     dryRun: { type: Boolean, default: false },
     triggeredBy: { type: String, default: "api" }, // api | cron
     createdAt: { type: Date, default: Date.now, expires: 180 * 24 * 3600 },

@@ -11,10 +11,11 @@
  * The text before the Bill Number is "<landlord>" or "<landlord> - GST" (or "<landlord> - Rent"): it is kept and validated later by the
  * normal landlord / Rent / GST mapping, so a wrong landlord name or component is still skipped for manual review.
  */
-const { stripQuoted, extractCashLines } = require("./utrExtractor");
+const { stripQuoted, extractCashLines, joinWrappedValues } = require("./utrExtractor");
 
 const regexEscape = (v) => String(v).replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
-const BILL_CHAR = "[A-Za-z0-9\\-/]";
+// a Bill Number (ADNOOHBILL + digits) has no dash: a dash next to it is the line separator ("Aran-<BillNo>:UTR..."), not part of a longer code
+const BILL_CHAR = "[A-Za-z0-9/]";
 const billRegex = (b) => new RegExp(`(?<!${BILL_CHAR})${regexEscape(b)}(?!${BILL_CHAR})`, "i");
 const SEPS = "(?:[:=|\\-–—]+\\s*)*";
 const UTR_AFTER_BILL = new RegExp(`^\\s*${SEPS}(?:UTR(?:\\s*(?:No\\.?|Number|Num|Ref(?:erence)?|#))?(?=[\\s:=|#\\-\u2013\u2014])\\s*${SEPS})?([A-Za-z0-9]{5,30})(?![A-Za-z0-9])`, "i");
@@ -28,7 +29,7 @@ function extractBillLines(text, knownBills) {
   const bills = [...new Set((knownBills || []).filter(Boolean))].sort((a, b) => b.length - a.length);
   const out = [];
   if (!bills.length) return out;
-  for (const raw of stripQuoted(text).split("\n")) {
+  for (const raw of joinWrappedValues(stripQuoted(text)).split("\n")) {
     let hit = null;
     for (const b of bills) {
       const m = billRegex(b).exec(raw);

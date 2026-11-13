@@ -134,7 +134,7 @@ const CASES = [
   { n: 5, faces: 3, owners: 1, siteBillMode: 2, landOwnerBillMode: 1, expected: 3, mode: "separate_site" },
   { n: 6, faces: 3, owners: 2, siteBillMode: 2, landOwnerBillMode: 1, expected: 3, mode: "separate_site" },
   { n: 7, faces: 1, owners: 1, siteBillMode: 2, landOwnerBillMode: 2, expected: 1, mode: "separate_site" },
-  { n: 8, faces: 1, owners: 3, siteBillMode: 1, landOwnerBillMode: 2, expected: 3, mode: "separate_landlord" },
+  { n: 8, faces: 1, owners: 3, siteBillMode: 1, landOwnerBillMode: 2, expected: 1, mode: "single" }, // several landlords = ONE bill number, whatever landOwnerBillMode says
 ];
 
 for (const c of CASES) {

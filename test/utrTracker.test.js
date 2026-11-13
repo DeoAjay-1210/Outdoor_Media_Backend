@@ -122,3 +122,13 @@ test("T7. several sites on one bill: site codes and names are written side by si
   assert.equal(r["Site Code"], "ADINCHN0188, ADINCHN0189");
   assert.equal(r["Site Name"], "Kasi Theatre A, Kasi Theatre B");
 });
+
+test("T13. a bill that needs review shows the reply Finance ACTUALLY wrote (Dhoni - UTR : ...), not the expected format; others keep the expected format", async () => {
+  const log = { billNumber: BILL, status: "ambiguous_mapping", reason: "landlord_name_not_found", createdAt: new Date("2026-11-10T04:00:00Z"), replyLines: ["Dhoni - UTR : UTR8437438443"] };
+  const r = (await run([media()], [log])).rows[0];
+  assert.equal(r["Status"], "Needs review");
+  assert.equal(r["Reply Format (exact)"], "Dhoni - UTR : UTR8437438443");
+  assert.match(r["Reply Example"], /^Landlord1 - UTR : SBIN/); // the example still shows the right way
+  const w = (await run([media()], [{ ...log, status: "utr_not_found", reason: "", replyLines: undefined }])).rows[0];
+  assert.equal(w["Reply Format (exact)"], "Landlord1 - UTR : <UTR>");
+});

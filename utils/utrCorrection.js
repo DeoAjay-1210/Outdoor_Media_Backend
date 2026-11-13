@@ -140,7 +140,7 @@ function mapLineToSlot(line, stored) {
     pool = pool.filter((s) => s.landOwnerId === m.landlord.landOwnerId);
   } else if (new Set(pool.map((s) => s.landOwnerId)).size > 1) return { error: "unnamed_utr_line_with_several_landlords" };
   // a line that names its Bill Number without GST ("Aran - <BillNo> : UTR") is the RENT UTR of that bill
-  if (!kind && landlordName && line.message && line.message.explicitBill) kind = "rent";
+  if (!kind && landlordName) kind = "rent"; // "<landlord> - UTR : X" without the GST word is the RENT UTR (never GST)
   if (kind) pool = pool.filter((s) => s.kind === kind);
   if (pool.length !== 1) return { error: pool.length ? "line_matches_several_payments" : "line_matches_no_paid_payment" };
   return { slot: pool[0] };

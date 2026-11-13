@@ -95,9 +95,9 @@ function rowEntryTime(row) {
 }
 
 const isSeparateSite = (media) => (media?.mediaDetails || []).some((d) => Number(d?.siteBillMode) === 2);
+// Several landlords on one bill ALWAYS share ONE Bill Number: landOwnerBillMode is no longer read (separate-landlord numbers are switched off).
+// Bills numbered earlier with one number per landlord keep their numbers (a number is never changed).
 function separateLandlords(media) {
-  const owners = (media?.landOwners || []).filter(Boolean);
-  if (owners.length > 1 && owners.some((o) => Number(o.landOwnerBillMode) === 2)) return owners;
   return null;
 }
 

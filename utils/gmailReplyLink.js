@@ -11,6 +11,7 @@
 const { extractBillNumbers, stripQuoted, findCandidates, extractCashLines } = require("./utrExtractor");
 const { extractBillLines, billLinesAsReply, commonUtrBills } = require("./billLines");
 
+const OTHER_ROOT = { id: "__other_root__" };
 const normId = (v) => String(v || "").trim().replace(/^<|>$/g, "").toLowerCase();
 const ownBills = (m) => [...new Set(extractBillNumbers(stripQuoted(m.bodyText)))];
 const isApprovalMessage = (m) => /Owner Name/i.test(stripQuoted(m.bodyText)) && ownBills(m).length > 0;
@@ -37,6 +38,8 @@ function scopeThreadToBill(messages, billNumber) {
   const rootApproval = (m) => {
     let cur = m;
     for (let i = 0; i < 25 && cur; i++) {
+      // the chain ends at a message of this thread that answers nothing and is NOT an approval mail (an older / cancelled mail): the reply belongs to that mail, never to this bill
+      if (cur !== m && !cur.inReplyTo) return OTHER_ROOT;
       const parent = cur.inReplyTo ? byHeader.get(normId(cur.inReplyTo)) : null;
       if (!parent) return null;
       if (approvalIds.has(parent.id)) return parent;
@@ -56,6 +59,7 @@ function scopeThreadToBill(messages, billNumber) {
   for (const m of messages) {
     if (approvalIds.has(m.id)) continue;
     const root = rootApproval(m);
+    if (root === OTHER_ROOT) continue; // answers an older non-approval mail of the thread: not about this bill
     if (root && root.id === approval.id) bankMessages.push(m);
     const bl = extractBillLines(m.bodyText, known);
     if (bl.length) {
