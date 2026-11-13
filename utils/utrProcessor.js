@@ -107,7 +107,7 @@ function buildRunSummary({ ctx, startedAt, started, scope, pendingTotal, results
     errors: results.filter((r) => r.status === "gmail_error" || r.status === "database_error").map((r) => ({ billNumber: r.billNumber, dueMonth: r.dueMonth || "", status: r.status, reason: r.reason || "" })),
   };
 }
-const UTR_SHAPE = /^[A-Za-z0-9]{5,30}$/;
+const UTR_SHAPE = /^[A-Za-z0-9]{3,30}$/;
 
 /**
  * Bank Narration of the Finance "Payment Uploaded" table -> p.narration (saved as the ledger remark instead of the static text).

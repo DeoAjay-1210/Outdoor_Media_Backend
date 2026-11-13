@@ -13,8 +13,8 @@ const LABEL =
   "(?:UTR(?:\\s*(?:No\\.?|Number|Num|Ref(?:erence)?(?:\\s*(?:No\\.?|Number))?|#))?|Transaction\\s+Ref(?:erence)?(?:\\s*(?:No\\.?|Number|Num|ID))?|Txn\\s*Ref(?:erence)?(?:\\s*(?:No\\.?|Number))?|Bank\\s+Ref(?:erence)?\\s*(?:No\\.?|Number))";
 // separator between label and value: ":", "-", "–", "=", "|" or just spaces / tab
 const SEP = "[ \\t]*(?:[:=|\\-–—]+)?[ \\t]*";
-// ANY value Finance writes after the UTR label: 5-30 alphanumerics with at least one digit (SBIN92023012200543116, 412345678901, UTR7843274, jfiew4343, 1325ASD)
-const VALUE = "([A-Za-z0-9]{5,30})";
+// ANY value Finance writes after the UTR label: 3-30 alphanumerics with at least one digit (SBIN92023012200543116, 412345678901, UTR7843274, jfiew4343, 1325ASD)
+const VALUE = "([A-Za-z0-9]{3,30})";
 const SAME_LINE = new RegExp(`\\b${LABEL}(?![A-Za-z0-9])${SEP}${VALUE}(?![A-Za-z0-9])`, "gi");
 const LABEL_ONLY_LINE = new RegExp(`^\\W*${LABEL}\\W*$`, "i");
 const VALUE_ONLY_LINE = new RegExp(`^\\W*${VALUE}\\W*$`);
@@ -48,13 +48,13 @@ const stripQuoted = (text) => {
  *   - "Name"               + next line "- UTR : UTR1111111111111" (separator + label start the next line)
  * Only a continuation that is JUST a UTR value / starts with the UTR label is joined; signatures, bullets of other landlords and ordinary text are not.
  */
-const VALUE_LINE = /^\s*(?:UTR(?:\s*(?:No\.?|Number|Num|Ref(?:erence)?|#))?\s*[:=|\-\u2013\u2014]*\s*)?[A-Za-z0-9]{5,30}\s*[,;.]?\s*$/i;
+const VALUE_LINE = /^\s*(?:UTR(?:\s*(?:No\.?|Number|Num|Ref(?:erence)?|#))?\s*[:=|\-\u2013\u2014]*\s*)?[A-Za-z0-9]{3,30}\s*[,;.]?\s*$/i;
 const LABEL_START = /^\s*[:=|\-\u2013\u2014]*\s*(?:UTR|Transaction\s+Ref)/i;
 function joinWrappedValues(text) {
   const src = String(text || "").replace(/[\u00a0\u2007\u202f]/g, " ").replace(/[\u200b-\u200d\ufeff]/g, "").split("\n");
   const out = [];
   const nextIdx = (i) => { let j = i + 1; while (j < src.length && !src[j].trim()) j++; return j; };
-  const hasValue = (l) => /\bUTR[A-Za-z0-9 .#:=|\-\u2013\u2014]*[A-Za-z0-9]{5,30}\s*[,;.]?\s*$/i.test(l) && /\d/.test(l.split(/UTR/i).pop() || "");
+  const hasValue = (l) => /\bUTR[A-Za-z0-9 .#:=|\-\u2013\u2014]*[A-Za-z0-9]{3,30}\s*[,;.]?\s*$/i.test(l) && /\d/.test(l.split(/UTR/i).pop() || "");
   for (let i = 0; i < src.length; i++) {
     const line = src[i];
     const j = nextIdx(i);

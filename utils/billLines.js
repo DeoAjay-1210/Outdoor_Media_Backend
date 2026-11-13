@@ -18,7 +18,7 @@ const regexEscape = (v) => String(v).replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
 const BILL_CHAR = "[A-Za-z0-9/]";
 const billRegex = (b) => new RegExp(`(?<!${BILL_CHAR})${regexEscape(b)}(?!${BILL_CHAR})`, "i");
 const SEPS = "(?:[:=|\\-–—]+\\s*)*";
-const UTR_AFTER_BILL = new RegExp(`^\\s*${SEPS}(?:UTR(?:\\s*(?:No\\.?|Number|Num|Ref(?:erence)?|#))?(?=[\\s:=|#\\-\u2013\u2014])\\s*${SEPS})?([A-Za-z0-9]{5,30})(?![A-Za-z0-9])`, "i");
+const UTR_AFTER_BILL = new RegExp(`^\\s*${SEPS}(?:UTR(?:\\s*(?:No\\.?|Number|Num|Ref(?:erence)?|#))?(?=[\\s:=|#\\-\u2013\u2014])\\s*${SEPS})?([A-Za-z0-9]{3,30})(?![A-Za-z0-9])`, "i");
 const CASH_AFTER_BILL = new RegExp(`^\\s*${SEPS}cash\\b(.*)$`, "i");
 
 /**
