@@ -39,6 +39,9 @@ const bootServer = async (flag, purgeCron) => {
     "MediaOnboardingController/RentalDueNew2Controller": { fixSingleBillOverdueAmounts: async () => { calls.fixOverdue++; return { checked: 0, fixed: 0 }; } },
     "landOwnerMasterController/landOwnerMasterController": { seedLandOwnerBankAccounts: async () => { calls.seed++; return { seeded: 0 }; } },
     "utils/apkAutoPublish": { startApkAutoPublish: () => { calls.apk++; } },
+    "config/firebase": { initFirebase: noop },
+    "utils/overdueScheduler": { startOverdueScheduler: noop },
+    "utils/gmailUtrCron": { startGmailUtrCron: noop },
   };
   const routeStub = router();
 

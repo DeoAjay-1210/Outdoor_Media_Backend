@@ -4022,12 +4022,18 @@ latestLedger = latestLedger.sort((a, b) => {
             }
             if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
               expectedOwnerGst = 0;
+            } else if (gstFlag === 2 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0); // owner's own GST share (e.g. 720 / 1080), not an equal split
             } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
               expectedOwnerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
+            // Owner-wise GST stored on the owner (site flag 1 but rentalPayment.gstAmount 0): use the owner's own share, not an equal split
+            if (expectedOwnerGst <= 0 && Number(owner.gstApplicable) === 1 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0);
+            }
             if (expectedOwnerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               expectedOwnerGst = cycleExpectedGst / ownerCount;
@@ -4537,12 +4543,18 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
             }
             if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
               expectedOwnerGst = 0;
+            } else if (gstFlag === 2 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0); // owner's own GST share (e.g. 720 / 1080), not an equal split
             } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
               expectedOwnerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
+            // Owner-wise GST stored on the owner (site flag 1 but rentalPayment.gstAmount 0): use the owner's own share, not an equal split
+            if (expectedOwnerGst <= 0 && Number(owner.gstApplicable) === 1 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0);
+            }
             if (expectedOwnerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               expectedOwnerGst = cycleExpectedGst / ownerCount;
