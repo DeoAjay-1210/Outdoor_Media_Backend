@@ -1347,7 +1347,13 @@ function decorateLedgerHistoryBlockBase(block, arrearsBills, lastRevision, paren
 
   bills.forEach((b) => {
     const due = new Date(b.dueDate);
-    if (Number.isNaN(due.getTime()) || !inRange(due)) return;
+    if (Number.isNaN(due.getTime())) return;
+    if (!inRange(due)) {
+      // ✅ NEW — top-level gstBalanceHistory is not month-range filtered (like bill / advance GST rows): New Bill GST row still listed
+      const outGst = ownerGstRow(arrearsGstRow(b), b);
+      if (outGst && billKind(b) !== "advance") gstBalanceHistory = insertAfterMonth(gstBalanceHistory, [outGst], b.dueMonth);
+      return;
+    }
     const ownerIds = ownerFilter ? filteredOwnerIds(b) : null; // ✅ NEW
     const ownerOk = (id) => !ownerIds || ownerIds.has(String(id)); // ✅ NEW
     const yearKey = String(due.getUTCFullYear());
