@@ -816,11 +816,10 @@ test("K4. with both switches on, the Cash UTR is saved through the ledger engine
 });
 
 test("K5. Cash mapping that cannot be proven stays manual: two open rent payments (cat 3), several landlords, GST on hold", async () => {
+  // ONE landlord with Cash + Online (cat 3, no GST) is no longer manual: it goes through the pair mapping (see M24)
   const both = setup({ docs: [cashDocT({ landOwners: [owner({ _id: "oK", paymentCategory: 3 })] })], cashSave: true });
   const a = await both.p.processPendingUtrs({ dryRun: false });
-  assert.equal(a.results[0].status, "ambiguous_mapping");
-  assert.equal(a.results[0].reason, "no_single_rent_slot");
-  assert.equal(both.calls.lookup.length, 0);
+  assert.notEqual(a.results[0].reason, "no_single_rent_slot");
 
   const two = setup({ docs: [cashDocT({ landOwners: [owner({ _id: "oK", paymentCategory: 1 }), owner({ _id: "oL", landOwnerMasterId: "mL", paymentCategory: 1 })] })], cashSave: true });
   const b = await two.p.processPendingUtrs({ dryRun: false });
@@ -1799,4 +1798,15 @@ test("M23. several landlords: a Cash-only landlord needs NO Cash line when 'Appr
   const split = await run({ doc: { landOwners: pairOwners(1) }, cashSave: true, lookupLandlords: reply(two, { approvedBank: [...bank, { ...bank[0], messageId: "B2", sentDate: "2026-11-10", sentAt: "2026-11-10T08:00:00.000Z" }] }) });
   assert.equal(one(split.r).status, "found_and_saved"); // two mails on different days: the LAST one (10-Nov) is used
   assert.ok(sorted(split.calls).includes("oJ|Cash||2026-11-10"));
+});
+
+test("M24. ONE landlord with Cash + Online rent (no GST): his UTR saves the Online part, the Cash part takes the mail date; a nameless 'UTR : X' line is his", async () => {
+  for (const text of [`Jamuna - UTR: ${U.J}`, `UTR: ${U.J}`]) {
+    const x = await run({ doc: { landOwners: [pairOwners(3)[0]] }, cashSave: true, lookupLandlords: reply(text) });
+    assert.equal(one(x.r).status, "found_and_saved");
+    assert.deepEqual(sorted(x.calls), ["oJ|Cash||2026-11-09", "oJ|Online|" + U.J + "|2026-11-09"]);
+  }
+  const off = await run({ doc: { landOwners: [pairOwners(3)[0]] }, cashSave: false, lookupLandlords: reply(`Jamuna - UTR: ${U.J}`) });
+  assert.equal(one(off.r).reason, "cash_auto_save_disabled");
+  assert.equal(off.calls.saver.length, 0);
 });

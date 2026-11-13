@@ -33,15 +33,15 @@ test("T1. an approved bill with no UTR yet: ONE row, Waiting, UTR dash, exact re
   assert.deepEqual([r["Month"], r["Approval Date"], r["Bill Type"], r["Bill Number"], r["Site Name"], r["Site Code"], r["Landlord Name"], r["Payment Category"], r["Payment Frequency"], r["GST Applicable"]],
     ["November 2026", "09 Nov 2026", "Normal Bill", BILL, "Kasi Theatre", "ADINCHN0188", "Landlord1", "Online", "Quarterly", "No"]);
   assert.deepEqual([r["Total Rental Amount"], r["GST Amount"], r["Total Amount"], r["Rent UTR"], r["GST UTR"], r["Status"]], [5000, 0, 5000, "-", "-", "Waiting for UTR"]);
-  assert.equal(r["Reply Format (exact)"], "UTR : <UTR>");
-  assert.match(r["Reply Example"], /^UTR : SBIN/);
+  assert.equal(r["Reply Format (exact)"], "Landlord1 - UTR : <UTR>");
+  assert.match(r["Reply Example"], /^Landlord1 - UTR : SBIN/);
   assert.equal("Last Checked" in r, false);
   assert.deepEqual(summary, { total: 1, saved: 0, partial: 0, waiting: 1, review: 0 });
 });
 
 test("T2. saved: the UTR column holds only the UTR, the format column the line with it; several landlords side by side; Cash shows a dash", async () => {
   const one = (await run([media({ ledger: [paid("o1", "Online", "SBIN92023012200543117")] })])).rows[0];
-  assert.deepEqual([one["Rent UTR"], one["Status"], one["Reply Format (exact)"], one["Error"]], ["SBIN92023012200543117", "Saved", "UTR : SBIN92023012200543117", ""]);
+  assert.deepEqual([one["Rent UTR"], one["Status"], one["Reply Format (exact)"], one["Error"]], ["SBIN92023012200543117", "Saved", "Landlord1 - UTR : SBIN92023012200543117", ""]);
   const two = media({ landOwners: [owner("o1", "Landlord1"), owner("o2", "Landlord2")], ledger: [paid("o1", "Online", "UTR111111111111"), paid("o2", "Online", "UTR222222222222")] });
   const r = (await run([two])).rows[0];
   assert.equal(r["Landlord Name"], "Landlord1, Landlord2");
@@ -110,7 +110,7 @@ test("T6. New Bill with a Cash + Online landlord: ONE row, the Online line needs
   };
   const rows = (await run([media({ rentalDue: [{ _id: "p1", withGst: 2 }], arrearsDue: [bill] })])).rows;
   assert.equal(rows.length, 1);
-  assert.deepEqual([rows[0]["Bill Type"], rows[0]["Payment Category"], rows[0]["Total Rental Amount"], rows[0]["Reply Format (exact)"]], ["New Bill", "Cash + Online", 3500, "UTR : <UTR>"]);
+  assert.deepEqual([rows[0]["Bill Type"], rows[0]["Payment Category"], rows[0]["Total Rental Amount"], rows[0]["Reply Format (exact)"]], ["New Bill", "Cash + Online", 3500, "Landlord1 - UTR : <UTR>"]);
 });
 
 test("T7. several sites on one bill: site codes and names are written side by side", async () => {

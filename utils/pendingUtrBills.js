@@ -201,9 +201,12 @@ function evaluateGroup(billNumber, entries, helpers, nowMs = Date.now()) {
   const twoOpen = [...slotCount.entries()].some(([id, n]) => n > 1 && !pairOwner(id));
   const otherBlockers = reasons.filter((r) => r !== "multiple_landlords" && r !== "no_single_rent_slot");
   if (twoOpen) otherBlockers.push("landlord_with_two_open_payments");
-  const perLandlordEligible = owners.length > 1 && reasons.includes("multiple_landlords") && otherBlockers.length === 0 && rentSlots.length > 0;
+  // ONE landlord with BOTH a Cash and an Online rent payment open (no GST hold): the same pair rule as for several landlords - his UTR line saves the
+  // Online part, the Cash part takes its Paid Date from the mail that carries it (GST-hold bills have their own mapping below)
+  const singlePair = owners.length === 1 && pairOwner(idStr(owners[0]._id)) && reasons.includes("no_single_rent_slot");
+  const perLandlordEligible = ((owners.length > 1 && reasons.includes("multiple_landlords")) || singlePair) && otherBlockers.length === 0 && rentSlots.length > 0;
   const perLandlordMapping =
-    owners.length > 1
+    owners.length > 1 || singlePair
       ? {
           eligible: perLandlordEligible,
           reasons: perLandlordEligible ? [] : otherBlockers,

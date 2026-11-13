@@ -90,7 +90,7 @@ const REVIEW_STATUSES = new Set(["ambiguous_mapping", "multiple_review_required"
 
 /** Exact reply line Finance must write for ONE open payment (the same lines the processor reads). */
 function replyFormat({ flow, word, single, hold, part, mode, name, paired }) {
-  const lead = single ? "" : `${name} - `;
+  const lead = `${name} - `; // the landlord name is always written (single or several landlords)
   const bill = ""; // the NewBill / Advance word is no longer needed in the reply (bill type comes from the bill)
   if (part === "gst") return `${lead}${bill}GST - UTR : <UTR>`;
   const label = hold ? "Rent - " : "";
@@ -203,7 +203,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
         const saved = !isOpen;
         let utr = "";
         if (saved) utr = p.part === "gst" ? p.gstUtr || utrOf(oid, "gst") : p.mode === "Cash" ? "" : utrOf(oid, "rent") || "";
-        push({ ...base, category: cat === 3 ? "Cash + Online" : cat === 1 ? "Cash" : "Online", landlordName: o.name || "", amount: p.amount, paymentPart: p.part === "gst" ? "GST" : "Rent", paymentMode: p.mode, utr: utr || "-", _saved: saved, _open: isOpen, _eligible: eligible, _single: single, _hold: hold, _paired: pair && p.mode === "Cash", _pairNoAuto: pair && single && !hold, _word: "", _part: p.part, _reasons: (item && item.manualReviewReasons) || [], _dupOrInactive: item && (item.manualReviewReasons || []).filter((r) => ["duplicate_bill_number", "media_inactive"].includes(r)) });
+        push({ ...base, category: cat === 3 ? "Cash + Online" : cat === 1 ? "Cash" : "Online", landlordName: o.name || "", amount: p.amount, paymentPart: p.part === "gst" ? "GST" : "Rent", paymentMode: p.mode, utr: utr || "-", _saved: saved, _open: isOpen, _eligible: eligible, _single: single, _hold: hold, _paired: pair && p.mode === "Cash", _pairNoAuto: false, _word: "", _part: p.part, _reasons: (item && item.manualReviewReasons) || [], _dupOrInactive: item && (item.manualReviewReasons || []).filter((r) => ["duplicate_bill_number", "media_inactive"].includes(r)) });
       });
     });
   }

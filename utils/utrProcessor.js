@@ -297,7 +297,7 @@ function createUtrProcessor(deps = {}) {
     const anyCash = pendingLandlords.some((l) => l.paymentMode === "Cash" || l.cashCompanion);
 
     if (!ctx.dryRun) {
-      if (!multiOn) return done("ambiguous_mapping", "multi_landlord_auto_save_disabled");
+      if (!multiOn && item.perLandlordMapping.landlords.length > 1) return done("ambiguous_mapping", "multi_landlord_auto_save_disabled");
       if (anyCash && !cashOn) return done("ambiguous_mapping", "cash_auto_save_disabled");
     }
 
@@ -321,6 +321,8 @@ function createUtrProcessor(deps = {}) {
     // about this bill: it is ignored and reported. Every other reply counts. Finance must send ALL landlords in ONE mail,
     // so UTR lines spread over several relevant replies are never combined.
     const landlordsNow = item.perLandlordMapping.landlords;
+    // ONE landlord (Cash + Online pair): a line without a name ("UTR : X") can only be his
+    if (landlordsNow.length === 1) for (const r of d.replies || []) for (const l of r.lines || []) if (!l.name) l.name = landlordsNow[0].name;
     const aboutThisBill = (r) => r.lines.some((l) => matchLandlord(l.name, landlordsNow).error !== "landlord_name_not_found");
     const relevant = (d.replies || []).filter(aboutThisBill);
     const ignored = (d.replies || []).filter((r) => !relevant.includes(r)).map((r) => ({ messageId: r.messageId, reason: "names_match_no_landlord_of_this_bill", names: r.lines.map((l) => l.name) }));
