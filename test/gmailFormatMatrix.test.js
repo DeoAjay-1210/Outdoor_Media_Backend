@@ -23,10 +23,10 @@ test("F1. UTR line spellings: name + UTR is read with or without spaces, any das
   for (const t of ok) assert.equal(P.extractLandlordUtrLines(t).length, 1, t);
   assert.equal(P.extractLandlordUtrLines("Aran - UTR : UTR132587456123")[0].name, "Aran");
   assert.equal(P.extractLandlordUtrLines("UTR : UTR132587456123")[0].name, "");
-  for (const t of ["Aran - UTR : pending", "Aran - UTR : NA", "Aran - UTR : 1234", "Aran 132587456123", "Aran-UTR132587456123x y"]) {
+  for (const t of ["Aran - UTR : pending", "Aran - UTR : NA", "Aran - UTR : 12", "Aran 132587456123", "Aran-UTR132587456123x y"]) {
     assert.equal(P.extractLandlordUtrLines(t).filter((l) => /\d/.test(l.utr) && l.utr.length >= 5).length <= 1, true, t);
   }
-  for (const t of ["Aran - UTR : pending", "Aran - UTR : NA", "Aran - UTR : 1234", "Aran 132587456123"]) assert.equal(P.extractLandlordUtrLines(t).length, 0, t);
+  for (const t of ["Aran - UTR : pending", "Aran - UTR : NA", "Aran - UTR : 12", "Aran 132587456123"]) assert.equal(P.extractLandlordUtrLines(t).length, 0, t);
 });
 
 // ── 2. several landlords, no GST (mapLandlords: all-or-nothing, by name) ──
@@ -149,4 +149,13 @@ test("F10. every way a mail client may break / space the line is read as ONE lin
   for (const t of [`Aran - ${B[0]} :\n${U}`, `Aran - ${B[0]}\n: ${U}`, `Aran -\n${B[0]} : ${U}`, `Aran - ${B[0]} :\nUTR : ${U}`]) {
     assert.deepEqual(extractBillLines(t, B).map((l) => [l.name, l.utr]), [["Aran", U]], JSON.stringify(t));
   }
+});
+
+test("F11. a SHORT value after the UTR label is still a UTR (963, 1489, 1325ASD): 3-30 characters with a digit; 2 characters or letters only are not", () => {
+  for (const [t, utr] of [["Ajay - UTR : 963", "963"], ["Singh - UTR : 1489", "1489"], ["Ajay - UTR : 1325ASD", "1325ASD"], ["UTR : 7", null], ["Ajay - UTR : 96", null], ["Ajay - UTR : abc", null]]) {
+    const l = P.extractLandlordUtrLines(t);
+    assert.equal(l.length ? l[0].utr : null, utr, t);
+  }
+  const B = ["ADNOOHBILL0610202613"];
+  assert.equal(extractBillLines(`Ajay - ${B[0]} : 963`, B)[0].utr, "963");
 });
