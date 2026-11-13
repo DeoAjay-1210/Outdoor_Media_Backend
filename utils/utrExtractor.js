@@ -39,6 +39,39 @@ const stripQuoted = (text) => {
   return kept.join("\n");
 };
 
+/**
+ * Reply text, tidied so that a line that Gmail / the mail client broke is read as the ONE line Finance typed:
+ *   - odd spaces (no-break, narrow no-break, zero-width) become normal spaces / nothing
+ *   - "Name - <BillNo> :"  + next line "UTR1111111111111,"       (value wrapped to the next line)
+ *   - "Name - UTR :"       + next line "UTR1111111111111"        (same, with the label on the first line)
+ *   - "Name -"             + next line "UTR : UTR1111111111111"  (label wrapped to the next line)
+ *   - "Name"               + next line "- UTR : UTR1111111111111" (separator + label start the next line)
+ * Only a continuation that is JUST a UTR value / starts with the UTR label is joined; signatures, bullets of other landlords and ordinary text are not.
+ */
+const VALUE_LINE = /^\s*(?:UTR(?:\s*(?:No\.?|Number|Num|Ref(?:erence)?|#))?\s*[:=|\-\u2013\u2014]*\s*)?[A-Za-z0-9]{5,30}\s*[,;.]?\s*$/i;
+const LABEL_START = /^\s*[:=|\-\u2013\u2014]*\s*(?:UTR|Transaction\s+Ref)/i;
+function joinWrappedValues(text) {
+  const src = String(text || "").replace(/[\u00a0\u2007\u202f]/g, " ").replace(/[\u200b-\u200d\ufeff]/g, "").split("\n");
+  const out = [];
+  const nextIdx = (i) => { let j = i + 1; while (j < src.length && !src[j].trim()) j++; return j; };
+  const hasValue = (l) => /\bUTR[A-Za-z0-9 .#:=|\-\u2013\u2014]*[A-Za-z0-9]{5,30}\s*[,;.]?\s*$/i.test(l) && /\d/.test(l.split(/UTR/i).pop() || "");
+  for (let i = 0; i < src.length; i++) {
+    const line = src[i];
+    const j = nextIdx(i);
+    if (line.trim() && j < src.length) {
+      const next = src[j];
+      const endsSep = /[:=|\-\u2013\u2014]\s*$/.test(line);
+      const joinValue = endsSep && /\d/.test(next) && VALUE_LINE.test(next);
+      const joinLabel = endsSep && LABEL_START.test(next) && /\d/.test(next);
+      const joinLead = !endsSep && !hasValue(line) && /^\s*[:=|\-\u2013\u2014]+\s*(?:UTR|Transaction\s+Ref)/i.test(next) && /\d/.test(next);
+      const joinBill = endsSep && /^\s*ADNOOHBILL\d/i.test(next); // "Name -" + next line "<BillNo> : UTR ..."
+      if (joinValue || joinLabel || joinLead || joinBill) { out.push(line.replace(/\s+$/, "") + " " + next.trim()); i = j; continue; }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 // the first labelled UTR on ONE line: { utr, labelStart, end } | null  (used for "Jamuna - UTR: X" landlord lines)
 const LINE_UTR = new RegExp(`\\b(${LABEL})(?![A-Za-z0-9])${SEP}${VALUE}(?![A-Za-z0-9])`, "i");
 const findUtrInLine = (line) => {
@@ -50,7 +83,7 @@ const findUtrInLine = (line) => {
 /** All labelled UTR candidates in one text: [{ utr, label }] (document order, may repeat). */
 const findCandidates = (text) => {
   const out = [];
-  const body = stripQuoted(text);
+  const body = joinWrappedValues(stripQuoted(text)); // a line the mail client broke is read as the one line Finance typed
   for (const m of body.matchAll(SAME_LINE)) {
     if (hasDigits(m[1])) out.push({ utr: m[1].toUpperCase(), label: m[0].slice(0, m[0].length - m[1].length).trim() });
   }
@@ -124,4 +157,4 @@ function extractCashLines(text) {
   return out;
 }
 
-module.exports = { extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, stripQuoted, extractCashLines };
+module.exports = { joinWrappedValues, extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, stripQuoted, extractCashLines };

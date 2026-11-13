@@ -171,7 +171,7 @@ const utrCorrectionsApi = async (req, res) => {
 
 /** GET /api/gmail/utr-tracker/export?from=YYYY-MM-DD&to=YYYY-MM-DD — CMD only. READ-ONLY Excel: every bill CMD-approved in the range, per landlord and payment part, with the UTR (or "-"), status, error and the exact reply format. */
 const utrTrackerExport = async (req, res) => {
-  if (!isCmd(req)) return errorResponse(res, "Only CMD can use this API", null, 403);
+  // read-only report: any logged-in user (CMD, Rental Executive, Rental Manager ...) may download it; the route still needs a valid token (protect)
   const from = String(req.query.from || "").trim();
   const to = String(req.query.to || "").trim();
   const ymd = /^\d{4}-\d{2}-\d{2}$/;

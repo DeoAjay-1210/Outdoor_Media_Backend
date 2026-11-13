@@ -1515,9 +1515,10 @@ test("G10. label spellings: Rent / Base Rent / Rental / Rent Amount and GST / GS
     assert.deepEqual(kinds(x.calls).map((k) => [k[0], k[1]]), [["rental", RU], ["gst", GU]], rentLabel);
   }
   const other = await runS({ lookupLandlords: lkS([rep2("R1", `TDS - UTR: ${RU}\nSuresh - UTR: ${GU}`, RENT_AT)]) });
-  assert.equal(one(other.r).status, "utr_not_found");
+  // names that are not this bill's landlord: nothing is saved and it is reported for review (a later reply with the right name still saves)
+  assert.equal(one(other.r).status, "ambiguous_mapping");
+  assert.equal(one(other.r).reason, "landlord_name_not_found");
   assert.equal(other.calls.saver.length, 0);
-  assert.deepEqual(one(other.r).ignoredLines.map((l) => l.reason), ["label_is_not_rent_or_gst", "label_is_not_rent_or_gst"]);
 });
 
 test("G11. a Paid Date written on a line wins; the other payment uses its own reply's sent date", async () => {
@@ -1809,4 +1810,62 @@ test("M24. ONE landlord with Cash + Online rent (no GST): his UTR saves the Onli
   const off = await run({ doc: { landOwners: [pairOwners(3)[0]] }, cashSave: false, lookupLandlords: reply(`Jamuna - UTR: ${U.J}`) });
   assert.equal(one(off.r).reason, "cash_auto_save_disabled");
   assert.equal(off.calls.saver.length, 0);
+});
+
+test("N10. single landlord: a landlord NAME on the UTR line that is not this bill's landlord = nothing saved; the right name, or no name, saves", async () => {
+  const lk = (names) => () => foundReply({ utrLineNames: names });
+  const bad = setup({ lookup: lk(["Wrong Person"]) });
+  const r = await bad.p.processPendingUtrs({ dryRun: false, force: true });
+  assert.equal(r.results[0].status, "ambiguous_mapping");
+  assert.equal(r.results[0].reason, "landlord_name_not_found");
+  assert.equal(bad.calls.saver.length, 0);
+  for (const names of [["Landlord 1"], [""], []]) {
+    const ok = setup({ lookup: lk(names) });
+    assert.equal((await ok.p.processPendingUtrs({ dryRun: false, force: true })).results[0].status, "found_and_saved");
+    assert.equal(ok.calls.saver.length, 1);
+  }
+});
+
+test("N11. single landlord: a wrong-name line is ignored when a line with the RIGHT name states the same UTR; only wrong names = nothing saved", async () => {
+  const x = setup({ lookup: () => foundReply({ utrLineNames: ["Dhoni", "Landlord 1", "Landlord 1"] }) });
+  assert.equal((await x.p.processPendingUtrs({ dryRun: false, force: true })).results[0].status, "found_and_saved");
+  const y = setup({ lookup: () => foundReply({ utrLineNames: ["Dhoni", "Someone"] }) });
+  assert.equal((await y.p.processPendingUtrs({ dryRun: false, force: true })).results[0].reason, "landlord_name_not_found");
+  assert.equal(y.calls.saver.length, 0);
+});
+
+test("N12. a reply that needs review keeps what Finance actually wrote in the log (name + UTR), for the Excel", async () => {
+  const bad = setup({ lookup: () => foundReply({ utrLineNames: ["Dhoni"] }) });
+  const r = await bad.p.processPendingUtrs({ dryRun: false, force: true });
+  assert.equal(r.results[0].reason, "landlord_name_not_found");
+  assert.deepEqual(bad.Log.rows[0].replyLines, [`Dhoni - UTR : ${UTR}`]);
+  const ok = setup({ lookup: () => foundReply({ utrLineNames: ["Landlord 1"] }) });
+  await ok.p.processPendingUtrs({ dryRun: false, force: true });
+  assert.equal(ok.Log.rows[0].replyLines, undefined); // a saved bill needs no review lines
+});
+
+test("W1. WRONG name first, RIGHT name in a later reply, in EVERY Rental flow: the right one saves, the wrong one never does; a wrong name alone is reported", async () => {
+  // single landlord, GST hold
+  const hold = await runS({ lookupLandlords: lkS([rep2("R1", `Dhoni - UTR: ${RU}`, RENT_AT), rep2("R2", `Venkatesan Prasanna Kumar - UTR: ${RU}\nVenkatesan Prasanna Kumar - GST - UTR: ${GU}`, GST_AT)]) });
+  assert.deepEqual(kinds(hold.calls).map((k) => [k[0], k[1]]), [["rental", RU], ["gst", GU]]);
+  const holdOnly = await runS({ lookupLandlords: lkS([rep2("R1", `Dhoni - UTR: ${RU}`, RENT_AT)]) });
+  assert.equal(one(holdOnly.r).reason, "landlord_name_not_found");
+  assert.equal(holdOnly.calls.saver.length, 0);
+  // several landlords, no GST
+  const wrong = `Dhoni - UTR: UTR999999999999`;
+  const ok = await run({ lookupLandlords: reply(`${wrong}\n${THREE}`) });
+  assert.equal(one(ok.r).status, "found_and_saved");
+  assert.ok(ok.calls.saver.every((b) => b.payments[0].utrNumber !== "UTR999999999999"));
+  const only = await run({ lookupLandlords: reply(wrong) });
+  assert.equal(one(only.r).status, "ambiguous_mapping");
+  assert.equal(only.calls.saver.length, 0);
+});
+
+test("W2. a line the mail client broke (UTR on the next line, no-break spaces) saves in the single-landlord flow too", async () => {
+  const U1 = "UTR8437438443";
+  const x = setup({ lookup: () => foundReply({ utr: U1 }) });
+  // the lookup builds candidates with findCandidates: it must read the wrapped line
+  const { findCandidates } = require("../utils/utrExtractor");
+  for (const t of [`Landlord 1 - UTR :\n${U1},`, `Landlord\u00a01\u00a0-\u00a0UTR\u00a0:\u00a0${U1}`, `Landlord 1 -\nUTR : ${U1}`]) assert.deepEqual(findCandidates(t).map((c) => c.utr), [U1], JSON.stringify(t));
+  assert.equal((await x.p.processPendingUtrs({ dryRun: false, force: true })).results[0].status, "found_and_saved");
 });

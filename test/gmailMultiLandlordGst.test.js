@@ -67,7 +67,7 @@ test("MG-P3. unknown / ambiguous / initial-only landlord names are problems; an 
   assert.equal(run("R - GST - UTR : UTR438432443").problems[0].reason, "landlord_name_too_short");
   const u = run("Ravi Kumar - UTR : UTR438432443");
   assert.equal(u.problems.length, 0);
-  assert.equal(u.ignored[0].reason, "no_rent_or_gst_label");
+  assert.equal(u.ignored.length, 0); // a NAMED line without the GST word is the Rent UTR
 });
 
 // ───────────────────────── pending list ─────────────────────────
@@ -207,20 +207,30 @@ test("MG4. only Landlord2's GST line exists: that payment alone is saved, the ot
   assert.equal(x.calls.saver[0].entryType, "gst");
 });
 
-test("MG5. an unknown landlord name blocks the whole bill: nothing is saved", async () => {
-  const x = setup({ replies: [reply("m1", `${FOUR}\nLandlord9 - Rent - UTR : UTR999999999999`)] });
+test("MG5. a line with an unknown landlord name never blocks the lines that carry the right names; a wrong name ALONE saves nothing and is reported; the right name later saves", async () => {
+  // every payment has its own correct line + one stranger line: the stranger is ignored, nothing else is affected
+  const x = setup({ replies: [reply("m1", `${FOUR}
+Landlord9 - Rent - UTR : UTR999999999999`)] });
   const r = await x.p.processPendingUtrs({ dryRun: false });
-  assert.equal(one(r).status, "ambiguous_mapping");
-  assert.equal(one(r).reason, "landlord_name_not_found");
-  assert.equal(x.calls.saver.length, 0);
+  assert.equal(one(r).status, "found_and_saved");
+  assert.ok(x.calls.saver.every((b) => b.payments.every((p) => p.utrNumber !== "UTR999999999999")));
+  // only a wrong name: nothing is saved, reported as landlord_name_not_found
+  const y = setup({ replies: [reply("m1", `Landlord9 - Rent - UTR : UTR999999999999`)] });
+  const ry = await y.p.processPendingUtrs({ dryRun: false });
+  assert.equal(one(ry).status, "ambiguous_mapping");
+  assert.equal(one(ry).reason, "landlord_name_not_found");
+  assert.equal(y.calls.saver.length, 0);
 });
 
-test("MG6. a line without Rent / GST is never used (it could be either)", async () => {
+test("MG6. a NAMED line without the GST word is the RENT UTR; a line with no name at all is never used (it could be anyone / either)", async () => {
+  const y = setup({ replies: [reply("m1", `UTR : ${U.r1}`)] });
+  const ry = await y.p.processPendingUtrs({ dryRun: false });
+  assert.equal(one(ry).status, "utr_not_found");
+  assert.equal(y.calls.saver.length, 0);
   const x = setup({ replies: [reply("m1", `Landlord1 - UTR : ${U.r1}`)] });
   const r = await x.p.processPendingUtrs({ dryRun: false });
-  assert.equal(one(r).status, "utr_not_found");
-  assert.equal(x.calls.saver.length, 0);
-  assert.equal(one(r).ignoredLines[0].reason, "no_rent_or_gst_label");
+  assert.equal(one(r).status, "found_and_saved");
+  assert.ok(x.calls.saver.every((b) => b.payments.every((p) => p.utrNumber !== undefined)));
 });
 
 test("MG7. the same UTR on two payments blocks the whole bill", async () => {
