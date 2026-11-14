@@ -42,6 +42,7 @@ const bootServer = async (flag, purgeCron) => {
     "utils/agreementStatusSync": { syncAgreementStatuses: async () => { calls.agreements++; return { checked: 0, updated: 0 }; } },
     "config/firebase": { initFirebase: noop },
     "utils/overdueScheduler": { startOverdueScheduler: noop },
+    "utils/gmailUtrCron": { startGmailUtrCron: noop },
   };
   const routeStub = router();
 

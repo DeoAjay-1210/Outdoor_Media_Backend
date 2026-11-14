@@ -315,9 +315,16 @@ test("period due: media type / city filters, mixed sites, inactive faces and sit
 
 test("period due: cash + online owners need both modes paid", () => {
   const owners = [{ _id: "1-o", paymentCategory: 3, cashAmount: 4000, onlineAmount: 6000, shareAmount: 10000 }];
-  const d = due(deepFreeze([dsite("1", 10000, { owners, ledgerHistory: paidHist("1", "June") })]), { startDate: "2026-06-01", endDate: "2026-06-30" });
+  const d = due(deepFreeze([dsite("1", 10000, { owners, ledgerHistory: paidHist("1", "June", "2026", 6000) })]), { startDate: "2026-06-01", endDate: "2026-06-30" }); // only the online part paid
   assert.equal(d.toBePaid, 10000);
   assert.equal(d.unpaid, 4000);
+});
+
+test("period due: a month fully paid in one mode keeps that category although the owner is now cash + online", () => {
+  const owners = [{ _id: "1-o", paymentCategory: 3, cashAmount: 4000, onlineAmount: 6000, shareAmount: 10000 }];
+  const d = due(deepFreeze([dsite("1", 10000, { owners, ledgerHistory: paidHist("1", "June") })]), { startDate: "2026-06-01", endDate: "2026-06-30" }); // whole share paid online
+  assert.equal(d.toBePaid, 10000);
+  assert.equal(d.unpaid, 0);
 });
 
 test("period due: the paid card (payments by date) is independent and the chart is untouched", () => {

@@ -170,7 +170,7 @@ function recomputePendingMonths(media) {
           const hasOnline = ownerEntries.some(
             (e) => e.paymentMode === "Online",
           );
-          const paymentCategory = Number(owner.paymentCategory || 1);
+          const paymentCategory = paidCategoryForCycle(ownerEntries, owner) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
           if (paymentCategory === 1) return hasCash;
           if (paymentCategory === 2) return hasOnline;
           if (paymentCategory === 3) return hasCash && hasOnline;
@@ -860,6 +860,7 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
       const isDirectGst = Number(effectiveWithGst) === 2;
 
       cycleOwners.forEach((owner) => {
+        owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
         const paymentCategory = Number(owner.paymentCategory || 1);
         getRequiredModesShared(paymentCategory).forEach((mode) => {
           const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
@@ -1054,6 +1055,7 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
       cycleUnpaidRent = isLiveCycle ? Number(cycleMedia.rentalPayment?.totalRentalAmount || 0) : 0;
     } else {
       owners.forEach((owner) => {
+        owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
         const paymentCategory = Number(owner.paymentCategory || 1);
         getRequiredModesShared(paymentCategory).forEach((mode) => {
           const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle);
@@ -2757,6 +2759,63 @@ async function runBulkLedgerEntry(req, res) {
 // approved bill — same rule as landOwnerSiteFilter ("approved wins over a
 // waiting duplicate"). One bill / equal statuses → same bill as before.
 const RENTAL_DUE_STATUS_RANK = { 3: 3, 2: 2 };
+// ✅ NEW — payment category a cycle was actually PAID in: when an owner's saved rent entries of that month
+// cover the owner's share, the month keeps the mode(s) it was paid in (1 Cash, 2 Online, 3 Cash + Online)
+// even if the owner's paymentCategory was changed later. null → not fully paid: the owner's current category.
+// monthLabel null → [entries] are already that month's entries.
+function paidCategoryForCycle(entries, owner, monthLabel = null) {
+  const share = Number(owner?.shareAmount || 0);
+  if (!owner || share <= 0) return null;
+  const mine = (entries || []).filter(
+    (e) =>
+      e && !e.isVirtual && e.isUtrEntry !== true && (e.paymentMode === "Cash" || e.paymentMode === "Online") &&
+      (monthLabel === null || e.dueMonth === monthLabel || e.month === monthLabel) &&
+      (String(e.landOwnerId) === String(owner._id) ||
+        (owner.landOwnerMasterId && String(e.landOwnerId) === String(owner.landOwnerMasterId)) ||
+        (!e.landOwnerId && owner.name && e.landOwnerName === owner.name)),
+  );
+  if (!mine.length) return null;
+  const paid = mine.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  if (paid + 0.5 < share) return null;
+  const modes = new Set(mine.map((e) => e.paymentMode));
+  return modes.has("Cash") && modes.has("Online") ? 3 : modes.has("Cash") ? 1 : 2;
+}
+
+// ✅ NEW — a cycle's saved rent entries (live ledger + ledgerHistory, same sources as isOwnerModePaidForCycle),
+// de-duplicated (a payment can be in both), then paidCategoryForCycle for this owner
+function paidCategoryOfCycle(media, owner, cycleDate) {
+  if (!media || !owner || !cycleDate) return null;
+  const ist = new Date(new Date(cycleDate).getTime() + IST_OFFSET_MS);
+  const monthName = MONTH_NAMES[ist.getUTCMonth()];
+  const year = String(ist.getUTCFullYear());
+  const label = `${monthName} ${year}`.toLowerCase();
+  const live = (media.ledger || []).filter((e) => e && e.status === 1 && String(e.dueMonth || e.month || "").trim().toLowerCase() === label);
+  const hist = (((media.ledgerHistory || []).find((y) => String(y.year) === year)?.months || [])
+    .find((m) => String(m.month || "").toLowerCase() === monthName.toLowerCase())?.entries) || [];
+  const seen = new Set();
+  const entries = [...live, ...hist].filter((e) => {
+    const key = `${e.landOwnerId}|${e.paymentMode}|${Number(e.amount || 0)}|${e.utrNumber || ""}|${e.date ? new Date(e.date).getTime() : ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return paidCategoryForCycle(entries, owner);
+}
+
+// ✅ NEW — owner as of a fully paid cycle: paid in a category other than the current one → that category, with
+// the single paid mode carrying the whole share (1 Cash / 2 Online). Otherwise the owner unchanged.
+function paidOwnerOfCycle(media, owner, cycleDate) {
+  const pc = paidCategoryOfCycle(media, owner, cycleDate);
+  if (pc === null || pc === Number(owner.paymentCategory || 1)) return owner;
+  const share = Number(owner.shareAmount || 0);
+  return {
+    ...owner,
+    paymentCategory: pc,
+    cashAmount: pc === 1 ? share : pc === 3 ? owner.cashAmount : 0,
+    onlineAmount: pc === 2 ? share : pc === 3 ? owner.onlineAmount : 0,
+  };
+}
+
 function findRentalDueForMonth(rentalDue, dueMonth) {
   let best = null;
   for (const d of rentalDue || []) {
@@ -3010,7 +3069,7 @@ if (city) {
               const hasOnline = ownerEntries.some(
                 (e) => e.paymentMode === "Online",
               );
-              const paymentCategory = Number(owner.paymentCategory || 1);
+              const paymentCategory = paidCategoryForCycle(ownerEntries, owner) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
               if (paymentCategory === 1) return hasCash;
               if (paymentCategory === 2) return hasOnline;
               if (paymentCategory === 3) return hasCash && hasOnline;
@@ -3196,7 +3255,7 @@ for (const media of results) {
                   const hasOnline = ownerEntries.some(
                     (e) => e.paymentMode === "Online",
                   );
-                  const paymentCategory = Number(owner.paymentCategory || 1);
+                  const paymentCategory = paidCategoryForCycle(ownerEntries, owner) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
                   if (paymentCategory === 1) return hasCash;
                   if (paymentCategory === 2) return hasOnline;
                   if (paymentCategory === 3) return hasCash && hasOnline;
@@ -3664,7 +3723,8 @@ for (const media of results) {
         const cycleMedia = mediaAsOfDate(mediaObj, cycleDate);
 
         (cycleMedia.landOwners || []).forEach((owner) => {
-          const paymentCategory = Number(owner.paymentCategory || 1);
+          const paidCategory = paidCategoryForCycle(realLedgerHistoryEntries, owner, cycleMonthLabel); // ✅ NEW — fully paid month keeps its paid mode(s)
+          const paymentCategory = paidCategory ?? Number(owner.paymentCategory || 1);
           const requiredModes = getRequiredModesForOwner(paymentCategory);
 
           requiredModes.forEach((mode) => {
@@ -3704,6 +3764,10 @@ for (const media of results) {
                   mode === "Online" ? Number(owner.onlineAmount || 0) : undefined,
                 shareAmount: Number(owner.shareAmount || 0), // ✅ NEW
                 tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
+                // ✅ NEW — paid in a category other than the current one: amount paid in this mode
+                ...(paidCategory !== null && paidCategory !== Number(owner.paymentCategory || 1)
+                  ? { cashAmount: mode === "Cash" ? Number(realHistoryEntry.amount || 0) : undefined, onlineAmount: mode === "Online" ? Number(realHistoryEntry.amount || 0) : undefined }
+                  : {}),
                 rentalDueApprovalStatus:
                   matchedDueForApproval?.approvalStatus ?? 0,
                 withGst: resolvedWithGst,
@@ -5440,7 +5504,7 @@ const details = (media.mediaDetails || []).map((d) => ({
   const getOwnerPaymentInfo = (owner, cycleDate) => {
     if (!owner || !cycleDate) return { isPaid: false, date: null };
 
-    const pc = Number(owner.paymentCategory || 1);
+    const pc = paidCategoryOfCycle(media, owner, cycleDate) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
     const modes = getRequiredModesShared(pc);
     let latestDate = null;
 
@@ -5687,7 +5751,14 @@ const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycl
 const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(cycleMedia) > 0 ? 1 : 0);
     matchingLandOwners.forEach((rawOwner) => {
       const owner = ownerAsOfDate(media, rawOwner, cycleDate);
-      const paymentCategory = Number(owner.paymentCategory || 1);
+      // ✅ NEW — fully paid month keeps the mode(s) it was paid in (owner's category changed later)
+      const ownerCycleEntries = isLiveCycle
+        ? (media.ledger || []).filter((e) => e.status === 1)
+        : (((media.ledgerHistory || []).find((y) => y.year === String(cycleDate.getUTCFullYear()))?.months || [])
+            .find((m) => String(m.month || "").toLowerCase() === MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()].toLowerCase())?.entries || []);
+      const paidCategory = paidCategoryForCycle(ownerCycleEntries, owner);
+      const paidInOtherCategory = paidCategory !== null && paidCategory !== Number(owner.paymentCategory || 1);
+      const paymentCategory = paidCategory ?? Number(owner.paymentCategory || 1);
       cycleTds += Number(owner.tdsAmount || 0);
 
       // const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
@@ -5718,6 +5789,12 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
             }
         }
 
+        // ✅ NEW — paid in another category: this mode's expected amount = what was paid in it
+        if (paidInOtherCategory) {
+          amt = ownerCycleEntries
+            .filter((e) => e.isUtrEntry !== true && e.paymentMode === mode && String(e.landOwnerId) === String(owner._id))
+            .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+        }
         cycleTotal += amt;
 
         let entry = null;
@@ -6112,7 +6189,8 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 
     matchingLandOwners.forEach((rawOwner) => {
       const owner = ownerAsOfDate(media, rawOwner, cycleDate);
-      const paymentCategory = Number(owner.paymentCategory || 1);
+      const paidCategory = paidCategoryForCycle(realEntries, owner); // ✅ NEW — fully paid month keeps its paid mode(s)
+      const paymentCategory = paidCategory ?? Number(owner.paymentCategory || 1);
       const requiredModes = getRequiredModesForOwner(paymentCategory);
 
       requiredModes.forEach((mode) => {
@@ -6254,6 +6332,10 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             onlineAmount: resolvedOnlineAmount, // ✅ CHANGED — always a number now
             shareAmount: resolvedShareAmount, // ✅ ADDED
             tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
+            // ✅ NEW — paid in a category other than the current one: amount paid in this mode
+            ...(paidCategory !== null && paidCategory !== Number(owner.paymentCategory || 1)
+              ? { cashAmount: mode === "Cash" ? resolvedRealAmount : 0, onlineAmount: mode === "Online" ? resolvedRealAmount : 0 }
+              : {}),
             rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ NEW
             remark: realEntry.remark ?? "", // ✅ NEW — saved remark (was dropped)
             bankRefNo: realEntry.bankRefNo ?? "",
@@ -7051,6 +7133,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     // ── RENT — identical rule to getUnpaidRentForCycle(), per owner ──
     cycleOwners.forEach((owner) => {
       const ownerId = String(owner._id);
+      owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
@@ -7235,6 +7318,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     const isDirectGst = Number(effectiveWithGst) === 2;
 
     cycleOwners.forEach((owner) => {
+      owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         let rentAmount = (mode === "Cash"

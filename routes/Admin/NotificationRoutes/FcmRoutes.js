@@ -5,6 +5,6 @@ const FcmController = require("../../../controllers/Admin/NotificationController
 
 // FCM Token Management Routes
 router.post("/fcm/token", protect, FcmController.saveFcmToken);
-router.post("/fcm/remove-token", protect, FcmController.removeFcmToken);
+router.post("/fcm/remove-token", FcmController.removeFcmToken);
 
 module.exports = router;
