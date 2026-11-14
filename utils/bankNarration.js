@@ -83,10 +83,16 @@ const last4 = (s) => { const d = String(s || "").replace(/\D/g, ""); return d.le
 /** Which landlord a bank row pays: by account number (last 4) and by name words in Ledger Name / Account Name. -> landlord | null | "ambiguous" */
 function landlordOfRow(row, landlords) {
   const byAcc = row.accountNo ? landlords.filter((l) => l.accountLast4 && l.accountLast4 === last4(row.accountNo)) : [];
-  const words = new Set(norm(`${row.ledgerName} ${row.payee}`).split(" ").filter(Boolean));
+  const wordList = norm(`${row.ledgerName} ${row.payee}`).split(" ").filter(Boolean);
+  const words = new Set(wordList);
+  // the bank may write "land1" for the landlord "land 1": consecutive words joined together are candidates too (whole words only, never a part of a word)
+  const joined = new Set(wordList);
+  for (let i = 0; i < wordList.length; i++) for (let k = 2; k <= 3 && i + k <= wordList.length; k++) joined.add(wordList.slice(i, i + k).join(""));
   const byName = landlords.filter((l) => {
     const t = nameTokens(l.name).filter((x) => x.length >= 2);
-    return t.length > 0 && t.every((x) => words.has(x));
+    if (t.length > 0 && t.every((x) => words.has(x))) return true;
+    const compact = nameTokens(l.name).join("");
+    return compact.length >= 3 && joined.has(compact);
   });
   if (byAcc.length > 1) return "ambiguous";
   if (byAcc.length === 1) {

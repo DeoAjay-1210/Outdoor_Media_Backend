@@ -357,7 +357,10 @@ async function buildUtrTracker(opts = {}, deps = {}) {
     const gst = list.filter((p) => p._part === "gst").reduce((t, p) => t + num(p.amount), 0);
     const perLandlord = (fn) => landlords.map((n) => uniq(list.filter((p) => p.landlordName === n && p._saved).map(fn)));
     const paidDates = perLandlord((p) => p._paid).map((a) => (a.length ? a.join(" / ") : "-"));
-    const narrations = perLandlord((p) => p._narr).map((a) => (a.length ? a.join(" / ") : "-"));
+    const narrOf = (part) => landlords.map((n) => uniq(list.filter((p) => p.landlordName === n && p._saved && p._part === part).map((p) => p._narr)).join(" / ") || "-");
+    const narrText = (arr) => (landlords.length > 1 ? landlords.map((n, i) => `${n}: ${arr[i]}`).join("\n") : arr[0] || "-");
+    const rentNarr = narrOf("rent");
+    const gstNarr = narrOf("gst");
     const st = new Set(list.map((p) => p.status));
     const open = list.filter((p) => p._open);
     // Some payment of the bill is already saved and the ONLY thing still open is a part whose reply used a wrong landlord name: that is not a problem of
@@ -376,7 +379,8 @@ async function buildUtrTracker(opts = {}, deps = {}) {
       "Total Rental Amount": rent, "GST Amount": gst, "Total Amount": rent + gst,
       "Rent UTR": rentUtr.join(", "), "GST UTR": first.gstLabel === "Yes - On hold" ? gstUtr.join(", ") : "-",
       "Paid Date": paidDates.join(", "),
-      "Narration": landlords.length > 1 ? landlords.map((n, i) => `${n}: ${narrations[i]}`).join("\n") : narrations[0] || "-",
+      "Rent Narration": narrText(rentNarr),
+      "GST Narration": first.gstLabel === "Yes - On hold" ? narrText(gstNarr) : "-",
       "Status": status,
       "Error": soft ? `Waiting for the ${waitingFor} UTR - the reply used a landlord name that is not on this bill` : uniq(open.map((p) => p.errorText)).join("\n"),
       // a bill that needs review: show what Finance ACTUALLY replied (e.g. "Dhoni - UTR : …"), not the format that was expected
@@ -401,7 +405,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
 const COLS = [
   ["Month", 16], ["Approval Date", 15], ["Bill Type", 14], ["Bill Number", 25], ["Site Code", 22], ["Site Name", 34], ["Landlord Name", 30],
   ["Payment Category", 18], ["Payment Frequency", 16], ["GST Applicable", 20], ["Total Rental Amount", 20], ["GST Amount", 16], ["Total Amount", 18],
-  ["Rent UTR", 30], ["GST UTR", 30], ["Paid Date", 22], ["Narration", 50], ["Status", 17], ["Error", 50], ["Reply Format (exact)", 62], ["Reply Example", 56], ["Error Code", 26],
+  ["Rent UTR", 30], ["GST UTR", 30], ["Paid Date", 22], ["Rent Narration", 46], ["GST Narration", 46], ["Status", 17], ["Error", 50], ["Reply Format (exact)", 62], ["Reply Example", 56], ["Error Code", 26],
 ];
 const COL_RENT = 10; // Total Rental Amount .. Total Amount = columns 10-12
 const COL_TOTAL = 12;

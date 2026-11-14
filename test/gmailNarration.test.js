@@ -375,3 +375,18 @@ test("U6. manual ledger saves are unchanged: the engine still uses the logged-in
   const eng = require("fs").readFileSync(require("path").join(__dirname, "..", "controllers", "Admin", "MediaOnboardingController", "LedgerNew2Controller.js"), "utf8");
   assert.ok(/const updatedBy = req\.user\?\.userName \|\| "Admin"/.test(eng));
 });
+
+test("N20. the bank writes the landlord without a space ('land1' for 'land 1'): each landlord still gets ITS OWN narration (never the other's)", () => {
+  const { narrationFor } = require("../utils/bankNarration");
+  const L = [{ landOwnerId: "a", name: "land 1", accountLast4: "4654" }, { landOwnerId: "b", name: "land 2", accountLast4: "8687" }];
+  const row = (ledger, amount, ref, narration) => ({ date: "13-11-2026", month: "Oct-26", ledgerName: ledger, amount, payee: ledger.split(" ")[0], accountNo: "418601838", reference: ref, narration });
+  const rows = [row("land1 Hoarding Landlord", 37760, "R1", "Rent for land1"), row("land2 Hoarding Landlord", 56640, "R2", "Rent for land2")];
+  assert.equal(narrationFor(rows, L, { landOwnerId: "a" }).narration, "Rent for land1");
+  assert.equal(narrationFor(rows, L, { landOwnerId: "b" }).narration, "Rent for land2");
+  // Rent row and GST row of one landlord with different narrations are told apart by the amount
+  const two = [...rows, row("land1 GST", 6800, "R3", "GST for land1")];
+  assert.equal(narrationFor(two, L, { landOwnerId: "a", amount: 37760 }).narration, "Rent for land1");
+  assert.equal(narrationFor(two, L, { landOwnerId: "a", amount: 6800 }).narration, "GST for land1");
+  // "land10" is never "land 1"
+  assert.equal(narrationFor([row("land10 Hoarding", 1000, "R9", "x")], L, { landOwnerId: "a" }).reason, "narration_landlord_not_identified");
+});

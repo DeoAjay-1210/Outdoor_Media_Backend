@@ -143,16 +143,16 @@ test("T14. no 'Rent' word in the reply format: 'Name - UTR' (Rent) and 'Name - G
 
 test("T15. Paid Date and Narration (the ledger 'remarks') of the saved payments; '-' when nothing is saved / no narration", async () => {
   const open = (await run([media()])).rows[0];
-  assert.deepEqual([open["Paid Date"], open["Narration"]], ["-", "-"]);
+  assert.deepEqual([open["Paid Date"], open["Rent Narration"]], ["-", "-"]);
   const saved = media({ landOwners: [owner("o1", "Landlord1"), owner("o2", "Landlord2")], ledger: [
     { ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T10:30:00Z"), remarks: "TEST NARRATION 1" },
     { ...paid("o2", "Online", "UTR222222222222"), date: new Date("2026-11-10T04:00:00Z"), remarks: "" },
   ] });
   const r = (await run([saved])).rows[0];
   assert.equal(r["Paid Date"], "09 Nov 2026, 10 Nov 2026");
-  assert.equal(r["Narration"], "Landlord1: TEST NARRATION 1\nLandlord2: -");
+  assert.equal(r["Rent Narration"], "Landlord1: TEST NARRATION 1\nLandlord2: -");
   const one = media({ ledger: [{ ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T10:30:00Z"), remarks: "Bank narration" }] });
-  assert.deepEqual([(await run([one])).rows[0]["Paid Date"], (await run([one])).rows[0]["Narration"]], ["09 Nov 2026", "Bank narration"]);
+  assert.deepEqual([(await run([one])).rows[0]["Paid Date"], (await run([one])).rows[0]["Rent Narration"]], ["09 Nov 2026", "Bank narration"]);
 });
 
 test("T16. Excel: Paid Date and Narration sit right after GST UTR; every empty cell shows '-' (Error, Error Code ...)", async () => {
@@ -160,10 +160,10 @@ test("T16. Excel: Paid Date and Narration sit right after GST UTR; every empty c
   const wb = XLSX.read(trackerWorkbook(data), { type: "buffer" });
   const aoa = XLSX.utils.sheet_to_json(wb.Sheets["UTR Tracker"], { header: 1, defval: "" });
   const head = aoa[2];
-  assert.deepEqual(head.slice(head.indexOf("GST UTR"), head.indexOf("GST UTR") + 4), ["GST UTR", "Paid Date", "Narration", "Status"]);
+  assert.deepEqual(head.slice(head.indexOf("GST UTR"), head.indexOf("GST UTR") + 5), ["GST UTR", "Paid Date", "Rent Narration", "GST Narration", "Status"]);
   const row = aoa.find((r) => r[3] === BILL);
   assert.equal(row[head.indexOf("Paid Date")], "09 Nov 2026");
-  for (const col of ["Narration", "Error", "Reply Example", "Error Code"]) assert.equal(row[head.indexOf(col)], "-", col);
+  for (const col of ["Rent Narration", "GST Narration", "Error", "Reply Example", "Error Code"]) assert.equal(row[head.indexOf(col)], "-", col);
   assert.ok(row.every((v) => v !== ""), "no empty cell in a data row");
 });
 
@@ -175,7 +175,7 @@ test("T17. New Bill: Paid Date and Narration come from the bill's saved payments
     ownerApprovalDate: new Date("2026-11-05T03:00:00Z"), createdAt: new Date("2026-11-05T03:00:00Z"),
   };
   const rows = (await run([media({ rentalDue: [{ _id: "p1", withGst: 2 }], arrearsDue: [bill] })])).rows;
-  assert.deepEqual([rows[0]["Rent UTR"], rows[0]["Paid Date"], rows[0]["Narration"]], ["UTR111111111111", "11 Nov 2026", "NB narration"]);
+  assert.deepEqual([rows[0]["Rent UTR"], rows[0]["Paid Date"], rows[0]["Rent Narration"]], ["UTR111111111111", "11 Nov 2026", "NB narration"]);
 });
 
 test("T18. Rent saved with the RIGHT name, GST only ever got a WRONG-name line: 'Partially saved' (not 'Needs review'), the Error says what it waits for, no Error Code", async () => {
@@ -199,4 +199,17 @@ test("T19. the life of one bill: wrong name -> Needs review (landlord_name_not_f
   const step2 = (await run([media({ ledger: [{ ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-11T05:00:00Z") }] })], [log])).rows[0]; // right name arrived and was saved; the review log is still the latest row
   assert.deepEqual([step2["Status"], step2["Rent UTR"], step2["Error"], step2["Error Code"], step2["Paid Date"]], ["Saved", "UTR111111111111", "", "", "11 Nov 2026"]);
   assert.equal(step2["Reply Format (exact)"], "Landlord1 - UTR : UTR111111111111");
+});
+
+test("T20. GST hold, several landlords: Rent narration and GST narration are SEPARATE columns, per landlord; '-' when a payment has none", async () => {
+  const m = media({
+    landOwners: [owner("o1", "land 1"), owner("o2", "land 2")], rentalDue: [dueRow({ withGst: 1 })],
+    ledger: [{ ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T05:00:00Z"), remarks: "Rent narration L1" }, { ...paid("o2", "Online", "UTR222222222222"), date: new Date("2026-11-09T05:00:00Z"), remarks: "Rent narration L2" }],
+    gstBalanceHistory: [{ _id: "g1", rentalDueId: "r1", ownerId: "o1", isPaid: true, utrNumber: "GST111111111111", date: new Date("2026-11-10T05:00:00Z"), remarks: "GST narration L1", gstAmount: 900 }, { _id: "g2", rentalDueId: "r1", ownerId: "o2", isPaid: false, utrNumber: "", gstAmount: 540 }],
+  });
+  const r = (await run([m])).rows[0];
+  assert.equal(r["Rent Narration"], "land 1: Rent narration L1\nland 2: Rent narration L2");
+  assert.equal(r["GST Narration"], "land 1: GST narration L1\nland 2: -");
+  const nogst = (await run([media({ ledger: [{ ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T05:00:00Z"), remarks: "N" }] })])).rows[0];
+  assert.deepEqual([nogst["Rent Narration"], nogst["GST Narration"]], ["N", "-"]);
 });
