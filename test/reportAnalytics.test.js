@@ -641,12 +641,13 @@ test("agreements: classified by dates (never the stale stored status); total = l
   const r = RA.computeAgreements(agreementsFixture(), fy({ details: true }), NOW);
   const s = r.summary;
   assert.equal(r.asOf, "2026-10-21");
-  assert.deepEqual([s.live.agreements, s.expired.agreements, s.upcoming.agreements, s.superseded.agreements], [3, 2, 1, 1]); // live: A, C, E; expired: A (old version), B; upcoming: D; superseded: B (later-filed, not current)
-  assert.equal(s.total.agreements, s.live.agreements + s.expired.agreements + s.upcoming.agreements + s.superseded.agreements);
-  assert.equal(r.records.length, s.total.agreements, "one record per distinct filed agreement");
+  assert.deepEqual([s.live.agreements, s.expired.agreements, s.upcoming.agreements, s.superseded.agreements], [2, 1, 1, 0]); // summary = current agreement per site: live (Active only): A, E — C is expiring soon; expired: B; upcoming: D
+  assert.equal(s.total.agreements, s.live.agreements + s.expiringSoon.agreements + s.expired.agreements + s.upcoming.agreements + s.superseded.agreements, "no drafts in the fixture: expiring soon is outside live");
+  assert.equal(s.total.agreements, 5, "one per site with a dated current agreement");
+  assert.equal(r.records.length, s.total.agreements, "popup records = the cards: one per site (current agreement)");
   const by = (id) => r.records.filter((x) => x.siteId === id);
-  assert.deepEqual(by("A").map((x) => x.state).sort(), ["expired", "live"], "the old version ended although its stored status says Active");
-  assert.deepEqual(by("B").map((x) => x.state).sort(), ["expired", "superseded"]);
+  assert.deepEqual(by("A").map((x) => x.state), ["live"], "only the current agreement is listed");
+  assert.deepEqual(by("B").map((x) => x.state), ["expired"]);
   assert.equal(by("D")[0].state, "upcoming");
   assert.equal(by("C")[0].expiringSoon, true);
   assert.equal(s.expiringSoon.agreements, 1);
@@ -670,14 +671,26 @@ test("agreements: one monthly chart — per month every started agreement is exp
   // the counts look back over every filed agreement: a period that starts later still sees the history
   const later = RA.computeAgreements(agreementsFixture(), RA.parseFilters({ startDate: "2026-12-01", endDate: "2026-12-31" }, NOW).filters, NOW);
   assert.deepEqual(cnt(later.buckets[0]), [6, 2, 1, 3]);
-  assert.equal(r.summary.total.agreements, 7, "cards cover every agreement of the matching sites whatever the period");
+  assert.equal(r.summary.total.agreements, 5, "cards cover the current agreement of every matching site whatever the period");
 });
 
 test("agreements: media type / city filters narrow the sites; a site without any agreement is skipped", () => {
   const r = RA.computeAgreements(agreementsFixture(), fy({ city: "Madurai" }), NOW);
   assert.equal(r.summary.total.agreements, 1);
-  assert.equal(r.summary.live.agreements, 1);
+  assert.equal(r.summary.live.agreements, 0, "C is expiring soon — not in the Active-only live card");
   assert.equal(RA.computeAgreements(deepFreeze([site("Z", [["Hoarding", "Chennai"]], {})]), fy(), NOW).summary.total.agreements, 0);
+});
+
+test("agreements: summary uses the current agreement's stored status (1 Active / 2 Expire soon / 3 Expired) and counts Draft documents", () => {
+  const docs = deepFreeze([
+    site("S1", [["Hoarding", "Chennai"]], { agreement: agr([2026, 0, 1], [2026, 11, 31], { status: 2, agreementStatus: 2 }) }), // dates say live (not soon) -> stored 2 = expiring soon
+    site("S2", [["Hoarding", "Chennai"]], { agreement: agr([2025, 0, 1], [2026, 9, 20], { status: 1, agreementStatus: 1 }) }), // dates say expired -> stored 1 = live
+    site("S3", [["Hoarding", "Chennai"]], { agreement: agr([2025, 0, 1], [2027, 0, 1], { status: 3, agreementStatus: 2 }) }), // stored 3 = expired
+  ]);
+  const s = RA.computeAgreements(docs, fy(), NOW).summary;
+  assert.deepEqual([s.total.agreements, s.live.agreements, s.expired.agreements, s.expiringSoon.agreements], [3, 1, 1, 1]); // live = S2; S1 (draft, expiring soon) and S3 (draft, expired) are in their status card AND in draft
+  assert.equal(s.total.agreements, s.live.agreements + s.expiringSoon.agreements + s.expired.agreements + s.upcoming.agreements + s.superseded.agreements, "status cards: one per site (drafts included)");
+  assert.deepEqual(s.draft, { agreements: 2, sites: 2 });
 });
 
 // ── Bills ─────────────────────────────────────────────────────────────────

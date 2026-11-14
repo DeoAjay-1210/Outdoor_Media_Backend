@@ -941,7 +941,8 @@ const computeAppraisal = (docs, f, now = nowIST(), opts = {}) => {
  * total = live + expired + upcoming + superseded. "Expiring soon" is a live agreement within its own reminderBeforeExpiry days of the end.
  * A record without a start or end date cannot be classified: it is left out of every figure and counted in meta.recordsWithoutDates.
  *
- * Cards = every record of the matching sites as of today (the period does not apply).
+ * Cards (✅ CHANGED) = the CURRENT agreement of each matching site, by its stored status when set (same as the Dashboard / Agreement
+ * list), + draft (agreementStatus 2). The monthly chart and the detail records still cover every filed agreement (the period does not apply).
  *
  * ONE monthly chart (the period's months; the counts look back over every filed agreement, whatever the period). For a month M, among the
  * agreements that have started by M's last day (start day <= last day of M; superseded versions are never counted — they are not the site's
@@ -964,6 +965,7 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
   const total = mk();
   const states = mkStates();
   const expiringSoon = mk();
+  const draft = mk(); // ✅ NEW — current agreement with agreementStatus 2 (Draft)
   const excl = newExclusions();
   const meta = { recordsWithoutDates: 0, sitesWithoutAgreement: 0, currentNotInHistory: 0, historyEntriesCurrentDiffers: 0 };
   const rows = f.details ? [] : null;
@@ -998,9 +1000,20 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
       const state = endKey < todayKey ? "expired" : !r.isCurrent ? "superseded" : startKey > todayKey ? "upcoming" : "live";
       const daysToExpiry = Math.round((keyMs(endKey) - keyMs(todayKey)) / dayMs);
       const soon = state === "live" && daysToExpiry <= r.reminder;
-      bump(total, sid);
-      bump(states[state], sid);
-      if (soon) bump(expiringSoon, sid);
+      // ✅ CHANGED — summary cards: one per site, its CURRENT agreement only, by its stored status (1=Active 2=Expire soon 3=Expired —
+      // same as the Dashboard / Agreement list); no stored status or not started yet → the date rule above. Chart / records unchanged.
+      const stored = num(cur.status);
+      const useStored = r.isCurrent && [1, 2, 3].includes(stored) && startKey <= todayKey;
+      const sState = useStored ? (stored === 3 ? "expired" : "live") : state;
+      const sSoon = useStored ? stored === 2 : soon;
+      if (r.isCurrent) {
+        bump(total, sid);
+        // ✅ CHANGED — status cards: live = Active only (not expiring soon), expiringSoon, expired … (one per site:
+        //   total = live + expiringSoon + expired + upcoming + superseded). draft = every Draft document, ALSO in its status card.
+        if (num(cur.agreementStatus) === 2) bump(draft, sid);
+        if (sSoon) bump(expiringSoon, sid);
+        else bump(states[sState], sid);
+      }
       if (state !== "superseded") {
         for (const [key, bm] of buckets) {
           const [first, last] = monthRange(key);
@@ -1010,18 +1023,18 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
           bump(bm[cat], sid);
         }
       }
-      if (rows) {
+      if (rows && r.isCurrent) { // ✅ CHANGED — popup rows = the cards: current agreement per site, same state / expiring soon
         rows.push({
           ...detailBase(doc),
           date: startKey,
           startDate: startKey,
           endDate: endKey,
-          state,
-          expiringSoon: soon,
+          state: sState,
+          expiringSoon: sSoon,
           isCurrent: r.isCurrent,
           reminderDays: r.reminder,
           daysToExpiry,
-          document: r.docType === 1 ? "Original" : r.docType === 2 ? "Draft" : null,
+          document: (num(cur.agreementStatus) || r.docType) === 1 ? "Original" : (num(cur.agreementStatus) || r.docType) === 2 ? "Draft" : null, // ✅ CHANGED — current agreement's document type
           documentPath: r.pdf ? r.pdf.path : null,
           documentName: r.pdf ? r.pdf.name : null,
         });
@@ -1035,7 +1048,7 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
     filters: publicFilters(f),
     asOf: todayKey,
     buckets: list,
-    summary: { total: fin(total), ...finStates(states), expiringSoon: fin(expiringSoon) },
+    summary: { total: fin(total), ...finStates(states), expiringSoon: fin(expiringSoon), draft: fin(draft) },
     ...(rows ? { records: rows.sort(byDateThenName) } : {}),
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
   };
