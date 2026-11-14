@@ -24,7 +24,7 @@ const { getPendingUtrBills, evaluateGroup, billField, isValidBill } = require(".
 const { lookupUtrByBillNumber, lookupLandlordUtrs, lookupBillThread } = require("./gmailUtrLookup");
 const { storedPayments, utrStatements, planCorrections, buildCorrectionWrite } = require("./utrCorrection");
 const { getPendingArrearsUtrBills, evaluateArrearsGroup } = require("./pendingArrearsUtrBills");
-const { narrationFor } = require("./bankNarration");
+const { narrationFor, pickBankRow, usedBankRefs } = require("./bankNarration");
 const { senderName } = require("./senderName");
 // the Finance reply a payment was read from -> its sender name (ledger updatedBy)
 const actorOf = (d, messageId) => { const r = [...(d.replies || []), ...(d.cashReplies || [])].find((x) => x.messageId === messageId); return senderName(r ? r.from : d.senderEmail); };
@@ -114,13 +114,19 @@ const UTR_SHAPE = /^[A-Za-z0-9]{3,30}$/;
  * Only what is certain: one landlord = the thread's one narration; several landlords = a row that names the landlord (account / name).
  * When nothing is certain p.narration stays "" (the default remark is kept) and p.narrationNote says why.
  */
-function attachNarration(plan, d, landlords) {
+function attachNarration(plan, d, landlords, usedRefs = new Set()) {
   const idOf = (p) => (p.slot ? p.slot.landOwnerId : p.slots && p.slots[0] ? p.slots[0].landOwnerId : "");
   const count = new Map();
   plan.forEach((p) => count.set(idOf(p), (count.get(idOf(p)) || 0) + 1));
+  const taken = new Set(usedRefs); // Bank References already on a payment of the site + the ones given to the payments of this run
   for (const p of plan) {
-    if (p.companion) { p.narration = ""; continue; } // Cash part of a Cash + Online pair: no bank narration
-    const n = narrationFor(d.bankRows || [], landlords || [], { landOwnerId: idOf(p), amount: p.amount ?? p.gstAmount ?? p.rentAmount ?? null, siblings: count.get(idOf(p)) });
+    if (p.companion) { p.narration = ""; p.bankRefNo = ""; continue; } // Cash part of a Cash + Online pair: no bank narration
+    const amount = p.amount ?? p.gstAmount ?? p.rentAmount ?? null;
+    // the bank row of THIS payment (a Bank Reference is unique per row): its narration = remark, its reference = bankRefNo
+    const pick = pickBankRow(d.bankRows || [], landlords || [], { landOwnerId: idOf(p), amount, usedRefs: taken });
+    if (pick.row) { p.bankRefNo = pick.row.reference; p.narration = pick.row.narration || ""; taken.add(String(pick.row.reference).trim().toUpperCase()); continue; }
+    const n = narrationFor(d.bankRows || [], landlords || [], { landOwnerId: idOf(p), amount, siblings: count.get(idOf(p)) }); // the row cannot be told: the earlier narration-only rules
+    p.bankRefNo = "";
     p.narration = n.narration;
     if (!n.narration && n.reason && n.reason !== "no_narration_in_thread") p.narrationNote = n.reason;
   }
@@ -412,7 +418,7 @@ function createUtrProcessor(deps = {}) {
       if (!cs) return done("ambiguous_mapping", "no_auto_processable_payment", { ...gm, landlordMappingProblems: [{ reason: "no_open_payment", name: l.name }] });
       plan.push({ landlord: l.name, landOwnerId: l.landOwnerId, utr: "", paymentType: "cash", paymentMode: "Cash", paidDate: ds[0].date, paidDateSource: ds[0].source, paidDateNote: ds[0].note, sourceMessageId: found[0].reply.messageId, slot: cs });
     }
-    attachNarration(plan, d, pm.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
+    attachNarration(plan, d, pm.landlords, usedBankRefs(fresh.media)); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slot, ...rest }) => rest);
 
     if (ctx.dryRun) {
@@ -443,6 +449,7 @@ function createUtrProcessor(deps = {}) {
         entryType: "rental",
         date: p.paidDate,
         remark: p.narration || "", // Bank Narration only; no narration -> empty remark
+        bankRefNo: p.bankRefNo || "", // Bank Reference of the bank row (unique) -> ledger bankRefNo
         payments: [{ mediaId: fresh.current.mediaId, landOwnerId: p.slot.landOwnerId, rentalDueId: p.slot.rentalDueId, targetType: p.slot.targetType, paymentMode: p.slot.paymentMode, utrNumber: p.utr }],
       };
       try {
@@ -592,7 +599,7 @@ function createUtrProcessor(deps = {}) {
       if (wrongNames.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: wrongNames });
       return done("utr_not_found", "", extra);
     }
-    attachNarration(plan, d, [sm.landlord]); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
+    attachNarration(plan, d, [sm.landlord], usedBankRefs(fresh.media)); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slot, ...rest }) => rest);
 
     if (ctx.dryRun) {
@@ -613,6 +620,7 @@ function createUtrProcessor(deps = {}) {
         entryType: isGst ? "gst" : "rental",
         date: p.paidDate,
         remark: p.narration || "", // Bank Narration only; no narration -> empty remark
+        bankRefNo: p.bankRefNo || "", // Bank Reference of the bank row (unique) -> ledger bankRefNo
         payments: [{ mediaId: fresh.current.mediaId, landOwnerId: p.slot.landOwnerId, rentalDueId: p.slot.rentalDueId, targetType: p.slot.targetType, paymentMode: p.slot.paymentMode || "Online", utrNumber: p.utr }],
       };
       try {
@@ -762,7 +770,7 @@ function createUtrProcessor(deps = {}) {
       if (nameOnly.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: nameOnly });
       return done("utr_not_found", "", extra);
     }
-    attachNarration(plan, d, mg.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
+    attachNarration(plan, d, mg.landlords, usedBankRefs(fresh.media)); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slot, ...rest }) => rest);
 
     if (ctx.dryRun) {
@@ -785,6 +793,7 @@ function createUtrProcessor(deps = {}) {
         entryType: isGst ? "gst" : "rental",
         date: p.paidDate,
         remark: p.narration || "", // Bank Narration only; no narration -> empty remark
+        bankRefNo: p.bankRefNo || "", // Bank Reference of the bank row (unique) -> ledger bankRefNo
         payments: [{ mediaId: fresh.current.mediaId, landOwnerId: p.slot.landOwnerId, rentalDueId: p.slot.rentalDueId, targetType: p.slot.targetType, paymentMode: p.slot.paymentMode || "Online", utrNumber: p.utr }],
       };
       try {
@@ -964,7 +973,7 @@ function createUtrProcessor(deps = {}) {
       if (nameOnly.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: nameOnly });
       return done("utr_not_found", "", extra);
     }
-    attachNarration(plan, d, cur.landlords); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
+    attachNarration(plan, d, cur.landlords, usedBankRefs(fresh.media)); // Bank Narration of the Finance payment mail -> the ledger remark (never guessed)
     const summary = plan.map(({ slots, ...rest }) => rest);
     const paymentType = cur.billKind === "advance" ? "advance_rent_gst" : "new_bill_rent_gst";
 
@@ -990,6 +999,7 @@ function createUtrProcessor(deps = {}) {
           entryType: isGst ? "gst" : "rental",
           date: p.paidDate,
           remark: p.narration || "", // Bank Narration only; no narration -> empty remark
+          bankRefNo: p.bankRefNo || "", // Bank Reference of the bank row (unique) -> ledger bankRefNo
           payments: [{
             mediaId: cur.mediaId,
             landOwnerId: s.landOwnerId,
@@ -1069,6 +1079,9 @@ function createUtrProcessor(deps = {}) {
     if (new Set(dates.map((x) => x.date)).size > 1) return done("ambiguous_mapping", "conflicting_cash_paid_date", gm);
     const paid = dates[0];
     const nar = narrationFor(d.bankRows || [], item.landlords || [], { landOwnerId: slot.landOwnerId });
+    const pickC = pickBankRow(d.bankRows || [], item.landlords || [], { landOwnerId: slot.landOwnerId, amount: slot.amount ?? null, usedRefs: usedBankRefs(fresh.media) });
+    const bankRefC = pickC.row ? pickC.row.reference : "";
+    if (pickC.row) nar.narration = pickC.row.narration || "";
     const dateInfo = { paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, narration: nar.narration };
     const summary = [{ kind: "rent", landlord: slot.landOwnerName, utr: "", paymentType: "cash", paymentMode: "Cash", ...dateInfo, sourceMessageId: lines[0].r.messageId }];
     const batch = {
@@ -1076,7 +1089,7 @@ function createUtrProcessor(deps = {}) {
       entryType: "rental",
       date: paid.date,
       remark: nar.narration || "", // Bank Narration only; no narration -> empty remark
-      payments: [{ mediaId: fresh.current.mediaId, landOwnerId: slot.landOwnerId, rentalDueId: slot.rentalDueId, targetType: slot.targetType, paymentMode: "Cash", utrNumber: "" }],
+      payments: [{ mediaId: fresh.current.mediaId, landOwnerId: slot.landOwnerId, rentalDueId: slot.rentalDueId, targetType: slot.targetType, paymentMode: "Cash", utrNumber: "", bankRefNo: bankRefC }],
     };
     if (ctx.dryRun) {
       const blockedBy = [];
@@ -1187,6 +1200,9 @@ function createUtrProcessor(deps = {}) {
     const paid = resolvePaidDate(d.paidDateInfo || {}, { approvalDate: fresh.current.approvalDate, now: deps.now ? deps.now() : Date.now() });
     if (!paid.date) return done("ambiguous_mapping", "paid_date_not_determined", { utr, ...gm, paidDateNote: paid.note });
     const nar = narrationFor(d.bankRows || [], fresh.current.landlords || item.landlords || [], { landOwnerId: slot.landOwnerId });
+    const pickU = pickBankRow(d.bankRows || [], fresh.current.landlords || item.landlords || [], { landOwnerId: slot.landOwnerId, amount: slot.amount ?? null, usedRefs: usedBankRefs(fresh.media) });
+    const bankRefU = pickU.row ? pickU.row.reference : "";
+    if (pickU.row) nar.narration = pickU.row.narration || "";
     const dateInfo = { paidDate: paid.date, paidDateSource: paid.source, paidDateNote: paid.note, narration: nar.narration, ...(nar.narration || !nar.reason || nar.reason === "no_narration_in_thread" ? {} : { narrationNote: nar.reason }), ...(paid.rejected.length ? { paidDateRejected: paid.rejected } : {}) };
 
     const batch = {
@@ -1202,6 +1218,7 @@ function createUtrProcessor(deps = {}) {
           targetType: slot.targetType,
           paymentMode: slot.paymentMode,
           utrNumber: utr,
+          bankRefNo: bankRefU,
         },
       ],
     };

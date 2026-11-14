@@ -141,4 +141,45 @@ function narrationFor(rows, landlords, { landOwnerId, amount = null, siblings = 
   return { narration: "", reason: "narration_rows_ambiguous" };
 }
 
-module.exports = { extractBankRows, collectBankRows, narrationFor, landlordOfRow, flatten };
+/** Every Bank Reference already stored on a payment of the site (ledger, withGst1Ledger, ledgerHistory, gstBalanceHistory, arrears payments). */
+function usedBankRefs(media) {
+  const used = new Set();
+  const add = (v) => { const x = String(v || "").trim().toUpperCase(); if (x) used.add(x); };
+  ((media && media.ledger) || []).forEach((e) => add(e.bankRefNo));
+  ((media && media.withGst1Ledger) || []).forEach((e) => add(e.bankRefNo));
+  ((media && media.gstBalanceHistory) || []).forEach((g) => add(g.bankRefNo));
+  ((media && media.ledgerHistory) || []).forEach((y) => (y.months || []).forEach((m) => (m.entries || []).forEach((e) => add(e.bankRefNo))));
+  ((media && media.arrearsDue) || []).forEach((b) => (b.payments || []).forEach((p) => add(p.bankRefNo)));
+  return used;
+}
+
+/**
+ * The ONE bank row of a payment: { row } | { reason }. A Bank Reference is unique per bank row, so
+ *   - a row whose reference is already stored on another payment (usedRefs) is never taken again;
+ *   - several landlords: only a row that names ITS landlord (account / name); one landlord: every row is his;
+ *   - the landlord still has several rows (months, Rent and GST): the one with the payment's amount; otherwise nothing is guessed.
+ */
+function pickBankRow(rows, landlords, { landOwnerId, amount = null, usedRefs = new Set() }) {
+  const free = (rows || []).filter((r) => r.reference && !usedRefs.has(String(r.reference).trim().toUpperCase()));
+  if (!free.length) return { reason: "no_free_bank_row" };
+  let mine;
+  if (landlords.length === 1) mine = free;
+  else {
+    const mapped = free.map((r) => ({ r, l: landlordOfRow(r, landlords) }));
+    mine = mapped.filter((x) => x.l && x.l !== "ambiguous" && x.l.landOwnerId === landOwnerId).map((x) => x.r);
+    if (!mine.length) return { reason: mapped.some((x) => x.l === "ambiguous") ? "bank_row_landlord_ambiguous" : "bank_row_landlord_not_identified" };
+  }
+  if (mine.length === 1) return { row: mine[0] };
+  const byAmount = mine.filter((r) => amount !== null && Number(r.amount) === Number(amount));
+  if (byAmount.length === 1) return { row: byAmount[0] };
+  return { reason: "bank_rows_ambiguous" };
+}
+
+/** Narration of a payment that already has its Bank Reference: exactly the row with that reference. */
+const narrationByRef = (rows, ref) => {
+  const k = String(ref || "").trim().toUpperCase();
+  const r = (rows || []).find((x) => String(x.reference || "").trim().toUpperCase() === k);
+  return r ? r.narration || "" : "";
+};
+
+module.exports = { extractBankRows, collectBankRows, narrationFor, landlordOfRow, flatten, usedBankRefs, pickBankRow, narrationByRef };

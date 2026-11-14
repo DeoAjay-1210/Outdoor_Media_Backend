@@ -173,30 +173,30 @@ async function buildUtrTracker(opts = {}, deps = {}) {
   const dmy = (d) => { const t = new Date(d); return Number.isNaN(t.getTime()) ? "" : `${String(t.getUTCDate()).padStart(2, "0")} ${MON[t.getUTCMonth()]} ${t.getUTCFullYear()}`; };
   const push = (r) => {
     const m = r._saved ? curMeta.get(`${curOid}|${r.paymentPart === "GST" ? "gst" : "rent|" + r.paymentMode}`) : null;
-    out.push({ ...r, _oid: curOid, _paid: m && m.date ? dmy(m.date) : "", _narr: m && hasText(m.remark) ? String(m.remark).trim() : "" });
+    out.push({ ...r, _oid: curOid, _paid: m && m.date ? dmy(m.date) : "", _narr: m && hasText(m.remark) ? String(m.remark).trim() : "", _bank: m && hasText(m.bankRefNo) ? String(m.bankRefNo).trim() : "" });
   };
   /** Paid Date + remark of the saved payments of a Rental bill: key "<landlord>|rent|Online|Cash" / "<landlord>|gst" (the latest entry wins). */
   const rentalMeta = (media, rowIds, owners) => {
     const map = new Map();
     const single = owners.length === 1;
     const ownerOf = (id) => owners.find((o) => ownerMatches(o, id)) || (!hasText(id) && single ? owners[0] : null);
-    const put = (o, key, date, remark) => {
+    const put = (o, key, date, remark, bankRefNo) => {
       if (!o) return;
       const k = `${idStr(o._id)}|${key}`;
       const prev = map.get(k);
-      if (!prev || new Date(date || 0).getTime() >= new Date(prev.date || 0).getTime()) map.set(k, { date, remark });
+      if (!prev || new Date(date || 0).getTime() >= new Date(prev.date || 0).getTime()) map.set(k, { date, remark, bankRefNo });
     };
     const scan = (list) => (list || []).forEach((e) => {
       if (!e || !rowIds.has(idStr(e.rentalDueId))) return;
-      if (e.isUtrEntry === true) put(ownerOf(e.landOwnerId), "gst", e.date, e.remarks || e.remark);
-      else if (e.paymentMode) put(ownerOf(e.landOwnerId), `rent|${e.paymentMode}`, e.date, e.remarks || e.remark);
+      if (e.isUtrEntry === true) put(ownerOf(e.landOwnerId), "gst", e.date, e.remarks || e.remark, e.bankRefNo);
+      else if (e.paymentMode) put(ownerOf(e.landOwnerId), `rent|${e.paymentMode}`, e.date, e.remarks || e.remark, e.bankRefNo);
     });
     scan(media.ledger);
     scan(media.withGst1Ledger);
     (media.ledgerHistory || []).forEach((y) => (y.months || []).forEach((m) => scan(m.entries)));
     (media.gstBalanceHistory || []).forEach((g) => {
       if (!g || !rowIds.has(idStr(g.rentalDueId)) || !(g.isPaid === true || hasText(g.utrNumber))) return;
-      put(ownerOf(g.ownerId || g.landOwnerId), "gst", g.date || g.paidAt, g.remarks || g.remark);
+      put(ownerOf(g.ownerId || g.landOwnerId), "gst", g.date || g.paidAt, g.remarks || g.remark, g.bankRefNo);
     });
     return map;
   };
@@ -209,7 +209,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
       if (!o) return;
       const k = `${ownerIdOf(o)}|${p.type === "gst" ? "gst" : `rent|${p.paymentMode}`}`;
       const prev = map.get(k);
-      if (!prev || new Date(p.date || 0).getTime() >= new Date(prev.date || 0).getTime()) map.set(k, { date: p.date, remark: p.remarks || p.remark });
+      if (!prev || new Date(p.date || 0).getTime() >= new Date(prev.date || 0).getTime()) map.set(k, { date: p.date, remark: p.remarks || p.remark, bankRefNo: p.bankRefNo });
     }));
     return map;
   };
@@ -359,6 +359,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
     const paidDates = perLandlord((p) => p._paid).map((a) => (a.length ? a.join(" / ") : "-"));
     const narrOf = (part) => landlords.map((n) => uniq(list.filter((p) => p.landlordName === n && p._saved && p._part === part).map((p) => p._narr)).join(" / ") || "-");
     const narrText = (arr) => (landlords.length > 1 ? landlords.map((n, i) => `${n}: ${arr[i]}`).join("\n") : arr[0] || "-");
+    const bankRefs = landlords.map((n) => uniq(list.filter((p) => p.landlordName === n && p._saved).map((p) => p._bank)).join(" / ") || "-");
     const rentNarr = narrOf("rent");
     const gstNarr = narrOf("gst");
     const st = new Set(list.map((p) => p.status));
@@ -379,6 +380,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
       "Total Rental Amount": rent, "GST Amount": gst, "Total Amount": rent + gst,
       "Rent UTR": rentUtr.join(", "), "GST UTR": first.gstLabel === "Yes - On hold" ? gstUtr.join(", ") : "-",
       "Paid Date": paidDates.join(", "),
+      "Bank Ref No": bankRefs.join(", "),
       "Rent Narration": narrText(rentNarr),
       "GST Narration": first.gstLabel === "Yes - On hold" ? narrText(gstNarr) : "-",
       "Status": status,
@@ -405,7 +407,7 @@ async function buildUtrTracker(opts = {}, deps = {}) {
 const COLS = [
   ["Month", 16], ["Approval Date", 15], ["Bill Type", 14], ["Bill Number", 25], ["Site Code", 22], ["Site Name", 34], ["Landlord Name", 30],
   ["Payment Category", 18], ["Payment Frequency", 16], ["GST Applicable", 20], ["Total Rental Amount", 20], ["GST Amount", 16], ["Total Amount", 18],
-  ["Rent UTR", 30], ["GST UTR", 30], ["Paid Date", 22], ["Rent Narration", 46], ["GST Narration", 46], ["Status", 17], ["Error", 50], ["Reply Format (exact)", 62], ["Reply Example", 56], ["Error Code", 26],
+  ["Rent UTR", 30], ["GST UTR", 30], ["Paid Date", 22], ["Bank Ref No", 24], ["Rent Narration", 46], ["GST Narration", 46], ["Status", 17], ["Error", 50], ["Reply Format (exact)", 62], ["Reply Example", 56], ["Error Code", 26],
 ];
 const COL_RENT = 10; // Total Rental Amount .. Total Amount = columns 10-12
 const COL_TOTAL = 12;

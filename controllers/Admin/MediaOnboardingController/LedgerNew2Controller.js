@@ -1241,6 +1241,7 @@ async function payArrearsBillIfArrears(req, res) {
       date: date ? combineDateWithCurrentTime(date) : nowIST(),
       userName: req.user?.userName || "",
       remark: remarkText(remark), // ✅ NEW
+      bankRefNo: String((req.body || {}).bankRefNo || "").trim(),
       parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
       siteOwners: media.landOwners || [], // ✅ NEW — Cash + Online owner: 0-mode entry allowed
     });
@@ -1303,7 +1304,7 @@ async function payArrearsBillIfArrears(req, res) {
 // (or gstBalanceHistoryId) is a rent revision arrears / advance bill → paid on
 // that bill (same as payArrearsBillIfArrears). Returns a savedEntries row
 // ({ status: "saved" | "failed" }); never throws.
-async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedBy, batchRemark = "") {
+async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedBy, batchRemark = "", batchBankRef = "") {
   const billId = String(item.rentalDueId || item.gstBalanceHistoryId || "");
   const remark = remarkText(item.remark, batchRemark); // ✅ NEW
   const base = {
@@ -1330,6 +1331,7 @@ async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedB
       date: entryDate,
       userName: updatedBy,
       remark, // ✅ NEW
+      bankRefNo: String(item.bankRefNo || batchBankRef || "").trim(),
       parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
       siteOwners: media.landOwners || [], // ✅ NEW — Cash + Online owner: 0-mode entry allowed
     });
@@ -2411,6 +2413,7 @@ async function executeBulkPaymentBatch(req, batchData) {
       for (const item of normalSitePayments) {
         const targetType = item.targetType;
         const itemRemark = remarkText(item.remark, batchData.remark); // ✅ NEW
+        const itemBankRef = String(item.bankRefNo || batchData.bankRefNo || "").trim(); // Bank Reference of the Finance payment row (unique per row)
         const result = {
           mediaId: mId,
           mediaName: media.mediaName,
@@ -2419,6 +2422,7 @@ async function executeBulkPaymentBatch(req, batchData) {
           paymentMode: item.paymentMode,
           utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
           remark: itemRemark, // ✅ NEW
+          bankRefNo: itemBankRef,
           status: "saved"
         };
 
@@ -2473,7 +2477,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
               date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
               amount, updatedBy, updatedAt: nowIST(), index: media.ledger.length, withGst: effectiveWithGst,
-              isUtrEntry: false, remark: itemRemark // ✅ NEW
+              isUtrEntry: false, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("ledger");
           }
@@ -2491,7 +2495,7 @@ async function executeBulkPaymentBatch(req, batchData) {
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: effectiveWithGst, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null, remark: itemRemark // ✅ NEW
+            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
           });
           media.markModified("ledgerHistory");
         }
@@ -2511,6 +2515,7 @@ async function executeBulkPaymentBatch(req, batchData) {
 
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
           row.remark = itemRemark; // ✅ NEW
+          row.bankRefNo = itemBankRef;
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
 
@@ -2528,7 +2533,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
               netPayable: amount, rentalDueId: null, withGst: 2, month: dueMonthLabel, cycle: null,
               paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-              isUtrEntry: false, remark: itemRemark // ✅ NEW
+              isUtrEntry: false, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("ledgerHistory");
           }
@@ -2575,13 +2580,14 @@ async function executeBulkPaymentBatch(req, batchData) {
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.isUtrEntry = true;
           row.date = entryDate; row.updatedBy = updatedBy; row.updatedAt = nowIST();
           row.remark = itemRemark; // ✅ NEW
+          row.bankRefNo = itemBankRef;
           media.markModified("gstBalanceHistory");
 
           if (targetType === "current") {
             media.withGst1Ledger.push({
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
               date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
-              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true, remark: itemRemark // ✅ NEW
+              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("withGst1Ledger");
           }
@@ -2599,7 +2605,7 @@ async function executeBulkPaymentBatch(req, batchData) {
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 1, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: true, remark: itemRemark // ✅ NEW
+            isUtrEntry: true, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
           });
           media.markModified("ledgerHistory");
         }
@@ -2612,6 +2618,7 @@ async function executeBulkPaymentBatch(req, batchData) {
           amount = Number(row.gstOutStandingAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
           row.remark = itemRemark; // ✅ NEW
+          row.bankRefNo = itemBankRef;
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
 
@@ -2629,7 +2636,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
               netPayable: 0, rentalDueId: null, withGst: 1, month: dueMonthLabel, cycle: null,
               paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-              isUtrEntry: true, remark: itemRemark // ✅ NEW
+              isUtrEntry: true, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("ledgerHistory");
           }
@@ -2646,7 +2653,7 @@ async function executeBulkPaymentBatch(req, batchData) {
 
       // ✅ NEW — arrears / advance bill payments of this site
       for (const item of extraBillItems) {
-        const r = await payExtraBillInBatch(mId, item, entryType, entryDate, updatedBy, batchData.remark); // ✅ CHANGED — + batch remark
+        const r = await payExtraBillInBatch(mId, item, entryType, entryDate, updatedBy, batchData.remark, batchData.bankRefNo); // ✅ CHANGED — + batch remark
         if (r.status === "saved") totalAmountSaved += r.amount;
         savedEntries.push(r);
       }
@@ -5615,6 +5622,7 @@ const details = (media.mediaDetails || []).map((d) => ({
         utrNumber: lastGst ? lastGst.utrNumber || "" : "",
         date: lastGst ? lastGst.date : null,
         remark: lastGst ? lastGst.remark || "" : "", // ✅ NEW
+        bankRefNo: lastGst ? lastGst.bankRefNo || "" : "",
         isUtrEntry: gstPaidFull,
         withGst: Number(b.withGst || 0),
         rentalDueApprovalStatus: 3,
@@ -5672,6 +5680,7 @@ let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistor
     let cycleTds = 0;
     let maxPaymentDate = null;
     let latestRemark = ""; // ✅ NEW — remark of the latest rent payment of this cycle
+    let latestBankRef = ""; // Bank Reference of the latest rent payment of this cycle
     // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
     const cycleMedia = mediaAsOfDate(media, cycleDate);
 const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
@@ -5739,9 +5748,11 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
             const d = new Date(entry.date);
             if (!maxPaymentDate || d > maxPaymentDate) maxPaymentDate = d;
             if (entry.remark && (!latestRemark || d >= maxPaymentDate)) latestRemark = entry.remark; // ✅ NEW
+            if (entry.bankRefNo && (!latestBankRef || d >= maxPaymentDate)) latestBankRef = entry.bankRefNo;
           } else if (entry.remark && !latestRemark) {
             latestRemark = entry.remark; // ✅ NEW
           }
+          if (!entry.date && entry.bankRefNo && !latestBankRef) latestBankRef = entry.bankRefNo;
         } else {
           cycleUnpaid += amt;
         }
@@ -5759,6 +5770,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
       isVirtual: true,
       date: isPaid ? maxPaymentDate : null,
       remark: isPaid ? latestRemark : "", // ✅ NEW — remark of the rent payment
+      bankRefNo: isPaid ? latestBankRef : "",
       updatedAt: null,
       updatedBy: "",
       cycle: cycleDate,
@@ -5820,6 +5832,7 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
         isVirtual: !paid,
         date: paid && lastPay ? lastPay.date : null,
         remark: paid && lastPay ? lastPay.remark || "" : "", // ✅ NEW
+        bankRefNo: paid && lastPay ? lastPay.bankRefNo || "" : "",
         updatedAt: lastPay ? lastPay.createdAt || null : null,
         updatedBy: lastPay ? lastPay.createdBy || "" : "",
         cycle: b.dueDate,
@@ -6243,6 +6256,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
             rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ NEW
             remark: realEntry.remark ?? "", // ✅ NEW — saved remark (was dropped)
+            bankRefNo: realEntry.bankRefNo ?? "",
             isVirtual: false,
           });
         } else {
@@ -6460,6 +6474,7 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           amount: entry.amount,
           rentalDueApprovalStatus: matchedDueSpecific?.approvalStatus ?? 0, // ✅ NEW
           remark: entry.remark ?? "", // ✅ NEW — saved remark (was dropped)
+          bankRefNo: entry.bankRefNo ?? "",
           isVirtual: false,
         };
       });
@@ -6980,10 +6995,10 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     outStantStatus:
       media.rentalPayment?.outStantStatus ??
       (outstanding.totalOutstandingAmount > 0 ? 1 : 0),
-    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "" })), // ✅ CHANGED — + remark key
+    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "", bankRefNo: r.bankRefNo ?? "" })), // ✅ CHANGED — + remark key
     // ✅ CHANGED — + remark key on every row ("" when none)
-    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory).map((r) => ({ ...r, remark: r.remark ?? "" })),
-    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "" })),
+    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory).map((r) => ({ ...r, remark: r.remark ?? "", bankRefNo: r.bankRefNo ?? "" })),
+    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "", bankRefNo: r.bankRefNo ?? "" })),
     previousLedger: media.previousLedger || null,
   };
 }
