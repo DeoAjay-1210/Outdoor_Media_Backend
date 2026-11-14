@@ -459,7 +459,7 @@ test("R3. a valid unambiguous UTR is saved through the ledger engine with the ex
   assert.equal(b.entryType, "rental");
   assert.equal(b.siteBillMode, 1);
   assert.equal(b.date, "2026-11-09");
-  assert.deepEqual(b.payments, [{ mediaId: "s1", landOwnerId: "o1", rentalDueId: "r1", targetType: "current", paymentMode: "Online", utrNumber: UTR }]);
+  assert.deepEqual(b.payments, [{ mediaId: "s1", landOwnerId: "o1", rentalDueId: "r1", targetType: "current", paymentMode: "Online", utrNumber: UTR, bankRefNo: "" }]);
   assert.equal(Log.rows[0].status, "found_and_saved");
   assert.equal(Log.rows[0].utr, UTR);
   assert.equal(Log.rows[0].gmailThreadId, "T1");
@@ -807,7 +807,7 @@ test("K4. with both switches on, the Cash UTR is saved through the ledger engine
   assert.equal(calls.saver.length, 1);
   const b = calls.saver[0];
   assert.equal(b.entryType, "rental"); // never "gst"
-  assert.deepEqual(b.payments, [{ mediaId: "k", landOwnerId: "oK", rentalDueId: "rk", targetType: "current", paymentMode: "Cash", utrNumber: UTR }]);
+  assert.deepEqual(b.payments, [{ mediaId: "k", landOwnerId: "oK", rentalDueId: "rk", targetType: "current", paymentMode: "Cash", utrNumber: UTR, bankRefNo: "" }]);
   assert.equal(Log.rows[0].status, "found_and_saved");
   assert.equal(db.get("k").ledger.length, 1);
   const again = await p.processPendingUtrs({ dryRun: false });

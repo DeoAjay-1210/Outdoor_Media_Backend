@@ -275,6 +275,7 @@ const ledgerSchema = new mongoose.Schema({
   amount: { type: Number, default: 0, min: 0 },
   isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
   remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+  bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -305,6 +306,7 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     amount: { type: Number, default: 0, min: 0 },
     isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
     remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+    bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
   },
   { _id: true },
 );
@@ -398,6 +400,7 @@ const gstOutstandingHistorySchema = new mongoose.Schema({
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
   remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+  bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
   // populated only when paymentMode === "Cash+Online"
   paymentBreakup: [
     {
@@ -429,6 +432,7 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
   remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+  bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
   paymentBreakup: [
     {
       paymentMode: { type: String, enum: ["Cash", "Online"] },

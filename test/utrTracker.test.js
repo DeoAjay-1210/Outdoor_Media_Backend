@@ -160,7 +160,7 @@ test("T16. Excel: Paid Date and Narration sit right after GST UTR; every empty c
   const wb = XLSX.read(trackerWorkbook(data), { type: "buffer" });
   const aoa = XLSX.utils.sheet_to_json(wb.Sheets["UTR Tracker"], { header: 1, defval: "" });
   const head = aoa[2];
-  assert.deepEqual(head.slice(head.indexOf("GST UTR"), head.indexOf("GST UTR") + 5), ["GST UTR", "Paid Date", "Rent Narration", "GST Narration", "Status"]);
+  assert.deepEqual(head.slice(head.indexOf("GST UTR"), head.indexOf("GST UTR") + 6), ["GST UTR", "Paid Date", "Bank Ref No", "Rent Narration", "GST Narration", "Status"]);
   const row = aoa.find((r) => r[3] === BILL);
   assert.equal(row[head.indexOf("Paid Date")], "09 Nov 2026");
   for (const col of ["Rent Narration", "GST Narration", "Error", "Reply Example", "Error Code"]) assert.equal(row[head.indexOf(col)], "-", col);
@@ -212,4 +212,31 @@ test("T20. GST hold, several landlords: Rent narration and GST narration are SEP
   assert.equal(r["GST Narration"], "land 1: GST narration L1\nland 2: -");
   const nogst = (await run([media({ ledger: [{ ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T05:00:00Z"), remarks: "N" }] })])).rows[0];
   assert.deepEqual([nogst["Rent Narration"], nogst["GST Narration"]], ["N", "-"]);
+});
+
+test("T21. Bank Ref No column: the Bank Reference of the saved payments, per landlord; '-' when nothing is saved or no reference", async () => {
+  const open = (await run([media()])).rows[0];
+  assert.equal(open["Bank Ref No"], "-");
+  const saved = media({ landOwners: [owner("o1", "Landlord1"), owner("o2", "Landlord2")], ledger: [
+    { ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T10:30:00Z"), remarks: "N1", bankRefNo: "ADINN121162291" },
+    { ...paid("o2", "Online", "UTR222222222222"), date: new Date("2026-11-09T10:30:00Z"), remarks: "N2" },
+  ] });
+  const r = (await run([saved])).rows[0];
+  assert.equal(r["Bank Ref No"], "ADINN121162291, -");
+  const wb = XLSX.read(trackerWorkbook(await run([saved])), { type: "buffer" });
+  const head = XLSX.utils.sheet_to_json(wb.Sheets["UTR Tracker"], { header: 1, defval: "" })[2];
+  assert.deepEqual(head.slice(head.indexOf("Paid Date"), head.indexOf("Paid Date") + 4), ["Paid Date", "Bank Ref No", "Rent Narration", "GST Narration"]);
+});
+
+test("T22. New Bill / Advance: the Bank Ref No column comes from the bill's payment rows (arrearsDue[].payments[].bankRefNo)", async () => {
+  for (const type of ["arrears", "advance"]) {
+    const bill = {
+      _id: "b1", type, dueMonth: "November 2026", parentRentalDueId: "p1", adinn_ooh_bills: "ADNOOHBILL1011202692", approvalStatus: 3, mailSent: true, withGst: 2, gstAmount: 0, gstPaid: 0,
+      owners: [{ landOwnerId: "o1", landOwnerMasterId: "mo1", landOwnerName: "Landlord1", onlineAmount: 2500, cashAmount: 0, gstAmount: 0, paidOnline: true, paidCash: false }],
+      payments: [{ _id: "pay1", type: "rental", landOwnerId: "o1", paymentMode: "Online", utrNumber: "UTR111111111111", amount: 2500, date: new Date("2026-11-11T09:00:00Z"), remark: "NB narration", bankRefNo: "ADINN0411001" }],
+      ownerApprovalDate: new Date("2026-11-05T03:00:00Z"), createdAt: new Date("2026-11-05T03:00:00Z"),
+    };
+    const r = (await run([media({ rentalDue: [{ _id: "p1", withGst: 2 }], arrearsDue: [bill] })])).rows[0];
+    assert.deepEqual([r["Rent UTR"], r["Bank Ref No"], r["Rent Narration"]], ["UTR111111111111", "ADINN0411001", "NB narration"], type);
+  }
 });

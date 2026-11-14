@@ -390,3 +390,57 @@ test("N20. the bank writes the landlord without a space ('land1' for 'land 1'): 
   // "land10" is never "land 1"
   assert.equal(narrationFor([row("land10 Hoarding", 1000, "R9", "x")], L, { landOwnerId: "a" }).reason, "narration_landlord_not_identified");
 });
+
+// ───────────────────────── Bank Reference (bankRefNo): the unique reference of the bank row of a payment ─────────────────────────
+test("N21. Rental Bill, two landlords: each payment carries the Bank Reference of ITS OWN bank row next to its narration (remark and bankRefNo are separate keys)", async () => {
+  const names = [["Ravi Kumar", "111111111111"], ["Sita Devi", "222222222222"]];
+  const off = stubGmail(chain(msg("mA", "midA", approvalText(BILL, names), "2026-11-10T03:00:00.000Z"), table(ROW_B, ROW_A), "Ravi - UTR: UTRRAVI12345678\nSita - UTR: UTRSITA12345678"));
+  try {
+    const x = setupRental({ doc: rentalSite([owner("o1", "Ravi Kumar", "111111111111"), owner("o2", "Sita Devi", "222222222222")]) });
+    await run(x);
+    const by = (id) => x.calls.saver.find((b) => b.payments[0].landOwnerId === id);
+    assert.deepEqual([by("o1").bankRefNo, by("o1").remark], ["ADINN0411001", "Nov rent for Ravi Kumar site"]);
+    assert.deepEqual([by("o2").bankRefNo, by("o2").remark], ["ADINN0411002", "Nov rent for Sita Devi site"]);
+  } finally { off(); }
+});
+
+test("N22. narration rows that cannot be mapped: no Bank Reference is guessed either (bankRefNo stays empty)", async () => {
+  const names = [["Ravi Kumar", "111111111111"], ["Sita Devi", "222222222222"]];
+  const stranger = "04-11-2026 Nov-26 Unknown Person 5000 Unknown Person SBI 999999999999 SBIN0009999 AXIS 9445 NEFT ADINN0411003 something else";
+  const off = stubGmail(chain(msg("mA", "midA", approvalText(BILL, names), "2026-11-10T03:00:00.000Z"), table(stranger), "Ravi - UTR: UTRRAVI12345678\nSita - UTR: UTRSITA12345678"));
+  try {
+    const x = setupRental({ doc: rentalSite([owner("o1", "Ravi Kumar", "111111111111"), owner("o2", "Sita Devi", "222222222222")]) });
+    await run(x);
+    assert.ok(x.calls.saver.every((b) => b.remark === "" && b.bankRefNo === ""));
+  } finally { off(); }
+});
+
+for (const isAdvance of [false, true]) {
+  const bill = isAdvance ? "ADNOOHBILL1111202613" : "ADNOOHBILL1111202612";
+  const word = isAdvance ? "Advance" : "NewBill";
+  test(`N23. ${isAdvance ? "Advance" : "New Bill"}, two landlords: each payment row in MongoDB stores its bankRefNo and its narration (remark) separately`, async () => {
+    const names = [["Ravi Kumar", "111111111111"], ["Sita Devi", "222222222222"]];
+    const off = stubGmail(chain(msg("mA", "midA", approvalText(bill, names), "2026-11-10T03:00:00.000Z"), table(ROW_B, ROW_A), `Ravi - ${word} - Rent - UTR: UTRRAVI12345678\nSita - ${word} - Rent - UTR: UTRSITA12345678`));
+    try {
+      const p = setupArrears(isAdvance, 2);
+      assert.equal((await p.processPendingUtrs({ dryRun: false })).results[0].status, "found_and_saved");
+      const pays = DB.get(SITE).arrearsDue[0].payments;
+      assert.deepEqual(pays.map((x) => [x.landOwnerName, x.bankRefNo, x.remark]), [["Ravi Kumar", "ADINN0411001", "Nov rent for Ravi Kumar site"], ["Sita Devi", "ADINN0411002", "Nov rent for Sita Devi site"]]);
+    } finally { off(); }
+  });
+}
+
+test("N24. a Bank Reference that is already stored on a payment of the site is never given to another payment", () => {
+  const { pickBankRow, usedBankRefs, narrationByRef } = require("../utils/bankNarration");
+  const L = [{ landOwnerId: "a", name: "land 1", accountLast4: "4654" }, { landOwnerId: "b", name: "land 2", accountLast4: "8687" }];
+  const row = (ledger, amount, ref, narration) => ({ ledgerName: ledger, payee: ledger.split(" ")[0], amount, accountNo: "418601838", reference: ref, narration });
+  const rows = [row("land1 Hoarding Landlord", 37760, "ADINN121162291", "Oct narration"), row("Land1", 40000, "ADINN121162293", "Nov narration"), row("land2 Hoarding Landlord", 56640, "ADINN121162292", "Oct narration L2")];
+  assert.equal(pickBankRow(rows, L, { landOwnerId: "a", amount: 37760 }).row.reference, "ADINN121162291");
+  assert.equal(pickBankRow(rows, L, { landOwnerId: "a", amount: 40000 }).row.reference, "ADINN121162293");
+  assert.equal(pickBankRow(rows, L, { landOwnerId: "a" }).reason, "bank_rows_ambiguous"); // two rows, amount unknown: nothing is guessed
+  const used = usedBankRefs({ ledger: [{ bankRefNo: "adinn121162291" }], gstBalanceHistory: [{ bankRefNo: "X2" }], ledgerHistory: [{ months: [{ entries: [{ bankRefNo: "X3" }] }] }], arrearsDue: [{ payments: [{ bankRefNo: "X4" }] }], withGst1Ledger: [{ bankRefNo: "X5" }] });
+  assert.deepEqual([...used].sort(), ["ADINN121162291", "X2", "X3", "X4", "X5"]);
+  assert.equal(pickBankRow(rows, L, { landOwnerId: "a", usedRefs: used }).row.reference, "ADINN121162293"); // the Oct row is taken: only the Nov row is left
+  assert.equal(pickBankRow(rows, L, { landOwnerId: "a", amount: 37760, usedRefs: used }).row.reference, "ADINN121162293");
+  assert.equal(narrationByRef(rows, "adinn121162292"), "Oct narration L2");
+});

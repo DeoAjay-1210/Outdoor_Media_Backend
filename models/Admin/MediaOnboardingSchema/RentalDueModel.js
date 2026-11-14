@@ -330,6 +330,7 @@ const gstBalanceSchema = new mongoose.Schema(
     date: { type: Date, default: null },
     isUtrEntry: { type: Boolean, default: false },
     remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+    bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
     updatedBy: { type: String, trim: true, default: null },   // ← ADDED
     updatedAt: { type: Date, default: null },                 
   },
