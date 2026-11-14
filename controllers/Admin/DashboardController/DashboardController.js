@@ -500,18 +500,26 @@ const getDashboardV2 = async (req, res) => {
     let draftSites = 0;
     for (const site of gAll) {
       const ag = site.agreement || {};
-      if (Number(ag.agreementStatus) === 2) draftSites += Math.max((site.mediaDetails || []).length, 1); // 1=Original 2=Draft; counted in sites
-      if (ag.startDate && ag.endDate) {
+      if (Number(ag.agreementStatus) === 2) draftSites += 1; // 1=Original 2=Draft; ✅ CHANGED — one per site (document), not per mediaDetails face
+      // ✅ NEW — current period: the agreement's stored status (1=Active 2=Expire soon 3=Expired), same as the agreement list
+      const storedAgStatus = Number(ag.status);
+      if (ag.startDate && ag.endDate && range.end.getTime() >= Date.now() && [1, 2, 3].includes(storedAgStatus)) {
+        if (storedAgStatus === 3) media.expiredAgreements++;
+        else if (storedAgStatus === 2) media.expiringAgreements++;
+        else media.activeAgreements++;
+      } else if (ag.startDate && ag.endDate) {
         const days = Math.ceil((new Date(ag.endDate).getTime() - range.end.getTime()) / 86400000);
         if (days < 0) media.expiredAgreements++;
         else if (days <= Number(ag.reminderBeforeExpiry || 30)) media.expiringAgreements++;
         else media.activeAgreements++;
       }
       const details = site.mediaDetails || [];
-      if (!details.length) { media.totalSites++; media.inactiveSites++; continue; }
+      // ✅ CHANGED — inactiveSites is site (document) based: one per site with no active face
+      if (!details.some((f) => Number(f.status) === 1)) media.inactiveSites++;
+      if (!details.length) { media.totalSites++; continue; }
       for (const f of details) {
         media.totalSites++;
-        Number(f.status) === 1 ? media.activeSites++ : media.inactiveSites++;
+        if (Number(f.status) === 1) media.activeSites++;
         const t = typeof f.mediaType === "string" && f.mediaType.trim() ? f.mediaType.trim() : "Unspecified";
         media.sitesByMediaType[t] = (media.sitesByMediaType[t] || 0) + 1;
       }
