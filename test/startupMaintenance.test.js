@@ -20,7 +20,7 @@ const CRON_ENV = ["SKIP_STARTUP_MAINTENANCE", "CMD_NOTIFICATION_PURGE_CRON", "AP
 
 /** Runs server.js against stubs and returns what it tried to do. */
 const bootServer = async (flag, purgeCron) => {
-  const calls = { sync: 0, appraisals: 0, purge: 0, seed: 0, fixOverdue: 0, crons: [], connectDB: 0, listen: 0, apk: 0, dns: 0 };
+  const calls = { sync: 0, agreements: 0, appraisals: 0, purge: 0, seed: 0, fixOverdue: 0, crons: [], connectDB: 0, listen: 0, apk: 0, dns: 0 };
   const noop = () => {};
   const router = () => ({ use: noop, get: noop, post: noop });
   const app = { use: noop, get: noop, listen: () => { calls.listen++; } };
@@ -39,6 +39,9 @@ const bootServer = async (flag, purgeCron) => {
     "MediaOnboardingController/RentalDueNew2Controller": { fixSingleBillOverdueAmounts: async () => { calls.fixOverdue++; return { checked: 0, fixed: 0 }; } },
     "landOwnerMasterController/landOwnerMasterController": { seedLandOwnerBankAccounts: async () => { calls.seed++; return { seeded: 0 }; } },
     "utils/apkAutoPublish": { startApkAutoPublish: () => { calls.apk++; } },
+    "utils/agreementStatusSync": { syncAgreementStatuses: async () => { calls.agreements++; return { checked: 0, updated: 0 }; } },
+    "config/firebase": { initFirebase: noop },
+    "utils/overdueScheduler": { startOverdueScheduler: noop },
   };
   const routeStub = router();
 
@@ -77,24 +80,24 @@ const bootServer = async (flag, purgeCron) => {
 test("flag unset: all five routines run at startup and all three cron schedules are registered (unchanged behaviour)", async () => {
   const { calls, logs } = await bootServer(undefined);
   assert.deepEqual(
-    { sync: calls.sync, appraisals: calls.appraisals, purge: calls.purge, seed: calls.seed, fixOverdue: calls.fixOverdue },
-    { sync: 1, appraisals: 1, purge: 1, seed: 1, fixOverdue: 1 },
+    { sync: calls.sync, agreements: calls.agreements, appraisals: calls.appraisals, purge: calls.purge, seed: calls.seed, fixOverdue: calls.fixOverdue },
+    { sync: 1, agreements: 1, appraisals: 1, purge: 1, seed: 1, fixOverdue: 1 },
   );
-  assert.deepEqual(calls.crons.map((c) => c.expr).sort(), ["10 0 * * *", "15 * * * *", "5 0 * * *"]);
+  assert.deepEqual(calls.crons.map((c) => c.expr).sort(), ["10 0 * * *", "15 * * * *", "15 0 * * *", "5 0 * * *"]);
   assert.equal(logs.some((l) => l.includes("SKIP_STARTUP_MAINTENANCE")), false);
 });
 
 test("flag=false behaves exactly like unset", async () => {
   const { calls } = await bootServer("false");
-  assert.equal(calls.sync + calls.appraisals + calls.purge + calls.seed + calls.fixOverdue, 5);
-  assert.equal(calls.crons.length, 3);
+  assert.equal(calls.sync + calls.agreements + calls.appraisals + calls.purge + calls.seed + calls.fixOverdue, 6);
+  assert.equal(calls.crons.length, 4);
 });
 
 test("flag=true: none of the five routines runs and no maintenance cron is scheduled", async () => {
   const { calls, logs } = await bootServer("true");
   assert.deepEqual(
-    { sync: calls.sync, appraisals: calls.appraisals, purge: calls.purge, seed: calls.seed, fixOverdue: calls.fixOverdue },
-    { sync: 0, appraisals: 0, purge: 0, seed: 0, fixOverdue: 0 },
+    { sync: calls.sync, agreements: calls.agreements, appraisals: calls.appraisals, purge: calls.purge, seed: calls.seed, fixOverdue: calls.fixOverdue },
+    { sync: 0, agreements: 0, appraisals: 0, purge: 0, seed: 0, fixOverdue: 0 },
   );
   assert.equal(calls.crons.length, 0);
   assert.equal(logs.some((l) => l.includes("SKIP_STARTUP_MAINTENANCE is on")), true);
@@ -110,5 +113,16 @@ test("flag=true: the rest of startup is unchanged (DB connect, listen, APK watch
 
 test("flag=true: a custom purge cron expression is not scheduled either", async () => {
   assert.equal((await bootServer("true", "* * * * *")).calls.crons.length, 0);
-  assert.deepEqual((await bootServer(undefined, "* * * * *")).calls.crons.map((c) => c.expr).sort(), ["* * * * *", "10 0 * * *", "5 0 * * *"]);
+  assert.deepEqual((await bootServer(undefined, "* * * * *")).calls.crons.map((c) => c.expr).sort(), ["* * * * *", "10 0 * * *", "15 0 * * *", "5 0 * * *"]);
+});
+
+// ── agreement.status daily refresh ──
+const { agreementStatusFor } = require("../utils/agreementStatusSync");
+test("agreementStatusFor: same rule as the agreement pre-save (expired / within reminder days / active)", () => {
+  const now = new Date(Date.UTC(2026, 10, 14, 6));
+  assert.equal(agreementStatusFor(new Date(Date.UTC(2026, 11, 1)), 30, now), 2, "17 days left, reminder 30 -> expire soon");
+  assert.equal(agreementStatusFor(new Date(Date.UTC(2027, 0, 30)), 30, now), 1);
+  assert.equal(agreementStatusFor(new Date(Date.UTC(2026, 10, 1)), 30, now), 3);
+  assert.equal(agreementStatusFor(new Date(Date.UTC(2026, 11, 20)), undefined, now), 1, "36 days, default reminder 30");
+  assert.equal(agreementStatusFor(new Date(Date.UTC(2026, 11, 20)), 60, now), 2);
 });

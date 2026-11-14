@@ -60,6 +60,21 @@ if (!SKIP_STARTUP_MAINTENANCE) {
   cron.schedule("10 0 * * *", runApplyDueAppraisals);
 }
 
+// Refresh agreement.status (Active / Expire soon / Expired) of every site — otherwise it changes only when a site is saved (startup + daily 00:15)
+const { syncAgreementStatuses } = require("./utils/agreementStatusSync");
+const runSyncAgreementStatuses = async () => {
+  try {
+    const result = await syncAgreementStatuses(Media);
+    if (result.updated) console.log(`[syncAgreementStatuses] checked=${result.checked} updated=${result.updated}`);
+  } catch (err) {
+    console.error("[syncAgreementStatuses] failed:", err.message);
+  }
+};
+if (!SKIP_STARTUP_MAINTENANCE) {
+  runSyncAgreementStatuses();
+  cron.schedule("15 0 * * *", runSyncAgreementStatuses);
+}
+
 // Delete Executive / Manager / CMD notifications read more than
 // CMD_NOTIFICATION_READ_RETENTION_MINUTES (.env, default 1 day) ago;
 // unread ones are kept. Also removes CMD's copies of billing date revert

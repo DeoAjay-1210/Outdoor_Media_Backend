@@ -43,7 +43,8 @@ function parseFilters(body = {}) {
       cm += 1;
       if (cm > 12) { cm = 1; cy += 1; }
     }
-    if (months.length > 12) return { error: "Custom range cannot exceed 12 months" };
+    // ✅ CHANGED — was 12 months; a custom range may span more than a year (10-year safety cap only)
+    if (months.length > 120) return { error: "Custom range cannot exceed 10 years" };
   } else {
     // legacy "MM-YYYY" month param is still honoured
     if (typeof body.month === "string" && /^\d{2}-\d{4}$/.test(body.month)) {
