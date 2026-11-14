@@ -514,12 +514,11 @@ const getDashboardV2 = async (req, res) => {
         else media.activeAgreements++;
       }
       const details = site.mediaDetails || [];
-      // ✅ CHANGED — inactiveSites is site (document) based: one per site with no active face
-      if (!details.some((f) => Number(f.status) === 1)) media.inactiveSites++;
-      if (!details.length) { media.totalSites++; continue; }
+      // activeSites / inactiveSites are mediaDetails (face) based: every face counts once by its own status (1 = active)
+      if (!details.length) { media.totalSites++; media.inactiveSites++; continue; }
       for (const f of details) {
         media.totalSites++;
-        if (Number(f.status) === 1) media.activeSites++;
+        Number(f.status) === 1 ? media.activeSites++ : media.inactiveSites++;
         const t = typeof f.mediaType === "string" && f.mediaType.trim() ? f.mediaType.trim() : "Unspecified";
         media.sitesByMediaType[t] = (media.sitesByMediaType[t] || 0) + 1;
       }
