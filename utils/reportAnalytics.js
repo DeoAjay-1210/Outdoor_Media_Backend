@@ -1008,9 +1008,11 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
       const sSoon = useStored ? stored === 2 : soon;
       if (r.isCurrent) {
         bump(total, sid);
-        bump(states[sState], sid);
-        if (sSoon) bump(expiringSoon, sid);
+        // ✅ CHANGED — status cards: live = Active only (not expiring soon), expiringSoon, expired … (one per site:
+        //   total = live + expiringSoon + expired + upcoming + superseded). draft = every Draft document, ALSO in its status card.
         if (num(cur.agreementStatus) === 2) bump(draft, sid);
+        if (sSoon) bump(expiringSoon, sid);
+        else bump(states[sState], sid);
       }
       if (state !== "superseded") {
         for (const [key, bm] of buckets) {
