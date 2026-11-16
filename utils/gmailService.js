@@ -1,17 +1,14 @@
 /**
  * Gmail (read-only) service — official Gmail REST API through google-auth-library.
  *
- * Scope is gmail.readonly ONLY (no send / modify / delete). Credentials come from the
- * environment (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI,
- * GOOGLE_REFRESH_TOKEN); nothing here logs or returns a secret.
+ * Scope is gmail.readonly ONLY (no send / modify / delete). The OAuth client comes from the environment
+ * (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI); the connected account's refresh token is stored
+ * encrypted in MongoDB (key GMAIL_TOKEN_KEY, else JWT_SECRET). Nothing here logs or returns a secret.
  */
-const fs = require("fs");
-const path = require("path");
 const { OAuth2Client } = require("google-auth-library");
 
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
-const ENV_PATH = path.join(__dirname, "..", ".env");
 
 const missingConfig = () =>
   ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"].filter((k) => !process.env[k]);
@@ -46,25 +43,77 @@ const exchangeCode = async (code) => {
   return tokens;
 };
 
-/** Sets KEY=value in .env (replacing the line, or appending) and in the running process. */
-const saveEnvValue = (key, value) => {
-  let env = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, "utf8") : "";
-  const line = `${key}=${value}`;
-  const re = new RegExp(`^${key}=.*$`, "m");
-  env = re.test(env) ? env.replace(re, () => line) : env.replace(/\s*$/, "\n") + line + "\n";
-  fs.writeFileSync(ENV_PATH, env);
-  process.env[key] = value;
+// ── the Gmail account connected through the login (OAuth): its refresh token lives ENCRYPTED in MongoDB (collection gmail_connection) ──
+// Nothing is written to .env and GOOGLE_REFRESH_TOKEN is not read. Every server that uses the same database uses the same connected account.
+const crypto = require("crypto");
+const encKey = () => crypto.createHash("sha256").update(String(process.env.GMAIL_TOKEN_KEY || process.env.JWT_SECRET || "")).digest(); // 32 bytes
+const encrypt = (plain) => {
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv("aes-256-gcm", encKey(), iv);
+  const enc = Buffer.concat([c.update(String(plain), "utf8"), c.final()]);
+  return [iv.toString("base64"), c.getAuthTag().toString("base64"), enc.toString("base64")].join(".");
+};
+const decrypt = (blob) => {
+  const [iv, tag, enc] = String(blob || "").split(".");
+  if (!iv || !tag || !enc) return "";
+  const d = crypto.createDecipheriv("aes-256-gcm", encKey(), Buffer.from(iv, "base64"));
+  d.setAuthTag(Buffer.from(tag, "base64"));
+  return Buffer.concat([d.update(Buffer.from(enc, "base64")), d.final()]).toString("utf8");
+};
+const connectionModel = () => require("../models/Admin/GmailConnectionSchema");
+const CACHE_MS = 5 * 60 * 1000;
+let tokenCache = null; // { token, at }
+
+/** Refresh token to use: ONLY the connected account's token stored in the database (the environment is no longer read). */
+const loadRefreshToken = async () => {
+  if (tokenCache && Date.now() - tokenCache.at < CACHE_MS) return tokenCache.token;
+  let token = "";
+  try {
+    const doc = await connectionModel().findOne({ key: "primary" }).lean();
+    if (doc && doc.refreshTokenEnc) token = decrypt(doc.refreshTokenEnc);
+  } catch (_) { token = ""; } // database unreachable / wrong key: not connected
+  if (token) tokenCache = { token, at: Date.now() }; // an empty result is never cached: a connection made on another server is seen at once
+  return token;
 };
 
-const authorizedClient = () => {
-  if (!process.env.GOOGLE_REFRESH_TOKEN) {
-    const err = new Error("Gmail is not authorized yet (GOOGLE_REFRESH_TOKEN is empty). Run the OAuth flow first.");
+const authorizedClient = async () => {
+  const token = await loadRefreshToken();
+  if (!token) {
+    const err = new Error("Gmail is not connected yet. Open /api/gmail/oauth/url and sign in with the Gmail account (Connect Gmail).");
     err.status = 409;
     throw err;
   }
   const client = createClient();
-  client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  client.setCredentials({ refresh_token: token });
   return client;
+};
+
+/** Login finished: check the token, read the account's address, store the token encrypted in MongoDB. */
+const connectWithRefreshToken = async (refreshToken, connectedBy = "") => {
+  const client = createClient();
+  client.setCredentials({ refresh_token: refreshToken });
+  const profile = await gmailGet(client, "/profile");
+  await connectionModel().findOneAndUpdate(
+    { key: "primary" },
+    { $set: { email: profile.emailAddress || "", refreshTokenEnc: encrypt(refreshToken), connectedBy: String(connectedBy || ""), connectedAt: new Date(), lastError: "", lastErrorAt: null } },
+    { upsert: true, new: true },
+  );
+  tokenCache = { token: refreshToken, at: Date.now() };
+  return { email: profile.emailAddress || "" };
+};
+
+/** Which account is connected (never the token). */
+const connectionStatus = async () => {
+  const doc = await connectionModel().findOne({ key: "primary" }).lean();
+  if (!doc || !doc.refreshTokenEnc) return { connected: false, source: "none", email: "", connectedAt: null, connectedBy: "", valid: null };
+  let valid = true, error = "";
+  try { await getProfile(); } catch (e) { valid = false; error = e.message; }
+  return { connected: true, source: "database", email: doc.email || "", connectedAt: doc.connectedAt || null, connectedBy: doc.connectedBy || "", valid, ...(error ? { error } : {}) };
+};
+
+const disconnect = async () => {
+  await connectionModel().deleteOne({ key: "primary" });
+  tokenCache = null;
 };
 
 const gmailGet = async (client, endpoint, params = {}) => {
@@ -79,7 +128,7 @@ const gmailGet = async (client, endpoint, params = {}) => {
   }
 };
 
-const getProfile = async () => gmailGet(authorizedClient(), "/profile");
+const getProfile = async () => gmailGet(await authorizedClient(), "/profile");
 
 /** Base64URL -> utf8 text. */
 const decodeBase64Url = (data) => {
@@ -158,13 +207,13 @@ const isUsableMessage = (m) => !(m && Array.isArray(m.labelIds) && m.labelIds.so
 
 /** Threads matching a Gmail search query: [{ id, snippet }]. */
 const searchThreads = async (query, maxResults = 10) => {
-  const data = await gmailGet(authorizedClient(), "/threads", { q: query, maxResults });
+  const data = await gmailGet(await authorizedClient(), "/threads", { q: query, maxResults });
   return data.threads || [];
 };
 
 /** Real Gmail API thread (id from threads.list, never the browser URL id), messages oldest first. */
 const getThread = async (threadId) => {
-  const data = await gmailGet(authorizedClient(), `/threads/${encodeURIComponent(threadId)}`, { format: "full" });
+  const data = await gmailGet(await authorizedClient(), `/threads/${encodeURIComponent(threadId)}`, { format: "full" });
   const all = (data.messages || []).map(parseMessage).sort((a, b) => new Date(a.date) - new Date(b.date));
   const messages = all.filter(isUsableMessage);
   return { id: data.id, subject: messages[0]?.subject || "", messages, ignoredMessages: all.filter((m) => !isUsableMessage(m)).map((m) => ({ id: m.id, labelIds: m.labelIds })) };
@@ -174,7 +223,9 @@ module.exports = {
   SCOPES,
   buildAuthUrl,
   exchangeCode,
-  saveEnvValue,
+  connectWithRefreshToken,
+  connectionStatus,
+  disconnect,
   getProfile,
   searchThreads,
   getThread,
@@ -183,4 +234,6 @@ module.exports = {
   parseMessage,
   decodeBase64Url,
   htmlToText,
+  encrypt,
+  decrypt,
 };
