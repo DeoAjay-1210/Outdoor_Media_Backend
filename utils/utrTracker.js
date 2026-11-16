@@ -119,8 +119,8 @@ async function buildUtrTracker(opts = {}, deps = {}) {
   const helpers = deps.helpers || require("../controllers/Admin/MediaOnboardingController/LedgerNew2Controller");
   const nowMs = deps.now || Date.now();
   const field = billField();
-  const fromMs = istDayStart(opts.from);
-  const toMs = istDayStart(opts.to) + 86400000 - 1;
+  const fromMs = opts.from ? istDayStart(opts.from) : 0; // from / to are optional: no date = all dates
+  const toMs = opts.to ? istDayStart(opts.to) + 86400000 - 1 : 4102444799000; // up to 31-Dec-2099
   const inRange = (d) => { const t = new Date(d || 0).getTime(); return t >= fromMs && t <= toMs; };
   const range = { $gte: new Date(fromMs), $lte: new Date(toMs) };
 
@@ -433,13 +433,13 @@ function trackerWorkbook(data) {
   };
   const STATUS_COLOR = { "Saved": "38761D", "Partially saved": "2F5597", "Waiting for UTR": "C55A11", "Needs review": "C00000" };
 
-  const sheet = (rows, label) => {
+  const sheet = (rows, label, opts = {}) => {
     const aoa = [];
     const kind = []; // row type per aoa row
     const merges = [];
     const blank = (first) => [first, ...Array(LAST).fill("")];
     aoa.push(blank(`UTR TRACKER REPORT - ${label.toUpperCase()}`)); kind.push("title"); merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST } });
-    aoa.push(blank(`Approval Period: ${fmtLong(data.from)} to ${fmtLong(data.to)}`)); kind.push("period"); merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST } });
+    aoa.push(blank(opts.period || (data.from && data.to ? `Approval Period: ${fmtLong(data.from)} to ${fmtLong(data.to)}` : "Approval Period: All dates"))); kind.push("period"); merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST } });
     aoa.push(COLS.map((c) => c[0])); kind.push("head");
 
     const totals = (labelText, list) => {
@@ -497,9 +497,16 @@ function trackerWorkbook(data) {
   };
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, sheet(data.rows, "All bills"), "UTR Tracker");
-  XLSX.utils.book_append_sheet(wb, sheet(data.rows.filter((r) => r.Status === "Waiting for UTR" || r.Status === "Partially saved"), "Waiting for UTR"), "Waiting for UTR");
-  XLSX.utils.book_append_sheet(wb, sheet(data.rows.filter((r) => r.Status === "Needs review"), "Needs review"), "Needs Review");
+  // one tab per CMD approval day (India time): the latest day first (left), the older days to the right
+  const dayOf = (r) => new Date((r._approvedMs || 0) + 330 * 60 * 1000).toISOString().slice(0, 10);
+  const days = new Map();
+  data.rows.forEach((r) => { const k = r._approvedMs ? dayOf(r) : ""; if (!days.has(k)) days.set(k, []); days.get(k).push(r); });
+  const keys = [...days.keys()].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : b.localeCompare(a)));
+  if (!keys.length) XLSX.utils.book_append_sheet(wb, sheet([], "No bills", { period: "Approval Period: No bills found" }), "UTR Tracker");
+  keys.forEach((k) => {
+    const name = k ? fmtLong(k) : "No approval date";
+    XLSX.utils.book_append_sheet(wb, sheet(days.get(k), name, { period: k ? `Approval Date: ${name}` : "Approval Date: not available" }), name);
+  });
   const raw = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   try { return require("../controllers/Admin/MediaOnboardingController/RentalOOHExcelController").freezeHeaderInXlsxBuffer(raw, 3); } catch (_) { return raw; } // header rows stay while scrolling
 }

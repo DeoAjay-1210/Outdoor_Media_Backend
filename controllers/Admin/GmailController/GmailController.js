@@ -175,15 +175,15 @@ const utrTrackerExport = async (req, res) => {
   const from = String(req.query.from || "").trim();
   const to = String(req.query.to || "").trim();
   const ymd = /^\d{4}-\d{2}-\d{2}$/;
-  if (!ymd.test(from) || !ymd.test(to) || Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) return errorResponse(res, "from and to are required as YYYY-MM-DD", null, 400);
-  if (from > to) return errorResponse(res, "from must not be after to", null, 400);
-  if ((Date.parse(to) - Date.parse(from)) / 86400000 > 400) return errorResponse(res, "Date range is too long (max 400 days)", null, 400);
+  // from / to are optional (no date = all dates); when given they must be YYYY-MM-DD
+  if ((from && (!ymd.test(from) || Number.isNaN(Date.parse(from)))) || (to && (!ymd.test(to) || Number.isNaN(Date.parse(to))))) return errorResponse(res, "from and to must be YYYY-MM-DD", null, 400);
+  if (from && to && from > to) return errorResponse(res, "from must not be after to", null, 400);
   try {
     const { buildUtrTracker, trackerWorkbook } = require("../../../utils/utrTracker");
-    const data = await buildUtrTracker({ from, to });
+    const data = await buildUtrTracker({ from: from || undefined, to: to || undefined });
     const buffer = trackerWorkbook(data);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename="utr-tracker-${from}_to_${to}.xlsx"`);
+    res.setHeader("Content-Disposition", `attachment; filename="${from || to ? `utr-tracker-${from || "start"}_to_${to || "latest"}` : "utr-tracker-all"}.xlsx"`);
     res.setHeader("X-Tracker-Summary", JSON.stringify(data.summary));
     return res.status(200).send(buffer);
   } catch (err) {
