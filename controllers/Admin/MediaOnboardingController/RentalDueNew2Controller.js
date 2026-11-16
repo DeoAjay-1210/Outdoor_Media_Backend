@@ -6758,6 +6758,7 @@ const details = (item.mediaDetails || []).map((d) => ({
           agreementPDF: item.agreement?.agreementPDF,
           status: item.agreement?.status,
           agreementStatus: item.agreement?.agreementStatus ?? null, // 1=Original 2=Draft
+          reason: item.agreement?.reason || "", // ✅ NEW — agreement reason
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,
