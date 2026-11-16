@@ -2063,7 +2063,10 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
     failed = failed.map((f) => ({ index: f.index, mediaId: f.mediaId, mediaCode: codeById.get(f.mediaId) || "", message: f.message }));
     return errorResponse(
       res,
-      `Rent revision not saved — ${failed.length} of ${items.length} site(s) failed. Fix them and send again.`,
+      // ✅ CHANGED — + each failed site's reason in the message
+      `Rent revision not saved — ${failed.length} of ${items.length} site(s) failed: ${failed
+        .map((f) => (f.mediaCode ? `${f.mediaCode} — ${f.message}` : f.message))
+        .join("; ")}. Fix them and send again.`,
       { totalSites: items.length, passedSites: items.length - failed.length, failedSites: failed.length, failed },
       400,
     );
