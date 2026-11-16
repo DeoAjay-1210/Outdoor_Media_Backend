@@ -2028,9 +2028,9 @@ const fakeRes = () => {
 };
 const handlers = ["getFilterOptions", "getPaymentAnalytics", "getMediaAnalytics", "getAppraisalAnalytics", "getBillAnalytics", "getGstAnalytics", "getTdsAnalytics"];
 
-test("roles outside 1-4 (including 5, missing, garbage) get 403 on every endpoint", async () => {
+test("roles outside 1-6 (including 7, missing, garbage) get 403 on every endpoint", async () => {
   for (const name of handlers) {
-    for (const userType of [5, 0, undefined, "x", null]) {
+    for (const userType of [7, 0, undefined, "x", null]) {
       const res = fakeRes();
       await C[name]({ user: { userType }, body: {} }, res);
       assert.equal(res.statusCode, 403, `${name} userType=${userType}`);
@@ -2041,10 +2041,10 @@ test("roles outside 1-4 (including 5, missing, garbage) get 403 on every endpoin
   }
 });
 
-test("roles 1-4 pass the guard; invalid filters return 400 before any DB access", async () => {
-  assert.deepEqual(C.ALLOWED_ROLES, [1, 2, 3, 4]);
+test("roles 1-6 pass the guard; invalid filters return 400 before any DB access", async () => {
+  assert.deepEqual(C.ALLOWED_ROLES, [1, 2, 3, 4, 5, 6]);
   for (const name of handlers.slice(1)) {
-    for (const userType of [1, 2, 3, 4]) {
+    for (const userType of [1, 2, 3, 4, 5, 6]) {
       const res = fakeRes();
       await C[name]({ user: { userType }, body: { startDate: "bad", endDate: "worse" } }, res);
       assert.equal(res.statusCode, 400, `${name} role ${userType}`);

@@ -3328,6 +3328,8 @@ function siteBillForOverdue(media, dueDate) {
   }
 }
 
+exports.siteBillForOverdue = siteBillForOverdue; // ✅ NEW — reused by the Generated Bills Excel
+
 async function siteBillAmountsForOverdueRows(records) {
   const result = new Map();
   const mediaIds = [
@@ -6758,6 +6760,7 @@ const details = (item.mediaDetails || []).map((d) => ({
           agreementPDF: item.agreement?.agreementPDF,
           status: item.agreement?.status,
           agreementStatus: item.agreement?.agreementStatus ?? null, // 1=Original 2=Draft
+          reason: item.agreement?.reason || "", // ✅ NEW — agreement reason
         },
         agreementDocVerificationHistory:
           filteredAgreementDocVerificationHistory,

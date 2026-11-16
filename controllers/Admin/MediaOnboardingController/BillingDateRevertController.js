@@ -877,3 +877,315 @@ exports.markBillingDateRevertRead = async (req, res) => {
     return errorResponse(res, error.message, null, 500);
   }
 };
+
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — ADMIN BILLING DATE REVERT (userType 6, no CMD approval)
+// POST /admin/billing-date-revert/admin  → ONE call: dates + bills changed directly (no preview, no CMD approval)
+// body: { mediaId, lastBillDate, removeApproved?: false, reason? }
+//
+// Sets lastBillPaidDate / nextBillingDate / billingStartDate exactly like a
+// CMD approval. Bills of the months on/before the new lastBillDate are
+// removed (rentalDue + rentalDueHistory + their unpaid GST balance rows,
+// overdue rows and notifications), EXCEPT:
+//   • bills with a payment (ledger / ledgerHistory / withGst1Ledger / TDS
+//     balance, or a paid GST balance row) — never removed
+//   • CMD-approved bills, unless removeApproved is true
+// Every applied revert is stored as an Approved BillingDateRevertRequest
+// (source "admin") with a full copy of each removed bill.
+// ─────────────────────────────────────────────────────────────
+const ADMIN_ROLE = 6;
+const isPaidGstRow = (g) =>
+  !!g && (g.isPaid === true || g.isPaid === "true" || (g.utrNumber && String(g.utrNumber).trim() !== "") || Number(g.paidAmount || 0) > 0);
+
+function findBillsForAdminRevert(media, newLastBill, removeApproved) {
+  const lastBillMonth = monthKeyUTC(newLastBill);
+  const plain = media.toObject({ virtuals: false });
+  const paymentData = JSON.stringify([
+    plain.ledger,
+    plain.withGst1Ledger,
+    plain.ledgerHistory,
+    plain.tdsBalanceHistory,
+    (plain.gstBalanceHistory || []).filter(isPaidGstRow),
+  ]);
+  const remove = [];
+  const kept = [];
+  (plain.rentalDue || []).forEach((e) => {
+    if (!e?._id || !e.dueDate) return;
+    if (monthKeyUTC(e.dueDate) > lastBillMonth) return;
+    const row = {
+      rentalDueId: e._id,
+      mediaDetailId: e.mediaDetailId || null,
+      dueMonth: e.dueMonth,
+      dueDate: e.dueDate,
+      netPayable: Number(e.netPayable || 0),
+      approvalStatus: e.approvalStatus ?? null,
+      billNo: e.billNo || "",
+      adinn_ooh_bills: e.adinn_ooh_bills || "",
+    };
+    const approved = Number(e.approvalStatus) === 3 || Number(e.status) === 3;
+    if (paymentData.includes(String(e._id))) {
+      kept.push({ ...row, reason: "Payment entered for this bill — remove the payment first" });
+    } else if (approved && !removeApproved) {
+      kept.push({ ...row, reason: "Approved by CMD — send removeApproved: true to remove" });
+    } else {
+      remove.push({ ...row, bill: e });
+    }
+  });
+  return { remove, kept };
+}
+
+async function prepareAdminRevert(req) {
+  if (Number(req.user?.userType) !== ADMIN_ROLE) {
+    return { status: 403, error: "Only Admin can use this billing date revert" };
+  }
+  const { mediaId, lastBillDate } = req.body || {};
+  const removeApproved = req.body?.removeApproved === true || req.body?.removeApproved === "true";
+  if (!mediaId || !lastBillDate) return { status: 400, error: "mediaId and lastBillDate are required" };
+  const mediaObjectId = toObjectId(mediaId);
+  if (!mediaObjectId) return { status: 400, error: "mediaId is not valid" };
+  const requestedLastBill = parseDateOnly(lastBillDate);
+  if (!requestedLastBill) return { status: 400, error: "lastBillDate must be a valid date (YYYY-MM-DD or DD.MM.YYYY)" };
+
+  const media = await Media.findById(mediaObjectId);
+  if (!media) return { status: 404, error: "Media not found" };
+
+  const pending = await BillingDateRevertRequest.exists({ mediaId: mediaObjectId, status: REVERT_STATUS.PENDING });
+  if (pending) {
+    return { status: 409, error: "A billing date revert request is pending for this site — approve / reject it first" };
+  }
+
+  const validation = validateRequestedDates(media, requestedLastBill, null);
+  if (validation.error) return { status: 400, error: validation.error };
+
+  const { remove, kept } = findBillsForAdminRevert(media, validation.lastBillPaidDate, removeApproved);
+  const removeIds = new Set(remove.map((b) => String(b.rentalDueId)));
+  const historyEntries = (media.rentalDueHistory || []).reduce(
+    (n, y) =>
+      n + (y.months || []).reduce((m, mo) => m + (mo.entries || []).filter((h) => removeIds.has(String(h.rentalDueId))).length, 0),
+    0,
+  );
+  const gstRows = (media.gstBalanceHistory || []).filter((g) => g && removeIds.has(String(g.rentalDueId)) && !isPaidGstRow(g)).length;
+  const ids = remove.map((b) => b.rentalDueId);
+  const [overDueHistoryDocs, cmdNotifications] = ids.length
+    ? await Promise.all([
+        OverDueHistory.countDocuments({ rentalDueId: { $in: ids } }),
+        CmdNotification.countDocuments({ rentalDueId: { $in: ids }, notificationType: { $ne: "billingDateRevert" } }),
+      ])
+    : [0, 0];
+
+  const rp = media.rentalPayment || {};
+  return {
+    media,
+    validation,
+    remove,
+    kept,
+    summary: {
+      mediaId: media._id,
+      siteName: media.mediaDetails?.[0]?.mediaName || "",
+      mediaCodes: (media.mediaDetails || []).map((d) => d.mediaCode).filter(Boolean),
+      paymentFrequency: rp.paymentFrequency ?? null,
+      cycleMonths: validation.cycleMonths,
+      current: {
+        lastBillPaidDate: formatYMD(rp.lastBillPaidDate),
+        nextBillingDate: formatYMD(rp.nextBillingDate),
+        billingStartDate: formatYMD(rp.billingStartDate),
+      },
+      corrected: {
+        lastBillPaidDate: formatYMD(validation.lastBillPaidDate),
+        nextBillingDate: formatYMD(validation.nextBillingDate),
+        billingStartDate: formatYMD(validation.lastBillPaidDate),
+      },
+      removeApproved,
+      billsToRemove: remove.map(({ bill, ...b }) => ({ ...b, dueDate: formatYMD(b.dueDate) })),
+      billsKept: kept.map((b) => ({ ...b, dueDate: formatYMD(b.dueDate) })),
+      alsoCleaned: { rentalDueHistoryEntries: historyEntries, gstBalanceUnpaidRows: gstRows, overDueHistoryDocs, cmdNotifications },
+      totals: {
+        billsToRemove: remove.length,
+        amountToRemove: remove.reduce((s, b) => s + b.netPayable, 0),
+        billsKept: kept.length,
+      },
+    },
+  };
+}
+
+exports.adminBillingDateRevert = async (req, res) => {
+  try {
+    const p = await prepareAdminRevert(req);
+    if (p.error) return errorResponse(res, p.error, null, p.status);
+    const { media, validation, remove, kept, summary } = p;
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : ""; // optional
+    const datesBeforeApproval = snapshotDates(media.rentalPayment);
+
+    // same handling as a CMD approval: the anchor follows the new lastBillPaidDate
+    media.rentalPayment.billingStartDate = validation.lastBillPaidDate;
+    media.rentalPayment.previousBillGenerateDate = datesBeforeApproval.lastBillPaidDate;
+    media.rentalPayment.lastBillPaidDate = validation.lastBillPaidDate;
+    media.rentalPayment.nextBillingDate = validation.nextBillingDate;
+    if (remove.length) {
+      removeBillsFromMedia(media, remove);
+      const removeIds = new Set(remove.map((b) => String(b.rentalDueId)));
+      (media.gstBalanceHistory || [])
+        .filter((g) => g && removeIds.has(String(g.rentalDueId)) && !isPaidGstRow(g))
+        .forEach((g) => media.gstBalanceHistory.pull({ _id: g._id }));
+    }
+    media.updatedAt = nowIST();
+    await media.save({ timestamps: false });
+    await removeOverdueRowsForBills(remove);
+
+    const actor = actorFromReq(req, reason);
+    const appliedDates = snapshotDates(media.rentalPayment);
+    const face = media.mediaDetails?.[0] || {};
+    const record = await BillingDateRevertRequest.create({
+      mediaId: media._id,
+      siteCode: face.mediaCode || "",
+      siteName: face.mediaName || "",
+      landOwnerName: (media.landOwners || []).map((o) => o.name).filter(Boolean).join(", "),
+      paymentFrequency: media.rentalPayment?.paymentFrequency,
+      customPaymentFrequency: media.rentalPayment?.customPaymentFrequency ?? null,
+      cycleMonths: validation.cycleMonths,
+      originalDates: datesBeforeApproval,
+      requestedDates: { lastBillPaidDate: validation.lastBillPaidDate, nextBillingDate: validation.nextBillingDate },
+      datesBeforeApproval,
+      appliedDates,
+      removedBills: remove.map((b) => ({
+        rentalDueId: b.rentalDueId,
+        mediaDetailId: b.mediaDetailId,
+        dueMonth: b.dueMonth,
+        dueDate: b.dueDate,
+        netPayable: b.netPayable,
+        approvalStatus: b.approvalStatus,
+        bill: b.bill,
+      })),
+      remark: reason || "Admin billing date revert",
+      source: "admin",
+      status: REVERT_STATUS.APPROVED,
+      requestedBy: actor,
+      cmdAction: actor,
+      createdAt: nowIST(),
+      updatedAt: nowIST(),
+    });
+
+    // catch the site up from the new date (same as a CMD approval); a failure never undoes the revert
+    let generatedAfterRevert = [];
+    try {
+      const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
+      const freshMedia = await Media.findById(media._id);
+      if (freshMedia) {
+        const sweep = await generateMissedEntriesForMedia(freshMedia, req.user?.userName || "");
+        if ((sweep?.generatedEntries?.length || 0) > 0 || freshMedia.isModified()) {
+          await freshMedia.save({ timestamps: false });
+        }
+        generatedAfterRevert = (sweep?.generatedEntries || []).map((g) => ({
+          rentalDueId: g.rentalDueId,
+          dueMonth: g.dueMonth,
+          dueDate: formatYMD(g.dueDate),
+          netPayable: Number(g.netPayable || 0),
+        }));
+      }
+    } catch (err) {
+      console.error("[AdminBillingDateRevert] catch-up after revert failed:", err.message);
+    }
+
+    return successResponse(res, "Billing date reverted", {
+      mediaId: media._id,
+      revertId: record._id,
+      siteName: summary.siteName,
+      mediaCodes: summary.mediaCodes,
+      previous: summary.current,
+      corrected: summary.corrected,
+      removedBills: summary.billsToRemove,
+      keptBills: summary.billsKept,
+      cleaned: summary.alsoCleaned,
+      totals: {
+        billsRemoved: summary.totals.billsToRemove,
+        amountRemoved: summary.totals.amountToRemove,
+        billsKept: summary.totals.billsKept,
+      },
+      generatedAfterRevert,
+      reason,
+      revertedBy: req.user?.userName || "",
+      revertedAt: actor.actionAt,
+    });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — POST/GET /admin/billing-date-revert/admin/list
+// Role: Admin (6). Admin reverts only (source "admin"), newest first.
+// body/query: pageNumber (default 1), count (default 10), mediaId (optional)
+// ─────────────────────────────────────────────────────────────
+exports.getAdminBillingDateReverts = async (req, res) => {
+  try {
+    if (Number(req.user?.userType) !== ADMIN_ROLE) {
+      return errorResponse(res, "Only Admin can view admin billing date reverts", null, 403);
+    }
+    const params = { ...(req.query || {}), ...(req.body || {}) };
+    const pageNumber = Math.max(parseInt(params.pageNumber) || 1, 1);
+    const count = Math.max(parseInt(params.count) || 10, 1);
+
+    const filter = { source: "admin" };
+    if (params.mediaId) {
+      const mediaObjectId = toObjectId(params.mediaId);
+      if (!mediaObjectId) return errorResponse(res, "mediaId is not valid", null, 400);
+      filter.mediaId = mediaObjectId;
+    }
+
+    const [totalCount, rows] = await Promise.all([
+      BillingDateRevertRequest.countDocuments(filter),
+      BillingDateRevertRequest.find(filter)
+        .select("-removedBills.bill") // full bill copies stay in the DB (audit), not in the list
+        .sort({ createdAt: -1 })
+        .skip((pageNumber - 1) * count)
+        .limit(count)
+        .lean(),
+    ]);
+
+    const dates = (d) => ({
+      lastBillPaidDate: formatYMD(d?.lastBillPaidDate),
+      nextBillingDate: formatYMD(d?.nextBillingDate),
+      billingStartDate: formatYMD(d?.billingStartDate),
+    });
+
+    const reverts = rows.map((r) => {
+      const removedBills = (r.removedBills || []).map((b) => ({
+        rentalDueId: b.rentalDueId,
+        dueMonth: b.dueMonth,
+        dueDate: formatYMD(b.dueDate),
+        netPayable: Number(b.netPayable || 0),
+        approvalStatus: b.approvalStatus ?? null,
+      }));
+      return {
+        revertId: r._id,
+        mediaId: r.mediaId,
+        siteName: r.siteName || "",
+        siteCode: r.siteCode || "",
+        landOwnerName: r.landOwnerName || "",
+        paymentFrequency: r.paymentFrequency ?? null,
+        cycleMonths: r.cycleMonths ?? null,
+        previous: dates(r.datesBeforeApproval || r.originalDates),
+        corrected: dates(r.appliedDates || r.requestedDates),
+        removedBills,
+        totals: {
+          billsRemoved: removedBills.length,
+          amountRemoved: removedBills.reduce((s, b) => s + b.netPayable, 0),
+        },
+        reason: r.cmdAction?.remark || "",
+        revertedBy: {
+          userId: r.cmdAction?.userId || null,
+          userName: r.cmdAction?.userName || "",
+          role: r.cmdAction?.role ?? null,
+        },
+        revertedAt: r.cmdAction?.actionAt || r.createdAt || null,
+      };
+    });
+
+    return successResponse(res, "Admin billing date reverts fetched successfully", {
+      pagination: { pageNumber, count, totalCount, totalPages: Math.ceil(totalCount / count) },
+      reverts,
+    });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};

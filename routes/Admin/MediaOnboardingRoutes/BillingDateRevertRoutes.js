@@ -5,6 +5,8 @@ const {
   approveBillingDateRevertRequest,
   rejectBillingDateRevertRequest,
   getBillingDateRevertRequests,
+  adminBillingDateRevert, // ✅ NEW
+  getAdminBillingDateReverts, // ✅ NEW
 } = require("../../../controllers/Admin/MediaOnboardingController/BillingDateRevertController");
 const { createUploader } = require("../../../middleware/dynamicFileUpload");
 const protect = require("../../../middleware/authMiddleware");
@@ -32,5 +34,11 @@ router.post("/billing-date-revert/reject", protect, rejectBillingDateRevertReque
 // Rental Executive / Rental Manager / CMD — view
 router.post("/billing-date-revert/list", protect, getBillingDateRevertRequests);
 router.get("/billing-date-revert/list", protect, getBillingDateRevertRequests);
+
+// ✅ NEW — Admin (6): single call, direct revert by mediaId (no CMD approval)
+router.post("/billing-date-revert/admin", protect, adminBillingDateRevert);
+// ✅ NEW — Admin (6): list of admin reverts (pageNumber, count, mediaId)
+router.post("/billing-date-revert/admin/list", protect, getAdminBillingDateReverts);
+router.get("/billing-date-revert/admin/list", protect, getAdminBillingDateReverts);
 
 module.exports = router;

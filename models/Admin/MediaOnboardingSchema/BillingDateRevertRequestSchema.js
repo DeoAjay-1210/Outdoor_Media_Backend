@@ -32,7 +32,7 @@ const actorSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "Users", default: null },
     userName: { type: String, trim: true, default: "" },
-    role: { type: Number, enum: [1, 2, 3, null], default: null }, // same as UserSchema.userType
+    role: { type: Number, enum: [1, 2, 3, 6, null], default: null }, // same as UserSchema.userType (✅ + 6 Admin)
     remark: { type: String, trim: true, default: "" },
     actionAt: { type: Date, default: null },
   },
@@ -99,6 +99,7 @@ const billingDateRevertRequestSchema = new mongoose.Schema(
     },
 
     remark: { type: String, trim: true, required: true },
+    source: { type: String, enum: ["request", "admin"], default: "request" }, // ✅ NEW — "admin" = direct Admin (userType 6) revert, no CMD approval
     image: {
       originalName: { type: String },
       fileName: { type: String },
