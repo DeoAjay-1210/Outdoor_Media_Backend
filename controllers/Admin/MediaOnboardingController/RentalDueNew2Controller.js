@@ -3328,6 +3328,8 @@ function siteBillForOverdue(media, dueDate) {
   }
 }
 
+exports.siteBillForOverdue = siteBillForOverdue; // ✅ NEW — reused by the Generated Bills Excel
+
 async function siteBillAmountsForOverdueRows(records) {
   const result = new Map();
   const mediaIds = [

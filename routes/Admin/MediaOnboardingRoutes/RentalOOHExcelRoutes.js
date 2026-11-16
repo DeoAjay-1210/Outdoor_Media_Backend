@@ -2,7 +2,12 @@ const express = require("express");
 const router = express.Router();
 const { downloadRentalOOHExcel } = require("../../../controllers/Admin/MediaOnboardingController/RentalOOHExcelController");
 const { downloadApprovedSitesExcel } = require("../../../controllers/Admin/MediaOnboardingController/ApprovedSitesExcelController");
+const { downloadGeneratedBillsExcel } = require("../../../controllers/Admin/MediaOnboardingController/GeneratedBillsExcel/GeneratedBillsExcelController"); // ✅ NEW
 const protect = require("../../../middleware/authMiddleware");
+
+// ✅ NEW — GET /admin/rental-ooh/download-bills-excel?fromMonth=08-2026&toMonth=11-2026&city=Chennai
+// generated bills (rentalDue) of the months, with Rent / GST / Total amounts
+router.get("/rental-ooh/download-bills-excel", protect, downloadGeneratedBillsExcel);
 
 // GET /admin/rental-ooh/download-excel?fromMonth=08-2026&toMonth=10-2027
 router.get("/rental-ooh/download-excel", protect, downloadRentalOOHExcel);
