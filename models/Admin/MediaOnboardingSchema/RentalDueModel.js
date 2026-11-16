@@ -107,6 +107,14 @@ const rentalDueEntrySchema = new mongoose.Schema(
     dueDate: { type: Date, required: true }, // actual due date
     // ✅ NEW — bill number, given when the bill is created (utils/billNo.js)
     billNo: { type: String, trim: true, default: null },
+    // ✅ NEW — rent revision BILL decrease (CMD approved bill went down once)
+    originalAmount: { type: Number, default: undefined },
+    decreasedAmount: { type: Number, default: undefined },
+    decreaseRevisionId: { type: mongoose.Schema.Types.ObjectId, default: undefined },
+    decreasedAt: { type: Date, default: undefined },
+    // ✅ NEW — rent revision CANCEL: every cancelled approval (old steps, old
+    // ADINN OOH number, amount before / after, reason, who / when)
+    approvalResetHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     // ✅ NEW — lifetime ADINN OOH bill number (utils/adinnOohBills.js), given when
     // the bill is fully approved: "ADNOOHBILL" + DDMMYYYY (bill date) + lifetime
     // serial, e.g. ADNOOHBILL05112026367. Never changed once set. Authoritative
@@ -321,6 +329,8 @@ const gstBalanceSchema = new mongoose.Schema(
      utrNumber: { type: String, trim: true, default: "" },
     date: { type: Date, default: null },
     isUtrEntry: { type: Boolean, default: false },
+    remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+    bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
     updatedBy: { type: String, trim: true, default: null },   // ← ADDED
     updatedAt: { type: Date, default: null },                 
   },

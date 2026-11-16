@@ -17,6 +17,7 @@ const {
 } = require("../landOwnerMasterController/landOwnerMasterController");
 const { generateMissedEntriesForMedia } = require("./RentalDueNew2Controller");
 const appraisalRevision = require("../../../utils/appraisalRevision");
+const { getRentForDueDate } = require("../../../utils/appraisalRent"); // ✅ NEW — lock approved months on rent change
 
 // ─────────────────────────────────────────────────────────────
 // PROCESS FILES HELPER
@@ -395,6 +396,14 @@ const APPRAISAL_FREQUENCY_LABEL = {
 };
 const APPRAISAL_FREQUENCY_MONTHS_MAP = { 1: 12, 2: 24, 3: 36 };
 
+// ✅ NEW — "September 2026" label of a bill (its dueMonth, else from dueDate)
+const RENT_LOCK_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const billMonthLabel = (b) => {
+  if (b?.dueMonth) return String(b.dueMonth);
+  const d = b?.dueDate ? new Date(b.dueDate) : null;
+  return d && !Number.isNaN(d.getTime()) ? `${RENT_LOCK_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}` : "";
+};
+
 const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
   const incomingAmount = Number(
     mediaData.rentalPayment?.totalRentalAmount ?? 0,
@@ -416,7 +425,15 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
 
   if (isNew) {
     history = [
-      { amount: incomingAmount, updatedBy: userName, updatedAt: nowIST() },
+      {
+              amount: incomingAmount,
+              previousAmount: 0,
+              updatedBy: userName,
+              updatedAt: nowIST(),
+              isManualChange: false,
+              isInitial: true,
+              isAppraisal: false,
+            },
     ];
     rentActuallyChanged = true; // first-ever entry counts as a "change"
   } else {
@@ -424,17 +441,57 @@ const handleRentalAmountHistory = (mediaData, existingMedia, userName) => {
       existingMedia.rentalPayment?.totalRentalAmount ?? 0,
     );
 
+    // ✅ NEW — months kept at a fixed rent (rent revision / CMD-approved months)
+        // are carried forward: the edit form does not send them back
+        const keptMonths = (existingMedia.rentalPayment?.rentRevisionKeptMonths || []).map((k) =>
+          k && k.toObject ? k.toObject() : { ...k },
+        );
+
     if (incomingAmount !== oldAmount) {
+
+    // ✅ NEW — rent change is CMD-approval based: a month already CMD approved
+          // keeps the rent it was approved at (locked); every month NOT approved yet
+          // (past ones too) and future months take the new rent.
+          (existingMedia.rentalDue || []).forEach((b) => {
+            if (!b || Number(b.approvalStatus) !== 3 || !b.dueDate) return;
+            const label = billMonthLabel(b);
+            if (!label || keptMonths.some((k) => k && k.dueMonth === label)) return;
+            const lockedRent = getRentForDueDate(existingMedia, b.dueDate);
+            if (lockedRent > 0) {
+              keptMonths.push({ dueMonth: label, rent: lockedRent, source: "approvedBeforeRentChange", lockedAt: nowIST() });
+            }
+          });
+
+          // new rent applies from the first bill month (not only from this month)
+          const rp = existingMedia.rentalPayment || {};
+          const startCandidates = [rp.billingStartDate, ...(existingMedia.rentalDue || []).map((b) => b?.dueDate)]
+            .map((d) => (d ? new Date(d) : null))
+            .filter((d) => d && !Number.isNaN(d.getTime()));
+          const effectiveFrom = startCandidates.length
+            ? new Date(Math.min(...startCandidates.map((d) => d.getTime())))
+            : null;
+
       // Genuinely different amount → record it.
-      history.push({
-        amount: incomingAmount,
-        updatedBy: userName,
-        updatedAt: nowIST(),
-      });
+       history.push({
+              amount: incomingAmount,
+              previousAmount: oldAmount,
+              updatedBy: userName,
+              updatedAt: nowIST(),
+              isManualChange: true,
+              isInitial: false,
+              isAppraisal: false,
+              ...(effectiveFrom ? { effectiveFrom } : {}),
+            });
       rentActuallyChanged = true;
     }
-    // Same amount → no new entry, rentActuallyChanged stays false.
-  }
+    if (keptMonths.length) mediaData.rentalPayment.rentRevisionKeptMonths = keptMonths;
+            // ✅ NEW — rent revision advances (deducted from a later bill) carried forward too
+            const advanceAdjustments = (existingMedia.rentalPayment?.advanceAdjustments || []).map((a) =>
+              a && a.toObject ? a.toObject() : { ...a },
+            );
+            if (advanceAdjustments.length) mediaData.rentalPayment.advanceAdjustments = advanceAdjustments;
+          }
+
 
   history.sort((a, b) => b.updatedAt - a.updatedAt);
   mediaData.rentalPayment.rentalAmountHistory = history;
@@ -3144,7 +3201,8 @@ siteBillMode: detail.siteBillMode !== undefined && detail.siteBillMode !== null 
         "agreementDocVerification",
         "verificationProgressHistory",
         "gstBalanceHistory",
-        "agreementDocVerificationHistory"
+        "agreementDocVerificationHistory",
+        "arrearsDue", // ✅ NEW — rent revision arrears bills / payments (never from the edit form)
       ];
 
       Object.keys(mediaData).forEach((key) => {
@@ -5007,6 +5065,43 @@ const deleteMedia = async (req, res) => {
   }
 };
 
+const checkMediaCode = async (req, res) => {
+  try {
+    const mediaCode = req.body.mediaCode !== undefined ? req.body.mediaCode : req.query.mediaCode;
+    const mediaId = req.body.mediaId !== undefined ? req.body.mediaId : req.query.mediaId;
+
+    if (!mediaCode || String(mediaCode).trim() === "") {
+      return successResponse(res, "Media code is required", { exists: false, available: true });
+    }
+
+    const code = String(mediaCode).trim();
+    const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^${escapeRegExp(code)}$`, "i");
+
+    const query = {
+      $or: [
+        { mediaCode: regex },
+        { "mediaDetails.mediaCode": regex }
+      ]
+    };
+
+    if (mediaId && mongoose.Types.ObjectId.isValid(mediaId)) {
+      query._id = { $ne: new mongoose.Types.ObjectId(mediaId) };
+    }
+
+    const existing = await MediaOnboarding.findOne(query).select("_id mediaCode mediaDetails.mediaCode");
+
+    const exists = !!existing;
+    return successResponse(res, exists ? "Media code already exists" : "Media code is available", {
+      exists,
+      available: !exists,
+      mediaCode: code,
+    });
+  } catch (error) {
+    return errorResponse(res, error.message, null, 500);
+  }
+};
+
 module.exports = {
   mediaOnboarding,
   mediaList,
@@ -5016,6 +5111,7 @@ module.exports = {
   syncBillingCyclesNow,
   applyDueAppraisals,
   deleteMedia, // ✅ NEW
+  checkMediaCode, // ✅ NEW
   recomputeAppraisalSummary, // ✅ NEW — used by the appraisal hold release (date shift)
   handleAppraisalLogic, // exported for the appraisal revision tests
   recordAppraisalRevision, // exported for the appraisal revision tests

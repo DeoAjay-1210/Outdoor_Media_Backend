@@ -2,6 +2,9 @@ const mongoose = require("mongoose");
 const { successResponse, errorResponse } = require("../../../utils/response");
 const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema"); // adjust path to wherever MediaSchema.js actually lives in your project
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
+// ✅ NEW — rent revision arrears (paid via ledger-save, shown in ledger-list)
+const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema");
+const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst, newBillLabel, withSiteOwnerCategory } = require("../../../utils/rentRevisionArrears"); // ✅ CHANGED — + withSiteOwnerCategory
 const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
   getRentForDueDate,
@@ -167,7 +170,7 @@ function recomputePendingMonths(media) {
           const hasOnline = ownerEntries.some(
             (e) => e.paymentMode === "Online",
           );
-          const paymentCategory = Number(owner.paymentCategory || 1);
+          const paymentCategory = paidCategoryForCycle(ownerEntries, owner) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
           if (paymentCategory === 1) return hasCash;
           if (paymentCategory === 2) return hasOnline;
           if (paymentCategory === 3) return hasCash && hasOnline;
@@ -857,6 +860,7 @@ function getUnpaidRentForCycle(media, requestedMonthYear) {
       const isDirectGst = Number(effectiveWithGst) === 2;
 
       cycleOwners.forEach((owner) => {
+        owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
         const paymentCategory = Number(owner.paymentCategory || 1);
         getRequiredModesShared(paymentCategory).forEach((mode) => {
           const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
@@ -1051,6 +1055,7 @@ function buildAutoRentalDueEntries(media, requestedMonthYear) {
       cycleUnpaidRent = isLiveCycle ? Number(cycleMedia.rentalPayment?.totalRentalAmount || 0) : 0;
     } else {
       owners.forEach((owner) => {
+        owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
         const paymentCategory = Number(owner.paymentCategory || 1);
         getRequiredModesShared(paymentCategory).forEach((mode) => {
           const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate, isLiveCycle);
@@ -1201,6 +1206,155 @@ async function syncWithOverDueHistory(mediaId, rentalDueId, entryDate, withGst, 
   }
 }
 
+// ✅ NEW — rentalDueId of a rent revision ARREARS bill → that payment is saved on
+// the arrears bill only (media.arrearsDue[]). Returns null when rentalDueId is not
+// an arrears bill (normal ledger flow continues unchanged).
+// ✅ NEW — ledger-save remark: first non-empty value (item, then batch / body)
+const remarkText = (...values) => {
+  for (const v of values) {
+    if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
+  }
+  return "";
+};
+
+async function payArrearsBillIfArrears(req, res) {
+  const { mediaId, entryType, landOwnerId, paymentMode, utrNumber, date, remark } = req.body || {};
+  // arrears GST row in gstBalanceHistory has _id = arrears bill id → either id works
+  const rentalDueId = req.body?.rentalDueId || req.body?.gstBalanceHistoryId;
+  if (!rentalDueId || !mongoose.Types.ObjectId.isValid(String(rentalDueId))) return null;
+  if (!mediaId || !mongoose.Types.ObjectId.isValid(String(mediaId))) return null;
+  const billId = new mongoose.Types.ObjectId(String(rentalDueId));
+  const media = await Media.findOne({ _id: mediaId, "arrearsDue._id": billId }).select("arrearsDue rentalDue._id rentalDue.withGst landOwners._id landOwners.paymentCategory").lean();
+  if (!media) return null;
+  const bill = (media.arrearsDue || []).find((b) => String(b._id) === String(billId));
+  if (!bill) return null;
+  if (Number(bill.approvalStatus) !== 3) {
+    return errorResponse(res, "Rent revision not approved yet — arrears cannot be paid", null, 400);
+  }
+  const kind = bill.type === "advance" ? "advance" : "newBill"; // ✅ CHANGED — shown as "newBill" (was "arrears")
+  const blockKey = bill.type === "advance" ? "advance" : "arrears"; // response key name unchanged
+  let paid;
+  try {
+    paid = applyArrearsPayment(bill, {
+      entryType: entryType === "gst" ? "gst" : "rental",
+      landOwnerId,
+      paymentMode,
+      utrNumber,
+      date: date ? combineDateWithCurrentTime(date) : nowIST(),
+      userName: req.user?.userName || "",
+      remark: remarkText(remark), // ✅ NEW
+      bankRefNo: String((req.body || {}).bankRefNo || "").trim(),
+      parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
+      siteOwners: media.landOwners || [], // ✅ NEW — Cash + Online owner: 0-mode entry allowed
+    });
+  } catch (e) {
+    if (e && e.statusCode) return errorResponse(res, e.message, null, e.statusCode);
+    throw e;
+  }
+  await Media.updateOne(
+    { _id: mediaId },
+    { $set: { "arrearsDue.$[a]": paid.bill } },
+    { arrayFilters: [{ "a._id": billId }], strict: false },
+  );
+  const block = arrearsBlock([paid.bill]);
+  const b0 = block.bills[0];
+  return successResponse(
+    res,
+    "Ledger entry created successfully",
+    {
+      mediaId,
+      ledgerEntries: paid.saved.map((p) => ({
+        _id: p._id,
+        rentalDueId: paid.bill._id,
+        billType: kind,
+        label: p.type === "gst" ? `${newBillLabel(paid.bill.label)} GST` : newBillLabel(paid.bill.label),
+        month: paid.bill.dueMonth,
+        landOwnerId: p.landOwnerId || null,
+        landOwnerName: p.landOwnerName || "",
+        amount: p.amount,
+        rentAmount: p.rentAmount,
+        tdsAmount: p.tdsAmount,
+        paymentMode: p.paymentMode,
+        utrNumber: p.utrNumber,
+        remark: p.remark || "", // ✅ NEW
+        withGst: Number(paid.bill.withGst || 0),
+        gstAmount: Number(p.gstAmount || 0),
+        date: p.date,
+        createdBy: p.createdBy,
+      })),
+      tdsRecords: paid.saved
+        .filter((p) => Number(p.tdsAmount || 0) > 0)
+        .map((p) => ({ rentalDueId: paid.bill._id, month: paid.bill.dueMonth, billType: kind, landOwnerId: p.landOwnerId, tdsAmount: p.tdsAmount })),
+      [blockKey]: {
+        rentalDueId: b0.rentalDueId,
+        ...(kind === "advance" ? { adjustInMonth: paid.bill.adjustInMonth || "" } : {}),
+        dueMonth: b0.dueMonth,
+        rentAmount: b0.rentAmount,
+        rentPaid: b0.rentPaid,
+        rentPending: Math.max(0, b0.rentAmount - b0.rentPaid),
+        gstAmount: b0.gstAmount,
+        gstPaid: b0.gstPaid,
+        gstPending: Math.max(0, b0.gstAmount - b0.gstPaid),
+        status: b0.status,
+      },
+    },
+    201,
+  );
+}
+
+// ✅ NEW — bulk / multi-batch ledger-save: one payment item whose rentalDueId
+// (or gstBalanceHistoryId) is a rent revision arrears / advance bill → paid on
+// that bill (same as payArrearsBillIfArrears). Returns a savedEntries row
+// ({ status: "saved" | "failed" }); never throws.
+async function payExtraBillInBatch(mediaId, item, entryType, entryDate, updatedBy, batchRemark = "", batchBankRef = "") {
+  const billId = String(item.rentalDueId || item.gstBalanceHistoryId || "");
+  const remark = remarkText(item.remark, batchRemark); // ✅ NEW
+  const base = {
+    mediaId,
+    landOwnerId: item.landOwnerId || null,
+    targetType: item.targetType,
+    paymentMode: item.paymentMode,
+    utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+    remark, // ✅ NEW
+    rentalDueId: billId,
+  };
+  try {
+    const media = await Media.findById(mediaId).select("arrearsDue rentalDue._id rentalDue.withGst landOwners._id landOwners.paymentCategory").lean();
+    const bill = (media?.arrearsDue || []).find((b) => String(b._id) === billId);
+    if (!bill) throw new Error("Arrears / advance bill not found");
+    const kind = bill.type === "advance" ? "advance" : "newBill"; // ✅ CHANGED — was "arrears"
+    if (Number(bill.approvalStatus) !== 3) throw new Error(`Rent revision not approved yet — ${kind} cannot be paid`);
+    const paid = applyArrearsPayment(bill, {
+      entryType: entryType === "gst" ? "gst" : "rental",
+      landOwnerId: entryType === "gst" && item.gstScope !== "landlord" ? null : item.landOwnerId, // ✅ CHANGED — landlord-wise GST only when asked
+      gstScope: entryType === "gst" && item.gstScope === "landlord" ? "landlord" : "",
+      paymentMode: item.paymentMode,
+      utrNumber: item.utrNumber,
+      date: entryDate,
+      userName: updatedBy,
+      remark, // ✅ NEW
+      bankRefNo: String(item.bankRefNo || batchBankRef || "").trim(),
+      parentWithGst: (media.rentalDue || []).find((d) => String(d._id) === String(bill.parentRentalDueId))?.withGst,
+      siteOwners: media.landOwners || [], // ✅ NEW — Cash + Online owner: 0-mode entry allowed
+    });
+    await Media.updateOne(
+      { _id: mediaId },
+      { $set: { "arrearsDue.$[a]": paid.bill } },
+      { arrayFilters: [{ "a._id": bill._id }], strict: false },
+    );
+    return {
+      ...base,
+      billType: kind,
+      label: entryType === "gst" ? `${newBillLabel(String(bill.label || "").split(" (")[0])} GST` : newBillLabel(bill.label),
+      dueMonth: bill.dueMonth,
+      amount: paid.saved.reduce((s, p) => s + Number(p.amount || 0), 0),
+      status: "saved",
+    };
+  } catch (e) {
+    return { ...base, status: "failed", error: e?.message || "Arrears / advance payment failed" };
+  }
+}
+
 exports.createLedgerEntry = async (req, res) => {
   try {
     // ✅ NEW — handle array of batches
@@ -1212,6 +1366,9 @@ exports.createLedgerEntry = async (req, res) => {
       return runBulkLedgerEntry(req, res);
     }
 
+    // ✅ NEW — rent revision arrears bill → own payment flow
+    const arrearsHandled = await payArrearsBillIfArrears(req, res);
+    if (arrearsHandled) return arrearsHandled;
     const { mediaId } = req.body;
     let { entries, outstandingEntries } = req.body;
     const {
@@ -1223,6 +1380,7 @@ exports.createLedgerEntry = async (req, res) => {
       utrNumber,
       date,
       paymentSplits,
+      remark, // ✅ NEW
     } = req.body;
     if (entryType && targetType && !entries && !outstandingEntries) {
       if (entryType === "rental" && targetType === "current") {
@@ -1233,6 +1391,7 @@ exports.createLedgerEntry = async (req, res) => {
             paymentMode,
             utrNumber,
             date,
+            remark, // ✅ NEW
             // withGst: 2,
           },
         ];
@@ -1244,6 +1403,7 @@ exports.createLedgerEntry = async (req, res) => {
             paymentMode,
             utrNumber,
             date,
+            remark, // ✅ NEW
             withGst: 1,
           },
         ];
@@ -1258,6 +1418,7 @@ exports.createLedgerEntry = async (req, res) => {
             utrNumber,
             date,
             paymentSplits,
+            remark, // ✅ NEW
             gstBalanceHistoryId: req.body.gstBalanceHistoryId,
             gstOutstandingId: req.body.gstOutstandingId,
             rentalOutstandingId: req.body.rentalOutstandingId,
@@ -1421,6 +1582,7 @@ exports.createLedgerEntry = async (req, res) => {
       for (let i = 0; i < entries.length; i++) {
         const item = entries[i];
         const entryDate = item.date ? combineDateWithCurrentTime(item.date) : nowIST();
+        const itemRemark = remarkText(item.remark, req.body.remark); // ✅ NEW
         const matchedOwner = item.landOwnerId
           ? media.landOwners.id(item.landOwnerId) ||
             media.landOwners.find(
@@ -1451,6 +1613,7 @@ exports.createLedgerEntry = async (req, res) => {
             // ✅ NEW field only — amount, when caller supplies it (optional,
             // does not affect any existing matching/upsert logic below)
             amount: item.amount !== undefined ? Number(item.amount) : 0,
+            remark: itemRemark, // ✅ NEW
           };
 
           let savedLedgerEntry;
@@ -1537,6 +1700,7 @@ exports.createLedgerEntry = async (req, res) => {
             matchingGstRecords.forEach((g) => {
               g.utrNumber = item.utrNumber;
               g.date = entryDate;
+              g.remark = itemRemark; // ✅ NEW
               g.isUtrEntry = true;
               g.isPaid = true; // ✅ ADDED — mark as paid
               g.updatedBy = req.user?.userName || "";
@@ -1616,6 +1780,7 @@ exports.createLedgerEntry = async (req, res) => {
             rentalDueId: item.rentalDueId || null,
             index: withGst === 2 ? ledgerEntryData.index : null,
             amount: ledgerEntryData.amount, // ✅ NEW field only
+            remark: itemRemark, // ✅ NEW
           });
           historyBuckets.push({ year: bucketYear, month: bucketMonthName });
         }
@@ -1652,6 +1817,7 @@ exports.createLedgerEntry = async (req, res) => {
               landOwnerName: matchedOwner ? matchedOwner.name : "",
               utrNumber: item.utrNumber,
               date: item.date,
+              remark: itemRemark, // ✅ NEW
             });
             tdsRecord =
               media.tdsBalanceHistory[media.tdsBalanceHistory.length - 1];
@@ -1663,6 +1829,7 @@ exports.createLedgerEntry = async (req, res) => {
             tdsRecord.paidBy = req.user?.userName || "Admin";
             tdsRecord.utrNumber = item.utrNumber;
             tdsRecord.date = entryDate;
+            tdsRecord.remark = itemRemark; // ✅ NEW
             tdsRecord.dueMonth = dueMonth;
           }
           media.markModified("tdsBalanceHistory");
@@ -1688,6 +1855,7 @@ exports.createLedgerEntry = async (req, res) => {
           rentalOutstandingId,
           rentalDueId,
         } = item;
+        const outstandingRemark = remarkText(item.remark, req.body.remark); // ✅ NEW
 
         if (!["gst", "rental"].includes(entryType)) {
           return errorResponse(
@@ -1869,6 +2037,7 @@ exports.createLedgerEntry = async (req, res) => {
           row.isPaid = true;
           row.isUtrEntry = true;
           row.date = entryDate;
+          row.remark = outstandingRemark; // ✅ NEW
           row.updatedBy = updatedBy;
           row.updatedAt = nowIST();
           media.markModified("gstBalanceHistory");
@@ -1921,6 +2090,7 @@ exports.createLedgerEntry = async (req, res) => {
           }
           row.isPaid = true;
           row.date = entryDate;
+          row.remark = outstandingRemark; // ✅ NEW
           row.updatedBy = updatedBy;
           row.updatedAt = nowIST();
           media.markModified("rentalPayment");
@@ -1975,6 +2145,7 @@ exports.createLedgerEntry = async (req, res) => {
           }
           row.isPaid = true;
           row.date = entryDate;
+          row.remark = outstandingRemark; // ✅ NEW
           row.updatedBy = updatedBy;
           row.updatedAt = nowIST();
           media.markModified("rentalPayment");
@@ -2177,8 +2348,9 @@ async function executeBulkPaymentBatch(req, batchData) {
   }
 
   for (let i = 0; i < payments.length; i++) {
-    if (!["current", "pastCycle", "outstanding"].includes(payments[i].targetType)) {
-      throw { message: `payments[${i}].targetType must be "current", "pastCycle", or "outstanding"`, statusCode: 400 };
+    // ✅ CHANGED — "arrears" / "advance": rent revision bill (rentalDueId = that bill's id)
+    if (!["current", "pastCycle", "outstanding", "newBill", "arrears", "advance"].includes(payments[i].targetType)) {
+      throw { message: `payments[${i}].targetType must be "current", "pastCycle", "outstanding", "newBill" or "advance"`, statusCode: 400 };
     }
     if (!payments[i].paymentMode || !["Cash", "Online"].includes(payments[i].paymentMode)) {
       throw { message: `payments[${i}].paymentMode must be "Cash" or "Online"`, statusCode: 400 };
@@ -2227,8 +2399,23 @@ async function executeBulkPaymentBatch(req, batchData) {
       if (!media.rentalPayment.gstOutstandingHistory) media.rentalPayment.gstOutstandingHistory = [];
       if (!media.rentalPayment.rentalOutstandingHistory) media.rentalPayment.rentalOutstandingHistory = [];
 
-      for (const item of sitePayments) {
+      // ✅ NEW — rentalDueId of a rent revision arrears / advance bill
+      // (media.arrearsDue[]) → paid on that bill after this site's normal
+      // payments are saved (normal payments unchanged)
+      const extraBillIds = new Set((media.arrearsDue || []).map((b) => String(b && b._id)));
+      const extraBillItems = sitePayments.filter(
+        (p) =>
+          p.targetType === "arrears" ||
+          p.targetType === "newBill" ||
+          p.targetType === "advance" ||
+          extraBillIds.has(String(p.rentalDueId || p.gstBalanceHistoryId || "")),
+      );
+      const normalSitePayments = sitePayments.filter((p) => !extraBillItems.includes(p));
+
+      for (const item of normalSitePayments) {
         const targetType = item.targetType;
+        const itemRemark = remarkText(item.remark, batchData.remark); // ✅ NEW
+        const itemBankRef = String(item.bankRefNo || batchData.bankRefNo || "").trim(); // Bank Reference of the Finance payment row (unique per row)
         const result = {
           mediaId: mId,
           mediaName: media.mediaName,
@@ -2236,6 +2423,8 @@ async function executeBulkPaymentBatch(req, batchData) {
           targetType,
           paymentMode: item.paymentMode,
           utrNumber: item.paymentMode === "Online" ? item.utrNumber : null,
+          remark: itemRemark, // ✅ NEW
+          bankRefNo: itemBankRef,
           status: "saved"
         };
 
@@ -2290,7 +2479,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
               date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
               amount, updatedBy, updatedAt: nowIST(), index: media.ledger.length, withGst: effectiveWithGst,
-              isUtrEntry: false
+              isUtrEntry: false, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("ledger");
           }
@@ -2308,7 +2497,7 @@ async function executeBulkPaymentBatch(req, batchData) {
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: effectiveWithGst, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null
+            isUtrEntry: false, index: targetType === "current" ? media.ledger.length - 1 : null, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
           });
           media.markModified("ledgerHistory");
         }
@@ -2327,6 +2516,8 @@ async function executeBulkPaymentBatch(req, batchData) {
           }
 
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
+          row.remark = itemRemark; // ✅ NEW
+          row.bankRefNo = itemBankRef;
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
 
@@ -2344,7 +2535,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
               netPayable: amount, rentalDueId: null, withGst: 2, month: dueMonthLabel, cycle: null,
               paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-              isUtrEntry: false
+              isUtrEntry: false, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("ledgerHistory");
           }
@@ -2390,13 +2581,15 @@ async function executeBulkPaymentBatch(req, batchData) {
           amount = Number(row.gstAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.isUtrEntry = true;
           row.date = entryDate; row.updatedBy = updatedBy; row.updatedAt = nowIST();
+          row.remark = itemRemark; // ✅ NEW
+          row.bankRefNo = itemBankRef;
           media.markModified("gstBalanceHistory");
 
           if (targetType === "current") {
             media.withGst1Ledger.push({
               landOwnerId: owner._id, landOwnerName: owner.name, paymentMode: item.paymentMode, utrNumber: item.utrNumber,
               date: entryDate, status: 1, month: dueMonthLabel, cycle: cycleDateVal, rentalDueId: item.rentalDueId,
-              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true
+              amount, updatedBy, updatedAt: nowIST(), withGst: 1, isUtrEntry: true, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("withGst1Ledger");
           }
@@ -2414,7 +2607,7 @@ async function executeBulkPaymentBatch(req, batchData) {
             landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
             netPayable: rentalDue.netPayable, rentalDueId: item.rentalDueId, withGst: 1, month: dueMonthLabel, cycle: cycleDateVal,
             paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-            isUtrEntry: true
+            isUtrEntry: true, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
           });
           media.markModified("ledgerHistory");
         }
@@ -2426,6 +2619,8 @@ async function executeBulkPaymentBatch(req, batchData) {
           dueMonthLabel = row.dueMonth;
           amount = Number(row.gstOutStandingAmount || 0);
           row.paymentMode = item.paymentMode; row.utrNumber = item.utrNumber; row.isPaid = true; row.date = entryDate;
+          row.remark = itemRemark; // ✅ NEW
+          row.bankRefNo = itemBankRef;
           row.updatedBy = updatedBy; row.updatedAt = nowIST();
           media.markModified("rentalPayment");
 
@@ -2443,7 +2638,7 @@ async function executeBulkPaymentBatch(req, batchData) {
               landOwnerId: owner._id, landOwnerName: owner.name, mediaName: media.mediaName, paymentFrequency: media.rentalPayment.paymentFrequency,
               netPayable: 0, rentalDueId: null, withGst: 1, month: dueMonthLabel, cycle: null,
               paymentMode: item.paymentMode, utrNumber: item.utrNumber, status: 1, date: entryDate, amount, updatedBy, updatedAt: nowIST(),
-              isUtrEntry: true
+              isUtrEntry: true, remark: itemRemark, bankRefNo: itemBankRef // ✅ NEW
             });
             media.markModified("ledgerHistory");
           }
@@ -2458,8 +2653,15 @@ async function executeBulkPaymentBatch(req, batchData) {
       recomputePendingMonths(media);
       await media.save({ timestamps: false });
 
+      // ✅ NEW — arrears / advance bill payments of this site
+      for (const item of extraBillItems) {
+        const r = await payExtraBillInBatch(mId, item, entryType, entryDate, updatedBy, batchData.remark, batchData.bankRefNo); // ✅ CHANGED — + batch remark
+        if (r.status === "saved") totalAmountSaved += r.amount;
+        savedEntries.push(r);
+      }
+
       // ✅ NEW — Sync with OverDueHistory for bulk batch
-      for (const item of sitePayments) {
+      for (const item of normalSitePayments) {
           if (item.rentalDueId) {
               const resolvedWithGst = entryType === "gst" ? 1 : 2;
               await syncWithOverDueHistory(mId, item.rentalDueId, entryDate, resolvedWithGst, updatedBy);
@@ -2480,8 +2682,11 @@ async function executeBulkPaymentBatch(req, batchData) {
     if (e.targetType === "current") acc.currentAmount += e.amount;
     else if (e.targetType === "pastCycle") acc.pastCycleAmount += e.amount;
     else if (e.targetType === "outstanding") acc.outstandingAmount += e.amount;
+    // ✅ NEW — rent revision bills (by the bill's own type)
+    else if (e.billType === "advance") acc.advanceAmount += e.amount;
+    else if (e.billType === "arrears" || e.billType === "newBill") acc.arrearsAmount += e.amount;
     return acc;
-  }, { currentAmount: 0, pastCycleAmount: 0, outstandingAmount: 0 });
+  }, { currentAmount: 0, pastCycleAmount: 0, outstandingAmount: 0, arrearsAmount: 0, advanceAmount: 0 });
 
   const distinctMonths = [...new Set(savedEntries.filter(e => e.status === "saved").map(e => e.dueMonth).filter(Boolean))];
   const distinctUtrGroups = [...new Set(savedEntries.filter(e => e.status === "saved" && e.paymentMode === "Online" && e.utrNumber).map(e => `${e.utrNumber}_${entryDate.getUTCMonth() + 1}-${entryDate.getUTCFullYear()}`))];
@@ -2554,6 +2759,63 @@ async function runBulkLedgerEntry(req, res) {
 // approved bill — same rule as landOwnerSiteFilter ("approved wins over a
 // waiting duplicate"). One bill / equal statuses → same bill as before.
 const RENTAL_DUE_STATUS_RANK = { 3: 3, 2: 2 };
+// ✅ NEW — payment category a cycle was actually PAID in: when an owner's saved rent entries of that month
+// cover the owner's share, the month keeps the mode(s) it was paid in (1 Cash, 2 Online, 3 Cash + Online)
+// even if the owner's paymentCategory was changed later. null → not fully paid: the owner's current category.
+// monthLabel null → [entries] are already that month's entries.
+function paidCategoryForCycle(entries, owner, monthLabel = null) {
+  const share = Number(owner?.shareAmount || 0);
+  if (!owner || share <= 0) return null;
+  const mine = (entries || []).filter(
+    (e) =>
+      e && !e.isVirtual && e.isUtrEntry !== true && (e.paymentMode === "Cash" || e.paymentMode === "Online") &&
+      (monthLabel === null || e.dueMonth === monthLabel || e.month === monthLabel) &&
+      (String(e.landOwnerId) === String(owner._id) ||
+        (owner.landOwnerMasterId && String(e.landOwnerId) === String(owner.landOwnerMasterId)) ||
+        (!e.landOwnerId && owner.name && e.landOwnerName === owner.name)),
+  );
+  if (!mine.length) return null;
+  const paid = mine.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  if (paid + 0.5 < share) return null;
+  const modes = new Set(mine.map((e) => e.paymentMode));
+  return modes.has("Cash") && modes.has("Online") ? 3 : modes.has("Cash") ? 1 : 2;
+}
+
+// ✅ NEW — a cycle's saved rent entries (live ledger + ledgerHistory, same sources as isOwnerModePaidForCycle),
+// de-duplicated (a payment can be in both), then paidCategoryForCycle for this owner
+function paidCategoryOfCycle(media, owner, cycleDate) {
+  if (!media || !owner || !cycleDate) return null;
+  const ist = new Date(new Date(cycleDate).getTime() + IST_OFFSET_MS);
+  const monthName = MONTH_NAMES[ist.getUTCMonth()];
+  const year = String(ist.getUTCFullYear());
+  const label = `${monthName} ${year}`.toLowerCase();
+  const live = (media.ledger || []).filter((e) => e && e.status === 1 && String(e.dueMonth || e.month || "").trim().toLowerCase() === label);
+  const hist = (((media.ledgerHistory || []).find((y) => String(y.year) === year)?.months || [])
+    .find((m) => String(m.month || "").toLowerCase() === monthName.toLowerCase())?.entries) || [];
+  const seen = new Set();
+  const entries = [...live, ...hist].filter((e) => {
+    const key = `${e.landOwnerId}|${e.paymentMode}|${Number(e.amount || 0)}|${e.utrNumber || ""}|${e.date ? new Date(e.date).getTime() : ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return paidCategoryForCycle(entries, owner);
+}
+
+// ✅ NEW — owner as of a fully paid cycle: paid in a category other than the current one → that category, with
+// the single paid mode carrying the whole share (1 Cash / 2 Online). Otherwise the owner unchanged.
+function paidOwnerOfCycle(media, owner, cycleDate) {
+  const pc = paidCategoryOfCycle(media, owner, cycleDate);
+  if (pc === null || pc === Number(owner.paymentCategory || 1)) return owner;
+  const share = Number(owner.shareAmount || 0);
+  return {
+    ...owner,
+    paymentCategory: pc,
+    cashAmount: pc === 1 ? share : pc === 3 ? owner.cashAmount : 0,
+    onlineAmount: pc === 2 ? share : pc === 3 ? owner.onlineAmount : 0,
+  };
+}
+
 function findRentalDueForMonth(rentalDue, dueMonth) {
   let best = null;
   for (const d of rentalDue || []) {
@@ -2807,7 +3069,7 @@ if (city) {
               const hasOnline = ownerEntries.some(
                 (e) => e.paymentMode === "Online",
               );
-              const paymentCategory = Number(owner.paymentCategory || 1);
+              const paymentCategory = paidCategoryForCycle(ownerEntries, owner) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
               if (paymentCategory === 1) return hasCash;
               if (paymentCategory === 2) return hasOnline;
               if (paymentCategory === 3) return hasCash && hasOnline;
@@ -2993,7 +3255,7 @@ for (const media of results) {
                   const hasOnline = ownerEntries.some(
                     (e) => e.paymentMode === "Online",
                   );
-                  const paymentCategory = Number(owner.paymentCategory || 1);
+                  const paymentCategory = paidCategoryForCycle(ownerEntries, owner) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
                   if (paymentCategory === 1) return hasCash;
                   if (paymentCategory === 2) return hasOnline;
                   if (paymentCategory === 3) return hasCash && hasOnline;
@@ -3461,7 +3723,8 @@ for (const media of results) {
         const cycleMedia = mediaAsOfDate(mediaObj, cycleDate);
 
         (cycleMedia.landOwners || []).forEach((owner) => {
-          const paymentCategory = Number(owner.paymentCategory || 1);
+          const paidCategory = paidCategoryForCycle(realLedgerHistoryEntries, owner, cycleMonthLabel); // ✅ NEW — fully paid month keeps its paid mode(s)
+          const paymentCategory = paidCategory ?? Number(owner.paymentCategory || 1);
           const requiredModes = getRequiredModesForOwner(paymentCategory);
 
           requiredModes.forEach((mode) => {
@@ -3501,6 +3764,10 @@ for (const media of results) {
                   mode === "Online" ? Number(owner.onlineAmount || 0) : undefined,
                 shareAmount: Number(owner.shareAmount || 0), // ✅ NEW
                 tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
+                // ✅ NEW — paid in a category other than the current one: amount paid in this mode
+                ...(paidCategory !== null && paidCategory !== Number(owner.paymentCategory || 1)
+                  ? { cashAmount: mode === "Cash" ? Number(realHistoryEntry.amount || 0) : undefined, onlineAmount: mode === "Online" ? Number(realHistoryEntry.amount || 0) : undefined }
+                  : {}),
                 rentalDueApprovalStatus:
                   matchedDueForApproval?.approvalStatus ?? 0,
                 withGst: resolvedWithGst,
@@ -3826,12 +4093,18 @@ latestLedger = latestLedger.sort((a, b) => {
             }
             if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
               expectedOwnerGst = 0;
+            } else if (gstFlag === 2 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0); // owner's own GST share (e.g. 720 / 1080), not an equal split
             } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
               expectedOwnerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
+            // Owner-wise GST stored on the owner (site flag 1 but rentalPayment.gstAmount 0): use the owner's own share, not an equal split
+            if (expectedOwnerGst <= 0 && Number(owner.gstApplicable) === 1 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0);
+            }
             if (expectedOwnerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               expectedOwnerGst = cycleExpectedGst / ownerCount;
@@ -4341,12 +4614,18 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
             }
             if (gstFlag === 2 && Number(owner.gstApplicable) !== 1 && Number(owner.gstAmount || 0) <= 0) {
               expectedOwnerGst = 0;
+            } else if (gstFlag === 2 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0); // owner's own GST share (e.g. 720 / 1080), not an equal split
             } else if (gstFlag === 1 || (gstFlag === 2 && Number(cycleMedia.rentalPayment?.gstAmount || 0) > 0)) {
               expectedOwnerGst = Number(cycleMedia.rentalPayment?.gstAmount || 0) / (mediaObj.landOwners?.length || 1);
             } else {
               expectedOwnerGst = Number(owner.gstAmount || 0);
             }
 
+            // Owner-wise GST stored on the owner (site flag 1 but rentalPayment.gstAmount 0): use the owner's own share, not an equal split
+            if (expectedOwnerGst <= 0 && Number(owner.gstApplicable) === 1 && Number(owner.gstAmount || 0) > 0) {
+              expectedOwnerGst = Number(owner.gstAmount || 0);
+            }
             if (expectedOwnerGst <= 0 && cycleExpectedGst > 0 && gstFlag !== 2) {
               const ownerCount = (mediaObj.landOwners || []).length || 1;
               expectedOwnerGst = cycleExpectedGst / ownerCount;
@@ -4564,6 +4843,92 @@ const cityFilter = [
     ),
   ),
 ].filter(Boolean).sort();
+    // ✅ NEW — rent revision arrears: rows / amounts added per site, totals added
+    // to the overall figures (sites without arrears unchanged, arrears: null)
+    {
+      const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
+      const [pageArrearsDocs, lastRevisions, allArrearsDocs] = await Promise.all([
+        Media.find({ _id: { $in: pageIds }, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue._id rentalDue.withGst rentalDue.dueMonth landOwners._id landOwners.paymentCategory").lean(), // ✅ CHANGED — + landowner category
+        RentRevision.find({ mediaId: { $in: pageIds }, status: "Approved" }).sort({ approvedAt: -1 }).lean(),
+        Media.find({ "mediaDetails.status": 1, "arrearsDue.0": { $exists: true } }).select("arrearsDue rentalDue.dueMonth").lean(),
+      ]);
+      // ✅ CHANGED — + site landowner category (Cash + Online owner → both rows)
+      const arrearsById = new Map(pageArrearsDocs.map((d) => [String(d._id), withSiteOwnerCategory(d.arrearsDue || [], d.landOwners)]));
+      const parentWithGstById = new Map();
+      pageArrearsDocs.forEach((d) => (d.rentalDue || []).forEach((r) => parentWithGstById.set(String(r._id), r.withGst)));
+      // ✅ NEW — bill months per site (advance adjusted = its bill is generated)
+      const billMonthsById = new Map(
+        pageArrearsDocs.map((d) => [String(d._id), new Set((d.rentalDue || []).map((r) => r && r.dueMonth).filter(Boolean))]),
+      );
+      const revisionById = new Map();
+      lastRevisions.forEach((r) => {
+        if (!revisionById.has(String(r.mediaId))) revisionById.set(String(r.mediaId), r);
+      });
+      finalMediaListData = finalMediaListData.map((m) => {
+        const id = String(m._id || m.mediaId);
+        return decorateLedgerItem(m, arrearsById.get(id) || [], revisionById.get(id) || null, parentWithGstById, billMonthsById.get(id) || null);
+      });
+
+      const t = overallArrearsTotals(allArrearsDocs);
+      overallOutstandingTotals.overallArrearsDue = t.pending;
+      overallOutstandingTotals.overallArrearsGSTDue = t.gstPending;
+      overallOutstandingTotals.overallTotalOutstandingAmount += t.pending + t.gstPending;
+      // ✅ NEW — rent revision advance totals
+      const adv = overallArrearsTotals(allArrearsDocs, "advance");
+      overallOutstandingTotals.overallAdvanceDue = adv.pending;
+      overallOutstandingTotals.overallAdvanceGSTDue = adv.gstPending;
+      overallOutstandingTotals.overallTotalOutstandingAmount += adv.pending + adv.gstPending;
+      if (overallLedgerSummary && typeof overallLedgerSummary === "object") {
+        const pendingTotal = t.pending + t.gstPending;
+        if (typeof overallLedgerSummary.totalLedgerPendingAmount === "number") overallLedgerSummary.totalLedgerPendingAmount += pendingTotal;
+        if (typeof overallLedgerSummary.overallDueMonthAmount === "number") overallLedgerSummary.overallDueMonthAmount += t.amount + t.gst;
+        if (typeof overallLedgerSummary.totalOutstanding === "number") overallLedgerSummary.totalOutstanding += pendingTotal;
+        const advPendingTotal = adv.pending + adv.gstPending;
+        if (typeof overallLedgerSummary.totalLedgerPendingAmount === "number") overallLedgerSummary.totalLedgerPendingAmount += advPendingTotal;
+        if (typeof overallLedgerSummary.totalOutstanding === "number") overallLedgerSummary.totalOutstanding += advPendingTotal;
+        Object.assign(overallLedgerSummary, {
+          arrearsAmount: t.amount,
+          arrearsAmountSites: t.amountSites,
+          arrearsPaid: t.paid,
+          arrearsPaidSites: t.paidSites,
+          arrearsPending: t.pending,
+          arrearsPendingSites: t.pendingSites,
+          arrearsGstPending: t.gstPending,
+          arrearsGstPendingSites: t.gstPendingSites,
+          // ✅ NEW — advance
+          advanceAmount: adv.amount,
+          advanceAmountSites: adv.amountSites,
+          advancePaid: adv.paid,
+          advancePaidSites: adv.paidSites,
+          advancePending: adv.pending,
+          advancePendingSites: adv.pendingSites,
+          advanceGstPending: adv.gstPending,
+          advanceGstPendingSites: adv.gstPendingSites,
+          advanceAdjusted: adv.adjusted,
+          advanceAdjustedSites: adv.adjustedSites,
+        });
+      }
+    }
+
+    // ✅ NEW — ownerApprovalDate on every ledger / gstBalanceHistory row (its bill's
+    // date, null when the bill is not approved yet); New Bill / advance rows keep theirs
+    {
+      const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
+      const approvalDocs = await Media.find({ _id: { $in: pageIds } }).select("rentalDue._id rentalDue.ownerApprovalDate").lean();
+      const approvalDateByBillId = new Map();
+      approvalDocs.forEach((d) => (d.rentalDue || []).forEach((r) => approvalDateByBillId.set(String(r._id), r.ownerApprovalDate || null)));
+      const withApprovalDate = (rows) =>
+        rows.map((g) => {
+          if (!g || g.ownerApprovalDate !== undefined) return g;
+          return { ...g, ownerApprovalDate: g.rentalDueId ? approvalDateByBillId.get(String(g.rentalDueId)) || null : null };
+        });
+      finalMediaListData = finalMediaListData.map((m) => ({
+        ...m,
+        ...(Array.isArray(m.ledger) ? { ledger: withApprovalDate(m.ledger) } : {}),
+        ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: withApprovalDate(m.gstBalanceHistory) } : {}),
+      }));
+    }
+
     return successResponse(
       res,
       "Media list fetched successfully",
@@ -4709,9 +5074,29 @@ exports.getLedgerHistory = async (req, res) => {
 
     const mediaDocs = await Media.find({ _id: { $in: validMediaIds }, "mediaDetails.status": 1 })
       .select(
-        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger appraisal",
+        "mediaDetails rentalPayment rentalDueHistory ledgerHistory ledger withGst1Ledger landOwners agreement gstBalanceHistory tdsBalanceHistory rentalDue pendingMonths previousLedger appraisal arrearsDue",
       )
       .lean();
+
+    // ✅ NEW — rent revision arrears: last approved revision per site, and the
+    // requested year / month range (arrears rows outside it are not added)
+    const historyRevisionById = new Map();
+    {
+      const arrearsMediaIds = mediaDocs.filter((m) => (m.arrearsDue || []).length).map((m) => m._id);
+      if (arrearsMediaIds.length) {
+        const revs = await RentRevision.find({ mediaId: { $in: arrearsMediaIds }, status: "Approved" }).sort({ approvedAt: -1 }).lean();
+        revs.forEach((r) => {
+          if (!historyRevisionById.has(String(r.mediaId))) historyRevisionById.set(String(r.mediaId), r);
+        });
+      }
+    }
+    const arrearsInRange = (d) => {
+      const k = d.getUTCFullYear() * 12 + d.getUTCMonth();
+      if (year && d.getUTCFullYear() !== Number(year)) return false;
+      if (rangeStart && k < rangeStart.year * 12 + (rangeStart.month - 1)) return false;
+      if (rangeEnd && k > rangeEnd.year * 12 + (rangeEnd.month - 1)) return false;
+      return true;
+    };
 
     const foundIds = new Set(mediaDocs.map((m) => String(m._id)));
     const notFoundIds = validMediaIds.filter((id) => !foundIds.has(String(id)));
@@ -4753,8 +5138,20 @@ exports.getLedgerHistory = async (req, res) => {
         }
       });
 
+      // ✅ NEW — arrears rows / GST / outstanding added (sites without arrears: arrears null)
+      const parentWithGstById = new Map((media.rentalDue || []).map((r) => [String(r._id), r.withGst]));
+      const blockWithArrears = decorateLedgerHistoryBlock(
+        block,
+        withSiteOwnerCategory(media.arrearsDue || [], media.landOwners), // ✅ CHANGED — + site landowner category
+        historyRevisionById.get(String(media._id)) || null,
+        parentWithGstById,
+        arrearsInRange,
+        new Set((media.rentalDue || []).map((r) => r && r.dueMonth).filter(Boolean)), // ✅ NEW — advance adjusted
+        ownerMasterIdFilter, // ✅ NEW — New Bill / advance totals → filtered landowners only
+      );
+
       mediaHistoryList.push({
-        ...block,
+        ...blockWithArrears,
         overDueRemarks: siteOverDueRemarks,
       });
     }
@@ -4787,6 +5184,13 @@ exports.getLedgerHistory = async (req, res) => {
         overallTotalOutstandingAmount: 0,
       },
     );
+
+    // ✅ NEW — rent revision arrears totals
+    summary.overallArrearsDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.arrearsDue || 0), 0);
+    summary.overallArrearsGSTDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.arrearsGSTDue || 0), 0);
+    // ✅ NEW — rent revision advance totals (already in overallTotalOutstandingAmount via outstanding)
+    summary.overallAdvanceDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.advanceDue || 0), 0);
+    summary.overallAdvanceGSTDue = mediaHistoryList.reduce((t, b) => t + Number(b.outstanding?.advanceGSTDue || 0), 0);
 
     // ✅ NEW — same billGroups collapsing as listMediaByLedger, applied
     // across every media block's ledgerHistory months. Groups real
@@ -5100,7 +5504,7 @@ const details = (media.mediaDetails || []).map((d) => ({
   const getOwnerPaymentInfo = (owner, cycleDate) => {
     if (!owner || !cycleDate) return { isPaid: false, date: null };
 
-    const pc = Number(owner.paymentCategory || 1);
+    const pc = paidCategoryOfCycle(media, owner, cycleDate) ?? Number(owner.paymentCategory || 1); // ✅ NEW — fully paid month keeps its paid mode(s)
     const modes = getRequiredModesShared(pc);
     let latestDate = null;
 
@@ -5224,6 +5628,86 @@ const details = (media.mediaDetails || []).map((d) => ({
       )
     : fullGstBalanceHistoryUnfiltered;
 
+  // ✅ NEW — rent revision ADVANCE in gstBalanceHistory: bill GST rows get
+  // billType "bill" (the bill the advance is deducted from also gets the advance
+  // amounts) and each advance bill with GST is its own GST row (_id = advance
+  // bill id → paid with gstBalanceHistoryId / rentalDueId), after its month's rows
+  {
+    const advanceBills = (media.arrearsDue || []).filter((b) => b && b.type === "advance");
+    const adjByMonth = new Map();
+    advanceBills.forEach((b) => {
+      if (!b.adjustInMonth) return;
+      const cur = adjByMonth.get(b.adjustInMonth) || {
+        totalRentalAmount: Number(b.billRent || 0),
+        advanceAdjusted: 0,
+        advanceGstAdjusted: 0,
+        advanceRentalDueId: b._id,
+      };
+      cur.advanceAdjusted += Number(b.netPayable || 0);
+      cur.advanceGstAdjusted += Number(b.gstAmount || 0);
+      adjByMonth.set(b.adjustInMonth, cur);
+    });
+    fullGstBalanceHistory.forEach((g, i) => {
+      if (!g || g.billType === "arrears" || g.billType === "newBill" || g.billType === "advance") return;
+      fullGstBalanceHistory[i] = { ...g, billType: g.billType || "bill", ...(adjByMonth.get(g.dueMonth) || {}) };
+    });
+
+    const monthKeyOfLabel = (label) => {
+      const p = parseDueMonthLabel(label);
+      return p ? p.year * 12 + p.monthIdx : null;
+    };
+    advanceBills.forEach((b) => {
+      const gstAmount = Number(b.gstAmount || 0);
+      if (gstAmount <= 0) return;
+      const gstPays = (b.payments || []).filter((p) => p.type === "gst" || Number(p.gstAmount || 0) > 0);
+      const lastGst = gstPays.slice(-1)[0];
+      const gstPaidFull = Number(b.gstPaid || 0) >= gstAmount;
+      const row = {
+        _id: b._id,
+        rentalDueId: b._id,
+        parentRentalDueId: null,
+        billType: "advance",
+        label: `${String(b.label || "").split(" (")[0]} GST`,
+        adjustInMonth: b.adjustInMonth || "",
+        rentRevisionId: b.rentRevisionId,
+        dueMonth: b.dueMonth,
+        cycle: b.dueDate,
+        gstAmount,
+        isPaid: gstPaidFull,
+        isVirtual: !gstPaidFull,
+        paidAmount: Number(b.gstPaid || 0),
+        paidAt: lastGst ? lastGst.date : null,
+        paidBy: lastGst ? lastGst.createdBy || "" : "",
+        createdAt: b.createdAt || null,
+        createdBy: b.createdBy || "",
+        source: "rental",
+        ownerId: null,
+        ownerName: "",
+        utrNumber: lastGst ? lastGst.utrNumber || "" : "",
+        date: lastGst ? lastGst.date : null,
+        remark: lastGst ? lastGst.remark || "" : "", // ✅ NEW
+        bankRefNo: lastGst ? lastGst.bankRefNo || "" : "",
+        isUtrEntry: gstPaidFull,
+        withGst: Number(b.withGst || 0),
+        rentalDueApprovalStatus: 3,
+      };
+      // after the last row of the same month, else before the first later month
+      let at = -1;
+      fullGstBalanceHistory.forEach((g, i) => {
+        if (g && g.dueMonth === b.dueMonth) at = i;
+      });
+      if (at < 0) {
+        const key = monthKeyOfLabel(b.dueMonth);
+        const later = fullGstBalanceHistory.findIndex((g) => {
+          const k = g ? monthKeyOfLabel(g.dueMonth) : null;
+          return key !== null && k !== null && k > key;
+        });
+        at = later < 0 ? fullGstBalanceHistory.length - 1 : later - 1;
+      }
+      fullGstBalanceHistory.splice(at + 1, 0, row);
+    });
+  }
+
   // let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
   //   if (h.cycle) return h;
   //   const parsed = parseDueMonthLabel(h.dueMonth);
@@ -5259,13 +5743,22 @@ let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistor
     let cycleUnpaid = 0;
     let cycleTds = 0;
     let maxPaymentDate = null;
+    let latestRemark = ""; // ✅ NEW — remark of the latest rent payment of this cycle
+    let latestBankRef = ""; // Bank Reference of the latest rent payment of this cycle
     // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
     const cycleMedia = mediaAsOfDate(media, cycleDate);
 const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
 const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(cycleMedia) > 0 ? 1 : 0);
     matchingLandOwners.forEach((rawOwner) => {
       const owner = ownerAsOfDate(media, rawOwner, cycleDate);
-      const paymentCategory = Number(owner.paymentCategory || 1);
+      // ✅ NEW — fully paid month keeps the mode(s) it was paid in (owner's category changed later)
+      const ownerCycleEntries = isLiveCycle
+        ? (media.ledger || []).filter((e) => e.status === 1)
+        : (((media.ledgerHistory || []).find((y) => y.year === String(cycleDate.getUTCFullYear()))?.months || [])
+            .find((m) => String(m.month || "").toLowerCase() === MONTH_NAMES_FOR_CYCLES[cycleDate.getUTCMonth()].toLowerCase())?.entries || []);
+      const paidCategory = paidCategoryForCycle(ownerCycleEntries, owner);
+      const paidInOtherCategory = paidCategory !== null && paidCategory !== Number(owner.paymentCategory || 1);
+      const paymentCategory = paidCategory ?? Number(owner.paymentCategory || 1);
       cycleTds += Number(owner.tdsAmount || 0);
 
       // const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
@@ -5296,6 +5789,12 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
             }
         }
 
+        // ✅ NEW — paid in another category: this mode's expected amount = what was paid in it
+        if (paidInOtherCategory) {
+          amt = ownerCycleEntries
+            .filter((e) => e.isUtrEntry !== true && e.paymentMode === mode && String(e.landOwnerId) === String(owner._id))
+            .reduce((sum, e) => sum + Number(e.amount || 0), 0);
+        }
         cycleTotal += amt;
 
         let entry = null;
@@ -5325,7 +5824,12 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
           if (entry.date) {
             const d = new Date(entry.date);
             if (!maxPaymentDate || d > maxPaymentDate) maxPaymentDate = d;
+            if (entry.remark && (!latestRemark || d >= maxPaymentDate)) latestRemark = entry.remark; // ✅ NEW
+            if (entry.bankRefNo && (!latestBankRef || d >= maxPaymentDate)) latestBankRef = entry.bankRefNo;
+          } else if (entry.remark && !latestRemark) {
+            latestRemark = entry.remark; // ✅ NEW
           }
+          if (!entry.date && entry.bankRefNo && !latestBankRef) latestBankRef = entry.bankRefNo;
         } else {
           cycleUnpaid += amt;
         }
@@ -5342,11 +5846,90 @@ const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst
       isPaid,
       isVirtual: true,
       date: isPaid ? maxPaymentDate : null,
+      remark: isPaid ? latestRemark : "", // ✅ NEW — remark of the rent payment
+      bankRefNo: isPaid ? latestBankRef : "",
       updatedAt: null,
       updatedBy: "",
       cycle: cycleDate,
     });
   });
+
+  // ✅ NEW — rent revision ADVANCE: generated bill rows get billType "bill"
+  // (the bill the advance is deducted from also gets the advance amounts) and
+  // each advance bill (media.arrearsDue[], type "advance") is its own row,
+  // after its month's row. Saved old-outstanding rows are not changed.
+  {
+    const advanceBills = (media.arrearsDue || []).filter((b) => b && b.type === "advance");
+    const adjByMonth = new Map();
+    advanceBills.forEach((b) => {
+      if (!b.adjustInMonth) return;
+      const cur = adjByMonth.get(b.adjustInMonth) || {
+        totalRentalAmount: Number(b.billRent || 0),
+        advanceAdjusted: 0,
+        advanceGstAdjusted: 0,
+        advanceRentalDueId: b._id,
+      };
+      cur.advanceAdjusted += Number(b.netPayable || 0);
+      cur.advanceGstAdjusted += Number(b.gstAmount || 0);
+      adjByMonth.set(b.adjustInMonth, cur);
+    });
+    fullRentalOutstandingHistory = fullRentalOutstandingHistory.map((h) =>
+      h && h.isVirtual === true ? { ...h, billType: "bill", ...(adjByMonth.get(h.dueMonth) || {}) } : h,
+    );
+
+    const monthKeyOfLabel = (label) => {
+      const p = parseDueMonthLabel(label);
+      return p ? p.year * 12 + p.monthIdx : null;
+    };
+    // ✅ CHANGED — New Bill (rent revision arrears, type "arrears") rows too
+    const parentWithGstById = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
+    const revisionBills = (media.arrearsDue || []).filter((b) => b && (b.type === "advance" || b.type === "arrears"));
+    revisionBills.forEach((b) => {
+      const isAdvance = b.type === "advance";
+      // ✅ CHANGED — New Bill with no GST → withGst 0 (shown only)
+      const withGst = isAdvance ? Number(b.withGst || 0) : Number(b.gstAmount || 0) > 0 ? effectiveWithGst(b, parentWithGstById.get(String(b.parentRentalDueId))) : 0;
+      const lastPay = (b.payments || []).filter((p) => p.type === "rental").slice(-1)[0];
+      const rentPending = Math.max(0, Math.round(Number(b.netPayable || 0) - Number(b.rentPaid || 0)));
+      const paid = rentPending === 0;
+      const row = {
+        _id: b._id,
+        rentalDueId: b._id,
+        dueMonth: b.dueMonth,
+        billType: isAdvance ? "advance" : "newBill",
+        label: isAdvance ? b.label : newBillLabel(b.label),
+        ...(isAdvance ? { adjustInMonth: b.adjustInMonth || "" } : { parentRentalDueId: b.parentRentalDueId || null }),
+        rentRevisionId: b.rentRevisionId,
+        baseRentOutstandingAmount: Number(b.netPayable || 0) + (withGst === 2 ? Number(b.gstAmount || 0) : 0),
+        withGst,
+        gstAmount: Number(b.gstAmount || 0),
+        tdsAmount: 0, // ✅ CHANGED — no TDS on an advance / New Bill
+        paidAmount: Number(b.rentPaid || 0),
+        pendingAmount: rentPending,
+        isPaid: paid,
+        isVirtual: !paid,
+        date: paid && lastPay ? lastPay.date : null,
+        remark: paid && lastPay ? lastPay.remark || "" : "", // ✅ NEW
+        bankRefNo: paid && lastPay ? lastPay.bankRefNo || "" : "",
+        updatedAt: lastPay ? lastPay.createdAt || null : null,
+        updatedBy: lastPay ? lastPay.createdBy || "" : "",
+        cycle: b.dueDate,
+      };
+      // after the last row of the same month, else before the first later month
+      let at = -1;
+      fullRentalOutstandingHistory.forEach((h, i) => {
+        if (h && h.dueMonth === b.dueMonth) at = i;
+      });
+      if (at < 0) {
+        const key = monthKeyOfLabel(b.dueMonth);
+        const later = fullRentalOutstandingHistory.findIndex((h) => {
+          const k = h ? monthKeyOfLabel(h.dueMonth) : null;
+          return key !== null && k !== null && k > key;
+        });
+        at = later < 0 ? fullRentalOutstandingHistory.length - 1 : later - 1;
+      }
+      fullRentalOutstandingHistory.splice(at + 1, 0, row);
+    });
+  }
 
   let gstPayment = false;
   if (fullGstBalanceHistory.length > 0) {
@@ -5606,7 +6189,8 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
 
     matchingLandOwners.forEach((rawOwner) => {
       const owner = ownerAsOfDate(media, rawOwner, cycleDate);
-      const paymentCategory = Number(owner.paymentCategory || 1);
+      const paidCategory = paidCategoryForCycle(realEntries, owner); // ✅ NEW — fully paid month keeps its paid mode(s)
+      const paymentCategory = paidCategory ?? Number(owner.paymentCategory || 1);
       const requiredModes = getRequiredModesForOwner(paymentCategory);
 
       requiredModes.forEach((mode) => {
@@ -5748,7 +6332,13 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
             onlineAmount: resolvedOnlineAmount, // ✅ CHANGED — always a number now
             shareAmount: resolvedShareAmount, // ✅ ADDED
             tdsAmount: Number(owner.tdsAmount || 0), // ✅ NEW
+            // ✅ NEW — paid in a category other than the current one: amount paid in this mode
+            ...(paidCategory !== null && paidCategory !== Number(owner.paymentCategory || 1)
+              ? { cashAmount: mode === "Cash" ? resolvedRealAmount : 0, onlineAmount: mode === "Online" ? resolvedRealAmount : 0 }
+              : {}),
             rentalDueApprovalStatus: matchedDue?.approvalStatus ?? 0, // ✅ NEW
+            remark: realEntry.remark ?? "", // ✅ NEW — saved remark (was dropped)
+            bankRefNo: realEntry.bankRefNo ?? "",
             isVirtual: false,
           });
         } else {
@@ -5965,6 +6555,8 @@ const computeOwnerModeAmount = (owner, mode, matchedDue, effectiveWithGst, payme
           gstAmount: gstDetails.gstAmount,
           amount: entry.amount,
           rentalDueApprovalStatus: matchedDueSpecific?.approvalStatus ?? 0, // ✅ NEW
+          remark: entry.remark ?? "", // ✅ NEW — saved remark (was dropped)
+          bankRefNo: entry.bankRefNo ?? "",
           isVirtual: false,
         };
       });
@@ -6417,8 +7009,37 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
   mediaId: media._id,
 }));
 
+  // ✅ NEW — every outstanding/balance row carries rentalDueApprovalStatus,
+  // ownerApprovalDate and createdAt (bill-type based: a newBill row gets the
+  // New Bill's createdAt, an advance row the Advance's createdAt, a normal row
+  // its rental due's createdAt). Source: the linked rentalDue / arrearsDue bill
+  // (by rentalDueId / _id), else the normal rentalDue of the same dueMonth.
+  // Existing values on a row are never overwritten.
+  const withApprovalFields = (rows) =>
+    (rows || []).map((row) => {
+      const r = row && typeof row.toObject === "function" ? row.toObject() : { ...row };
+      const linkId = String(r.rentalDueId || r._id || "");
+      const bt = String(r.billType || "").toLowerCase();
+      const isSpecial = bt === "newbill" || bt === "advance";
+      let due =
+        linkId &&
+        [...(media.rentalDue || []), ...(media.arrearsDue || [])].find(
+          (d) => d && String(d._id) === linkId,
+        );
+      if (!due && !isSpecial) {
+        due = (media.rentalDue || []).find((d) => d && d.dueMonth === r.dueMonth);
+      }
+      const pick = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== "");
+      return {
+        ...r,
+        rentalDueApprovalStatus: pick(r.rentalDueApprovalStatus, due?.approvalStatus) ?? null,
+        ownerApprovalDate: pick(r.ownerApprovalDate, due?.ownerApprovalDate) ?? null,
+        createdAt: pick(r.createdAt, due?.createdAt) ?? null,
+      };
+    });
+
   return {
-   
+
     mediaDetails: details,
     rentalPayment: media.rentalPayment,
     landOwners: matchingLandOwners,
@@ -6456,9 +7077,10 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
     outStantStatus:
       media.rentalPayment?.outStantStatus ??
       (outstanding.totalOutstandingAmount > 0 ? 1 : 0),
-    gstOutstandingHistory: media.rentalPayment?.gstOutstandingHistory || [],
-    gstBalanceHistory: fullGstBalanceHistory,
-    rentalOutstandingHistory: fullRentalOutstandingHistory,
+    gstOutstandingHistory: withApprovalFields(media.rentalPayment?.gstOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "", bankRefNo: r.bankRefNo ?? "" })), // ✅ CHANGED — + remark key
+    // ✅ CHANGED — + remark key on every row ("" when none)
+    gstBalanceHistory: withApprovalFields(fullGstBalanceHistory).map((r) => ({ ...r, remark: r.remark ?? "", bankRefNo: r.bankRefNo ?? "" })),
+    rentalOutstandingHistory: withApprovalFields(fullRentalOutstandingHistory).map((r) => ({ ...r, remark: r.remark ?? "", bankRefNo: r.bankRefNo ?? "" })),
     previousLedger: media.previousLedger || null,
   };
 }
@@ -6511,6 +7133,7 @@ function getOwnerWiseOutstanding(media, requestedMonthYear) {
     // ── RENT — identical rule to getUnpaidRentForCycle(), per owner ──
     cycleOwners.forEach((owner) => {
       const ownerId = String(owner._id);
+      owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         const isPaid = isOwnerModePaidForCycle(media, owner, mode, cycleDate);
@@ -6695,6 +7318,7 @@ function getOverallSummaryForCycle(media, requestedMonthYear) {
     const isDirectGst = Number(effectiveWithGst) === 2;
 
     cycleOwners.forEach((owner) => {
+      owner = paidOwnerOfCycle(media, owner, cycleDate); // ✅ NEW — fully paid month keeps its paid mode(s) + amounts
       const paymentCategory = Number(owner.paymentCategory || 1);
       getRequiredModesShared(paymentCategory).forEach((mode) => {
         let rentAmount = (mode === "Cash"
@@ -6968,7 +7592,33 @@ const LAND_OWNER_COUNT_CONDITIONS = [
 // ✅ NEW — newOverallLedgerSummary (landOwnerSiteFilter): PURE rent and PURE
 // GST, each split into Total / Paid / Remaining for the requested month and
 // for past months. GST (incl. withGst 2 "Direct") is never added to rent.
-function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
+// ✅ NEW — rent / GST of a rent revision not yet CMD approved (no bill yet):
+// BILL → monthsDetail amounts (else increaseAmount), ADVANCE → advanceAmount.
+// gstKind: "CannotHold" when the revision withGst is 2, else "Hold".
+function pendingRevisionAmounts(r) {
+  const isAdvance = r.billType === "ADVANCE";
+  const detail = !isAdvance && Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : null;
+  const rent = isAdvance
+    ? Number(r.advanceAmount || 0)
+    : detail
+      ? detail.reduce((s, d) => s + Number(d.amount || 0), 0)
+      : Number(r.increaseAmount ?? r.difference ?? 0);
+  const gst = isAdvance
+    ? Number(r.advanceGstAmount || 0)
+    : detail
+      ? detail.reduce((s, d) => s + Number(d.gstAmount || 0), 0)
+      : Number(r.increaseGstAmount || 0);
+  return {
+    kind: isAdvance ? "advance" : "newBill",
+    rent: Math.max(0, rent),
+    gst: Number(r.gstOnIncrease) === 1 ? Math.max(0, gst) : 0,
+    gstKind: Number(r.withGst || 0) === 2 ? "CannotHold" : "Hold",
+  };
+}
+
+// ✅ CHANGED — options.pendingRevisions (optional, site-filter): rent revisions
+// still Pending are added to the New Bill / Advance OverAll + Remaining
+function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const t = {
     curRentTotal: 0, curRentPaid: 0, curRentRemaining: 0,
     curGstTotal: 0, curGstPaid: 0, curGstRemaining: 0,
@@ -7013,14 +7663,95 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     });
   };
 
+  // ✅ NEW — New Bill (arrears) / Advance totals, ALL months (not by bucket):
+  // rent (netPayable / rentPaid) and GST (gstAmount / gstPaid) separately,
+  // GST split Hold (withGst 1 / not set) / Cannot Hold (withGst 2, the parent
+  // bill's when the arrears bill has none)
+  const revisionTotals = {
+    newBill: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
+    advance: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
+  };
+  // ✅ NEW — Pending rent revisions of active sites (no bill yet → paid 0)
+  if (Array.isArray(options.pendingRevisions) && options.pendingRevisions.length) {
+    const activeIds = new Set(
+      (mediaDocs || []).filter((m) => (m.mediaDetails || []).some((d) => d.status === 1)).map((m) => String(m._id)),
+    );
+    options.pendingRevisions.forEach((rv) => {
+      if (!rv || rv.status !== "Pending" || !activeIds.has(String(rv.mediaId))) return;
+      const p = pendingRevisionAmounts(rv);
+      const tt = revisionTotals[p.kind];
+      tt.rentTotal += p.rent;
+      tt.rentPendingApproval += p.rent;
+      if (p.gst > 0) {
+        tt[`gst${p.gstKind}Total`] += p.gst;
+        tt.gstPendingApproval += p.gst;
+      }
+    });
+  }
+  const addRevisionTotals = (media) => {
+    const parentWithGst = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
+    (media.arrearsDue || []).forEach((b) => {
+      if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+      const tt = revisionTotals[b.type === "advance" ? "advance" : "newBill"];
+      const rent = Number(b.netPayable || 0);
+      const gst = Number(b.gstAmount || 0);
+      tt.rentTotal += rent;
+      tt.rentPaid += Math.min(rent, Number(b.rentPaid || 0));
+      if (gst > 0) {
+        const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
+        tt[`gst${kind}Total`] += gst;
+        tt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
+      }
+    });
+  };
+
   const curCannotHoldOwners = new Set(); // ✅ NEW
   const pastCannotHoldOwners = new Set(); // ✅ NEW
   const curHoldPendingOwners = new Set(); // ✅ NEW
   const pastHoldPendingOwners = new Set(); // ✅ NEW
+
+  // ✅ NEW — rent revision arrears / advance bills (media.arrearsDue[]), placed
+  // by their OWN dueMonth like the legacy rows: rent and GST each Total / Paid /
+  // Remaining; GST Hold (withGst 1 / not set) or Cannot Hold (withGst 2, the
+  // parent bill's when the arrears bill has none)
+  const addRevisionBills = (media) => {
+    const parentWithGst = new Map((media.rentalDue || []).map((d) => [String(d._id), d.withGst]));
+    const ownerKeys = (media.landOwners || []).map((o) =>
+      o.landOwnerMasterId ? String(o.landOwnerMasterId) : `${String(media._id)}_${String(o._id || o.name || "")}`,
+    );
+    (media.arrearsDue || []).forEach((b) => {
+      if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+      const bucket = legacyBucket(b.dueMonth);
+      if (!bucket) return;
+      const rent = Number(b.netPayable || 0);
+      const rentPaid = Math.min(rent, Number(b.rentPaid || 0));
+      t[`${bucket}RentTotal`] += rent;
+      t[`${bucket}RentPaid`] += rentPaid;
+      t[`${bucket}RentRemaining`] += rent - rentPaid;
+
+      const gst = Number(b.gstAmount || 0);
+      if (gst <= 0) return;
+      const gstPaid = Math.min(gst, Number(b.gstPaid || 0));
+      const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
+      t[`${bucket}GstTotal`] += gst;
+      t[`${bucket}GstPaid`] += gstPaid;
+      t[`${bucket}GstRemaining`] += gst - gstPaid;
+      t[`${bucket}Gst${kind}Total`] += gst;
+      t[`${bucket}Gst${kind}Paid`] += gstPaid;
+      t[`${bucket}Gst${kind}Remaining`] += gst - gstPaid;
+      if (kind === "CannotHold") ownerKeys.forEach((k) => (bucket === "cur" ? curCannotHoldOwners : pastCannotHoldOwners).add(k));
+      else if (gst - gstPaid > 0) ownerKeys.forEach((k) => (bucket === "cur" ? curHoldPendingOwners : pastHoldPendingOwners).add(k));
+    });
+  };
+
   for (const media of mediaDocs || []) {
     if ((media.mediaDetails || []).some((d) => d.status === 1)) {
       addLegacy("Rent", media.rentalPayment?.rentalOutstandingHistory, "baseRentOutstandingAmount");
       addLegacy("Gst", media.rentalPayment?.gstOutstandingHistory, "gstOutStandingAmount");
+      // ✅ CHANGED — New Bill / Advance no longer added to the current / past
+      // rent + GST fields; they are only in newBill* / advance* fields below
+      // addRevisionBills(media);
+      addRevisionTotals(media); // ✅ NEW
     }
     const s = getOverallSummaryForCycle(media, requestedMonthYear);
     t.curRentTotal += s.splitCurRentTotal; t.curRentPaid += s.splitCurRentPaid; t.curRentRemaining += s.splitCurRentRemaining;
@@ -7093,9 +7824,25 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear) {
     // ✅ NEW — distinct landowners with GST Hold still pending
     newCurrentMonthGstHoldPendingLandOwners: curHoldPendingOwners.size,
     newPastGstHoldPendingLandOwners: pastHoldPendingOwners.size,
+    // ✅ NEW — New Bill / Advance (all months): rent, GST Hold and GST Cannot Hold, Total / Paid / Remaining
+    ...["newBill", "advance"].reduce((acc, k) => {
+      const tt = revisionTotals[k];
+      acc[`${k}RentOverAllAmount`] = r(tt.rentTotal);
+      acc[`${k}RentPaidAmount`] = r(tt.rentPaid);
+      acc[`${k}RentRemainingAmount`] = r(tt.rentTotal - tt.rentPaid);
+      ["Hold", "CannotHold"].forEach((kind) => {
+        acc[`${k}Gst${kind}OverAllAmount`] = r(tt[`gst${kind}Total`]);
+        acc[`${k}Gst${kind}PaidAmount`] = r(tt[`gst${kind}Paid`]);
+        acc[`${k}Gst${kind}RemainingAmount`] = r(tt[`gst${kind}Total`] - tt[`gst${kind}Paid`]);
+      });
+      acc[`${k}RentPendingApprovalAmount`] = r(tt.rentPendingApproval); // ✅ NEW — part of OverAll not yet CMD approved
+      acc[`${k}GstPendingApprovalAmount`] = r(tt.gstPendingApproval); // ✅ NEW
+      return acc;
+    }, {}),
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;
+exports.pendingRevisionAmounts = pendingRevisionAmounts; // ✅ NEW
 
 function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const includeLandOwnerCounts = !!options.includeLandOwnerCounts;
@@ -7310,7 +8057,8 @@ exports.calculateOverallLedgerSummary = calculateOverallLedgerSummary; // ✅ NE
 exports.getOverallSummaryForCycle = getOverallSummaryForCycle; // ✅ NEW: export for filter consistency
 exports.ensureRentalDueForCycles = ensureRentalDueForCycles; // ✅ NEW
 exports.isOwnerModePaidForCycle = isOwnerModePaidForCycle; // ✅ NEW
-exports.isGstPaidForCycle = isGstPaidForCycle; // ✅ NEW
+exports.isGstPaidForCycle = isGstPaidForCycle;
+exports.executeBulkPaymentBatch = executeBulkPaymentBatch; // used by the Gmail UTR processor (same engine as manual ledger-save) // ✅ NEW
 exports.getRequiredModesShared = getRequiredModesShared;
 exports.getAllDueCycles = getAllDueCycles;
 exports.resolveExpectedGstForCycle = resolveExpectedGstForCycle; // ✅ NEW — used by Rental OOH Excel (unpaid rows)

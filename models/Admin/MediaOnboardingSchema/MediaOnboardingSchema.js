@@ -37,8 +37,29 @@ const computeAppraisalAmount = (entry, previousRent) => {
 const rentalAmountHistorySchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0 },
+    previousAmount: { type: Number, default: 0 },
     updatedBy: { type: String },
     updatedAt: { type: Date, default: null },
+    // ✅ NEW — rent revision (POST /admin/rent-revision): the rent applies from this
+    // month (fromMonth), not from updatedAt. null = from updatedAt (as before).
+    effectiveFrom: { type: Date, default: null },
+    rentRevisionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    isManualChange: { type: Boolean, default: false },
+    isInitial: { type: Boolean, default: false },
+    isAppraisal: { type: Boolean, default: false },
+    // ✅ NEW — rent revision rows: normalBillIncrease / normalBillDecrease /
+    // newBill / newBillDecrease / advance, the month changed and the remark.
+    // isRevisionLog → only a month's bill changed (site rent same) — not used
+    // as a rent change (utils/appraisalRent.js)
+    changeType: { type: String, default: undefined },
+    changeLabel: { type: String, default: undefined },
+    month: { type: String, default: undefined },
+    adjustInMonth: { type: String, default: undefined },
+    changeAmount: { type: Number, default: undefined },
+    monthAmountBefore: { type: Number, default: undefined },
+    monthAmountAfter: { type: Number, default: undefined },
+    remark: { type: String, default: undefined },
+    isRevisionLog: { type: Boolean, default: undefined },
   },
   { _id: false },
 );
@@ -253,6 +274,8 @@ const ledgerSchema = new mongoose.Schema({
   index: { type: Number, default: null },
   amount: { type: Number, default: 0, min: 0 },
   isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
+  remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+  bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
 });
 
 const ledgerHistoryEntrySchema = new mongoose.Schema(
@@ -282,6 +305,8 @@ const ledgerHistoryEntrySchema = new mongoose.Schema(
     index: { type: Number, default: null },
     amount: { type: Number, default: 0, min: 0 },
     isUtrEntry: { type: Boolean, default: false }, // ✅ ADDED
+    remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+    bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
   },
   { _id: true },
 );
@@ -317,6 +342,7 @@ const tdsBalanceSchema = new mongoose.Schema(
     landOwnerName: { type: String, trim: true, default: "" },
     utrNumber: { type: String, trim: true, default: "" },
     date: { type: Date, default: null },
+    remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
   },
   { _id: true },
 );
@@ -373,6 +399,8 @@ const gstOutstandingHistorySchema = new mongoose.Schema({
   utrNumber: { type: String, trim: true, default: null },
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
+  remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+  bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
   // populated only when paymentMode === "Cash+Online"
   paymentBreakup: [
     {
@@ -403,6 +431,8 @@ const rentalOutstandingHistorySchema = new mongoose.Schema({
   utrNumber: { type: String, trim: true, default: null },
   date: { type: Date, default: null },
   isPaid: { type: Boolean, default: false },
+  remark: { type: String, trim: true, default: "" }, // ✅ NEW — ledger-save remark
+  bankRefNo: { type: String, trim: true, default: "" }, // Bank Reference of the Finance payment mail (unique per bank row)
   paymentBreakup: [
     {
       paymentMode: { type: String, enum: ["Cash", "Online"] },
@@ -524,6 +554,14 @@ const MediaSchema = new mongoose.Schema(
         min: 0,
       },
       rentalAmountHistory: [rentalAmountHistorySchema],
+      // ✅ NEW — rent revision: months that were already CMD approved before the
+            // revision keep their old rent (the difference is a separate arrears bill).
+            // [{ dueMonth: "September 2026", rent: 20000, rentRevisionId }]
+            rentRevisionKeptMonths: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+            // ✅ NEW — rent revision ADVANCE (CMD approved) deducted from the bill of
+            // dueMonth: [{ dueMonth: "December 2026", amount: 25000, gstDeducted: 1|0,
+            // advanceBillId, rentRevisionId }]
+            advanceAdjustments: { type: [mongoose.Schema.Types.Mixed], default: undefined },
       gstApplicable: {
         type: Number,
         enum: [0, 1],
@@ -1044,6 +1082,8 @@ const MediaSchema = new mongoose.Schema(
     rentalDueHistory: [rentalDueHistoryYearSchema],
     verificationProgressHistory: [verificationProgressSchema],
     gstBalanceHistory: [gstBalanceSchema],
+    // ✅ NEW — arrears bills from an approved rent revision (paid separately)
+        arrearsDue: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
   },

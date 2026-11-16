@@ -95,9 +95,9 @@ function rowEntryTime(row) {
 }
 
 const isSeparateSite = (media) => (media?.mediaDetails || []).some((d) => Number(d?.siteBillMode) === 2);
+// Several landlords on one bill ALWAYS share ONE Bill Number: landOwnerBillMode is no longer read (separate-landlord numbers are switched off).
+// Bills numbered earlier with one number per landlord keep their numbers (a number is never changed).
 function separateLandlords(media) {
-  const owners = (media?.landOwners || []).filter(Boolean);
-  if (owners.length > 1 && owners.some((o) => Number(o.landOwnerBillMode) === 2)) return owners;
   return null;
 }
 
@@ -317,7 +317,41 @@ function createAdinnOohBills(deps = {}) {
     }
   }
 
-  return { nextSerial, obtainNumber, assignBase, ensureAdinnOohBills };
+  /**
+   * ✅ NEW — rent revision New Bill / Advance (media.arrearsDue[]): ONE number
+   * per revision (all its New Bill rows share it). Same counter / format, bill
+   * date = CMD approval date. groupKey "<mediaId>|newbill:<revisionId>" or
+   * "<mediaId>|advance:<revisionId>" → the same revision always gets the same
+   * number. The number is written on those arrearsDue rows. Never throws;
+   * returns the number or null.
+   */
+  async function ensureRevisionAdinnOohBill({ mediaId, revisionId, kind = "newbill", dueMonth = "", billIds = [], billDate = new Date() }) {
+    try {
+      if (!mediaId || !revisionId || !billIds.length) return null;
+      const base = {
+        mediaId: idStr(mediaId),
+        dueMonth,
+        billDate,
+        billMode: kind === "advance" ? "advance" : "new_bill",
+        approvedRowIds: billIds,
+        existingNo: null,
+      };
+      const bill = { groupKey: `${idStr(mediaId)}|${kind}:${idStr(revisionId)}`, ownerIndex: 0, owner: null };
+      const no = await obtainNumber(base, bill, { source: "approval" });
+      if (!no) return null;
+      await getMedia().updateOne(
+        { _id: mediaId },
+        { $set: { "arrearsDue.$[a].adinn_ooh_bills": no } },
+        { arrayFilters: [{ "a._id": { $in: billIds } }], strict: false },
+      );
+      return no;
+    } catch (err) {
+      log.error("ensureRevisionAdinnOohBill error:", err.message);
+      return null;
+    }
+  }
+
+  return { nextSerial, obtainNumber, assignBase, ensureAdinnOohBills, ensureRevisionAdinnOohBill };
 }
 
 let defaultInstance = null;
@@ -338,4 +372,5 @@ module.exports = {
   compareBases,
   createAdinnOohBills,
   ensureAdinnOohBills: (mediaDoc) => instance().ensureAdinnOohBills(mediaDoc),
+  ensureRevisionAdinnOohBill: (opts) => instance().ensureRevisionAdinnOohBill(opts), // ✅ NEW — New Bill / Advance
 };

@@ -25,7 +25,9 @@ function crc32(buf) {
  * Injects <pane ySplit="N"/> into sheet1.xml of the generated XLSX ZIP buffer
  * to ensure freeze panes work reliably in MS Excel, Google Sheets, and LibreOffice.
  */
-function freezeHeaderInXlsxBuffer(buf, freezeRows = 3) {
+// ✅ NEW — freezeCols (optional, default 0 = rows only, unchanged): also keeps
+// the first N columns fixed while scrolling right
+function freezeHeaderInXlsxBuffer(buf, freezeRows = 3, freezeCols = 0) {
   try {
     let eocdPos = buf.length - 22;
     while (eocdPos >= 0) {
@@ -91,7 +93,9 @@ function freezeHeaderInXlsxBuffer(buf, freezeRows = 3) {
         xmlStr = sheetEntry.data.toString("utf8");
       }
 
-      const paneXml = `<pane ySplit="${freezeRows}" topLeftCell="A${freezeRows + 1}" activePane="bottomLeft" state="frozen"/>`;
+      const paneXml = freezeCols > 0
+        ? `<pane xSplit="${freezeCols}" ySplit="${freezeRows}" topLeftCell="${String.fromCharCode(65 + freezeCols)}${freezeRows + 1}" activePane="bottomRight" state="frozen"/><selection pane="bottomRight"/>`
+        : `<pane ySplit="${freezeRows}" topLeftCell="A${freezeRows + 1}" activePane="bottomLeft" state="frozen"/>`;
       let modifiedXml;
       if (xmlStr.includes("</sheetView>")) {
         modifiedXml = xmlStr.replace("</sheetView>", `${paneXml}</sheetView>`);
@@ -314,8 +318,14 @@ const downloadRentalOOHExcel = async (req, res) => {
         : {}),
     }).lean();
 
-    // Column layout (13 columns) — same for the Paid and Unpaid sheets
-    const LAST_COL = 13;
+    // Column layout — same for the Paid and Unpaid sheets
+    // ✅ CHANGED — + Rent Remark / GST Remark as the last columns (LAST_COL 13 → 15; Total Amount = COL_TOTAL)
+    const LAST_COL = 15;
+    const COL_TOTAL = 13;
+    const COL_RENT_REMARK = 14;
+    const COL_GST_REMARK = 15;
+    const NO_REMARK = "-";
+    const joinRemarks = (list) => [...new Set(list.map((r) => String(r || "").trim()).filter(Boolean))].join(" | ") || NO_REMARK;
     const COL_OWNERS = 7;
     const COL_GST_APPLY = 9;
     const COL_TDS_APPLY = 10;
@@ -360,11 +370,11 @@ const downloadRentalOOHExcel = async (req, res) => {
         });
 
         const allLedgerEntries = [
-          ...(media.ledger || []).map(e => ({ ...e, withGst: e.withGst !== undefined ? e.withGst : 2, status: 1 })),
-          ...(media.withGst1Ledger || []).map(e => ({ ...e, withGst: e.withGst !== undefined ? e.withGst : 1, status: 1 })),
+          ...(media.ledger || []).map(e => ({ ...e, withGst: e.withGst !== undefined ? e.withGst : 2, status: 1, remarkSource: "rent" })), // ✅ CHANGED — + remarkSource
+          ...(media.withGst1Ledger || []).map(e => ({ ...e, withGst: e.withGst !== undefined ? e.withGst : 1, status: 1, remarkSource: "gst" })),
           ...(media.rentalPayment?.rentalOutstandingHistory || [])
             .filter(h => h.isPaid)
-            .map(h => ({ ...h, amount: h.baseRentOutstandingAmount, month: h.dueMonth, isOutstanding: true, status: 1, withGst: 1 }))
+            .map(h => ({ ...h, amount: h.baseRentOutstandingAmount, month: h.dueMonth, isOutstanding: true, status: 1, withGst: 1, remarkSource: "rent" }))
         ];
 
         if (media.ledgerHistory) {
@@ -373,7 +383,7 @@ const downloadRentalOOHExcel = async (req, res) => {
               if (mb.entries) {
                 mb.entries.forEach(e => {
                   const historyWithGst = e.withGst !== undefined ? e.withGst : (e.isUtrEntry ? 1 : 2);
-                  allLedgerEntries.push({ ...e, withGst: historyWithGst, isHistory: true, status: 1 });
+                  allLedgerEntries.push({ ...e, withGst: historyWithGst, isHistory: true, status: 1, remarkSource: "history" }); // ✅ CHANGED — + remarkSource
                 });
               }
             });
@@ -405,6 +415,38 @@ const downloadRentalOOHExcel = async (req, res) => {
             )
             .map((g) => ({ ...g, gstAmount: g.gstOutStandingAmount })),
         ].filter((g) => normalizeMonth(g.dueMonth) === targetMonthNormalized);
+
+        // ✅ NEW — ledger-save remarks of this site + month, split Rent / GST:
+        //   rent → ledger, rent outstanding, rent history rows; direct GST
+        //          (withGst 2 ledger) → also the GST remark (GST paid with the rent)
+        //   GST  → GST ledger, GST balance / outstanding, GST history rows
+        // faceId → only that face's bills (+ site-wide ones)
+        const hasRemark = (e) => e && e.remark && String(e.remark).trim() !== "";
+        const gstRemarkRows = [
+          ...monthGstEntries.filter(hasRemark),
+          ...monthLedgerEntries.filter((e) => hasRemark(e) && (e.remarkSource === "gst" || (e.remarkSource === "history" && e.isUtrEntry === true))),
+        ];
+        const gstRemarkKeys = new Set(gstRemarkRows.map((e) => `${String(e.rentalDueId || "")}|${String(e.remark).trim()}`));
+        const rentRemarkRows = monthLedgerEntries.filter(
+          (e) =>
+            hasRemark(e) &&
+            (e.remarkSource === "rent" ||
+              // history row: not a GST row (same bill + remark as a GST entry → GST)
+              (e.remarkSource === "history" && e.isUtrEntry !== true &&
+                !gstRemarkKeys.has(`${String(e.rentalDueId || "")}|${String(e.remark).trim()}`))),
+        );
+        const directGstRows = monthLedgerEntries.filter((e) => hasRemark(e) && e.remarkSource === "rent" && Number(e.withGst) === 2);
+        const forFace = (rows, faceId) =>
+          rows.filter((e) => {
+            if (!faceId) return true;
+            const mapped = e.rentalDueId ? dueToMediaMap.get(String(e.rentalDueId)) : null;
+            return !mapped || mapped === String(faceId);
+          });
+        const setRemarks = (row, faceId = null) => {
+          row[COL_RENT_REMARK] = joinRemarks(forFace(rentRemarkRows, faceId).map((e) => e.remark));
+          row[COL_GST_REMARK] = joinRemarks([...forFace(gstRemarkRows, faceId), ...forFace(directGstRows, faceId)].map((e) => e.remark));
+          return row;
+        };
 
         const fallbackOwnerId = (owners && owners[0])
           ? String(owners[0]._id || owners[0].landOwnerMasterId || "no-owner")
@@ -645,7 +687,8 @@ const downloadRentalOOHExcel = async (req, res) => {
         const buildRow = (code, name, type, state, city, district, ownerNames, rental, gst) => {
           const row = [
             0, code, name, type, state, city, district || "-", owners.length, ownerNames, gstApplyText, tdsApplyText,
-            rental, gst, rental + gst
+            rental, gst, rental + gst,
+            NO_REMARK, NO_REMARK, // ✅ NEW — Rent Remark, GST Remark (set by the caller)
           ];
           row.status = status; // not a cell — read by buildSheet for the colours
           return row;
@@ -661,10 +704,12 @@ const downloadRentalOOHExcel = async (req, res) => {
                combinedOwnerNames = allOwnerNames;
              }
 
-             monthDataRows.push(buildRow(
+             const paidRow = buildRow(
                 combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedDistrict, combinedOwnerNames,
                 Math.round(siteRent * cityShare), Math.round(totalGst * cityShare)
-             ));
+             );
+             setRemarks(paidRow); // ✅ NEW
+             monthDataRows.push(paidRow);
            } else {
              mediaDetails.forEach(mDetail => {
                if (!faceMatchesCity(mDetail)) return; // ✅ NEW — city filter
@@ -675,10 +720,12 @@ const downloadRentalOOHExcel = async (req, res) => {
                  dNames = allOwnerNames;
                }
 
-               monthDataRows.push(buildRow(
+               const paidRow = buildRow(
                   mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", mDetail.district || "", dNames,
                   siteRent / faceCount, dGst
-               ));
+               );
+               setRemarks(paidRow, mId); // ✅ NEW
+               monthDataRows.push(paidRow);
              });
            }
         }
@@ -686,22 +733,77 @@ const downloadRentalOOHExcel = async (req, res) => {
         // ── ✅ NEW — UNPAID rows (pending rent / GST for this month) ──
         if (unpaid) {
           const { unpaidGst } = unpaid;
+          // ✅ CHANGED — GST already paid → the paid GST is shown (green, not
+          // added to the totals), same as the rent; was shown as 0
+          const gstPaidShown = status.gstApplicable && status.gstPaid && totalGst > 0;
 
           if (isCombined) {
-            unpaidDataRows.push(buildRow(
+            const unpaidRow = buildRow(
               combinedCode, combinedName, combinedMediaType, combinedState, combinedCity, combinedDistrict, allOwnerNames,
-              Math.round(siteRent * cityShare), Math.round(unpaidGst * cityShare)
-            ));
+              Math.round(siteRent * cityShare), Math.round((gstPaidShown ? totalGst : unpaidGst) * cityShare)
+            );
+            setRemarks(unpaidRow); // ✅ NEW — remark of the paid part (if any)
+            unpaidDataRows.push(unpaidRow);
           } else {
             mediaDetails.forEach(mDetail => {
               if (!faceMatchesCity(mDetail)) return; // ✅ NEW — city filter
-              unpaidDataRows.push(buildRow(
+              const unpaidRow = buildRow(
                 mDetail.mediaCode, mDetail.mediaName, mDetail.mediaType, mDetail.state || "", mDetail.city || "", mDetail.district || "", allOwnerNames,
-                siteRent / faceCount, unpaidGst / faceCount
-              ));
+                siteRent / faceCount,
+                gstPaidShown ? gstByFace.get(String(mDetail._id)) || (siteWideGst / mediaDetails.length) : unpaidGst / faceCount
+              );
+              setRemarks(unpaidRow, mDetail._id); // ✅ NEW — remark of the paid part (if any)
+              unpaidDataRows.push(unpaidRow);
             });
           }
         }
+
+        // ── ✅ NEW — rent revision arrears / advance bills of this month
+        // (media.arrearsDue[], paid through their own bill, not in the ledger
+        // entries above): own row "<media name> (<bill label>)" — paid part on
+        // the Paid sheet (green), pending part on the Unpaid sheet (red).
+        // Landowners column 0 so the month total does not count the site twice.
+        (media.arrearsDue || [])
+          .filter((b) => b && (b.type === "arrears" || b.type === "advance") && normalizeMonth(b.dueMonth) === targetMonthNormalized)
+          .forEach((b) => {
+            const face = b.mediaDetailId ? mediaDetails.find((d) => String(d._id) === String(b.mediaDetailId)) : null;
+            if (face && !faceMatchesCity(face)) return;
+            const share = face ? 1 : cityShare;
+            // ✅ CHANGED — arrears → "New Bill", advance → "Advance Amount"
+            const label = b.type === "advance" ? "Advance Amount" : "New Bill";
+            const rent = Number(b.netPayable || 0);
+            const gst = Number(b.gstAmount || 0);
+            const rentPaidAmt = Math.min(rent, Number(b.rentPaid || 0));
+            const gstPaidAmt = Math.min(gst, Number(b.gstPaid || 0));
+            const billRow = (rental, gstAmt, rowStatus) => {
+              const r = face
+                ? buildRow(face.mediaCode, `${face.mediaName} (${label})`, face.mediaType, face.state || "", face.city || "", face.district || "", allOwnerNames, Math.round(rental), Math.round(gstAmt))
+                : buildRow(combinedCode, `${combinedName} (${label})`, combinedMediaType, combinedState, combinedCity, combinedDistrict, allOwnerNames, Math.round(rental * share), Math.round(gstAmt * share));
+              r[COL_OWNERS] = 0;
+              r.status = rowStatus;
+              // ✅ NEW — remarks of this bill's payments: rent payments → Rent
+              // Remark (+ GST Remark when GST was paid with the rent), GST payments → GST Remark
+              const pays = b.payments || [];
+              r[COL_RENT_REMARK] = joinRemarks(pays.filter((p) => p.type !== "gst").map((p) => p.remark));
+              r[COL_GST_REMARK] = joinRemarks(pays.filter((p) => p.type === "gst" || Number(p.gstAmount || 0) > 0).map((p) => p.remark));
+              return r;
+            };
+            const rentPending = rent - rentPaidAmt;
+            const gstPending = gst - gstPaidAmt;
+            // ✅ CHANGED — Paid sheet: the full bill (rent / GST), green = paid,
+            // red = not paid — same as the site row (was the paid part only)
+            if (rentPaidAmt > 0 || gstPaidAmt > 0) {
+              monthDataRows.push(billRow(rent, gst, {
+                rentPaid: rentPending <= 0, gstPaid: gstPending <= 0, gstApplicable: gst > 0, outstandingGstOnly: false,
+              }));
+            }
+            if (rentPending > 0 || gstPending > 0) {
+              // paid part shown green (not added to the totals), pending part red
+              unpaidDataRows.push(billRow(rentPending > 0 ? rentPending : rentPaidAmt, gstPending > 0 ? gstPending : gstPaidAmt, {
+                rentPaid: rentPending <= 0, gstPaid: gstPending <= 0, gstApplicable: gst > 0, outstandingGstOnly: false,
+              }));
+            }
+          });
       }
 
       if (monthDataRows.length > 0) paidMonths.push({ label: monthLabel, rows: monthDataRows });
@@ -713,12 +815,14 @@ const downloadRentalOOHExcel = async (req, res) => {
     const colHeaders = [
       "Month", "Media Code", "Media Name", "Media Type", "State", "City", "District / Town",
       "Total Landowners", "Landowner Name", "GST Applicable", "TDS Applicable",
-      "Total Rental Amount (₹)", "GST Amount (₹)", "Total Amount (₹)"
+      "Total Rental Amount (₹)", "GST Amount (₹)", "Total Amount (₹)",
+      "Rent Remark", "GST Remark", // ✅ NEW
     ];
     const NOTE_TEXT = "Note: The TDS Amount is included in the Total Rental Amount. Green amounts are paid (ledger entry made); red amounts are not paid.";
     const noteRowIdx = 2;
     const headerRowIdx = 3;
     const FREEZE_ROWS = 4; // title, period, note, column headers
+    const FREEZE_COLS = 1; // ✅ NEW — column A (month / #)
 
     const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
     const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, alignment: { vertical: "center", wrapText: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
@@ -762,9 +866,15 @@ const downloadRentalOOHExcel = async (req, res) => {
           if (unpaidOnly && row.status) {
             if (row.status.rentPaid) rental = 0;
             if (row.status.gstApplicable && row.status.gstPaid) gst = 0;
-            row[LAST_COL] = rental + gst; // Total Amount = red (unpaid) amounts only
+            row[COL_TOTAL] = rental + gst; // Total Amount = red (unpaid) amounts only
             // Only Outstanding GST pending → no rent amount, GST Amount shows the outstanding GST
             if (row.status.outstandingGstOnly) row[COL_RENTAL] = "-";
+          } else if (!unpaidOnly && row.status) {
+            // ✅ NEW — Paid sheet: red (not paid) amounts are shown but NOT added
+            // to Total Amount or to the month / grand totals
+            if (!row.status.rentPaid) rental = 0;
+            if (row.status.gstApplicable && !row.status.gstPaid) gst = 0;
+            row[COL_TOTAL] = rental + gst; // Total Amount = green (paid) amounts only
           }
           monthRentalTotal += rental;
           monthGstTotal += gst;
@@ -772,7 +882,7 @@ const downloadRentalOOHExcel = async (req, res) => {
         aoa.push(...rows);
 
         const totalRowIdx = aoa.length;
-        aoa.push([`🏷️ ${label.toUpperCase()} TOTAL`, "", "", "", "", "", "", monthOwnerTotal, "", "", "", monthRentalTotal, monthGstTotal, monthRentalTotal + monthGstTotal]);
+        aoa.push([`🏷️ ${label.toUpperCase()} TOTAL`, "", "", "", "", "", "", monthOwnerTotal, "", "", "", monthRentalTotal, monthGstTotal, monthRentalTotal + monthGstTotal, "", "" /* ✅ NEW — Rent / GST Remark */]);
         merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 6 } });
         aoa.push([]);
 
@@ -782,7 +892,7 @@ const downloadRentalOOHExcel = async (req, res) => {
       });
 
       const grandTotalIdx = aoa.length;
-      aoa.push([`📊 GRAND TOTAL (${periodLabel})`, "", "", "", "", "", "", grandOwnerTotal, "", "", "", grandRentalTotal, grandGstTotal, grandRentalTotal + grandGstTotal]);
+      aoa.push([`📊 GRAND TOTAL (${periodLabel})`, "", "", "", "", "", "", "" /* ✅ CHANGED — no landowner total (summed across months) */, "", "", "", grandRentalTotal, grandGstTotal, grandRentalTotal + grandGstTotal, "", "" /* ✅ NEW — Rent / GST Remark */]);
       merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 6 } });
 
       const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -801,18 +911,18 @@ const downloadRentalOOHExcel = async (req, res) => {
           else if (aoa[r][0] && String(aoa[r][0]).startsWith("🗓️")) ws[addr].s = styleMonthHeader;
           else if (aoa[r][0] && String(aoa[r][0]).startsWith("🏷️")) {
             ws[addr].s = styleTotalRow(monthCounter % 2 === 0);
-            if (c >= COL_FIRST_AMOUNT) ws[addr].z = numFormat;
+            if (c >= COL_FIRST_AMOUNT && c <= COL_TOTAL) ws[addr].z = numFormat; // ✅ CHANGED — not on Remark
             if (c === LAST_COL) monthCounter++;
           } else if (aoa[r][0] && String(aoa[r][0]).startsWith("📊")) {
             ws[addr].s = styleGrandTotal;
-            if (c >= COL_FIRST_AMOUNT) ws[addr].z = numFormat;
+            if (c >= COL_FIRST_AMOUNT && c <= COL_TOTAL) ws[addr].z = numFormat; // ✅ CHANGED — not on Remark
           } else if (r > headerRowIdx && aoa[r].length > 0) {
             ws[addr].s = {
               ...styleData,
               alignment: {
                 vertical: "center",
                 wrapText: true,
-                horizontal: (c === 0 || c === COL_OWNERS || c === COL_GST_APPLY || c === COL_TDS_APPLY || c >= COL_FIRST_AMOUNT) ? "center" : "left"
+                horizontal: (c === 0 || c === COL_OWNERS || c === COL_GST_APPLY || c === COL_TDS_APPLY || (c >= COL_FIRST_AMOUNT && c <= COL_TOTAL)) ? "center" : "left"
               }
             };
             // ✅ Green = paid, red = not paid (Total Rental by rent, GST by GST)
@@ -822,30 +932,31 @@ const downloadRentalOOHExcel = async (req, res) => {
             } else if (status && c === COL_GST && (status.gstApplicable || status.outstandingGstOnly)) {
               ws[addr].s.font = { bold: true, color: { rgb: status.gstPaid ? PAID_COLOR : UNPAID_COLOR } };
             }
-            if (c >= COL_FIRST_AMOUNT) ws[addr].z = numFormat;
+            if (c >= COL_FIRST_AMOUNT && c <= COL_TOTAL) ws[addr].z = numFormat; // ✅ CHANGED — not on Remark
           }
         }
       }
 
       ws["!merges"] = merges;
+      // ✅ CHANGED — column A (month) also frozen → stays on the left while scrolling right
       ws["!freeze"] = {
-        xSplit: "0",
+        xSplit: String(FREEZE_COLS),
         ySplit: String(FREEZE_ROWS),
-        topLeftCell: `A${FREEZE_ROWS + 1}`,
-        activePane: "bottomLeft",
+        topLeftCell: `B${FREEZE_ROWS + 1}`,
+        activePane: "bottomRight",
         state: "frozen"
       };
       ws["!views"] = [
         {
           state: "frozen",
-          xSplit: 0,
+          xSplit: FREEZE_COLS,
           ySplit: FREEZE_ROWS,
-          topLeftCell: `A${FREEZE_ROWS + 1}`,
-          activePane: "bottomLeft"
+          topLeftCell: `B${FREEZE_ROWS + 1}`,
+          activePane: "bottomRight"
         }
       ];
       ws["!cols"] = [
-        { wch: 15 }, // A: Month #
+        { wch: 22 }, // A: Month # ✅ CHANGED — 15 → 22, month label fits in the frozen column
         { wch: 20 }, // B: Media Code
         { wch: 40 }, // C: Media Name
         { wch: 20 }, // D: Media Type
@@ -858,7 +969,9 @@ const downloadRentalOOHExcel = async (req, res) => {
         { wch: 18 }, // K: TDS Applicable
         { wch: 22 }, // L: Total Rental Amount
         { wch: 20 }, // M: GST Amount
-        { wch: 20 }  // N: Total Amount
+        { wch: 20 }, // N: Total Amount
+        { wch: 40 }, // O: Rent Remark ✅ NEW
+        { wch: 40 }, // P: GST Remark ✅ NEW
       ];
       ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 22 }, { hpt: 35 }];
       return ws;
@@ -868,7 +981,7 @@ const downloadRentalOOHExcel = async (req, res) => {
     XLSX.utils.book_append_sheet(wb, buildSheet("LEDGER SUMMARY REPORT - PAID", paidMonths), "Paid");
     XLSX.utils.book_append_sheet(wb, buildSheet("LEDGER SUMMARY REPORT - UNPAID", unpaidMonths, true), "Unpaid");
     const rawBuffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-    const buffer = freezeHeaderInXlsxBuffer(rawBuffer, FREEZE_ROWS);
+    const buffer = freezeHeaderInXlsxBuffer(rawBuffer, FREEZE_ROWS, FREEZE_COLS); // ✅ CHANGED — + column A
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     const fileCity = cityName ? `_${cityName.replace(/[^a-zA-Z0-9-]+/g, "_")}` : "";

@@ -18,7 +18,8 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 
 // ── Update-flow scenario (relative to today) ─────────────────────────────────
 const today = new Date();
-const d = (months, day = 15) => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + months, day));
+// day 1, so this month's row is always already "applied" (<= today) whatever day the suite runs on
+const d = (months, day = 1) => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + months, day));
 const iso = (v) => new Date(v).toISOString().slice(0, 10);
 const row = (date, previousRent, amount, fixedAmount = amount) => ({
   appraisalDate: date, type: 2, percentage: 0, fixedAmount, frequency: 1, customFrequencyMonths: 0,

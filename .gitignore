@@ -37,3 +37,6 @@ temp/
 coverage/
 # App update release metadata (per server; see docs/APP_UPDATE_RELEASE.md)
 config/appRelease.json
+
+# Google OAuth credential downloads
+client_secret*.json
