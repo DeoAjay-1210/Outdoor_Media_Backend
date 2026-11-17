@@ -134,7 +134,7 @@ app.use("/admin", fcmRoutes);
 app.use("/admin", billingDateRevertRoutes);
 app.use("/admin", rentRevisionRoutes); // ✅ NEW
 app.use("/admin", appUpdateRoutes);
-app.use("/api/gmail", gmailRoutes);
+app.use("/gmail", gmailRoutes);
 
 // Automatic Gmail UTR detection — every 10 minutes (GMAIL_UTR_CRON_ENABLED=true). The cron is a DRY RUN unless
 // GMAIL_UTR_CRON_DRY_RUN=false AND GMAIL_UTR_SAVE_ENABLED=true. See utils/gmailUtrCron.js.

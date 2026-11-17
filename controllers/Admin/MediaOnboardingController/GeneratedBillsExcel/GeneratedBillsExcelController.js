@@ -1,0 +1,379 @@
+// ─────────────────────────────────────────────────────────────
+// GENERATED BILLS EXCEL
+// GET /admin/rental-ooh/download-bills-excel?fromMonth=08-2026&toMonth=11-2026&city=Chennai
+//
+// Every generated bill (media.rentalDue) whose month is between fromMonth and
+// toMonth (MM-YYYY), grouped by month — same design as the Rental OOH Excel
+// (title, period, note, month header rows, month total, grand total, frozen
+// header + column A). Amounts: Rent = netPayable, GST = gstAmount,
+// Total = Rent + GST. Read only — nothing is written to the database.
+// ─────────────────────────────────────────────────────────────
+const XLSX = require("xlsx-js-style");
+const Media = require("../../../../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
+const { errorResponse } = require("../../../../utils/response");
+const { freezeHeaderInXlsxBuffer } = require("../RentalOOHExcelController");
+const { getRentForDueDate, mediaAsOfDate } = require("../../../../utils/appraisalRent");
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+const BILL_STATUS = { 1: "Pending", 2: "Partially Approved", 3: "Approved", 4: "Overdue" };
+
+// "MM-YYYY" → { month (1-12), year } or null
+const parseMonthYear = (str) => {
+  const m = String(str || "").trim().match(/^(\d{1,2})-(\d{4})$/);
+  if (!m) return null;
+  const month = Number(m[1]);
+  const year = Number(m[2]);
+  return month >= 1 && month <= 12 ? { month, year } : null;
+};
+
+const monthKey = (year, monthIdx) => year * 12 + monthIdx; // monthIdx 0-11
+
+// "November 2026" / "Nov 2026" → month key, else null
+const monthKeyOfLabel = (label) => {
+  const parts = String(label || "").trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  const idx = MONTH_NAMES.findIndex((n) => n.slice(0, 3).toLowerCase() === parts[0].slice(0, 3).toLowerCase());
+  const year = Number(parts[1]);
+  return idx === -1 || !year ? null : monthKey(year, idx);
+};
+
+// bill month: its dueMonth label, else its dueDate
+const billMonthKey = (bill) => {
+  const fromLabel = monthKeyOfLabel(bill.dueMonth);
+  if (fromLabel !== null) return fromLabel;
+  const d = bill.dueDate ? new Date(bill.dueDate) : null;
+  return d && !Number.isNaN(d.getTime()) ? monthKey(d.getUTCFullYear(), d.getUTCMonth()) : null;
+};
+
+const formatDMY = (d) => {
+  if (!d) return "-";
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return "-";
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${date.getUTCFullYear()}`;
+};
+
+const joinUnique = (arr) => [...new Set(arr.map((v) => String(v || "").trim()).filter(Boolean))].join(", ");
+
+const isGstApplicableSite = (media) =>
+  [1, 2].includes(Number(media.gstApplicableFlag)) ||
+  Number(media.rentalPayment?.gstApplicable) === 1 ||
+  (media.landOwners || []).some((o) => Number(o.gstApplicable) === 1);
+
+// several bills in one row: all approved → Approved, else the lowest stage
+const combinedStatus = (bills) => {
+  const statuses = bills.map((b) => Number(b.approvalStatus || 1));
+  if (statuses.every((s) => s === 3)) return BILL_STATUS[3];
+  if (statuses.includes(4)) return BILL_STATUS[4];
+  return BILL_STATUS[Math.min(...statuses)] || BILL_STATUS[1];
+};
+
+// ✅ NEW — the site's billing frequency (rentalPayment.paymentFrequency): 1 Monthly … 6 Custom (N months)
+const FREQUENCY_LABEL = { 1: "Monthly", 2: "Quarterly", 3: "Half Yearly", 4: "Yearly", 5: "2 Years" };
+const frequencyLabel = (media) => {
+  const freq = Number(media?.rentalPayment?.paymentFrequency || 0);
+  if (freq === 6) {
+    const n = Number(media?.rentalPayment?.customPaymentFrequency || 0);
+    return n > 0 ? `Custom (${n} Month${n > 1 ? "s" : ""})` : "Custom";
+  }
+  return FREQUENCY_LABEL[freq] || "-";
+};
+
+const downloadGeneratedBillsExcel = async (req, res) => {
+  try {
+    const { fromMonth, toMonth } = req.query;
+    const from = parseMonthYear(fromMonth);
+    const to = parseMonthYear(toMonth);
+    if (!from || !to) {
+      return errorResponse(res, "fromMonth and toMonth are required (format: MM-YYYY)", null, 400);
+    }
+    const fromKey = monthKey(from.year, from.month - 1);
+    const toKey = monthKey(to.year, to.month - 1);
+    if (fromKey > toKey) return errorResponse(res, "fromMonth must be on or before toMonth", null, 400);
+
+    // optional single-city filter (?city=Chennai), case / space insensitive
+    const cityRaw = Array.isArray(req.query.city) ? req.query.city[0] : req.query.city;
+    const cityName = cityRaw ? String(cityRaw).trim() : "";
+    const cityKey = cityName.toLowerCase();
+    const faceMatchesCity = (face) => !cityKey || String(face?.city || "").trim().toLowerCase() === cityKey;
+
+    const months = [];
+    for (let k = fromKey; k <= toKey; k++) {
+      months.push({ key: k, label: `${MONTH_NAMES[k % 12]} ${Math.floor(k / 12)}`, rows: [] });
+    }
+    const monthByKey = new Map(months.map((m) => [m.key, m]));
+
+    // ✅ CHANGED — every active site (full document): sites without a bill yet can have an upcoming cycle
+    const mediaDocs = await Media.find({ "mediaDetails.status": 1 }).lean();
+    const { getAllDueCycles, resolveExpectedGstForCycle } = require("../LedgerNew2Controller"); // lazy: avoids a circular import
+    const now = new Date();
+
+    // single-bill multi-face site: its bill is stored per face (site rent split by sqft) — the face rows can be
+    // ₹1 off the whole bill after rounding, so the whole bill (same as rental-due-list) is used when the
+    // difference is only rounding (≤ 1 per stored row). Full documents loaded only for those sites.
+    const { siteBillForOverdue } = require("../RentalDueNew2Controller"); // lazy: avoids a circular import
+    const fullDocCache = new Map();
+    const wholeBillOf = async (mediaId, dueDate) => {
+      const id = String(mediaId);
+      if (!fullDocCache.has(id)) fullDocCache.set(id, mediaDocs.find((d) => String(d._id) === id) || (await Media.findById(mediaId).lean()));
+      return siteBillForOverdue(fullDocCache.get(id), dueDate);
+    };
+    const roundOff = (stored, whole, rows) => (whole !== null && Math.abs(whole - stored) <= rows ? whole : stored);
+
+    // [serial, code, name, type, state, city, district, owners, ownerNames, frequency, billDate, status, gstApply, rent, gst, total]
+    for (const media of mediaDocs) {
+      const faces = media.mediaDetails || [];
+      const owners = media.landOwners || [];
+      const ownerNames = joinUnique(owners.map((o) => o.name)) || "-";
+      const gstApply = isGstApplicableSite(media) ? "Yes" : "No";
+      const frequency = frequencyLabel(media); // ✅ NEW
+      const isCombined = Number(media.siteBillMode) === 1 || (faces.length > 0 && Number(faces[0].siteBillMode) === 1);
+
+      // bills of this site in the period, by month → by row (combined site: one row; else one row per face)
+      const groups = new Map();
+      (media.rentalDue || []).forEach((bill) => {
+        const key = billMonthKey(bill);
+        if (key === null || !monthByKey.has(key)) return;
+        const face = bill.mediaDetailId ? faces.find((f) => String(f._id) === String(bill.mediaDetailId)) : null;
+        if (bill.mediaDetailId && !face) return; // stale bill of a removed face
+        const rowKey = `${key}|${isCombined || !face ? "site" : String(face._id)}`;
+        if (!groups.has(rowKey)) groups.set(rowKey, { key, face: isCombined ? null : face, bills: [] });
+        groups.get(rowKey).bills.push(bill);
+      });
+
+      for (const { key, face, bills } of groups.values()) {
+        const shownFaces = face ? [face] : faces.filter(faceMatchesCity);
+        if (!shownFaces.length) continue; // city filter
+        // combined site with faces in other cities → that share of the bill
+        const share = face || !cityKey ? 1 : shownFaces.length / (faces.length || 1);
+        // ✅ CHANGED — withGst 2 (Direct GST): netPayable already includes the GST → rent = netPayable − gstAmount
+        const rentOf = (b) =>
+          Number(b.withGst) === 2 ? Math.max(0, Number(b.netPayable || 0) - Number(b.gstAmount || 0)) : Number(b.netPayable || 0);
+        let rentSum = bills.reduce((s, b) => s + rentOf(b), 0);
+        let gstSum = bills.reduce((s, b) => s + Number(b.gstAmount || 0), 0);
+        const dueDates = bills.map((b) => b.dueDate).filter(Boolean).sort((a, b) => new Date(a) - new Date(b));
+        if (!face && bills.length > 1) {
+          const whole = await wholeBillOf(media._id, dueDates[0]);
+          if (whole) {
+            rentSum = roundOff(rentSum, whole.rent, bills.length);
+            gstSum = roundOff(gstSum, whole.gst, bills.length);
+          }
+        }
+        const rent = Math.round(rentSum * share);
+        const gst = Math.round(gstSum * share);
+        monthByKey.get(key).rows.push([
+          0,
+          joinUnique(shownFaces.map((f) => f.mediaCode)) || "-",
+          joinUnique(shownFaces.map((f) => f.mediaName)) || "-",
+          joinUnique(shownFaces.map((f) => f.mediaType)) || "-",
+          joinUnique(shownFaces.map((f) => f.state)) || "-",
+          joinUnique(shownFaces.map((f) => f.city)) || "-",
+          joinUnique(shownFaces.map((f) => f.district)) || "-",
+          owners.length,
+          ownerNames,
+          frequency, // ✅ NEW — Payment Frequency
+          formatDMY(dueDates[0]),
+          combinedStatus(bills),
+          gstApply,
+          rent,
+          gst,
+          rent + gst,
+        ]);
+      }
+
+      // ✅ NEW — a month with a billing cycle but no generated bill yet (e.g. a future month): the bill that WILL
+      // be generated — same cycles as rental-due-list / ledger (getAllDueCycles), rent as of the cycle date
+      // (appraisal-aware), expected GST of the cycle
+      const billedKeys = new Set([...groups.values()].map((grp) => grp.key));
+      const activeFaces = faces.filter((f) => Number(f.status) === 1);
+      const projectedFaces = activeFaces.filter(faceMatchesCity);
+      if (projectedFaces.length) {
+        const share = cityKey ? projectedFaces.length / (activeFaces.length || 1) : 1;
+        for (const m of months) {
+          if (billedKeys.has(m.key)) continue;
+          const year = Math.floor(m.key / 12);
+          const monthIdx = m.key % 12;
+          let cycles = [];
+          try {
+            cycles = getAllDueCycles(media, { year, month: monthIdx + 1 }) || [];
+          } catch (err) {
+            cycles = [];
+          }
+          const cycle = cycles[cycles.length - 1];
+          if (!cycle || cycle.getUTCFullYear() !== year || cycle.getUTCMonth() !== monthIdx) continue;
+          const rent = Math.round(Number(getRentForDueDate(media, cycle) || 0) * share);
+          const gst = Math.round(Number(resolveExpectedGstForCycle(mediaAsOfDate(media, cycle)) || 0) * share);
+          if (rent <= 0 && gst <= 0) continue;
+          const row = [
+            0,
+            joinUnique(projectedFaces.map((f) => f.mediaCode)) || "-",
+            joinUnique(projectedFaces.map((f) => f.mediaName)) || "-",
+            joinUnique(projectedFaces.map((f) => f.mediaType)) || "-",
+            joinUnique(projectedFaces.map((f) => f.state)) || "-",
+            joinUnique(projectedFaces.map((f) => f.city)) || "-",
+            joinUnique(projectedFaces.map((f) => f.district)) || "-",
+            owners.length,
+            ownerNames,
+            frequency, // ✅ NEW — Payment Frequency
+            formatDMY(cycle),
+            cycle.getTime() > now.getTime() ? "Upcoming (Not Generated)" : "Not Generated",
+            gstApply,
+            rent,
+            gst,
+            rent + gst,
+          ];
+          row.projected = true; // not a cell — counted in the total rows
+          m.rows.push(row);
+        }
+      }
+    }
+
+    // ── sheet (same design as the Rental OOH Excel) ──
+    // ✅ CHANGED — + Payment Frequency (column J) after Landowner Name
+    const LAST_COL = 15;
+    const COL_OWNERS = 7;
+    const COL_FREQUENCY = 9;
+    const COL_BILL_DATE = 10;
+    const COL_STATUS = 11;
+    const COL_GST_APPLY = 12;
+    const COL_RENT = 13, COL_GST = 14, COL_TOTAL = 15;
+    const blankRow = (first) => [first, ...Array(LAST_COL).fill("")];
+    const colHeaders = [
+      "Month", "Media Code", "Media Name", "Media Type", "State", "City", "District / Town",
+      "Total Landowners", "Landowner Name", "Payment Frequency", "Bill Date", "Approval Status", "GST Applicable",
+      "Rent Amount (₹)", "GST Amount (₹)", "Total Amount (₹)",
+    ];
+    const NOTE_TEXT = "Note: Rent Amount is the bill amount (TDS included). Total Amount = Rent Amount + GST Amount. Upcoming (Not Generated) = bill of that month not generated yet — expected amounts.";
+    const noteRowIdx = 2;
+    const headerRowIdx = 3;
+    const FREEZE_ROWS = 4; // title, period, note, column headers
+    const FREEZE_COLS = 2; // ✅ CHANGED — columns A (month) + B (Media Code) stay on the left while scrolling right
+
+    const startLabel = months[0].label;
+    const endLabel = months[months.length - 1].label;
+    const periodLabel = months.length > 1 ? `${startLabel} - ${endLabel}` : startLabel;
+    const periodText = (months.length > 1 ? `${startLabel} to ${endLabel}` : startLabel) + (cityName ? ` | City: ${cityName}` : "");
+
+    const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
+    const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, alignment: { vertical: "center", wrapText: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+    const styleTotalRow = (isEven) => ({ fill: { fgColor: { rgb: isEven ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } });
+    const styleGrandTotal = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    const styleData = { border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+    const styleNote = { font: { bold: true, italic: true, color: { rgb: "C00000" } }, alignment: { horizontal: "left", vertical: "center", wrapText: true } };
+    const numFormat = "₹ #,##,##0";
+
+    const aoa = [];
+    const merges = [];
+    aoa.push(blankRow("GENERATED BILLS REPORT"));
+    merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST_COL } });
+    aoa.push(blankRow(`Report Period: ${periodText}`));
+    merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST_COL } });
+    aoa.push(blankRow(NOTE_TEXT));
+    merges.push({ s: { r: noteRowIdx, c: 0 }, e: { r: noteRowIdx, c: LAST_COL } });
+    aoa.push(colHeaders);
+
+    let grandRent = 0, grandGst = 0, grandBills = 0, grandUpcoming = 0;
+    const monthTotalRows = new Set(); // ✅ NEW
+    months.filter((m) => m.rows.length).forEach(({ label, rows }) => {
+      const monthHeaderIdx = aoa.length;
+      aoa.push(blankRow(`🗓️ ${label.toUpperCase()}`));
+      merges.push({ s: { r: monthHeaderIdx, c: 0 }, e: { r: monthHeaderIdx, c: LAST_COL } });
+
+      rows.sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+      let monthRent = 0, monthGst = 0;
+      rows.forEach((row, idx) => {
+        row[0] = ""; // ✅ CHANGED — no S.No (column A stays for the month / total labels)
+        monthRent += row[COL_RENT];
+        monthGst += row[COL_GST];
+      });
+      aoa.push(...rows);
+
+      const totalRowIdx = aoa.length;
+      monthTotalRows.add(totalRowIdx); // ✅ NEW — styled by index (no icon)
+      const upcoming = rows.filter((r) => r.projected).length; // ✅ NEW
+      aoa.push([`${label.toUpperCase()} TOTAL`, "", "", "", "", "", "", "", "", "", `${rows.length} bill(s) (Generated ${rows.length - upcoming} · Upcoming ${upcoming})`, "", "", monthRent, monthGst, monthRent + monthGst]);
+      merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 6 } });
+      aoa.push([]);
+
+      grandRent += monthRent;
+      grandGst += monthGst;
+      grandBills += rows.length;
+      grandUpcoming += upcoming;
+    });
+
+    const grandTotalIdx = aoa.length;
+    aoa.push([`GRAND TOTAL (${periodLabel})`, "", "", "", "", "", "", "", "", "", `${grandBills} bill(s) (Generated ${grandBills - grandUpcoming} · Upcoming ${grandUpcoming})`, "", "", grandRent, grandGst, grandRent + grandGst]);
+    merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 6 } });
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["A1"].s = { fill: { fgColor: { rgb: "FFFFFF" } }, font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    ws["A2"].s = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+    ws[XLSX.utils.encode_cell({ r: noteRowIdx, c: 0 })].s = styleNote;
+
+    const centered = new Set([0, COL_OWNERS, COL_FREQUENCY, COL_BILL_DATE, COL_STATUS, COL_GST_APPLY, COL_RENT, COL_GST, COL_TOTAL]);
+    let monthCounter = 0;
+    for (let r = 0; r < aoa.length; r++) {
+      for (let c = 0; c <= LAST_COL; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        if (!ws[addr]) continue;
+        const first = aoa[r][0] ? String(aoa[r][0]) : "";
+        if (r === headerRowIdx) ws[addr].s = styleHeader;
+        else if (first.startsWith("🗓️")) ws[addr].s = styleMonthHeader;
+        else if (monthTotalRows.has(r)) {
+          ws[addr].s = styleTotalRow(monthCounter % 2 === 0);
+          if (c >= COL_RENT) ws[addr].z = numFormat;
+          if (c === LAST_COL) monthCounter++;
+        } else if (r === grandTotalIdx) {
+          ws[addr].s = styleGrandTotal;
+          if (c >= COL_RENT) ws[addr].z = numFormat;
+        } else if (r > headerRowIdx && aoa[r].length > 0) {
+          ws[addr].s = { ...styleData, alignment: { vertical: "center", wrapText: true, horizontal: centered.has(c) ? "center" : "left" } };
+          if (c >= COL_RENT) ws[addr].z = numFormat;
+        }
+      }
+    }
+
+    ws["!merges"] = merges;
+    ws["!freeze"] = { xSplit: String(FREEZE_COLS), ySplit: String(FREEZE_ROWS), topLeftCell: `C${FREEZE_ROWS + 1}`, activePane: "bottomRight", state: "frozen" };
+    ws["!views"] = [{ state: "frozen", xSplit: FREEZE_COLS, ySplit: FREEZE_ROWS, topLeftCell: `C${FREEZE_ROWS + 1}`, activePane: "bottomRight" }];
+    ws["!cols"] = [
+      { wch: 22 }, // A: Month #
+      { wch: 20 }, // B: Media Code
+      { wch: 40 }, // C: Media Name
+      { wch: 20 }, // D: Media Type
+      { wch: 18 }, // E: State
+      { wch: 18 }, // F: City
+      { wch: 18 }, // G: District
+      { wch: 18 }, // H: Total Landowners
+      { wch: 35 }, // I: Landowner Name
+      { wch: 20 }, // J: Payment Frequency ✅ NEW
+      { wch: 16 }, // K: Bill Date
+      { wch: 20 }, // L: Approval Status
+      { wch: 16 }, // M: GST Applicable
+      { wch: 20 }, // N: Rent Amount
+      { wch: 18 }, // O: GST Amount
+      { wch: 20 }, // P: Total Amount
+    ];
+    ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 22 }, { hpt: 35 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Generated Bills");
+    const rawBuffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    const buffer = freezeHeaderInXlsxBuffer(rawBuffer, FREEZE_ROWS, FREEZE_COLS);
+
+    const fileCity = cityName ? `_${cityName.replace(/[^a-zA-Z0-9-]+/g, "_")}` : "";
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename=Rental_OOH_Bills_${fromMonth}_to_${toMonth}${fileCity}.xlsx`);
+    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+    return res.send(buffer);
+  } catch (error) {
+    console.error("Generated bills Excel error:", error);
+    return errorResponse(res, "Failed to generate the generated bills Excel", error.message, 500);
+  }
+};
+
+module.exports = { downloadGeneratedBillsExcel };

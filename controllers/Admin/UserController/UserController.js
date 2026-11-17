@@ -16,6 +16,7 @@ const TEAMHEAD_REGISTER_PASSWORD = process.env.TEAMHEAD_REGISTER_PASSWORD;
 const CMD_REGISTER_PASSWORD = process.env.CMD_REGISTER_PASSWORD || process.env.OWNER_REGISTER_PASSWORD;
 const OTHER_REGISTER_PASSWORD = process.env.OTHER_REGISTER_PASSWORD || process.env.Other_REGISTER_PASSWORD; // ✅ NEW — userType 4
 const ACCOUNTS_REGISTER_PASSWORD = process.env.ACCOUNTS_REGISTER_PASSWORD; // ✅ NEW — userType 5
+const ADMIN_REGISTER_PASSWORD = process.env.ADMIN_REGISTER_PASSWORD; // ✅ NEW — userType 6
 
 const STAFF_LOGIN_PIN = process.env.STAFF_LOGIN_PIN || "1234";
 const TEAMHEAD_LOGIN_PIN = process.env.TEAMHEAD_LOGIN_PIN || "1234";
@@ -31,12 +32,13 @@ const USER_TYPE_LABELS = {
   3: "CMD",
   4: "Other",
   5: "Accounts", // ✅ NEW
+  6: "Admin", // ✅ NEW
 };
 
 // ✅ NEW — userType 4 (Other) and 5 (Accounts) can only register and log in
-const REGISTER_LOGIN_USER_TYPES = [1, 2, 3, 4, 5];
+const REGISTER_LOGIN_USER_TYPES = [1, 2, 3, 4, 5, 6]; // ✅ CHANGED — + 6 Admin
 const REGISTER_LOGIN_USER_TYPE_MESSAGE =
-  "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD), 4 (Other), 5 (Accounts)";
+  "Valid userType is required: 1 (Rental Executive), 2 (Rental Manager), 3 (CMD), 4 (Other), 5 (Accounts), 6 (Admin)";
 
 const logLoginLookup = (phone, userType, matched) => {
   if (process.env.NODE_ENV === "production") return;
@@ -120,6 +122,19 @@ const registerUser = async (req, res) => {
       }
       if (registerPassword !== ACCOUNTS_REGISTER_PASSWORD) {
         return errorResponse(res, "Invalid Accounts registration password", null, 400);
+      }
+    }
+
+    // ✅ NEW — userType 6 (Admin): registration password is always required
+    if (typeNum === 6) {
+      if (!ADMIN_REGISTER_PASSWORD) {
+        return errorResponse(res, "Admin registration is not enabled (ADMIN_REGISTER_PASSWORD is not set)", null, 400);
+      }
+      if (!registerPassword) {
+        return errorResponse(res, "Admin registration password is required", null, 400);
+      }
+      if (registerPassword !== ADMIN_REGISTER_PASSWORD) {
+        return errorResponse(res, "Invalid Admin registration password", null, 400);
       }
     }
 

@@ -16,6 +16,8 @@ const ROW = new RegExp(
   "^(\\d{2}[-/.]\\d{2}[-/.]\\d{4})\\s+(?:([A-Za-z]{3,9}[-\\s]\\d{2,4})\\s+)?(.+?)\\s+([\\d,]+(?:\\.\\d{1,2})?)\\s+(.+?)\\s+(\\d{6,20})\\s+([A-Za-z]{4}0[A-Za-z0-9]{6})\\s+(.+?)\\s+(" + TYPES + ")\\s+(\\S+)(?:\\s+(.+))?$",
   "i",
 );
+// ✅ NEW — the start of a real bank row: its date, then (with no other date in between) the account number + IFSC
+const ROW_HEAD = /^\d{2}[-/.]\d{2}[-/.]\d{4}\s+(?:(?!\b\d{2}[-/.]\d{2}[-/.]\d{4}\b).)+?\s\d{6,20}\s+[A-Za-z]{4}0[A-Za-z0-9]{6}\s/i;
 const HEADER = /Bank\s+Reference\s*[|\s]*Narration/i;
 const END = /Total\s+Amount|Thanks\s*(?:&|and)\s*Regards|Regards,|\bOn\s+\w{3},\s+\w{3}\s+\d{1,2},\s+\d{4}\b/i;
 
@@ -44,8 +46,12 @@ function extractBankRows(text) {
     const e = END.exec(rest);
     const region = (e ? rest.slice(0, e.index) : rest.slice(0, 1500)).trim();
     from = start;
-    // a row starts at every DD-MM-YYYY
-    const starts = [...region.matchAll(/\b\d{2}[-/.]\d{2}[-/.]\d{4}\b/g)].map((m) => m.index);
+    // a row starts at a DD-MM-YYYY that is followed (before any other date) by the account number + IFSC;
+    // ✅ CHANGED — a date INSIDE the narration ("Rent For 01.11.2026 to 30.04.2027") is not a new row any more
+    // (it cut the narration). No such date at all → every date, as before (an unparsable row is still reported).
+    const dates = [...region.matchAll(/\b\d{2}[-/.]\d{2}[-/.]\d{4}\b/g)].map((m) => m.index);
+    const heads = dates.filter((s) => ROW_HEAD.test(region.slice(s)));
+    const starts = heads.length ? heads : dates;
     starts.forEach((s, i) => {
       const chunk = region.slice(s, starts[i + 1] ?? region.length).trim();
       const m = ROW.exec(chunk);

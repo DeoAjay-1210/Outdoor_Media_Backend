@@ -23,10 +23,10 @@ const LEDGER_LIB = {
 
 // Roles 1-4 (Rental Executive, Rental Manager, CMD, Other/view-only).
 // Deliberately stricter than the dashboard's helper, which also admits role 5.
-const ALLOWED_ROLES = [1, 2, 3, 4];
+const ALLOWED_ROLES = [1, 2, 3, 4, 5, 6]; // ✅ CHANGED — + 5 Accounts, 6 Admin
 const allowedRole = (req) => ALLOWED_ROLES.includes(Number(req.user?.userType));
 // ✅ NEW — /report-analytics/overview only: every role (1-5)
-const OVERVIEW_ROLES = [1, 2, 3, 4, 5];
+const OVERVIEW_ROLES = [1, 2, 3, 4, 5, 6]; // ✅ CHANGED — + 6 Admin
 const overviewAllowedRole = (req) => OVERVIEW_ROLES.includes(Number(req.user?.userType));
 
 // face fields every chart reads: names / type / city for filters and labels, status for the site-status filter

@@ -4,7 +4,7 @@ process.env.JWT_SECRET = "test-secret";
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const XLSX = require("xlsx-js-style");
-const { buildUtrTracker, trackerWorkbook } = require("../utils/utrTracker");
+const { buildUtrTracker, trackerWorkbook, byBillMonth } = require("../utils/utrTracker");
 
 const NOW = new Date("2026-11-11T06:00:00Z").getTime();
 const BILL = "ADNOOHBILL0911202691";
@@ -90,19 +90,21 @@ test("T5. dates outside the period are not listed; the Excel is month by month w
   const data = await run([media(), oct]);
   assert.deepEqual(data.rows.map((r) => r["Month"]), ["October 2026", "November 2026"]);
   const wb = XLSX.read(trackerWorkbook(data), { type: "buffer" });
-  // one tab per approval day: the latest day first, older days to the right; no Waiting / Needs Review tabs
-  assert.deepEqual(wb.SheetNames, ["09 Nov 2026", "03 Nov 2026"]);
-  const older = XLSX.utils.sheet_to_json(wb.Sheets["03 Nov 2026"], { header: 1, defval: "" });
-  assert.deepEqual(older.map((r) => r[0]).filter((x) => /TOTAL|^[A-Z]+ 20\d\d$/.test(x)), ["OCTOBER 2026", "OCTOBER 2026 TOTAL (1 bill)", "GRAND TOTAL (1 bill)"]);
+  // ONE sheet (Rental OOH design): title, period, note, header; month rows with 🗓️; S.No in column A
+  assert.deepEqual(wb.SheetNames, ["UTR Tracker"]);
   assert.equal((await run([media(), oct], [], {})).rows.length, 2); // from / to are optional: no date = all dates
-  const aoa = XLSX.utils.sheet_to_json(wb.Sheets["09 Nov 2026"], { header: 1, defval: "" });
-  assert.match(aoa[0][0], /UTR TRACKER REPORT - 09 NOV 2026/);
-  assert.equal(aoa[1][0], "Approval Date: 09 Nov 2026");
-  assert.equal(aoa[2][0], "Month");
-  assert.ok(!aoa[2].includes("Last Checked"));
-  assert.deepEqual(aoa.map((r) => r[0]).filter((x) => /TOTAL|^[A-Z]+ 20\d\d$/.test(x)), ["NOVEMBER 2026", "NOVEMBER 2026 TOTAL (1 bill)", "GRAND TOTAL (1 bill)"]);
+  const aoa = XLSX.utils.sheet_to_json(wb.Sheets["UTR Tracker"], { header: 1, defval: "" });
+  assert.equal(aoa[0][0], "UTR TRACKER REPORT");
+  assert.match(aoa[1][0], /^Approval Period: /);
+  assert.match(aoa[2][0], /^Note: /);
+  assert.equal(aoa[3][0], "Month");
+  assert.ok(!aoa[3].includes("Last Checked"));
+  assert.deepEqual(aoa.map((r) => r[0]).filter((x) => /TOTAL|^🗓️ [A-Z]+ 20\d\d$/.test(x)), ["🗓️ OCTOBER 2026", "OCTOBER 2026 TOTAL (1 bill)", "🗓️ NOVEMBER 2026", "NOVEMBER 2026 TOTAL (1 bill)", "GRAND TOTAL (2 bills)"]);
+  assert.equal(aoa[aoa.findIndex((r) => r[0] === "🗓️ OCTOBER 2026") + 1][0], 1, "S.No in column A");
   const grand = aoa.find((r) => String(r[0]).startsWith("GRAND TOTAL"));
-  assert.deepEqual(grand.slice(10, 13), [5000, 0, 5000]);
+  const rentSum = data.rows.reduce((t, r) => t + r["Total Rental Amount"], 0);
+  const gstSum = data.rows.reduce((t, r) => t + r["GST Amount"], 0);
+  assert.deepEqual(grand.slice(10, 13), [rentSum, gstSum, rentSum + gstSum]); // every month in one grand total
 });
 
 test("T6. New Bill with a Cash + Online landlord: ONE row, the Online line needs the UTR, Cash is automatic (no line for it)", async () => {
@@ -162,7 +164,7 @@ test("T16. Excel: Paid Date and Narration sit right after GST UTR; every empty c
   const data = await run([media({ ledger: [{ ...paid("o1", "Online", "UTR111111111111"), date: new Date("2026-11-09T10:30:00Z") }] })]);
   const wb = XLSX.read(trackerWorkbook(data), { type: "buffer" });
   const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "" });
-  const head = aoa[2];
+  const head = aoa[3];
   assert.deepEqual(head.slice(head.indexOf("GST UTR"), head.indexOf("GST UTR") + 6), ["GST UTR", "Paid Date", "Bank Ref No", "Rent Narration", "GST Narration", "Status"]);
   const row = aoa.find((r) => r[3] === BILL);
   assert.equal(row[head.indexOf("Paid Date")], "09 Nov 2026");
@@ -227,7 +229,7 @@ test("T21. Bank Ref No column: the Bank Reference of the saved payments, per lan
   const r = (await run([saved])).rows[0];
   assert.equal(r["Bank Ref No"], "ADINN121162291, -");
   const wb = XLSX.read(trackerWorkbook(await run([saved])), { type: "buffer" });
-  const head = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "" })[2];
+  const head = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "" })[3];
   assert.deepEqual(head.slice(head.indexOf("Paid Date"), head.indexOf("Paid Date") + 4), ["Paid Date", "Bank Ref No", "Rent Narration", "GST Narration"]);
 });
 
@@ -242,4 +244,17 @@ test("T22. New Bill / Advance: the Bank Ref No column comes from the bill's paym
     const r = (await run([media({ rentalDue: [{ _id: "p1", withGst: 2 }], arrearsDue: [bill] })])).rows[0];
     assert.deepEqual([r["Rent UTR"], r["Bank Ref No"], r["Rent Narration"]], ["UTR111111111111", "ADINN0411001", "NB narration"], type);
   }
+});
+
+test("T23. export from / to = BILL month: a November request lists November bills only, whatever day they were approved", () => {
+  const row = (bill, month, status = "Saved") => ({ "Bill Number": bill, Status: status, _monthKey: month });
+  const data = { rows: [row("A", "September 2026"), row("B", "October 2026"), row("C", "November 2026"), row("D", "November 2026", "Waiting for UTR"), row("E", "December 2026")] };
+  const nov = byBillMonth(data, "2026-11-01", "2026-11-30");
+  assert.deepEqual(nov.rows.map((r) => r["Bill Number"]), ["C", "D"]);
+  assert.deepEqual([nov.summary.total, nov.summary.saved, nov.summary.waiting], [2, 1, 1]);
+  assert.equal(nov.periodText, "Bill Month: November 2026");
+  assert.equal(byBillMonth(data, "2026-10-01", "2026-11-30").periodText, "Bill Month: October 2026 to November 2026");
+  assert.equal(byBillMonth(data).rows.length, 5, "no from / to = every month");
+  const aoa = XLSX.utils.sheet_to_json(XLSX.read(trackerWorkbook({ ...nov, rows: [] }), { type: "buffer" }).Sheets["UTR Tracker"], { header: 1, defval: "" });
+  assert.equal(aoa[1][0], "Bill Month: November 2026");
 });

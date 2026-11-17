@@ -19,13 +19,15 @@ const { successResponse, errorResponse } = require("../../../utils/response");
 
 const CMD_ROLE = 3;
 const isCmd = (req) => Number(req.user?.userType) === CMD_ROLE;
+// Gmail connection (login / status / disconnect): Rental Executive (1), Rental Manager (2) and CMD (3) may use it
+const canConnectGmail = (req) => [1, 2, CMD_ROLE].includes(Number(req.user?.userType));
 const STATE_PURPOSE = "gmail-oauth";
 
 const fail = (res, err, fallback) => errorResponse(res, fallback, err.message, err.status || 500);
 
 // GET /api/gmail/oauth/url
 const getAuthUrl = (req, res) => {
-  if (!isCmd(req)) return errorResponse(res, "Only CMD can authorize Gmail", null, 403);
+  if (!canConnectGmail(req)) return errorResponse(res, "Only Rental Executive, Rental Manager or CMD can connect Gmail", null, 403);
   try {
     // stateless CSRF protection: a short-lived signed token the callback must hand back
     const state = jwt.sign({ purpose: STATE_PURPOSE, userId: req.user.userId }, process.env.JWT_SECRET, { expiresIn: "10m" });
@@ -42,9 +44,11 @@ const getAuthUrl = (req, res) => {
 const oauthCallback = async (req, res) => {
   const { code, state, error } = req.query;
   if (error) return errorResponse(res, "Google authorization was not granted", String(error), 400);
+  let decodedUser = "";
   try {
     const decoded = jwt.verify(String(state || ""), process.env.JWT_SECRET);
     if (decoded.purpose !== STATE_PURPOSE) throw new Error("wrong state");
+    decodedUser = String(decoded.userId || "");
   } catch (_) {
     return errorResponse(res, "Invalid or expired state. Start again from /api/gmail/oauth/url", null, 400);
   }
@@ -60,11 +64,10 @@ const oauthCallback = async (req, res) => {
         409
       );
     }
-    Gmail.saveEnvValue("GOOGLE_REFRESH_TOKEN", tokens.refresh_token);
-    // verify the new token really works, without exposing it
-    const profile = await Gmail.getProfile();
-    return successResponse(res, "Gmail authorized. Refresh token saved to the server environment.", {
-      account: profile.emailAddress,
+    // verify the token, then store it ENCRYPTED in MongoDB: every server on this database uses the connected account
+    const connected = await Gmail.connectWithRefreshToken(tokens.refresh_token, decodedUser);
+    return successResponse(res, "Gmail connected. The login token is saved in the database.", {
+      account: connected.email,
       scope: Gmail.SCOPES,
       refreshTokenSaved: true,
     });
@@ -73,6 +76,26 @@ const oauthCallback = async (req, res) => {
   }
 };
 
+// GET /api/gmail/status  (CMD only) -> which Gmail account is connected (never the token)
+const connectionStatusApi = async (req, res) => {
+  if (!canConnectGmail(req)) return errorResponse(res, "Only Rental Executive, Rental Manager or CMD can see the Gmail connection", null, 403);
+  try {
+    return successResponse(res, "Gmail connection", await Gmail.connectionStatus());
+  } catch (err) {
+    return fail(res, err, "Could not read the Gmail connection");
+  }
+};
+
+// DELETE /api/gmail/disconnect  (CMD only) -> removes the stored login token
+const disconnectApi = async (req, res) => {
+  if (!canConnectGmail(req)) return errorResponse(res, "Only Rental Executive, Rental Manager or CMD can disconnect Gmail", null, 403);
+  try {
+    await Gmail.disconnect();
+    return successResponse(res, "Gmail disconnected. The stored token was deleted.", { connected: false });
+  } catch (err) {
+    return fail(res, err, "Could not disconnect Gmail");
+  }
+};
 
 // GET /api/gmail/test-utr?billNumber=adinnooh0511202601[&maxResults=10]
 const testUtr = async (req, res) => {
@@ -179,8 +202,10 @@ const utrTrackerExport = async (req, res) => {
   if ((from && (!ymd.test(from) || Number.isNaN(Date.parse(from)))) || (to && (!ymd.test(to) || Number.isNaN(Date.parse(to))))) return errorResponse(res, "from and to must be YYYY-MM-DD", null, 400);
   if (from && to && from > to) return errorResponse(res, "from must not be after to", null, 400);
   try {
-    const { buildUtrTracker, trackerWorkbook } = require("../../../utils/utrTracker");
-    const data = await buildUtrTracker({ from: from || undefined, to: to || undefined });
+    const { buildUtrTracker, trackerWorkbook, byBillMonth } = require("../../../utils/utrTracker");
+    // ✅ CHANGED — from / to select the BILL month (e.g. 2026-11-01..2026-11-30 → November 2026 bills only),
+    // whatever day CMD approved them (was: bills CMD-approved between from and to, of any bill month)
+    const data = byBillMonth(await buildUtrTracker({}), from || undefined, to || undefined);
     const buffer = trackerWorkbook(data);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="${from || to ? `utr-tracker-${from || "start"}_to_${to || "latest"}` : "utr-tracker-all"}.xlsx"`);
@@ -191,4 +216,4 @@ const utrTrackerExport = async (req, res) => {
   }
 };
 
-module.exports = { getAuthUrl, oauthCallback, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi, utrTrackerExport };
+module.exports = { getAuthUrl, oauthCallback, connectionStatusApi, disconnectApi, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi, utrTrackerExport };

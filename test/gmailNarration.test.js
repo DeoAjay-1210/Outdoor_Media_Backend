@@ -53,6 +53,17 @@ test("N4. two bank rows (two landlords) are read as two rows; a row that cannot 
   assert.equal(extractBankRows(table("04-11-2026 garbage without bank fields"))[0].unparsed.startsWith("04-11-2026"), true);
 });
 
+test("N4b. dates INSIDE the narration (Rent For 01.11.2026 to 30.04.2027) are kept — they do not start a new row", () => {
+  const p = "14-11-2026 Nov-26 P.Iyyappan Hoarding 49500 P IYYAPPAN INDIAN BANK 6566930111 IDIB000P123 AXIS 9445 NEFT ADINN141162348 Panrutti Bus Stand Inside Hoarding Rent For 01.11.2026 to 30.04.2027";
+  assert.deepEqual(extractBankRows(table(p)).map((r) => [r.reference, r.narration]), [["ADINN141162348", "Panrutti Bus Stand Inside Hoarding Rent For 01.11.2026 to 30.04.2027"]]);
+  // two rows, both narrations with dates: still two rows, each narration whole
+  const q = "14-11-2026 Nov-26 Ravi Kumar Hoarding 5000 Ravi Kumar STATE BANK OF INDIA 111111111111 SBIN0001234 AXIS 9445 NEFT ADINN0411001 Nov rent for 01.11.2026 to 30.11.2026";
+  assert.deepEqual(extractBankRows(table(p, q)).map((r) => [r.reference, r.narration]), [
+    ["ADINN141162348", "Panrutti Bus Stand Inside Hoarding Rent For 01.11.2026 to 30.04.2027"],
+    ["ADINN0411001", "Nov rent for 01.11.2026 to 30.11.2026"],
+  ]);
+});
+
 test("N5. no table / a table without narration -> no narration", () => {
   assert.deepEqual(extractBankRows("UTR : HDFC92023012200543116"), []);
   const empty = extractBankRows(table("04-11-2026 Nov-26 B SIVAKUMAR 15000 B SIVAKUMAR INDIAN BANK 6566930110 IDIB000N079 AXIS 9445 NEFT ADINN041161985"));
