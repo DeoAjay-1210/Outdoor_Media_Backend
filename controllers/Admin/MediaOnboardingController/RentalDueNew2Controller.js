@@ -62,7 +62,7 @@ const combineDateWithCurrentTime = (dateInput) => {
   if (!dateInput) return now;
   const d = new Date(dateInput);
   if (!isNaN(d.getTime())) {
-    d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+    d.setUTCHours(now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds()); // ✅ FIXED — UTC fields: nowIST() is already +5:30, local setHours shifted late-evening entries to the previous day
   }
   return d;
 };

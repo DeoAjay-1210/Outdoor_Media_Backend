@@ -201,7 +201,7 @@ function planCorrections(statements, stored) {
 const combineDate = (day) => { // same stamp the ledger engine uses for a typed Paid Date
   const d = new Date(day);
   const now = new Date(Date.now() + 330 * 60000);
-  if (!Number.isNaN(d.getTime())) d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+  if (!Number.isNaN(d.getTime())) d.setUTCHours(now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds()); // ✅ FIXED — UTC fields: nowIST() is already +5:30, local setHours shifted late-evening entries to the previous day
   return d;
 };
 
