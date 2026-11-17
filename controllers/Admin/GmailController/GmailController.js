@@ -202,8 +202,10 @@ const utrTrackerExport = async (req, res) => {
   if ((from && (!ymd.test(from) || Number.isNaN(Date.parse(from)))) || (to && (!ymd.test(to) || Number.isNaN(Date.parse(to))))) return errorResponse(res, "from and to must be YYYY-MM-DD", null, 400);
   if (from && to && from > to) return errorResponse(res, "from must not be after to", null, 400);
   try {
-    const { buildUtrTracker, trackerWorkbook } = require("../../../utils/utrTracker");
-    const data = await buildUtrTracker({ from: from || undefined, to: to || undefined });
+    const { buildUtrTracker, trackerWorkbook, byBillMonth } = require("../../../utils/utrTracker");
+    // ✅ CHANGED — from / to select the BILL month (e.g. 2026-11-01..2026-11-30 → November 2026 bills only),
+    // whatever day CMD approved them (was: bills CMD-approved between from and to, of any bill month)
+    const data = byBillMonth(await buildUtrTracker({}), from || undefined, to || undefined);
     const buffer = trackerWorkbook(data);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="${from || to ? `utr-tracker-${from || "start"}_to_${to || "latest"}` : "utr-tracker-all"}.xlsx"`);

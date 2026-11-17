@@ -403,6 +403,39 @@ async function buildUtrTracker(opts = {}, deps = {}) {
   return { from: opts.from, to: opts.to, summary, rows };
 }
 
+// ✅ NEW — keep only the bills whose BILL month is between from and to (YYYY-MM-DD, month part only),
+// whatever day CMD approved them; summary recounted. data = buildUtrTracker() of all approval dates.
+const MONTH_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function byBillMonth(data, from, to) {
+  const keyOfYmd = (ymd) => { const [y, m] = String(ymd).split("-").map(Number); return y * 12 + (m - 1); };
+  const keyOfLabel = (label) => {
+    const [mon, year] = String(label || "").trim().split(/\s+/);
+    const idx = MONTH_FULL.findIndex((n) => n.slice(0, 3).toLowerCase() === String(mon || "").slice(0, 3).toLowerCase());
+    return idx === -1 || !Number(year) ? null : Number(year) * 12 + idx;
+  };
+  const lo = from ? keyOfYmd(from) : -Infinity;
+  const hi = to ? keyOfYmd(to) : Infinity;
+  const rows = (data.rows || []).filter((r) => { const k = keyOfLabel(r._monthKey); return k !== null && k >= lo && k <= hi; });
+  const label = (k) => `${MONTH_FULL[k % 12]} ${Math.floor(k / 12)}`;
+  const periodText = from || to
+    ? `Bill Month: ${from ? label(lo) : "Start"}${lo === hi ? "" : ` to ${to ? label(hi) : "Latest"}`}`
+    : "Bill Month: All months";
+  return {
+    ...data,
+    from,
+    to,
+    periodText,
+    rows,
+    summary: {
+      total: rows.length,
+      saved: rows.filter((r) => r.Status === "Saved").length,
+      partial: rows.filter((r) => r.Status === "Partially saved").length,
+      waiting: rows.filter((r) => r.Status === "Waiting for UTR").length,
+      review: rows.filter((r) => r.Status === "Needs review").length,
+    },
+  };
+}
+
 // ───────────────────────── Excel (same look as the Approved Sites report) ─────────────────────────
 const COLS = [
   ["Month", 16], ["Approval Date", 15], ["Bill Type", 14], ["Bill Number", 25], ["Site Code", 22], ["Site Name", 34], ["Landlord Name", 30],
@@ -430,7 +463,10 @@ function trackerWorkbook(data) {
     month: { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, alignment: { vertical: "center" }, border },
     total: (even) => ({ fill: { fgColor: { rgb: even ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" } }),
     grand: { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center" } },
+    note: { font: { bold: true, italic: true, color: { rgb: "C00000" } }, alignment: { horizontal: "left", vertical: "center", wrapText: true } }, // ✅ NEW
   };
+  // ✅ NEW — same design as the Rental OOH Excel: note row, month rows with 🗓️, S.No in column A
+  const NOTE_TEXT = "Note: Saved = UTR entered in the ledger; Partially saved = some parts still need the UTR; Waiting for UTR = reply not received yet; Needs review = see the Error column.";
   const STATUS_COLOR = { "Saved": "38761D", "Partially saved": "2F5597", "Waiting for UTR": "C55A11", "Needs review": "C00000" };
 
   const sheet = (rows, label, opts = {}) => {
@@ -438,8 +474,9 @@ function trackerWorkbook(data) {
     const kind = []; // row type per aoa row
     const merges = [];
     const blank = (first) => [first, ...Array(LAST).fill("")];
-    aoa.push(blank(`UTR TRACKER REPORT - ${label.toUpperCase()}`)); kind.push("title"); merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST } });
-    aoa.push(blank(opts.period || (data.from && data.to ? `Approval Period: ${fmtLong(data.from)} to ${fmtLong(data.to)}` : "Approval Period: All dates"))); kind.push("period"); merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST } });
+    aoa.push(blank(label ? `UTR TRACKER REPORT - ${label.toUpperCase()}` : "UTR TRACKER REPORT")); kind.push("title"); merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST } });
+    aoa.push(blank(opts.period || data.periodText /* ✅ NEW — bill month period */ || (data.from && data.to ? `Approval Period: ${fmtLong(data.from)} to ${fmtLong(data.to)}` : "Approval Period: All dates"))); kind.push("period"); merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST } });
+    aoa.push(blank(NOTE_TEXT)); kind.push("note"); merges.push({ s: { r: 2, c: 0 }, e: { r: 2, c: LAST } }); // ✅ NEW
     aoa.push(COLS.map((c) => c[0])); kind.push("head");
 
     const totals = (labelText, list) => {
@@ -454,8 +491,12 @@ function trackerWorkbook(data) {
     let even = 0;
     months.forEach((m) => {
       const name = String(m.key || "No month").toUpperCase();
-      aoa.push(blank(name)); kind.push("month"); merges.push({ s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: LAST } });
-      m.list.forEach((r) => { aoa.push(COLS.map((c) => (r[c[0]] === "" || r[c[0]] === null || r[c[0]] === undefined ? "-" : r[c[0]]))); kind.push("data"); }); // an empty cell shows "-"
+      aoa.push(blank(`🗓️ ${name}`)); kind.push("month"); merges.push({ s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: LAST } });
+      m.list.forEach((r, i) => {
+        const cells = COLS.map((c) => (r[c[0]] === "" || r[c[0]] === null || r[c[0]] === undefined ? "-" : r[c[0]]));
+        cells[0] = i + 1; // ✅ CHANGED — column A = S.No within the month (the month is on the month row)
+        aoa.push(cells); kind.push("data");
+      }); // an empty cell shows "-"
       aoa.push(totals(`${name} TOTAL (${m.list.length} ${m.list.length === 1 ? "bill" : "bills"})`, m.list)); kind.push(even++ % 2 === 0 ? "total0" : "total1");
       merges.push({ s: { r: aoa.length - 1, c: 0 }, e: { r: aoa.length - 1, c: COL_RENT - 1 } });
       aoa.push([]); kind.push("gap");
@@ -476,6 +517,7 @@ function trackerWorkbook(data) {
         const isAmount = c >= COL_RENT && c <= COL_TOTAL;
         if (k === "title") ws[addr].s = S.title;
         else if (k === "period") ws[addr].s = S.period;
+        else if (k === "note") ws[addr].s = S.note; // ✅ NEW
         else if (k === "head") ws[addr].s = S.head;
         else if (k === "month") ws[addr].s = S.month;
         else if (k === "total0" || k === "total1") { ws[addr].s = S.total(k === "total0"); if (isAmount) ws[addr].z = money; }
@@ -491,24 +533,17 @@ function trackerWorkbook(data) {
     }
     ws["!merges"] = merges;
     ws["!cols"] = COLS.map((c) => ({ wch: c[1] }));
-    ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 35 }];
-    ws["!views"] = [{ state: "frozen", xSplit: 0, ySplit: 3, topLeftCell: "A4", activePane: "bottomLeft" }];
+    ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 22 }, { hpt: 35 }];
+    // ✅ CHANGED — title, period, note, header + column A stay while scrolling
+    ws["!views"] = [{ state: "frozen", xSplit: 1, ySplit: 4, topLeftCell: "B5", activePane: "bottomRight" }];
     return ws;
   };
 
   const wb = XLSX.utils.book_new();
-  // one tab per CMD approval day (India time): the latest day first (left), the older days to the right
-  const dayOf = (r) => new Date((r._approvedMs || 0) + 330 * 60 * 1000).toISOString().slice(0, 10);
-  const days = new Map();
-  data.rows.forEach((r) => { const k = r._approvedMs ? dayOf(r) : ""; if (!days.has(k)) days.set(k, []); days.get(k).push(r); });
-  const keys = [...days.keys()].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : b.localeCompare(a)));
-  if (!keys.length) XLSX.utils.book_append_sheet(wb, sheet([], "No bills", { period: "Approval Period: No bills found" }), "UTR Tracker");
-  keys.forEach((k) => {
-    const name = k ? fmtLong(k) : "No approval date";
-    XLSX.utils.book_append_sheet(wb, sheet(days.get(k), name, { period: k ? `Approval Date: ${name}` : "Approval Date: not available" }), name);
-  });
+  // ✅ CHANGED — ONE sheet, month by month (was one tab per CMD approval day); rows are already sorted by month
+  XLSX.utils.book_append_sheet(wb, sheet(data.rows, ""), "UTR Tracker");
   const raw = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-  try { return require("../controllers/Admin/MediaOnboardingController/RentalOOHExcelController").freezeHeaderInXlsxBuffer(raw, 3); } catch (_) { return raw; } // header rows stay while scrolling
+  try { return require("../controllers/Admin/MediaOnboardingController/RentalOOHExcelController").freezeHeaderInXlsxBuffer(raw, 4, 1); } catch (_) { return raw; } // header rows stay while scrolling
 }
 
-module.exports = { buildUtrTracker, trackerWorkbook, replyFormat };
+module.exports = { buildUtrTracker, trackerWorkbook, replyFormat, byBillMonth };
