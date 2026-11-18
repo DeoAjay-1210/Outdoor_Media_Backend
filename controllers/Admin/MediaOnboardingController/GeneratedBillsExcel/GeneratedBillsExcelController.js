@@ -87,14 +87,15 @@ const frequencyLabel = (media) => {
 const billRentOf = (b) =>
   Number(b.withGst) === 2 ? Math.max(0, Number(b.netPayable || 0) - Number(b.gstAmount || 0)) : Number(b.netPayable || 0);
 
-// ✅ NEW — a bill NOT approved yet that was generated at the rent before an
+// ✅ NEW — a bill (pending OR approved) that was generated at the rent before an
 // appraisal applying to its month (the appraisal was added after the bill):
 // ratio appraisal rent ÷ stored rent, so the Excel matches site-filter /
 // rental-due-list (getRentForDueDate). 1 = keep the stored amounts:
-// approved bills, no appraisal for the month, or the bill is not at the
-// appraisal's previous rent (priced some other way — left as stored).
+// no appraisal for the month, or the bill is not at the appraisal's previous
+// rent (priced some other way — left as stored).
+// ✅ CHANGED — approved bills are re-priced too (same rule as site-filter approvedAmountTotal)
 function appraisalRepriceRatio(media, bills, dueDate, storedSiteRent) {
-  if (!dueDate || bills.every((b) => Number(b.approvalStatus) === 3)) return 1;
+  if (!dueDate) return 1;
   const due = new Date(dueDate);
   const dueKey = monthKey(due.getUTCFullYear(), due.getUTCMonth());
   const nowKey = monthKey(new Date().getUTCFullYear(), new Date().getUTCMonth());
@@ -380,7 +381,7 @@ const downloadGeneratedBillsExcel = async (req, res) => {
             gstSum = roundOff(gstSum, whole.gst, bills.length);
           }
         }
-        // ✅ NEW — bill not approved yet, generated at the rent BEFORE an appraisal that applies to its
+        // ✅ NEW — bill (pending or approved) generated at the rent BEFORE an appraisal that applies to its
         // month (appraisal added after the bill) → the appraisal rent (same as site-filter / rental-due-list)
         const ratio = appraisalRepriceRatio(media, bills, dueDates[0], storedMonthRent.get(key));
         if (ratio !== 1) {
