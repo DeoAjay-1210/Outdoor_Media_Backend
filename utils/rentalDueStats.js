@@ -158,7 +158,28 @@ const finalizeOwnerBucket = (bucket) =>
 // ✅ NEW — opts.overdueByRole (opt-in, landowner/site-filter only): with a
 // targetRole, overdue = past-due bills WAITING ON that role (same rule as
 // pending), current and past months. Without it overdue stays role independent.
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false }) {
+// ✅ NEW — opts.pastOverdueOnly (opt-in, landowner/site-filter only): overdue
+// counts PAST months only — the current month's overdue is not added.
+// ✅ NEW — opts.overdueByMonth (opt-in): stats.overdueMonths = past-month
+// overdue breakdown [{ month, siteCount, amount, landOwnerCount }], oldest first.
+// ✅ NEW — opts.pastApprovedInMonth (opt-in): stats.pastApprovedInMonth = PAST
+// month bills approved inside this month (approvalSteps[].approvedAt), at that
+// bill month's own rent + GST. With targetRole → that role's approval date.
+// ✅ NEW — opts.pastPendingByMonth (opt-in): stats.pastMonthPending = PAST month
+// bills still not approved (same bills as the past overdue) with rent / GST split,
+// + totalPendingThisMonth (past + this month's pending). pastApprovedInMonth also
+// adds totalApprovedThisMonth (past approved in this month + this month's approved).
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false }) {
+  const overdueMonthBuckets = overdueByMonth || pastPendingByMonth ? new Map() : null; // ✅ NEW
+  const pastApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map(), months: new Map() } : null; // ✅ NEW
+  // ✅ NEW — this month's approved / pending faces + landowners (for the combined totals)
+  const curApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map() } : null;
+  const curPending = pastPendingByMonth ? { faces: new Set(), owners: new Map() } : null;
+  const trackCur = (acc, media, faceId, amount) => {
+    if (!acc) return;
+    acc.faces.add(`${String(media._id)}_${faceId}`);
+    addFaceToOwnerBucket(acc.owners, media, faceId, amount);
+  };
   const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   // ✅ NEW — opts.dueThisMonthByRole (opt-in, landowner/site-filter only): with a
   // targetRole, dueThisMonth counts only this month's bills WAITING ON that role
@@ -233,6 +254,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           stats.approvedCount += 1;
           stats.approvedAmountTotal += faceAmount;
            trackOwner("approved", media, faceId, faceAmount);
+          trackCur(curApproved, media, faceId, faceAmount); // ✅ NEW
           if (onFace) onFace({ media, face, entry, amount: faceAmount, state: "approved", cycle: cycleSummary, rolePending: false });
           continue;
         }
@@ -250,6 +272,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           stats.pendingCount += 1;
           stats.pendingAmountTotal += faceAmount;
           trackOwner("pending", media, faceId, faceAmount);
+          trackCur(curPending, media, faceId, faceAmount); // ✅ NEW
         }
         if (!isOpenOverall) continue;
         if (roleOverdue && !isOpen) continue; // ✅ NEW — not waiting on this role → not its overdue
@@ -259,7 +282,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         const isOverdue =
           (!overdueFrom && Number(media.rentalPayment?.status) === 3) ||
           (overdueDate && new Date(overdueDate) < today);
-        if (isOverdue) {
+        if (isOverdue && !pastOverdueOnly) { // ✅ CHANGED — pastOverdueOnly: current month not added
           overdueFaces.add(faceId);
           stats.overdueAmountTotal += faceAmount;
           stats.dueAmountOpen += faceAmount;
@@ -295,11 +318,20 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         const faceId = String(face._id);
         const entry = pastSiteBillEntry !== undefined ? pastSiteBillEntry : pickFaceEntry(pastCycleEntries, faceId);
         if (faceFilter && !faceFilter(entry, media, face)) continue;
+        // ✅ NEW — pastApprovedInMonth: this past bill approved inside this month
+        if (pastApproved && approvedAtInRange(entry, targetRole, monthStart, monthEnd)) {
+          const gstShare = Number(pastSummary.currentMonthGstAmount || 0) / faceCount;
+          addToMonthBucket(pastApproved.months, cycleLabel, cycleYear * 12 + cycleMonthIdx, media, faceId, pastFaceAmount, gstShare);
+          pastApproved.faces.add(`${String(media._id)}_${faceId}`);
+          addFaceToOwnerBucket(pastApproved.owners, media, faceId, pastFaceAmount);
+        }
         const { isOpen } = roleStatus(entry, null); // overdue is role independent
         if (!isOpen) continue;
         // ✅ NEW — overdueByRole: only past bills waiting on this role
         if (roleOverdue && !roleStatus(entry, targetRole, { pendingAtRoleOnly }).isOpen) continue;
         overdueFaces.add(faceId);
+        // ✅ NEW — overdueByMonth: past-month breakdown
+        if (overdueMonthBuckets) addToMonthBucket(overdueMonthBuckets, cycleLabel, cycleYear * 12 + cycleMonthIdx, media, faceId, pastFaceAmount, Number(pastSummary.currentMonthGstAmount || 0) / faceCount);
         stats.overdueAmountTotal += pastFaceAmount;
         if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate, gstShare: Number(pastSummary.currentMonthGstAmount || 0) / faceCount });
         trackOwner("overdue", media, faceId, pastFaceAmount);
@@ -318,7 +350,129 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
     };
   }
 
+  // ✅ NEW — combined total: past month part + this month part, sites and
+  // landowners counted once even when they are in both
+  const combinedTotal = (pastPart, cur, curAmount, curCount) => {
+    const faces = new Set([...pastPart.faces, ...cur.faces]);
+    const owners = new Set([...pastPart.ownerKeys, ...cur.owners.keys()]);
+    const currentMonthTotalAmount = Math.round(curAmount);
+    return {
+      pastMonthTotalAmount: pastPart.totalAmount,
+      currentMonth: `${MONTH_NAMES[month - 1]} ${year}`,
+      currentMonthTotalAmount,
+      currentMonthSiteCount: curCount,
+      currentMonthLandOwnerCount: cur.owners.size,
+      totalAmount: pastPart.totalAmount + currentMonthTotalAmount,
+      siteCount: faces.size,
+      landOwnerCount: owners.size,
+    };
+  };
+
+  // ✅ NEW — past month bills still not approved (opt-in)
+  if (pastPendingByMonth) {
+    const months = finalizeMonthBuckets(overdueMonthBuckets);
+    const faces = new Set();
+    const ownerKeys = new Set();
+    overdueMonthBuckets.forEach((b) => {
+      b.faces.forEach((f) => faces.add(f));
+      b.owners.forEach((_, k) => ownerKeys.add(k));
+    });
+    const totalAmount = months.reduce((s, m) => s + m.totalAmount, 0);
+    stats.pastMonthPending = {
+      currentMonth: `${MONTH_NAMES[month - 1]} ${year}`,
+      siteCount: faces.size,
+      amount: months.reduce((s, m) => s + m.amount, 0),
+      gstAmount: months.reduce((s, m) => s + m.gstAmount, 0),
+      totalAmount,
+      landOwnerCount: ownerKeys.size,
+      months,
+      totalPendingThisMonth: combinedTotal({ faces, ownerKeys, totalAmount }, curPending, stats.pendingAmountTotal, stats.pendingCount),
+    };
+  }
+
+  // ✅ NEW — past-month overdue breakdown (opt-in)
+  if (overdueByMonth) {
+    stats.overdueMonths = finalizeMonthBuckets(overdueMonthBuckets).map(({ month: m, siteCount, totalAmount, landOwnerCount }) => ({
+      month: m,
+      siteCount,
+      amount: totalAmount,
+      landOwnerCount,
+    }));
+  }
+  // ✅ NEW — past bills approved inside this month (opt-in)
+  if (pastApproved) {
+    const months = finalizeMonthBuckets(pastApproved.months);
+    stats.pastApprovedInMonth = {
+      approvedMonth: `${MONTH_NAMES[month - 1]} ${year}`,
+      siteCount: pastApproved.faces.size,
+      amount: months.reduce((s, m) => s + m.amount, 0),
+      gstAmount: months.reduce((s, m) => s + m.gstAmount, 0),
+      totalAmount: months.reduce((s, m) => s + m.totalAmount, 0),
+      landOwnerCount: pastApproved.owners.size,
+      months,
+    };
+    // ✅ NEW — every approval of this month: past month bills + this month's bill
+    stats.pastApprovedInMonth.totalApprovedThisMonth = combinedTotal(
+      { faces: pastApproved.faces, ownerKeys: new Set(pastApproved.owners.keys()), totalAmount: stats.pastApprovedInMonth.totalAmount },
+      curApproved,
+      stats.approvedAmountTotal,
+      stats.approvedCount,
+    );
+  }
+
   return stats;
+}
+
+// ✅ NEW — approval date of a bill inside [from, to]: targetRole given → that
+// role's step (approved); otherwise the bill must be fully approved and its
+// last step approval date is used. approvedAt is stored nowIST-style, so it is
+// compared as-is with the UTC month bounds (no local-time conversion).
+function approvedAtInRange(entry, targetRole, from, to) {
+  if (!entry) return null;
+  const steps = entry.approvalSteps || [];
+  let at = null;
+  if (targetRole !== null && targetRole !== undefined) {
+    const step = steps.find((s) => s.role === targetRole);
+    if (!step || step.status !== 2 || !step.approvedAt) return null;
+    at = new Date(step.approvedAt);
+  } else {
+    if (!isApprovedDue(entry)) return null;
+    steps.forEach((s) => {
+      if ((s.status === 2 || s.status === 3) && s.approvedAt) {
+        const d = new Date(s.approvedAt);
+        if (!at || d > at) at = d;
+      }
+    });
+  }
+  if (!at || Number.isNaN(at.getTime())) return null;
+  return at >= from && at <= to ? at : null;
+}
+
+// ✅ NEW — month-wise bucket: faces, landowners, rent + GST
+function addToMonthBucket(buckets, label, sortKey, media, faceId, totalAmount, gstAmount) {
+  if (!buckets.has(label)) buckets.set(label, { sortKey, faces: new Set(), owners: new Map(), total: 0, gst: 0 });
+  const b = buckets.get(label);
+  b.faces.add(`${String(media._id)}_${faceId}`);
+  b.total += totalAmount;
+  b.gst += gstAmount;
+  addFaceToOwnerBucket(b.owners, media, faceId, totalAmount);
+}
+
+function finalizeMonthBuckets(buckets) {
+  return Array.from(buckets.entries())
+    .sort((a, b) => a[1].sortKey - b[1].sortKey)
+    .map(([label, b]) => {
+      const totalAmount = Math.round(b.total);
+      const gstAmount = Math.round(b.gst);
+      return {
+        month: label,
+        siteCount: b.faces.size,
+        amount: totalAmount - gstAmount,
+        gstAmount,
+        totalAmount,
+        landOwnerCount: b.owners.size,
+      };
+    });
 }
 
 /**
@@ -327,7 +481,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
  * counts (approvedCount / pendingCount / overDue.siteCount).
  * @returns {Map<string, {approved:boolean, pending:boolean, overdue:boolean}>} keyed by face _id
  */
-function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false }) {
+// ✅ NEW — opts.pastOverdueOnly (opt-in): overdue = past months only (same as computeRentalDueStats)
+function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false, pastOverdueOnly = false }) {
   // ✅ NEW — overdueByRole: overdue only while waiting on targetRole (same as computeRentalDueStats)
   const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   const result = new Map();
@@ -364,6 +519,7 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
       const { isApproved, isOpen } = roleStatus(entry, targetRole, { pendingAtRoleOnly });
       if (isApproved) flags.approved = true;
       else if (isOpen) flags.pending = true;
+      if (pastOverdueOnly) continue; // ✅ NEW — current month never overdue
       // overdue is role independent → overall approval status
       if (!roleStatus(entry, null).isOpen) continue;
       if (roleOverdue && !isOpen) continue; // ✅ NEW — not waiting on this role
