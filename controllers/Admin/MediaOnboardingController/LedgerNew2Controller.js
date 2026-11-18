@@ -5532,7 +5532,8 @@ const details = (media.mediaDetails || []).map((d) => ({
   let fullGstBalanceHistoryUnfiltered = dedupeGstBalanceHistory(
     Array.isArray(media.gstBalanceHistory) ? media.gstBalanceHistory : [],
   ).map(entry => {
-    const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === entry.dueMonth);
+    // ✅ FIXED — approved bill of the month first (a stale pending duplicate row gave withGst 0)
+    const matchedDue = findRentalDueForMonth(media.rentalDue, entry.dueMonth);
     const isApproved = matchedDue?.approvalStatus === 3;
     // ✅ FIXED — Only trust withGst: 2 if the owner has appraised it.
     let effectiveWithGst = entry.withGst !== undefined ? entry.withGst : (isApproved ? (matchedDue?.withGst ?? 1) : 0);
@@ -5593,7 +5594,8 @@ const details = (media.mediaDetails || []).map((d) => ({
           }
 
           if (ownerGst > 0) {
-            const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+            // ✅ FIXED — approved bill of the month first (not a stale pending duplicate)
+            const matchedDue = findRentalDueForMonth(media.rentalDue, cycleMonthLabel);
             const isApproved = matchedDue?.approvalStatus === 3;
             const effectiveWithGst = isApproved ? (matchedDue?.withGst ?? 1) : 0;
 
@@ -5718,7 +5720,7 @@ const details = (media.mediaDetails || []).map((d) => ({
   // });
 let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistory || []).map(h => {
   const parsed = parseDueMonthLabel(h.dueMonth);
-  const matchedDue = (media.rentalDue || []).find(d => d.dueMonth === h.dueMonth);
+  const matchedDue = findRentalDueForMonth(media.rentalDue, h.dueMonth); // ✅ FIXED — approved bill first
   const inferredWithGst = matchedDue ? matchedDue.withGst : (resolveExpectedGstForCycle(media) > 0 ? 1 : 0);
 
   return {
@@ -5747,7 +5749,7 @@ let fullRentalOutstandingHistory = (media.rentalPayment?.rentalOutstandingHistor
     let latestBankRef = ""; // Bank Reference of the latest rent payment of this cycle
     // ✅ FIXED — rent/owner/GST amounts as of this cycle (appraisal-aware)
     const cycleMedia = mediaAsOfDate(media, cycleDate);
-const matchedDueForMonth = (media.rentalDue || []).find(d => d.dueMonth === cycleMonthLabel);
+const matchedDueForMonth = findRentalDueForMonth(media.rentalDue, cycleMonthLabel); // ✅ FIXED — approved bill first (stale pending duplicate gave withGst 0)
 const effectiveWithGstForMonth = matchedDueForMonth ? matchedDueForMonth.withGst : (resolveExpectedGstForCycle(cycleMedia) > 0 ? 1 : 0);
     matchingLandOwners.forEach((rawOwner) => {
       const owner = ownerAsOfDate(media, rawOwner, cycleDate);
@@ -7027,7 +7029,7 @@ const outstanding = computeOutstandingSummary(media, autoCurrentMonthYM);
           (d) => d && String(d._id) === linkId,
         );
       if (!due && !isSpecial) {
-        due = (media.rentalDue || []).find((d) => d && d.dueMonth === r.dueMonth);
+        due = findRentalDueForMonth(media.rentalDue, r.dueMonth); // ✅ FIXED — approved bill first
       }
       const pick = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== "");
       return {
