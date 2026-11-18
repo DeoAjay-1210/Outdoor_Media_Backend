@@ -83,6 +83,216 @@ const frequencyLabel = (media) => {
   return FREQUENCY_LABEL[freq] || "-";
 };
 
+// ✅ NEW — rent of one stored bill (withGst 2: netPayable already includes the GST)
+const billRentOf = (b) =>
+  Number(b.withGst) === 2 ? Math.max(0, Number(b.netPayable || 0) - Number(b.gstAmount || 0)) : Number(b.netPayable || 0);
+
+// ✅ NEW — a bill NOT approved yet that was generated at the rent before an
+// appraisal applying to its month (the appraisal was added after the bill):
+// ratio appraisal rent ÷ stored rent, so the Excel matches site-filter /
+// rental-due-list (getRentForDueDate). 1 = keep the stored amounts:
+// approved bills, no appraisal for the month, or the bill is not at the
+// appraisal's previous rent (priced some other way — left as stored).
+function appraisalRepriceRatio(media, bills, dueDate, storedSiteRent) {
+  if (!dueDate || bills.every((b) => Number(b.approvalStatus) === 3)) return 1;
+  const due = new Date(dueDate);
+  const dueKey = monthKey(due.getUTCFullYear(), due.getUTCMonth());
+  const nowKey = monthKey(new Date().getUTCFullYear(), new Date().getUTCMonth());
+  const applied = (media?.appraisal?.history || [])
+    .filter((h) => {
+      if (!h || !h.appraisalDate || h.isAnchorEntry) return false;
+      if (Number(h.appraisalAmount || 0) <= 0 || Number(h.previousRent || 0) <= 0) return false;
+      const d = new Date(h.appraisalDate);
+      if (Number.isNaN(d.getTime())) return false;
+      const k = monthKey(d.getUTCFullYear(), d.getUTCMonth());
+      return k <= dueKey && k <= nowKey;
+    })
+    .sort((a, b) => new Date(b.appraisalDate) - new Date(a.appraisalDate))[0];
+  if (!applied) return 1;
+  const stored = Number(storedSiteRent || 0);
+  if (stored <= 0 || Math.abs(stored - Number(applied.previousRent)) > bills.length) return 1;
+  const rentNow = Number(getRentForDueDate(media, dueDate) || 0);
+  if (rentNow <= 0 || Math.abs(rentNow - stored) <= bills.length) return 1;
+  return rentNow / stored;
+}
+
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — Pending Bills / Approved Bills sheets: same rows and design as the
+// Generated Bills sheet (generated bills only, no Upcoming rows) + the
+// Rental Executive / Manager / CMD approval date of the bill(s) and who it is
+// waiting on. approvedAt is stored nowIST-style → read with getUTC* (IST clock).
+// ─────────────────────────────────────────────────────────────
+const APPROVAL_ROLES = [
+  { role: 1, name: "Rental Executive" },
+  { role: 2, name: "Manager" },
+  { role: 3, name: "CMD" },
+];
+
+const formatDateTimeIST = (d) => {
+  const date = d ? new Date(d) : null;
+  if (!date || Number.isNaN(date.getTime())) return "-";
+  const h = date.getUTCHours();
+  const hh = String(h % 12 || 12).padStart(2, "0");
+  const mi = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${formatDMY(date)} ${hh}:${mi} ${h < 12 ? "AM" : "PM"}`;
+};
+
+// one role's cell for the bill(s) of a row: latest approval date / Skipped / Pending / - (role not in the flow)
+const roleApprovalCell = (bills, role) => {
+  const steps = bills.map((b) => (b.approvalSteps || []).find((s) => Number(s.role) === role)).filter(Boolean);
+  if (!steps.length) return "-";
+  if (steps.some((s) => Number(s.status) === 1 || !s.status)) return "Pending";
+  const approved = steps.filter((s) => Number(s.status) === 2);
+  if (!approved.length) return "Skipped";
+  const latest = approved
+    .map((s) => (s.approvedAt ? new Date(s.approvedAt) : null))
+    .filter((d) => d && !Number.isNaN(d.getTime()))
+    .sort((a, b) => b - a)[0];
+  return latest ? formatDateTimeIST(latest) : "Approved";
+};
+
+// who the bill(s) of a row are waiting on (earliest role still pending)
+const waitingOnCell = (bills) => {
+  if (bills.every((b) => Number(b.approvalStatus) === 3)) return "Completed";
+  const roles = bills
+    .filter((b) => Number(b.approvalStatus) !== 3)
+    .map((b) => {
+      const cur = Number(b.currentPendingRole || 0);
+      if (cur) return cur;
+      const step = (b.approvalSteps || []).find((s) => Number(s.status) === 1 || !s.status);
+      return step ? Number(step.role) : 1;
+    });
+  const role = Math.min(...roles);
+  return (APPROVAL_ROLES.find((r) => r.role === role) || {}).name || "-";
+};
+
+function buildApprovalSheet({ title, periodText, periodLabel, months }) {
+  // Generated Bills columns + 4 after Approval Status
+  const LAST_COL = 19;
+  const COL_OWNERS = 7, COL_FREQUENCY = 9, COL_BILL_DATE = 10, COL_STATUS = 11;
+  const COL_EXEC = 12, COL_MANAGER = 13, COL_CMD = 14, COL_WAITING = 15;
+  const COL_GST_APPLY = 16, COL_RENT = 17, COL_GST = 18, COL_TOTAL = 19;
+  const blankRow = (first) => [first, ...Array(LAST_COL).fill("")];
+  const colHeaders = [
+    "Month", "Media Code", "Media Name", "Media Type", "State", "City", "District / Town",
+    "Total Landowners", "Landowner Name", "Payment Frequency", "Bill Date", "Approval Status",
+    "Rental Executive Approved On", "Manager Approved On", "CMD Approved On", "Waiting On",
+    "GST Applicable", "Rent Amount (₹)", "GST Amount (₹)", "Total Amount (₹)",
+  ];
+  const NOTE_TEXT = "Note: Rent Amount is the bill amount (TDS included). Total Amount = Rent Amount + GST Amount. Approved On = date & time (IST) the role approved; Skipped = a higher role approved directly; Pending = not approved yet; - = role not in this bill's approval flow.";
+  const noteRowIdx = 2;
+  const headerRowIdx = 3;
+  const FREEZE_ROWS = 4;
+  const FREEZE_COLS = 2;
+
+  const styleHeader = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true }, border: { top: { style: "thin" }, bottom: { style: "thin" } } };
+  const styleMonthHeader = { fill: { fgColor: { rgb: "E9F0FD" } }, font: { color: { rgb: "002D62" }, bold: true }, alignment: { vertical: "center", wrapText: true }, border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+  const styleTotalRow = (isEven) => ({ fill: { fgColor: { rgb: isEven ? "003399" : "38761D" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } });
+  const styleGrandTotal = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+  const styleData = { border: { bottom: { style: "thin", color: { rgb: "D1D4D7" } } } };
+  const styleNote = { font: { bold: true, italic: true, color: { rgb: "C00000" } }, alignment: { horizontal: "left", vertical: "center", wrapText: true } };
+  const numFormat = "₹ #,##,##0";
+
+  const aoa = [];
+  const merges = [];
+  aoa.push(blankRow(title));
+  merges.push({ s: { r: 0, c: 0 }, e: { r: 0, c: LAST_COL } });
+  aoa.push(blankRow(`Report Period: ${periodText}`));
+  merges.push({ s: { r: 1, c: 0 }, e: { r: 1, c: LAST_COL } });
+  aoa.push(blankRow(NOTE_TEXT));
+  merges.push({ s: { r: noteRowIdx, c: 0 }, e: { r: noteRowIdx, c: LAST_COL } });
+  aoa.push(colHeaders);
+
+  let grandRent = 0, grandGst = 0, grandBills = 0;
+  const monthHeaderRows = new Set();
+  const monthTotalRows = new Set();
+  months.filter((m) => m.rows.length).forEach(({ label, rows }) => {
+    const monthHeaderIdx = aoa.length;
+    monthHeaderRows.add(monthHeaderIdx);
+    aoa.push(blankRow(`🗓️ ${label.toUpperCase()}`));
+    merges.push({ s: { r: monthHeaderIdx, c: 0 }, e: { r: monthHeaderIdx, c: LAST_COL } });
+
+    let monthRent = 0, monthGst = 0;
+    [...rows]
+      .sort((a, b) => String(a[1]).localeCompare(String(b[1])))
+      .forEach((row) => {
+        // [_, code … status (0-11), gstApply, rent, gst, total] → + 4 approval columns after status
+        const out = [
+          "", ...row.slice(1, 12),
+          ...APPROVAL_ROLES.map((r) => roleApprovalCell(row.bills, r.role)),
+          waitingOnCell(row.bills),
+          ...row.slice(12, 16),
+        ];
+        monthRent += Number(out[COL_RENT] || 0);
+        monthGst += Number(out[COL_GST] || 0);
+        aoa.push(out);
+      });
+
+    const totalRowIdx = aoa.length;
+    monthTotalRows.add(totalRowIdx);
+    const totalRow = blankRow(`${label.toUpperCase()} TOTAL`);
+    totalRow[COL_BILL_DATE] = `${rows.length} bill(s)`;
+    totalRow[COL_RENT] = monthRent;
+    totalRow[COL_GST] = monthGst;
+    totalRow[COL_TOTAL] = monthRent + monthGst;
+    aoa.push(totalRow);
+    merges.push({ s: { r: totalRowIdx, c: 0 }, e: { r: totalRowIdx, c: 6 } });
+    aoa.push([]);
+
+    grandRent += monthRent;
+    grandGst += monthGst;
+    grandBills += rows.length;
+  });
+
+  const grandTotalIdx = aoa.length;
+  const grandRow = blankRow(`GRAND TOTAL (${periodLabel})`);
+  grandRow[COL_BILL_DATE] = `${grandBills} bill(s)`;
+  grandRow[COL_RENT] = grandRent;
+  grandRow[COL_GST] = grandGst;
+  grandRow[COL_TOTAL] = grandRent + grandGst;
+  aoa.push(grandRow);
+  merges.push({ s: { r: grandTotalIdx, c: 0 }, e: { r: grandTotalIdx, c: 6 } });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["A1"].s = { fill: { fgColor: { rgb: "FFFFFF" } }, font: { size: 18, bold: true, color: { rgb: "002D62" } }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+  ws["A2"].s = { fill: { fgColor: { rgb: "002D62" } }, font: { color: { rgb: "FFFFFF" }, bold: true }, alignment: { horizontal: "center", vertical: "center", wrapText: true } };
+  ws[XLSX.utils.encode_cell({ r: noteRowIdx, c: 0 })].s = styleNote;
+
+  const centered = new Set([0, COL_OWNERS, COL_FREQUENCY, COL_BILL_DATE, COL_STATUS, COL_EXEC, COL_MANAGER, COL_CMD, COL_WAITING, COL_GST_APPLY, COL_RENT, COL_GST, COL_TOTAL]);
+  let monthCounter = 0;
+  for (let r = 0; r < aoa.length; r++) {
+    for (let c = 0; c <= LAST_COL; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) continue;
+      if (r === headerRowIdx) ws[addr].s = styleHeader;
+      else if (monthHeaderRows.has(r)) ws[addr].s = styleMonthHeader;
+      else if (monthTotalRows.has(r)) {
+        ws[addr].s = styleTotalRow(monthCounter % 2 === 0);
+        if (c >= COL_RENT) ws[addr].z = numFormat;
+        if (c === LAST_COL) monthCounter++;
+      } else if (r === grandTotalIdx) {
+        ws[addr].s = styleGrandTotal;
+        if (c >= COL_RENT) ws[addr].z = numFormat;
+      } else if (r > headerRowIdx && aoa[r].length > 0) {
+        ws[addr].s = { ...styleData, alignment: { vertical: "center", wrapText: true, horizontal: centered.has(c) ? "center" : "left" } };
+        if (c >= COL_RENT) ws[addr].z = numFormat;
+      }
+    }
+  }
+
+  ws["!merges"] = merges;
+  ws["!freeze"] = { xSplit: String(FREEZE_COLS), ySplit: String(FREEZE_ROWS), topLeftCell: `C${FREEZE_ROWS + 1}`, activePane: "bottomRight", state: "frozen" };
+  ws["!views"] = [{ state: "frozen", xSplit: FREEZE_COLS, ySplit: FREEZE_ROWS, topLeftCell: `C${FREEZE_ROWS + 1}`, activePane: "bottomRight" }];
+  ws["!cols"] = [
+    { wch: 22 }, { wch: 20 }, { wch: 40 }, { wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 18 },
+    { wch: 18 }, { wch: 35 }, { wch: 20 }, { wch: 16 }, { wch: 20 },
+    { wch: 24 }, { wch: 24 }, { wch: 24 }, { wch: 18 }, // approval dates + Waiting On
+    { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 20 },
+  ];
+  ws["!rows"] = [{ hpt: 35 }, { hpt: 25 }, { hpt: 22 }, { hpt: 35 }];
+  return ws;
+}
+
 const downloadGeneratedBillsExcel = async (req, res) => {
   try {
     const { fromMonth, toMonth } = req.query;
@@ -145,6 +355,13 @@ const downloadGeneratedBillsExcel = async (req, res) => {
         groups.get(rowKey).bills.push(bill);
       });
 
+      // ✅ NEW — stored rent of each month's bills (whole site) — for the appraisal re-price below
+      const storedMonthRent = new Map();
+      groups.forEach((grp) => {
+        const sum = grp.bills.reduce((s, b) => s + billRentOf(b), 0);
+        storedMonthRent.set(grp.key, (storedMonthRent.get(grp.key) || 0) + sum);
+      });
+
       for (const { key, face, bills } of groups.values()) {
         const shownFaces = face ? [face] : faces.filter(faceMatchesCity);
         if (!shownFaces.length) continue; // city filter
@@ -162,6 +379,13 @@ const downloadGeneratedBillsExcel = async (req, res) => {
             rentSum = roundOff(rentSum, whole.rent, bills.length);
             gstSum = roundOff(gstSum, whole.gst, bills.length);
           }
+        }
+        // ✅ NEW — bill not approved yet, generated at the rent BEFORE an appraisal that applies to its
+        // month (appraisal added after the bill) → the appraisal rent (same as site-filter / rental-due-list)
+        const ratio = appraisalRepriceRatio(media, bills, dueDates[0], storedMonthRent.get(key));
+        if (ratio !== 1) {
+          rentSum *= ratio;
+          gstSum *= ratio;
         }
         const rent = Math.round(rentSum * share);
         const gst = Math.round(gstSum * share);
@@ -183,6 +407,7 @@ const downloadGeneratedBillsExcel = async (req, res) => {
           gst,
           rent + gst,
         ]);
+        monthByKey.get(key).rows[monthByKey.get(key).rows.length - 1].bills = bills; // ✅ NEW — not a cell: for the Pending / Approved sheets
       }
 
       // ✅ NEW — a month with a billing cycle but no generated bill yet (e.g. a future month): the bill that WILL
@@ -362,6 +587,20 @@ const downloadGeneratedBillsExcel = async (req, res) => {
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Generated Bills");
+    // ✅ NEW — Pending Bills / Approved Bills sheets (generated bills only, with each role's approval date)
+    const generatedRowsOf = (pick) =>
+      months.map((m) => ({ label: m.label, rows: m.rows.filter((r) => !r.projected && Array.isArray(r.bills) && pick(r.bills)) }));
+    const isAllApproved = (bills) => bills.every((b) => Number(b.approvalStatus) === 3);
+    XLSX.utils.book_append_sheet(
+      wb,
+      buildApprovalSheet({ title: "PENDING BILLS REPORT", periodText, periodLabel, months: generatedRowsOf((b) => !isAllApproved(b)) }),
+      "Pending Bills",
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      buildApprovalSheet({ title: "APPROVED BILLS REPORT", periodText, periodLabel, months: generatedRowsOf(isAllApproved) }),
+      "Approved Bills",
+    );
     const rawBuffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
     const buffer = freezeHeaderInXlsxBuffer(rawBuffer, FREEZE_ROWS, FREEZE_COLS);
 
