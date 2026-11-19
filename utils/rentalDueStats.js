@@ -358,6 +358,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
     const currentMonthTotalAmount = Math.round(curAmount);
     return {
       pastMonthTotalAmount: pastPart.totalAmount,
+      pastMonthSiteCount: new Set(pastPart.faces).size, // ✅ NEW — distinct past-month sites (faces)
+      pastMonthLandOwnerCount: new Set(pastPart.ownerKeys).size, // ✅ NEW — distinct past-month landowners
       currentMonth: `${MONTH_NAMES[month - 1]} ${year}`,
       currentMonthTotalAmount,
       currentMonthSiteCount: curCount,
