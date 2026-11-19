@@ -546,4 +546,4 @@ function trackerWorkbook(data) {
   try { return require("../controllers/Admin/MediaOnboardingController/RentalOOHExcelController").freezeHeaderInXlsxBuffer(raw, 4, 1); } catch (_) { return raw; } // header rows stay while scrolling
 }
 
-module.exports = { buildUtrTracker, trackerWorkbook, replyFormat, byBillMonth };
+module.exports = { buildUtrTracker, trackerWorkbook, replyFormat, byBillMonth, explain }; // ✅ NEW — explain: error code → plain English (UTR error chat)

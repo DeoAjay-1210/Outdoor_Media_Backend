@@ -46,6 +46,7 @@ const gmailUtrLogSchema = new mongoose.Schema(
     replyLines: { type: [String], default: undefined }, // what Finance actually wrote (name + UTR / Cash lines) when the reply needed manual review
     dryRun: { type: Boolean, default: false },
     triggeredBy: { type: String, default: "api" }, // api | cron
+    chatNotifiedAt: { type: Date, default: null }, // ✅ NEW — when this error was posted to the UTR error Google Chat space (utils/utrErrorChat.js)
     createdAt: { type: Date, default: Date.now, expires: 180 * 24 * 3600 },
   },
   { versionKey: false },

@@ -221,6 +221,12 @@ function replyLinesOf(d) {
   if (!out.length) (d.wrongNames || []).forEach((w) => out.push(`${w.name ? w.name + " - " : ""}UTR : ${w.utr}`));
   return [...new Set(out)].slice(0, 12);
 }
+/** ✅ NEW — same Finance reply lines as the last log (order-free)? Missing on both sides = same. */
+const sameLines = (a, b) => {
+  const x = [...new Set((a || []).map(String))].sort();
+  const y = [...new Set((b || []).map(String))].sort();
+  return x.length === y.length && x.every((v, i) => v === y[i]);
+};
 /** Bill Numbers the reply lists together with this UTR (empty when it was not listed for several bills). */
 const commonBillsOf = (d, utr) => ((d && d.commonUtrBills) || {})[String(utr || "").toUpperCase()] || [];
 
@@ -272,7 +278,13 @@ function createUtrProcessor(deps = {}) {
   async function writeLog(entry, ctx) {
     if (ctx.dryRun) return;
     try {
-      await getLog().create({ runId: ctx.runId, triggeredBy: ctx.triggeredBy, dryRun: false, ...entry });
+      const logDoc = await getLog().create({ runId: ctx.runId, triggeredBy: ctx.triggeredBy, dryRun: false, ...entry });
+      // ✅ NEW — a wrong Finance reply → Google Chat (UTR_ERROR_CHAT_URL); not awaited, never throws
+      try {
+        require("./utrErrorChat").notifyUtrErrorChat(logDoc).catch(() => {});
+      } catch (chatErr) {
+        logger.error("[gmail-utr] chat notify skipped:", chatErr.message);
+      }
     } catch (err) {
       logger.error("[gmail-utr] could not write log:", err.message);
     }
@@ -281,7 +293,7 @@ function createUtrProcessor(deps = {}) {
   /** Skip bills whose last non-dry-run result is recent (saves Gmail quota). */
   async function inCooldown(item, c) {
     const last = await getLog().findOne({ billNumber: item.billNumber, dryRun: false }).sort({ createdAt: -1 }).lean();
-    item._last = last ? { status: last.status, reason: last.reason || "" } : null; // lets done() skip a log row that says nothing new
+    item._last = last ? { status: last.status, reason: last.reason || "", replyLines: last.replyLines || [] } : null; // ✅ CHANGED — + replyLines (a NEW wrong reply is logged) // lets done() skip a log row that says nothing new
     if (!last) return false;
     const age = Date.now() - new Date(last.createdAt).getTime();
     // utr_not_found: the approval mail is in Gmail and Finance has not replied yet -> look again on every run (cheap: one thread).
@@ -1118,7 +1130,8 @@ function createUtrProcessor(deps = {}) {
       // A block decided BEFORE Gmail is touched (list rules, switches) is re-evaluated on every run: it costs no Gmail call, so it
       // is neither logged nor put in a cooldown (a stale "blocked" log must never hide a bill after a switch or rule changes).
       if (status === "ambiguous_mapping" && BLOCKED_BEFORE_GMAIL.has(reason)) entry.preGmail = true;
-      else if (item._last && ["utr_not_found", "ambiguous_mapping"].includes(status) && item._last.status === status && item._last.reason === (reason || "")) {
+      else if (item._last && ["utr_not_found", "ambiguous_mapping"].includes(status) && item._last.status === status && item._last.reason === (reason || "") && sameLines(entry.replyLines, item._last.replyLines)) {
+        // ✅ CHANGED — + sameLines: Finance wrote a NEW (still wrong) reply -> a new log row (and its UTR error chat message)
         // re-read on every run and still the same answer: no new log row (bill_not_found is always logged: its backoff reads the log time)
       } else await writeLog(entry, ctx);
       return entry;
@@ -1428,6 +1441,10 @@ function createUtrProcessor(deps = {}) {
       logger.log(`[gmail-utr] run ${ctx.runId} ${summary.mode} start=${summary.startedAt} end=${summary.finishedAt} (${summary.durationMs} ms) scope="${list.scope}" pending=${list.totalPending} processed=${results.length} ${JSON.stringify(counts)}${aborted ? ` ABORTED:${aborted}` : ""}`);
       results.filter((r) => !r.preGmail).forEach((r) => logger.log(`[gmail-utr]   ${r.billNumber}${r.dueMonth ? ` [${r.dueMonth}]` : ""} -> ${r.status}${r.reason ? ` (${r.reason})` : ""}${r.utr ? ` utr=${maskUtr(r.utr)} paidDate=${r.paidDate || "-"} [${r.paidDateSource || "-"}] ${r.paymentType || ""}` : ""}${r.landlordMappings ? " " + r.landlordMappings.map((m) => `${m.landlord}=${maskUtr(m.utr)} paid ${m.paidDate} [${m.paidDateSource}] ${m.paymentMode}`).join(" | ") : ""}${r.splitPayments ? " " + r.splitPayments.map((m) => `${m.landlord ? m.landlord + " " : ""}${m.kind}=${maskUtr(m.utr)} paid ${m.paidDate} [${m.paidDateSource}]`).join(" | ") + (r.pendingKinds ? ` (still waiting: ${r.pendingKinds.join(",")})` : "") : ""}`));
       corrections.filter((x) => x.status !== "correction_skipped").forEach((x) => logger.log(`[gmail-utr]   CORRECTION ${x.billNumber} -> ${x.status}${x.reason ? ` (${x.reason})` : ""}${x.correctedUtr ? ` ${x.landlord} ${x.paymentKind} ${maskUtr(x.existingUtr)} => ${maskUtr(x.correctedUtr)}` : ""}`));
+      // ✅ NEW — UTR error chat catch-up: errors logged while the chat was off / failed are posted now (live runs only, not awaited, never throws)
+      if (!dryRun && !deps.getPending) {
+        try { require("./utrErrorChat").notifyPendingUtrErrors({ excludeRunId: ctx.runId }).catch(() => {}); } catch (chatErr) { logger.error("[gmail-utr] chat catch-up skipped:", chatErr.message); }
+      }
       if (Object.keys(summary.blockedBeforeGmail).length) logger.log(`[gmail-utr]   blocked before Gmail (manual review / switches off, re-checked every run, no Gmail call): ${JSON.stringify(summary.blockedBeforeGmail)}`);
       return { runId: ctx.runId, dryRun, triggeredBy: ctx.triggeredBy, startedAt: summary.startedAt, finishedAt: summary.finishedAt, scope: list.scope, pendingTotal: list.totalPending, processed: results.length, counts, aborted, results, corrections };
     } catch (err) {
