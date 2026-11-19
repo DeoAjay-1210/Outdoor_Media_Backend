@@ -2360,7 +2360,8 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
       const prior = !!historicalRows;
       const pending = !approved && !prior;
       const pastCycle = date.getUTCFullYear() * 12 + date.getUTCMonth() < capMonth;
-      const pastDue = !approved && (prior || pastCycle || Number(doc.rentalPayment?.status) === 3 || (toDate(x.entry?.dueDate) && toDate(x.entry.dueDate) < today));
+      // ✅ CHANGED — past months only: a current-month bill past its due date is no longer pastDue
+      const pastDue = !approved && (prior || pastCycle);
       emit(doc, date, { rental: share(rental, i), gst: direct ? share(gst, i) : 0, holdGst: direct ? 0 : share(gst, i) }, x.entry, x.face,
         { generated: !prior, approved: approved && !prior, pending, pastDue: !!pastDue },
         { kind: "cycle", priorPeriod: prior });
@@ -2369,7 +2370,8 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
   const opening = (doc, date, amount, hold, paid, row, prior = false) => {
     if (prior && paid) return;
     emit(doc, date, { rental: hold ? 0 : amount, gst: 0, holdGst: hold ? amount : 0 }, null, null,
-      { generated: !prior, approved: !prior && paid, pending: !prior && !paid, pastDue: !paid && date < today },
+      // ✅ CHANGED — pastDue = unpaid opening balance of a month BEFORE the current month (capMonth)
+      { generated: !prior, approved: !prior && paid, pending: !prior && !paid, pastDue: !paid && date.getUTCFullYear() * 12 + date.getUTCMonth() < capMonth },
       { kind: hold ? "openingGst" : "openingRent", openingId: idOf(row?._id), priorPeriod: prior, approvalStatus: paid ? "Paid opening balance" : "Unpaid opening balance" });
   };
   const selected = applySiteStatus(docs, f);
@@ -2386,6 +2388,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
     computeRentalDueStats([doc], {
       year: cap.getUTCFullYear(), month: cap.getUTCMonth() + 1, singleBillAsSite: true,
       onFace: (x) => {
+        if (!x.past) return; // ✅ CHANGED — current-month bills are never past due (past months only)
         if (!x.past && (capMonth >= startMonth || x.state === "approved")) return;
         const entryDate = toDate(x.entry?.dueDate);
         if (!x.past && Number(doc.rentalPayment?.status) !== 3 && !(entryDate && entryDate < today)) return;
