@@ -215,7 +215,10 @@ function utrAlreadyUsed(media, utr, opts = {}) {
 /** The reply lines of a thread as Finance wrote them (name - UTR / Cash), for the manual-review report. */
 function replyLinesOf(d) {
   const out = [];
-  for (const r of d.replies || []) for (const l of r.lines || []) out.push(l.line ? String(l.line) : `${l.name ? l.name + " - " : ""}UTR : ${l.utr}`);
+  for (const r of d.replies || []) {
+    for (const l of r.lines || []) out.push(l.line ? String(l.line) : `${l.name ? l.name + " - " : ""}UTR : ${l.utr}`);
+    for (const l of r.rejected || []) out.push(String(l.line)); // a named line whose "UTR" has no digit is still what Finance wrote
+  }
   for (const r of d.cashReplies || []) for (const l of r.cashLines || []) if (!l.fromBankApproval) out.push(String(l.line || l.name));
   if (!out.length && d.utr) { const names = d.utrLineNames && d.utrLineNames.length ? d.utrLineNames : [""]; names.forEach((n) => out.push(`${n ? n + " - " : ""}UTR : ${d.utr}`)); }
   if (!out.length) (d.wrongNames || []).forEach((w) => out.push(`${w.name ? w.name + " - " : ""}UTR : ${w.utr}`));
@@ -373,7 +376,7 @@ function createUtrProcessor(deps = {}) {
 
     // a landlord whose ONLY open payment is Cash must be named in a Cash line ("Landlord - Cash"); a UTR line for him is manual review
     const isCashOnly = (l) => l.state === "pending" && l.paymentMode === "Cash" && !l.cashCompanion;
-    const map = mapLandlords(reply.lines || [], pm.landlords.map((l) => (isCashOnly(l) ? { ...l, state: "settled", storedUtr: null } : l)));
+    const map = mapLandlords(reply.lines || [], pm.landlords.map((l) => (isCashOnly(l) ? { ...l, state: "settled", storedUtr: null } : l)), reply.rejected || []);
     if (!map.ok) return done("ambiguous_mapping", map.reasons[0].reason, { ...gm, landlordMappingProblems: map.reasons });
     const mail = validateAgainstMail(d.approvalMailLandlords, pm.landlords);
     if (mail.status === "mismatch") return done("ambiguous_mapping", mail.problems[0].reason, { ...gm, landlordMappingProblems: mail.problems });

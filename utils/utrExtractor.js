@@ -80,6 +80,13 @@ const findUtrInLine = (line) => {
   return { utr: m[2].toUpperCase(), labelStart: m.index, end: m.index + m[0].length };
 };
 
+// a labelled line whose value has NO digit ("Name - UTR : abcdefgh"): never a UTR, but the line is still what Finance wrote
+const findRejectedUtrInLine = (line) => {
+  const m = LINE_UTR.exec(String(line || ""));
+  if (!m || hasDigits(m[2])) return null;
+  return { value: m[2], labelStart: m.index, end: m.index + m[0].length };
+};
+
 /** All labelled UTR candidates in one text: [{ utr, label }] (document order, may repeat). */
 const findCandidates = (text) => {
   const out = [];
@@ -157,4 +164,4 @@ function extractCashLines(text) {
   return out;
 }
 
-module.exports = { joinWrappedValues, extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, stripQuoted, extractCashLines };
+module.exports = { joinWrappedValues, extractUtrFromThread, extractBillNumbers, findCandidates, findUtrInLine, findRejectedUtrInLine, stripQuoted, extractCashLines };

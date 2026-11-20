@@ -161,7 +161,8 @@ async function notifyUtrErrorChat(logDoc, deps = {}) {
 
     // one message per bill + error + reply mail (no reply id → per bill + error)
     const Model = logDoc && logDoc.constructor && typeof logDoc.constructor.find === "function" ? logDoc.constructor : null;
-    if (Model) {
+    // deps.resend (old-errors API with resend:true) skips this check
+    if (Model && !deps.resend) {
       const q = { billNumber: log.billNumber, reason: log.reason, chatNotifiedAt: { $ne: null }, _id: { $ne: log._id } };
       if (log.sourceMessageId) q.sourceMessageId = log.sourceMessageId;
       const hits = await Model.find(q).select("replyLines").lean();
@@ -188,8 +189,156 @@ async function notifyUtrErrorChat(logDoc, deps = {}) {
     return true;
   } catch (err) {
     console.error("[utr-error-chat] not sent:", err.message); // never the URL (it holds the key / token)
+    if (typeof deps.onFail === "function") deps.onFail(err.response?.status ? String(err.response.status) : err.message);
     return false;
   }
+}
+
+/** ✅ NEW — the UTR error space can be used: URL set and GOOGLE_CHAT not off. */
+const isUtrErrorChatReady = () => !!String(process.env.UTR_ERROR_CHAT_URL || "").trim() && isChatOn();
+
+// bills that still wait for a UTR (Rental Bill + New Bill / Advance); a bill paid since the error is not posted
+async function stillPendingBills(billNumbers) {
+  const { getPendingUtrBills } = require("./pendingUtrBills");
+  const { getPendingArrearsUtrBills } = require("./pendingArrearsUtrBills");
+  const opts = { billNumbers, limit: 100000 };
+  const [rental, arrears] = await Promise.all([getPendingUtrBills(opts), getPendingArrearsUtrBills(opts)]);
+  return new Set([...(rental.bills || []), ...(arrears.bills || [])].map((b) => String(b.billNumber)));
+}
+
+async function mediaCodesOf(mediaIds) {
+  const Media = require("../models/Admin/MediaOnboardingSchema/MediaOnboardingSchema");
+  const ids = [...new Set(mediaIds.filter(Boolean))];
+  const docs = ids.length ? await Media.find({ _id: { $in: ids } }).select("mediaDetails").lean() : [];
+  const map = new Map();
+  docs.forEach((m) => {
+    const faces = (m.mediaDetails || []).filter((f) => Number(f.status) === 1);
+    map.set(String(m._id), faces.map((f) => f.mediaCode).filter(Boolean).join(", "));
+  });
+  return map;
+}
+
+/**
+ * ✅ NEW — OLD wrong Finance replies → UTR error space (POST /api/gmail/utr-errors/notify-chat).
+ * The cron catch-up only covers the last 48 hours; this posts older errors on demand.
+ *   opts: { dryRun = true, from, to (YYYY-MM-DD, India date of the error log), billNumbers = [], resend = false, limit = 20 (max 50) }
+ * Per bill only its NEWEST log is used, and only when that newest log is still a Finance-fixable error
+ * (a later save / other result → skipped) and the bill still waits for a UTR (paid since → skipped).
+ * Messages go one by one with a gap (Google Chat allows ~1 message / second per space).
+ * deps (tests): { Log, notify, stillPending(billNumbers) -> Set, mediaCodes(ids) -> Map, gapMs }
+ */
+async function notifyOldUtrErrors(opts = {}, deps = {}) {
+  const dryRun = opts.dryRun !== false;
+  const resend = opts.resend === true;
+  const limit = Math.min(Math.max(Number(opts.limit) || 20, 1), 50);
+  const billNumbers = (Array.isArray(opts.billNumbers) ? opts.billNumbers : []).map((b) => String(b).trim()).filter(Boolean);
+  const Log = deps.Log || require("../models/Admin/GmailUtrLogSchema");
+  const notify = deps.notify || notifyUtrErrorChat;
+  const pendingOf = deps.stillPending || stillPendingBills;
+  const codesOf = deps.mediaCodes || mediaCodesOf;
+  const gapMs = deps.gapMs ?? 1100;
+  let explain = (c) => c;
+  try {
+    explain = require("./utrTracker").explain || explain;
+  } catch (err) {
+    /* keep the code */
+  }
+
+  const q = { dryRun: false, reason: new RegExp(`^(${[...USER_ERRORS].join("|")})(?![A-Za-z0-9_])`) };
+  if (opts.from || opts.to) {
+    q.createdAt = {};
+    if (opts.from) q.createdAt.$gte = new Date(`${opts.from}T00:00:00.000+05:30`);
+    if (opts.to) q.createdAt.$lte = new Date(`${opts.to}T23:59:59.999+05:30`);
+  }
+  if (billNumbers.length) q.billNumber = { $in: billNumbers };
+
+  // newest error log of each bill inside the range
+  const errorLogs = await Log.find(q).sort({ createdAt: -1 }).limit(5000);
+  const newestError = new Map();
+  for (const doc of errorLogs) if (!newestError.has(doc.billNumber)) newestError.set(doc.billNumber, doc);
+
+  const bills = [];
+  const candidates = [];
+  for (const [billNumber, doc] of newestError) {
+    const log = typeof doc.toObject === "function" ? doc.toObject() : doc;
+    const code = reasonCode(log.reason);
+    const item = {
+      billNumber,
+      mediaId: log.mediaId || "",
+      siteCode: "",
+      dueMonth: log.dueMonth || "",
+      billKind: log.billKind || "",
+      reason: code,
+      explanation: explain(code),
+      replyLines: log.replyLines || [],
+      repliedBy: log.senderEmail || "",
+      repliedAt: istDateTime(log.messageDate),
+      loggedAt: istDateTime(log.createdAt),
+      chatNotifiedAt: log.chatNotifiedAt ? istDateTime(log.chatNotifiedAt) : null,
+      status: "",
+    };
+    bills.push(item);
+    const newest = await Log.findOne({ billNumber, dryRun: false }).sort({ createdAt: -1 }).select("_id status reason").lean();
+    if (newest && String(newest._id) !== String(log._id)) {
+      item.status = "skipped_newer_result";
+      item.newerResult = { status: newest.status, reason: newest.reason || "" };
+    } else if (log.chatNotifiedAt && !resend) {
+      item.status = "skipped_already_sent";
+    } else {
+      candidates.push({ item, doc });
+    }
+  }
+
+  // bills paid since the error (manual UTR entry etc.) are not posted
+  const pending = candidates.length ? await pendingOf(candidates.map((c) => c.item.billNumber)) : new Set();
+  const toSend = [];
+  for (const c of candidates) {
+    if (!pending.has(c.item.billNumber)) c.item.status = "skipped_already_paid";
+    else if (toSend.length >= limit) c.item.status = "over_limit";
+    else {
+      c.item.status = "will_send";
+      toSend.push(c);
+    }
+  }
+
+  try {
+    const codes = await codesOf(bills.map((b) => b.mediaId));
+    bills.forEach((b) => (b.siteCode = codes.get(String(b.mediaId)) || ""));
+  } catch (err) {
+    /* site code is display only */
+  }
+
+  if (!dryRun) {
+    for (let i = 0; i < toSend.length; i += 1) {
+      const { item, doc } = toSend[i];
+      let failReason = "";
+      const ok = await notify(doc, { resend, onFail: (r) => (failReason = r) });
+      if (ok) item.status = "sent";
+      else if (failReason) {
+        item.status = "failed";
+        item.error = failReason;
+      } else item.status = "skipped_already_sent"; // the same reply was already posted from another log row
+      if (i < toSend.length - 1 && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
+    }
+  }
+
+  const count = (s) => bills.filter((b) => b.status === s).length;
+  bills.forEach((b) => delete b.mediaId);
+  return {
+    dryRun,
+    range: { from: opts.from || null, to: opts.to || null },
+    totalErrorBills: bills.length,
+    willSend: toSend.length,
+    sent: count("sent"),
+    failed: count("failed"),
+    overLimit: count("over_limit"),
+    skipped: {
+      alreadySent: count("skipped_already_sent"),
+      newerResult: count("skipped_newer_result"),
+      alreadyPaid: count("skipped_already_paid"),
+    },
+    bills,
+  };
 }
 
 /**
@@ -228,4 +377,4 @@ async function notifyPendingUtrErrors(deps = {}) {
   }
 }
 
-module.exports = { notifyUtrErrorChat, notifyPendingUtrErrors, buildUtrErrorMessage, expectedReplyLines, isUserError, USER_ERRORS };
+module.exports = { notifyUtrErrorChat, notifyPendingUtrErrors, notifyOldUtrErrors, isUtrErrorChatReady, buildUtrErrorMessage, expectedReplyLines, isUserError, USER_ERRORS };

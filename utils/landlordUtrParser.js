@@ -12,7 +12,7 @@
  *   account_mismatch_in_reply | bank_mismatch_in_reply | not_listed_in_approval_mail |
  *   account_mismatch_approval_mail | bank_mismatch_approval_mail
  */
-const { findUtrInLine, stripQuoted, joinWrappedValues } = require("./utrExtractor");
+const { findUtrInLine, findRejectedUtrInLine, stripQuoted, joinWrappedValues } = require("./utrExtractor");
 const { extractExplicitPaymentDates } = require("./utrPaidDate");
 
 const alnum = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -49,6 +49,22 @@ function extractLandlordUtrLines(text) {
     const rest = raw.slice(hit.end);
     const extras = replyExtras(rest);
     out.push({ name, utr: hit.utr, dates: extractExplicitPaymentDates(rest).map((d) => ({ date: d.date, label: d.label })), accountLast4: extras.accountLast4, bank: extras.bank, line: raw.trim() });
+  }
+  return out;
+}
+
+/**
+ * Named lines of a reply whose UTR value has no digit ("JFIEFJE - UTR : abcdefgh"): [{ name, line }].
+ * They are never used as a UTR; they only (a) show in "You wrote" and (b) let a wrong landlord NAME be reported as such.
+ */
+function extractRejectedUtrLines(text) {
+  const out = [];
+  for (const raw of joinWrappedValues(stripQuoted(text)).split("\n")) {
+    if (findUtrInLine(raw)) continue;
+    const hit = findRejectedUtrInLine(raw);
+    if (!hit) continue;
+    const name = raw.slice(0, hit.labelStart).replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").replace(/[\s\-–—:|,]+$/, "").trim();
+    if (name) out.push({ name, line: raw.trim() });
   }
   return out;
 }
@@ -146,10 +162,14 @@ const bankMatches = (a, b) => { const x = alnum(a); const y = alnum(b); return !
  * landlords: [{ landOwnerId, name, state: "pending" | "settled", storedUtr, bankName, accountLast4 }]
  * -> { ok, reasons: [{ reason, ... }], mappings: [{ landlord, line, matchedBy, validation }] }   (all-or-nothing)
  */
-function mapLandlords(lines, landlords) {
+function mapLandlords(lines, landlords, rejected = []) {
   const reasons = [];
   const nameNotFound = []; // lines naming nobody of this bill: harmless when every landlord has his own correct line, otherwise reported
   const byLandlord = new Map();
+  // a line with a wrong landlord name AND a value without digits is still a wrong NAME (reported only when a landlord is left without a line)
+  for (const r of rejected || []) {
+    if (matchLandlord(r.name, landlords).error === "landlord_name_not_found") nameNotFound.push({ reason: "landlord_name_not_found", name: r.name });
+  }
 
   for (const l of lines) {
     const m = matchLandlord(l.name, landlords);
@@ -350,4 +370,4 @@ function validateAgainstMail(mailLandlords, landlords) {
   return { status: problems.length ? "mismatch" : "ok", problems };
 }
 
-module.exports = { splitCashName, splitArrearsName, mapArrearsLines, splitNameKind, mapLandlordKinds, classifyPaymentLabel, mapPaymentKinds, nameTokens, matchLandlord, extractLandlordUtrLines, mapLandlords, parseApprovalMailLandlords, validateAgainstMail, replyExtras };
+module.exports = { splitCashName, splitArrearsName, mapArrearsLines, splitNameKind, mapLandlordKinds, classifyPaymentLabel, mapPaymentKinds, nameTokens, matchLandlord, extractLandlordUtrLines, extractRejectedUtrLines, mapLandlords, parseApprovalMailLandlords, validateAgainstMail, replyExtras };

@@ -176,3 +176,68 @@ test("C4. nothing is sent when UTR_ERROR_CHAT_URL is not set or GOOGLE_CHAT=off;
     assert.equal(await notifyUtrErrorChat(log(), failing), false);
   });
 });
+
+// ✅ NEW — old wrong replies → space (POST /api/gmail/utr-errors/notify-chat)
+test("C8. old errors: newest error per bill only, skips fixed / paid / already sent, dry run sends nothing, limit + resend", async () => {
+  const { notifyOldUtrErrors } = require("../utils/utrErrorChat");
+  const t = (d) => new Date(Date.now() - d * 86400000);
+  const mk = (o) => ({ dryRun: false, reason: "invalid_utr", mediaId: "m1", replyLines: ["X - UTR : 1"], toObject() { return { ...this }; }, ...o });
+  const rows = [
+    mk({ _id: "a2", billNumber: "B1", reason: "landlord_name_not_found", createdAt: t(5) }), // newest error of B1 → send
+    mk({ _id: "a1", billNumber: "B1", createdAt: t(9) }), // older row of B1 → ignored
+    mk({ _id: "b1", billNumber: "B2", createdAt: t(6) }), // B2 saved later → skipped_newer_result
+    mk({ _id: "c1", billNumber: "B3", createdAt: t(7) }), // B3 paid manually → skipped_already_paid
+    mk({ _id: "d1", billNumber: "B4", createdAt: t(8), chatNotifiedAt: t(8) }), // already posted → skipped_already_sent
+    mk({ _id: "e1", billNumber: "B5", createdAt: t(4) }), // second sendable bill
+  ];
+  const newest = { B1: { _id: "a2" }, B2: { _id: "b2", status: "found_and_saved" }, B3: { _id: "c1" }, B4: { _id: "d1" }, B5: { _id: "e1" } };
+  let lastQuery;
+  const Log = {
+    find: (q) => ((lastQuery = q), { sort: () => ({ limit: async () => rows.filter((r) => q.reason.test(r.reason)) }) }),
+    findOne: (q) => ({ sort: () => ({ select: () => ({ lean: async () => newest[q.billNumber] }) }) }),
+  };
+  const sent = [];
+  const deps = {
+    Log,
+    gapMs: 0,
+    notify: async (d, o) => (sent.push({ id: d._id, resend: o.resend }), true),
+    stillPending: async () => new Set(["B1", "B2", "B4", "B5"]),
+    mediaCodes: async () => new Map([["m1", "ADINCHN0045"]]),
+  };
+  const status = (r) => Object.fromEntries(r.bills.map((b) => [b.billNumber, b.status]));
+
+  const dry = await notifyOldUtrErrors({ from: "2026-11-01", to: "2026-11-19" }, deps);
+  assert.equal(dry.dryRun, true);
+  assert.equal(sent.length, 0);
+  assert.deepEqual(status(dry), { B1: "will_send", B2: "skipped_newer_result", B3: "skipped_already_paid", B4: "skipped_already_sent", B5: "will_send" });
+  assert.equal(dry.bills[0].siteCode, "ADINCHN0045");
+  assert.equal(dry.bills[0].mediaId, undefined);
+  assert.ok(lastQuery.createdAt.$gte <= lastQuery.createdAt.$lte);
+
+  const one = await notifyOldUtrErrors({ dryRun: false, limit: 1 }, deps);
+  assert.deepEqual(sent.map((s) => s.id), ["a2"]);
+  assert.equal(one.sent, 1);
+  assert.equal(one.overLimit, 1);
+
+  sent.length = 0;
+  const again = await notifyOldUtrErrors({ dryRun: false, resend: true, billNumbers: ["B4"] }, deps);
+  assert.deepEqual(lastQuery.billNumber, { $in: ["B4"] });
+  assert.equal(status(again).B4, "sent");
+  assert.equal(sent[0].resend, true);
+});
+
+test("C9. old errors: a failed post is reported with its reason", async () => {
+  const { notifyOldUtrErrors } = require("../utils/utrErrorChat");
+  const row = { _id: "f1", billNumber: "B9", reason: "invalid_utr", dryRun: false, createdAt: new Date() };
+  const Log = {
+    find: () => ({ sort: () => ({ limit: async () => [row] }) }),
+    findOne: () => ({ sort: () => ({ select: () => ({ lean: async () => ({ _id: "f1" }) }) }) }),
+  };
+  const r = await notifyOldUtrErrors(
+    { dryRun: false },
+    { Log, gapMs: 0, notify: async (d, o) => (o.onFail("404"), false), stillPending: async () => new Set(["B9"]), mediaCodes: async () => new Map() },
+  );
+  assert.equal(r.failed, 1);
+  assert.equal(r.bills[0].status, "failed");
+  assert.equal(r.bills[0].error, "404");
+});
