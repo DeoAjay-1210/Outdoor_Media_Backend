@@ -151,7 +151,9 @@ const buildSection = async (chart, f) => {
   const loaded = await db.load(route.select);
   const docs = chart === "media" ? loaded : RA.applySiteStatus(loaded, f);
   const data = route.compute(docs, f);
-  return { ...data, supported: true, sourceIndependent: route.sourceIndependent };
+  // ✅ NEW — rowsPaging: this server pages the Outstanding payments popup (upcoming-bills with body.rows)
+  return { ...data, supported: true, sourceIndependent: route.sourceIndependent, // popups paged on the server: Outstanding payments, Payment analytics (Rental Master cycle rows), GST (Ledger GST rows)
+...((chart === "bills" || (chart === "payments" && f.source === "rentalMaster") || (chart === "gst" && f.source === "ledger") || ["appraisal", "agreements", "tdsStatus", "campaign"].includes(chart)) ? { rowsPaging: true } : {}) };
 };
 
 const makeHandler = (chart, message) => async (req, res) => {
@@ -164,6 +166,66 @@ const makeHandler = (chart, message) => async (req, res) => {
     return errorResponse(res, "Failed to build analytics", error.message, 500);
   }
 };
+
+// ✅ NEW — /report-analytics/upcoming-bills with body.rows: the Outstanding payments popup's page (one row per landlord,
+// searched / sorted / paginated on the server) under data.billRows. Without body.rows the response is unchanged.
+const { buildBillRowsPage, buildPaymentRowsPage, buildGstRowsPage, buildAppraisalRowsPage, buildAgreementRowsPage, buildCampaignRowsPage, buildTdsRowsPage } = require("../../../utils/reportRowsPage"); // ✅ one file for every popup page
+const billsHandler = makeHandler("bills", "Upcoming bill analytics fetched");
+const getBillAnalytics = async (req, res) => {
+  const body = { ...(req.query || {}), ...(req.body || {}) };
+  const rowsQuery = body.rows && typeof body.rows === "object" ? body.rows : null;
+  if (!rowsQuery) return billsHandler(req, res);
+  try {
+    if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+    const parsed = RA.parseFilters(body);
+    if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+    const keepRecords = parsed.filters.details; // the caller asked for every record too
+    const data = await buildSection("bills", { ...parsed.filters, details: true });
+    const { billRecords, ...rest } = data;
+    return successResponse(res, "Upcoming bill analytics fetched", {
+      ...rest,
+      ...(keepRecords && billRecords ? { billRecords } : {}),
+      ...(billRecords ? { billRows: buildBillRowsPage(billRecords, rowsQuery) } : {}),
+    });
+  } catch (error) {
+    return errorResponse(res, "Failed to build analytics", error.message, 500);
+  }
+};
+
+// ✅ NEW — /report-analytics/payments and /gst with body.rows: the popup's page under data.detailRows (Payments = one row per
+// site, GST = one per site bill cycle; grouped per landlord, searched / sorted / paged on the server). Without body.rows: unchanged.
+const makeRowsHandler = (chart, message, buildPage) => {
+  const plain = makeHandler(chart, message);
+  return async (req, res) => {
+    const body = { ...(req.query || {}), ...(req.body || {}) };
+    const rowsQuery = body.rows && typeof body.rows === "object" ? body.rows : null;
+    if (!rowsQuery) return plain(req, res);
+    try {
+      if (!allowedRole(req)) return errorResponse(res, "Forbidden", null, 403);
+      const parsed = RA.parseFilters(body);
+      if (parsed.error) return errorResponse(res, parsed.error, null, 400);
+      const keepRecords = parsed.filters.details;
+      // the detail lists only feed the page (appraisal's revisions too); they ship only when `details` was asked for
+      const data = await buildSection(chart, { ...parsed.filters, details: true });
+      const { records, revisions, sourceDetails, ...rest } = data;
+      return successResponse(res, message, {
+        ...rest,
+        ...(keepRecords && records ? { records } : {}),
+        ...(keepRecords && revisions ? { revisions } : {}),
+        ...(keepRecords && sourceDetails ? { sourceDetails } : {}),
+        ...(Array.isArray(records) ? { detailRows: buildPage(records, rowsQuery, data) } : {}), // data: the whole section (TDS reads sourceDetails)
+      });
+    } catch (error) {
+      return errorResponse(res, "Failed to build analytics", error.message, 500);
+    }
+  };
+};
+const getPaymentAnalytics = makeRowsHandler("payments", "Payment analytics fetched", buildPaymentRowsPage);
+const getGstAnalytics = makeRowsHandler("gst", "GST analytics fetched", buildGstRowsPage);
+const getAppraisalAnalytics = makeRowsHandler("appraisal", "Appraisal analytics fetched", buildAppraisalRowsPage); // ✅ NEW — + body.rows
+const getAgreementAnalytics = makeRowsHandler("agreements", "Agreement analytics fetched", buildAgreementRowsPage); // ✅ NEW — + body.rows
+const getTdsStatusAnalytics = makeRowsHandler("tdsStatus", "TDS status analytics fetched", buildTdsRowsPage); // ✅ NEW — + body.rows
+const getCampaignAnalytics = makeRowsHandler("campaign", "Campaign live status analytics fetched", buildCampaignRowsPage); // ✅ NEW — + body.rows
 
 const getFilterOptions = async (req, res) => {
   try {
@@ -246,13 +308,13 @@ module.exports = {
   getOverview,
   db, // DB access seam (tests only)
   resolve,
-  getPaymentAnalytics: makeHandler("payments", "Payment analytics fetched"),
+  getPaymentAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
   getMediaAnalytics: makeHandler("media", "Media analytics fetched"),
-  getAgreementAnalytics: makeHandler("agreements", "Agreement analytics fetched"),
-  getAppraisalAnalytics: makeHandler("appraisal", "Appraisal analytics fetched"),
-  getBillAnalytics: makeHandler("bills", "Upcoming bill analytics fetched"),
-  getGstAnalytics: makeHandler("gst", "GST analytics fetched"),
+  getAgreementAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
+  getAppraisalAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
+  getBillAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
+  getGstAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
   getTdsAnalytics: makeHandler("tds", "TDS analytics fetched"),
-  getTdsStatusAnalytics: makeHandler("tdsStatus", "TDS status analytics fetched"),
-  getCampaignAnalytics: makeHandler("campaign", "Campaign live status analytics fetched"),
+  getTdsStatusAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
+  getCampaignAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
 };
