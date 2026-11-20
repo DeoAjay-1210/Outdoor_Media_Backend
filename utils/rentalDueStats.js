@@ -169,7 +169,10 @@ const finalizeOwnerBucket = (bucket) =>
 // bills still not approved (same bills as the past overdue) with rent / GST split,
 // + totalPendingThisMonth (past + this month's pending). pastApprovedInMonth also
 // adds totalApprovedThisMonth (past approved in this month + this month's approved).
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false }) {
+// ✅ NEW — opts.overdueSitesByMonth (opt-in, with overdueByMonth): each
+// stats.overdueMonths[] item also gets sites[] = that month's overdue sites.
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false }) {
+  const overdueSiteRows = overdueByMonth && overdueSitesByMonth ? new Map() : null; // ✅ NEW — month label → Map(faceKey → site row)
   const overdueMonthBuckets = overdueByMonth || pastPendingByMonth ? new Map() : null; // ✅ NEW
   const pastApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map(), months: new Map() } : null; // ✅ NEW
   // ✅ NEW — this month's approved / pending faces + landowners (for the combined totals)
@@ -332,6 +335,7 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         overdueFaces.add(faceId);
         // ✅ NEW — overdueByMonth: past-month breakdown
         if (overdueMonthBuckets) addToMonthBucket(overdueMonthBuckets, cycleLabel, cycleYear * 12 + cycleMonthIdx, media, faceId, pastFaceAmount, Number(pastSummary.currentMonthGstAmount || 0) / faceCount);
+        if (overdueSiteRows) addOverdueSiteRow(overdueSiteRows, cycleLabel, media, face, entry, pastFaceAmount, Number(pastSummary.currentMonthGstAmount || 0) / faceCount); // ✅ NEW
         stats.overdueAmountTotal += pastFaceAmount;
         if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate, gstShare: Number(pastSummary.currentMonthGstAmount || 0) / faceCount });
         trackOwner("overdue", media, faceId, pastFaceAmount);
@@ -399,6 +403,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
       siteCount,
       amount: totalAmount,
       landOwnerCount,
+      // ✅ NEW — that month's overdue sites (opt-in), amounts add up to `amount`
+      ...(overdueSiteRows ? { sites: finalizeOverdueSiteRows(overdueSiteRows.get(m), totalAmount) } : {}),
     }));
   }
   // ✅ NEW — past bills approved inside this month (opt-in)
@@ -448,6 +454,86 @@ function approvedAtInRange(entry, targetRole, from, to) {
   }
   if (!at || Number.isNaN(at.getTime())) return null;
   return at >= from && at <= to ? at : null;
+}
+
+// ✅ NEW — overDue.months[].sites: one row per overdue site (media) of a past month
+const WAITING_ROLE_NAMES = { 1: "Rental Executive", 2: "Manager", 3: "CMD" };
+function waitingOnOf(entry) {
+  if (!entry) return "Bill not generated"; // no due row for that month yet
+  const steps = entry.approvalSteps || [];
+  if (!steps.length) return WAITING_ROLE_NAMES[FIRST_APPROVER_ROLE];
+  const next = steps.find((s) => !isStepActed(s));
+  return next ? WAITING_ROLE_NAMES[Number(next.role)] || `Role ${next.role}` : null;
+}
+// ✅ CHANGED — ONE row per site (media): its faces' rent / GST added together
+// rank: no due row 0 < Pending (1) / Overdue (4) 1 < Partially approved (2) 2 < Approved (3) 3
+const approvalRank = (entry) => {
+  if (!entry) return 0;
+  const s = Number(entry.approvalStatus);
+  return s === 4 ? 1 : Number.isFinite(s) ? s : 0;
+};
+function addOverdueSiteRow(rowsByMonth, label, media, face, entry, amount, gstAmount = 0) {
+  if (!rowsByMonth.has(label)) rowsByMonth.set(label, new Map());
+  const rows = rowsByMonth.get(label);
+  const key = String(media._id);
+  if (!rows.has(key)) {
+    rows.set(key, { mediaId: key, city: face.city || "", faces: [], gstAmount: 0, totalAmount: 0, entry, media });
+  }
+  const row = rows.get(key);
+  if (!row.faces.some((f) => f.faceId === String(face._id))) {
+    row.faces.push({ faceId: String(face._id), mediaCode: face.mediaCode || "", mediaName: face.mediaName || "" });
+  }
+  // separate-bill faces at different stages → the face still furthest behind
+  if (approvalRank(entry) < approvalRank(row.entry)) row.entry = entry;
+  row.totalAmount += amount; // rent + GST
+  row.gstAmount += gstAmount;
+}
+// faces' common name: "X (Top)" + "X (Bottom)" → "X"; otherwise the first face's name
+function commonMediaName(faces) {
+  const base = (n) => String(n || "").replace(/\s*\([^()]*\)\s*$/, "").trim();
+  const names = [...new Set(faces.map((f) => base(f.mediaName)))];
+  return names.length === 1 && names[0] ? names[0] : (faces[0] && faces[0].mediaName) || "";
+}
+function finalizeOverdueSiteRows(rows, monthTotal) {
+  const list = Array.from((rows || new Map()).values())
+    .map(({ entry, faces, ...r }) => {
+      const sorted = [...faces].sort((a, b) => a.mediaCode.localeCompare(b.mediaCode));
+      return {
+        mediaId: r.mediaId,
+        mediaCode: sorted.map((f) => f.mediaCode).filter(Boolean).join(", "),
+        mediaName: faces.length > 1 ? commonMediaName(sorted) : (sorted[0] && sorted[0].mediaName) || "",
+        city: r.city,
+        faceCount: sorted.length,
+        mediaDetails: sorted.map(({ faceId, ...f }) => ({ mediaDetailId: faceId, ...f })), // ✅ CHANGED — was faces[].faceId
+        rentAmount: 0,
+        gstAmount: Math.round(r.gstAmount),
+        totalAmount: Math.round(r.totalAmount),
+        approvalStatus: entry && entry.approvalStatus !== undefined ? entry.approvalStatus : null,
+        waitingOn: waitingOnOf(entry),
+        media: r.media,
+        faceId: sorted[0] ? sorted[0].faceId : "", // owner split only, removed below
+      };
+    })
+    .sort((a, b) => a.mediaCode.localeCompare(b.mediaCode));
+  // rounding gap → the biggest row, so sites' totalAmount adds up to the month amount
+  const gap = Math.round(monthTotal) - list.reduce((s, r) => s + r.totalAmount, 0);
+  if (gap && list.length) list.reduce((m, r) => (r.totalAmount > m.totalAmount ? r : m), list[0]).totalAmount += gap;
+  list.forEach((r) => (r.rentAmount = r.totalAmount - r.gstAmount));
+  return list.map(({ media, faceId: _ownerFace, ...r }) => {
+    const owners = new Map();
+    addFaceToOwnerBucket(owners, media, _ownerFace, r.totalAmount);
+    const byKey = new Map((media.landOwners || []).map((o) => [String(o.landOwnerMasterId || o._id || o.name || ""), o]));
+    const landOwners = Array.from(owners.entries()).map(([k, o]) => ({
+      landOwnerMasterId: o.landOwnerMasterId,
+      name: o.name,
+      phone: o.phone,
+      paymentCategory: byKey.get(k)?.paymentCategory ?? null,
+      amount: Math.round(o.amount),
+    }));
+    const ownerGap = r.totalAmount - landOwners.reduce((s, o) => s + o.amount, 0);
+    if (ownerGap && landOwners.length) landOwners[0].amount += ownerGap;
+    return { ...r, landOwners };
+  });
 }
 
 // ✅ NEW — month-wise bucket: faces, landowners, rent + GST

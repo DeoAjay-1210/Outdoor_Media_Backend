@@ -3880,6 +3880,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         pastApprovedInMonth: true,
         // ✅ NEW — past month bills still pending (pastMonthPending)
         pastPendingByMonth: true,
+        // ✅ NEW — overDue.months[].sites (that month's overdue sites)
+        overdueSitesByMonth: true,
         ...(billDateFilter.length
           ? {
               // ✅ FIXED — never before the bill's OWN due date: billDate slot 15 but
