@@ -73,9 +73,10 @@ test("C2. the message holds bill, site, month, landlord, amount, reply lines, er
     "ADNOOHBILL25102026133", "ADINCHN0045 – Anna Nagar 2nd Avenue (Chennai)", "October 2026",
     "JESURAJA S (Online)", "₹50,000", "• JESURAJA - UTR : AXISP00860490864",
     "landlord_name_not_found", "accounts@example.test", "19 Nov 2026, 10:38 AM",
-    "https://mail.google.com/mail/u/0/#all/abc123", "SAME mail thread",
+    "SAME mail thread",
     "You wrote", "Reply like this", "JESURAJA S - UTR : <UTR number>",
   ]) assert.ok(text.includes(part), `missing: ${part}`);
+  assert.ok(!text.includes("mail.google.com") && !text.includes("*Mail:*"), "the mail link is not posted");
 });
 
 test("C5. 'Reply like this' lines follow the bill: several landlords, GST hold, Cash and Cash + Online", () => {

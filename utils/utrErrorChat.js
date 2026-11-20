@@ -142,7 +142,6 @@ function buildUtrErrorMessage(log, media = null) {
   const who = log.senderEmail || "";
   const when = istDateTime(log.messageDate);
   if (who || when) lines.push(`*Replied by:* ${[who, when].filter(Boolean).join(" – ")}`);
-  if (log.gmailThreadId) lines.push(`*Mail:* https://mail.google.com/mail/u/0/#all/${log.gmailThreadId}`);
   lines.push("");
   lines.push("Reply again in the SAME mail thread with the corrected line.");
   return lines.join("\n");
