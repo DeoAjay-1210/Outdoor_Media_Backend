@@ -164,6 +164,28 @@ const buildBuckets = (f, make) => {
 const faceList = (doc) => (Array.isArray(doc.mediaDetails) ? doc.mediaDetails.filter(Boolean) : []);
 const uniq = (arr) => [...new Set(arr.filter(Boolean))];
 
+// ✅ NEW — "sites" = mediaDetails (faces), not media documents. Every chart load notes each media's face count (its active faces;
+// a site with none active: all its faces; none at all: 1). A sites set then holds media ids (counted as that media's faces) or
+// face keys "mediaId#faceId" (counted as 1: a record of ONE face, e.g. a bill). A media id without a noted count counts 1.
+const FACE_COUNTS = new Map();
+const noteFaceCounts = (docs) => {
+  for (const d of docs || []) {
+    if (!d || !d._id) continue;
+    const faces = faceList(d);
+    const active = faces.filter((fc) => Number(fc.status) === 1).length;
+    FACE_COUNTS.set(String(d._id), active || faces.length || 1);
+  }
+};
+const faceKey = (siteId, faceId) => (siteId && faceId ? `${siteId}#${faceId}` : siteId);
+const siteCount = (set) => {
+  let n = 0;
+  for (const k of set || []) {
+    const key = String(k);
+    n += key.includes("#") ? 1 : FACE_COUNTS.get(key) || 1;
+  }
+  return n;
+};
+
 /**
  * A site (document) holds one or more faces. Money is stored per site, never
  * per face, so a site-level amount can be tied to a media type / city ONLY when
@@ -243,7 +265,7 @@ const siteMatches = (doc, attr, f, excl, amount = 0) => {
 
 const typeLabel = (attr) => (attr.mediaType === MIXED ? "Mixed types" : attr.mediaType || "Unspecified");
 
-const exclusionMeta = (excl) => ({ sites: excl.sites.size, amount: r2(excl.amount) });
+const exclusionMeta = (excl) => ({ sites: siteCount(excl.sites), amount: r2(excl.amount) });
 
 const topList = (map, n = 5) =>
   [...map.values()].sort((a, b) => b.amount - a.amount).slice(0, n).map((x) => ({ name: x.name, amount: r2(x.amount) }));
@@ -359,13 +381,13 @@ const computePayments = (docs, f) => {
 
   const list = [...buckets].map(([key, b]) => ({
     key, total: r2(b.total), cash: r2(b.cash), online: r2(b.online), gstPayments: r2(b.gstPayments),
-    entries: b.entries, sites: b.sites.size,
+    entries: b.entries, sites: siteCount(b.sites),
   }));
   const peak = list.reduce((m, b) => (b.total > (m?.total ?? 0) ? b : m), null);
   return {
     filters: publicFilters(f),
     buckets: list,
-    summary: { total: r2(total), cash: r2(cash), online: r2(online), gstPayments: r2(gstPayments), entries, sites: allSites.size, peakKey: peak ? peak.key : null },
+    summary: { total: r2(total), cash: r2(cash), online: r2(online), gstPayments: r2(gstPayments), entries, sites: siteCount(allSites), peakKey: peak ? peak.key : null },
     ...(records ? { records: records.sort((a,b) => a.date.localeCompare(b.date) || a.recordId.localeCompare(b.recordId)) } : {}),
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
   };
@@ -552,9 +574,9 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
   const due = {
     toBePaid: r2(acc.rentDirect.toBePaid + acc.hold.toBePaid),
     unpaid: r2(acc.rentDirect.unpaid + acc.hold.unpaid),
-    sites: sites.size,
-    unpaidSites: unpaidSites.size,
-    paidSites: paidSites.size,
+    sites: siteCount(sites),
+    unpaidSites: siteCount(unpaidSites),
+    paidSites: siteCount(paidSites),
     parts: {
       rentDirect: part(acc.rentDirect), // rent + direct GST (opening rent included)
       hold: part(acc.hold), // expected hold GST (opening GST included)
@@ -562,7 +584,7 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
     },
   };
   const buckets = [...months].map(([key, m]) => ({
-    key, toBePaid: r2(m.toBePaid), unpaid: r2(m.unpaid), paid: r2(m.toBePaid - m.unpaid), sites: m.sites.size, unpaidSites: m.unpaidSites.size, paidSites: m.paidSites.size,
+    key, toBePaid: r2(m.toBePaid), unpaid: r2(m.unpaid), paid: r2(m.toBePaid - m.unpaid), sites: siteCount(m.sites), unpaidSites: siteCount(m.unpaidSites), paidSites: siteCount(m.paidSites),
   }));
   const records = rows
     ? [...rows.values()]
@@ -913,8 +935,8 @@ const computeAppraisal = (docs, f, now = nowIST(), opts = {}) => {
       }
     }
   }
-  const fin = (t) => ({ sites: t.sites.size, amount: r2(t.amount), entries: t.entries });
-  const finChanged = (t) => ({ sites: t.sites.size, revisions: t.revisions });
+  const fin = (t) => ({ sites: siteCount(t.sites), amount: r2(t.amount), entries: t.entries });
+  const finChanged = (t) => ({ sites: siteCount(t.sites), revisions: t.revisions });
   const list = [...buckets].map(([key, b]) => ({ key, given: fin(b.given), unpaid: fin(b.unpaid), upcoming: fin(b.upcoming), held: fin(b.held), total: fin(b.total), changed: finChanged(b.changed) }));
   return {
     filters: publicFilters(f),
@@ -1041,7 +1063,7 @@ const computeAgreements = (docs, filters, now = nowIST()) => {
       }
     }
   }
-  const fin = (t) => ({ agreements: t.records, sites: t.sites.size });
+  const fin = (t) => ({ agreements: t.records, sites: siteCount(t.sites) });
   const finStates = (o) => ({ live: fin(o.live), expired: fin(o.expired), upcoming: fin(o.upcoming), superseded: fin(o.superseded) });
   const list = [...buckets].map(([key, b]) => ({ key, total: fin(b.total), live: fin(b.live), expiring: fin(b.expiring), expired: fin(b.expired) }));
   return {
@@ -1175,7 +1197,7 @@ const computeBills = (docs, f, now = nowIST()) => {
   }
   const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { bills: v.bills, amount: r2(v.amount) }]));
   const fin = (p) => ({
-    bills: p.bills, sites: p.sites.size, total: r2(p.total), gst: r2(p.gst), payable: r2(p.payable),
+    bills: p.bills, sites: siteCount(p.sites), total: r2(p.total), gst: r2(p.gst), payable: r2(p.payable),
     byStatus: round(p.byStatus), byType: round(p.byType),
   });
   const list = [...buckets].map(([key, b]) => ({ key, ...fin(b), upcoming: fin(b.upcoming) }));
@@ -1185,13 +1207,13 @@ const computeBills = (docs, f, now = nowIST()) => {
     buckets: list,
     summary: {
       // all stored bills in the period (any timing), as before
-      bills: sum.bills, sites: sum.sites.size, total: r2(sum.total), gst: r2(sum.gst), payable: r2(sum.payable), byStatus: round(sum.byStatus),
+      bills: sum.bills, sites: siteCount(sum.sites), total: r2(sum.total), gst: r2(sum.gst), payable: r2(sum.payable), byStatus: round(sum.byStatus),
       upcoming: fin(upcoming),
       dueToday: fin(timing.dueToday),
       overdue: fin(timing.overdue),
       pastApproved: fin(timing.pastApproved),
     },
-    meta: { ...meta, staleRowsExcluded: { bills: stale.bills, amount: r2(stale.amount), sites: stale.sites.size }, excludedMixedSites: exclusionMeta(excl) },
+    meta: { ...meta, staleRowsExcluded: { bills: stale.bills, amount: r2(stale.amount), sites: siteCount(stale.sites) }, excludedMixedSites: exclusionMeta(excl) },
   };
 };
 
@@ -1340,7 +1362,7 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
       add(sid, cycleDate, isDirectGstCycle(doc, cycleDate, lib) ? "direct" : "hold", num(sm.splitCurGstPaid), num(sm.splitCurGstRemaining), undefined, approved, bill);
     }
   }
-  const fin = (t) => ({ amount: r2(t.amount), sites: t.sites.size, records: t.records });
+  const fin = (t) => ({ amount: r2(t.amount), sites: siteCount(t.sites), records: t.records });
   const finPart = (p) => ({ due: r2(p.due), paid: r2(p.paid), remaining: r2(p.remaining) });
   const finParts = (ps) => ({ hold: finPart(ps.hold), direct: finPart(ps.direct), opening: finPart(ps.opening) });
   const finCards = (c) => ({ generated: fin(c.generated), paid: fin(c.paid), unpaid: fin(c.unpaid), unpaidPending: fin(c.unpaidPending), unpaidLedger: fin(c.unpaidLedger), hold: fin(c.hold) });
@@ -1391,7 +1413,7 @@ const computeGst = (docs, f) => {
       add(doc, attr, "unpaid", parseMonthLabel(o.dueMonth), Math.max(num(o.gstOutStandingAmount) - settled, 0), { billMonth: text(o.dueMonth), status: "Onboarding due" });
     }
   }
-  const fin = (t) => ({ amount: r2(t.amount), sites: t.sites.size, records: t.records });
+  const fin = (t) => ({ amount: r2(t.amount), sites: siteCount(t.sites), records: t.records });
   const finAll = (o) => Object.fromEntries(cats.map((c) => [c, fin(o[c])]));
   const list = [...buckets].map(([key, b]) => ({ key, ...finAll(b) }));
   return {
@@ -1621,14 +1643,14 @@ const computeTds = (docs, filters, lib, granularity = "month") => {
   }
   const byDate = (a, b) => a.date.localeCompare(b.date) || a.siteName.localeCompare(b.siteName) || (a.ownerName || "").localeCompare(b.ownerName || "");
   const list = [...buckets].map(([key, b]) => ({
-    key, amount: r2(b.amount), entries: b.deductions.length, sites: b.sites.size, owners: b.owners.size,
+    key, amount: r2(b.amount), entries: b.deductions.length, sites: siteCount(b.sites), owners: b.owners.size,
     topSites: topList(b.sites), deductions: b.deductions.sort(byDate),
   }));
   const peak = list.reduce((m, b) => (b.amount > (m?.amount ?? 0) ? b : m), null);
   return {
     filters: publicFilters(f),
     buckets: list,
-    summary: { total: r2(total), entries, sites: allSites.size, owners: allOwners.size, peakKey: peak && peak.amount ? peak.key : null },
+    summary: { total: r2(total), entries, sites: siteCount(allSites), owners: allOwners.size, peakKey: peak && peak.amount ? peak.key : null },
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
   };
 };
@@ -1716,14 +1738,14 @@ const computeTdsRentalMaster = (docs, filters, lib, granularity = "month") => {
   }
   const byDate = (a, b) => a.date.localeCompare(b.date) || a.siteName.localeCompare(b.siteName) || (a.ownerName || "").localeCompare(b.ownerName || "");
   const list = [...buckets].map(([key, b]) => ({
-    key, amount: r2(b.amount), entries: b.deductions.length, sites: b.sites.size, owners: b.owners.size,
+    key, amount: r2(b.amount), entries: b.deductions.length, sites: siteCount(b.sites), owners: b.owners.size,
     topSites: topList(b.sites), deductions: b.deductions.sort(byDate),
   }));
   const peak = list.reduce((m, b) => (b.amount > (m?.amount ?? 0) ? b : m), null);
   return {
     filters: publicFilters(f),
     buckets: list,
-    summary: { total: r2(total), entries, sites: allSites.size, owners: allOwners.size, peakKey: peak && peak.amount ? peak.key : null },
+    summary: { total: r2(total), entries, sites: siteCount(allSites), owners: allOwners.size, peakKey: peak && peak.amount ? peak.key : null },
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
   };
 };
@@ -1863,7 +1885,7 @@ const computeTdsStatus = (docs, filters, lib, now = nowIST(), granularity = "mon
       emit(bm, "paid", amount, { billMonth: text(t.dueMonth) || `${MONTH_NAMES[bm.getUTCMonth()]} ${bm.getUTCFullYear()}`, ownerName: deduction.identity.ownerName, dueDate: null, date: paidOn ? dayKeyOf(paidOn) : dayKeyOf(bm), paidAt: paidOn ? dayKeyOf(paidOn) : null, utrNumber: text(t.utrNumber) || null, billStatus: null });
     }
   }
-  const fin = (t) => ({ amount: r2(t.amount), entries: t.entries, sites: t.sites.size });
+  const fin = (t) => ({ amount: r2(t.amount), entries: t.entries, sites: siteCount(t.sites) });
   const finAll = (o) => ({ total: fin(o.total), paid: fin(o.paid), due: fin(o.due), upcoming: fin(o.upcoming) });
   return {
     filters: publicFilters(f),
@@ -2080,10 +2102,10 @@ const computeOutstandingCycles = (docs, f, lib, now = nowIST()) => {
     }
   }
   const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { cycles: v.cycles, amount: r2(v.amount) }]));
-  const fin = (p) => ({ cycles: p.cycles, sites: p.sites.size, amount: r2(p.amount), rent: r2(p.rent), gst: r2(p.gst), notYetBilled: p.notYetBilled, byStatus: round(p.byStatus), byType: round(p.byType) });
+  const fin = (p) => ({ cycles: p.cycles, sites: siteCount(p.sites), amount: r2(p.amount), rent: r2(p.rent), gst: r2(p.gst), notYetBilled: p.notYetBilled, byStatus: round(p.byStatus), byType: round(p.byType) });
   const totalOf = (parts) => {
     const sites = new Set(CATS.flatMap((c) => [...parts[c].sites]));
-    return { cycles: CATS.reduce((x, c) => x + parts[c].cycles, 0), sites: sites.size, amount: r2(CATS.reduce((x, c) => x + parts[c].amount, 0)) };
+    return { cycles: CATS.reduce((x, c) => x + parts[c].cycles, 0), sites: siteCount(sites), amount: r2(CATS.reduce((x, c) => x + parts[c].amount, 0)) };
   };
   return {
     filters: publicFilters(f),
@@ -2093,7 +2115,7 @@ const computeOutstandingCycles = (docs, f, lib, now = nowIST()) => {
     summary: {
       ...Object.fromEntries(CATS.map((c) => [c, fin(totals[c])])),
       total: totalOf(totals),
-      unallocated: { cycles: unallocated.cycles, sites: unallocated.sites.size, ledgerRemaining: r2(unallocated.ledgerRemaining), configuredRent: r2(unallocated.configuredRent), records: unallocated.records },
+      unallocated: { cycles: unallocated.cycles, sites: siteCount(unallocated.sites), ledgerRemaining: r2(unallocated.ledgerRemaining), configuredRent: r2(unallocated.configuredRent), records: unallocated.records },
     },
     ...(records ? { records: records.sort((a, z) => a.dueDate.localeCompare(z.dueDate) || a.siteName.localeCompare(z.siteName)) } : {}),
     meta: { ...meta, excludedMixedSites: exclusionMeta(excl) },
@@ -2265,7 +2287,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
     }
   }
   const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { bills: v.bills, amount: r2(v.amount) }]));
-  const fin = (c) => ({ bills: c.bills, sites: c.sites.size, amount: r2(c.amount) });
+  const fin = (c) => ({ bills: c.bills, sites: siteCount(c.sites), amount: r2(c.amount) });
   const finAll = (x) => ({
     generated: fin(x.generated), approved: fin(x.approved), pending: fin(x.pending), pastDue: fin(x.pastDue),
     pendingByStage: round(x.pendingByStage), pendingByType: round(x.pendingByType), generatedByType: round(x.generatedByType),
@@ -2307,7 +2329,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
     for (const key of ["generated", "approved", "pending", "pastDue"]) {
       if (!r[key]) continue;
       target[key].bills += 1;
-      target[key].sites.add(r.siteId);
+      target[key].sites.add(faceKey(r.siteId, r.faceId)); // ✅ CHANGED — the bill's own face
       target[key].amount += r.total;
     }
     const by = (map, key) => {
@@ -2417,7 +2439,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
   }
   const finish = (a) => {
     const result = {};
-    for (const key of ["generated", "approved", "pending", "pastDue"]) result[key] = { bills: a[key].bills, sites: a[key].sites.size, amount: r2(a[key].amount) };
+    for (const key of ["generated", "approved", "pending", "pastDue"]) result[key] = { bills: a[key].bills, sites: siteCount(a[key].sites), amount: r2(a[key].amount) };
     for (const key of ["pendingByStage", "pendingByType", "generatedByType"]) result[key] = Object.fromEntries(Object.entries(a[key]).map(([k,v]) => [k, { bills: v.bills, amount: r2(v.amount) }]));
     return result;
   };
@@ -2537,12 +2559,16 @@ const computeCampaign = (docs, f, lib = {}) => {
       }
       for (const p of parts) {
         for (const t of [buckets.get(bk)[p.status], buckets.get(bk).all, sum[p.status], sum.all]) {
-          t.sites.add(sid); t.records += 1; t.amount += p.total; t.gst += p.gst;
+          // ✅ CHANGED — the faces of this part (a site's Live / Not Live faces), else the site's faces
+          const faceIds = p.bills.map((e) => e.bill && e.bill.mediaDetailId).filter(Boolean);
+          if (faceIds.length && faceIds.length === p.bills.length) faceIds.forEach((fid) => t.sites.add(faceKey(sid, String(fid))));
+          else t.sites.add(sid);
+          t.records += 1; t.amount += p.total; t.gst += p.gst;
         }
         if (rows) {
           const first = p.bills.map((e) => e.d).sort((a, z) => a - z)[0];
           rows.push({
-            ...detailBase(doc), bucket: bk, date: dayKeyOf(first), status: p.status,
+            ...detailBase(doc), bucket: bk, date: dayKeyOf(first), status: p.status, faceIds: ((ids) => (ids.length && ids.length === p.bills.length ? ids : []))(p.bills.map((e) => e.bill && e.bill.mediaDetailId).filter(Boolean).map(String)), // ✅ NEW — the part's faces when every bill names one (the same rule as the counts above)
             billMonth: uniq(p.bills.map((e) => text(e.bill.dueMonth))).join(", "),
             campaignName: uniq(p.bills.map((e) => text(e.bill.campaignName))).join(", "),
             mediaType: uniq(p.bills.map((e) => typeLabel({ mediaType: e.type }))).join(", "),
@@ -2552,7 +2578,7 @@ const computeCampaign = (docs, f, lib = {}) => {
       }
     }
   }
-  const fin = (t) => ({ sites: t.sites.size, records: t.records, amount: r2(t.amount), gst: r2(t.gst), rent: r2(Math.max(t.amount - t.gst, 0)) });
+  const fin = (t) => ({ sites: siteCount(t.sites), records: t.records, amount: r2(t.amount), gst: r2(t.gst), rent: r2(Math.max(t.amount - t.gst, 0)) });
   const finAll = (o) => Object.fromEntries([...CAMPAIGN_STATUSES, "all"].map((k) => [k, fin(o[k])]));
   return {
     filters: publicFilters(f),
@@ -2560,12 +2586,15 @@ const computeCampaign = (docs, f, lib = {}) => {
     buckets: [...buckets].map(([key, b]) => ({ key, ...finAll(b) })),
     summary: finAll(sum),
     ...(rows ? { records: rows.sort(byDateThenName) } : {}),
-    meta: { ...meta, staleRowsExcluded: { bills: stale.bills, sites: stale.sites.size }, excludedMixedSites: exclusionMeta(excl) },
+    meta: { ...meta, staleRowsExcluded: { bills: stale.bills, sites: siteCount(stale.sites) }, excludedMixedSites: exclusionMeta(excl) },
   };
 };
 
 
 module.exports = {
+  noteFaceCounts, // ✅ NEW — "sites" = faces (mediaDetails)
+  siteCount,
+  faceKey,
   computeCampaign,
   campaignStatusOf,
   computeRentalMasterApprovals,

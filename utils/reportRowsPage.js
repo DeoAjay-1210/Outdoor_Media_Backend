@@ -16,6 +16,18 @@
 // Pure: no DB access.
 // ─────────────────────────────────────────────────────────────
 
+// ✅ NEW — "sites" = faces (mediaDetails): a record of one face (a bill: faceId) counts 1, a campaign part counts its faces
+// (faceIds), any other record counts its site's faces (reportAnalytics.siteCount, noted on every chart load).
+const { siteCount } = require("./reportAnalytics");
+const siteKeysOf = (r) => {
+  const sid = r && r.siteId !== undefined && r.siteId !== null ? String(r.siteId).trim() : "";
+  if (!sid) return [];
+  if (r.faceId) return [`${sid}#${r.faceId}`];
+  if (Array.isArray(r.faceIds) && r.faceIds.length) return r.faceIds.map((fid) => `${sid}#${fid}`);
+  return [sid];
+};
+const sitesOf = (rows) => siteCount(new Set((rows || []).flatMap(siteKeysOf)));
+
 const CATEGORIES = [
   { key: "generated", label: "Bill Generated" },
   { key: "approved", label: "Approved" },
@@ -170,7 +182,7 @@ function buildBillRowsPage(records, rowsQuery = {}) {
 
   const cards = CATEGORIES.map(({ key, label }) => {
     const list = scoped.filter((r) => inCategory(r, key));
-    return { key, label, bills: list.length, sites: new Set(list.map((r) => str(r.siteId)).filter(Boolean)).size, amount: r2(list.reduce((s, r) => s + num(r.total), 0)) };
+    return { key, label, bills: list.length, sites: sitesOf(list), amount: r2(list.reduce((s, r) => s + num(r.total), 0)) };
   });
 
   const inCat = scoped.filter((r) => inCategory(r, o.category) && (!o.stage || str(r.stage) === o.stage) && (!o.pendingMediaType || str(r.mediaType) === o.pendingMediaType));
@@ -353,11 +365,11 @@ function buildPaymentRowsPage(records, rowsQuery = {}) {
   const cards = PAY_CATS.map(({ key, label }) => {
     const rows = rowsOf(key);
     const amount = r2(rows.reduce((a, x) => a + x.v[0] + x.v[1] + x.v[2], 0));
-    return { key, label, bills: rows.length, sites: rows.length, amount };
+    return { key, label, bills: rows.length, sites: sitesOf(rows.map((x) => x.s.recs[0])), amount };
   });
   const rows = rowsOf(o.category);
   const sum = (i) => r2(rows.reduce((a, x) => a + x.v[i], 0));
-  const totals = { sites: rows.length, rental: sum(0), gst: sum(1), holdGst: sum(2), total: r2(sum(0) + sum(1) + sum(2)) };
+  const totals = { sites: sitesOf(rows.map((x) => x.s.recs[0])), rental: sum(0), gst: sum(1), holdGst: sum(2), total: r2(sum(0) + sum(1) + sum(2)) };
   const units = rows.map(({ s, v }) => ({
     recs: s.recs,
     values: { rental: v[0], gst: v[1], holdGst: v[2], total: r2(v[0] + v[1] + v[2]) },
@@ -393,7 +405,7 @@ function buildGstRowsPage(records, rowsQuery = {}) {
   const scoped = (records || []).filter((r) => !o.bucket || str(r.bucket) === o.bucket);
   const cards = GST_CATS.map(({ key, label }) => {
     const rows = scoped.filter((r) => gstAmountOf(key, r) > 0.005);
-    const sites = new Set(rows.map((r) => str(r.siteId))).size;
+    const sites = sitesOf(rows);
     return { key, label, bills: sites, sites, records: rows.length, amount: r2(rows.reduce((a, r) => a + gstAmountOf(key, r), 0)) };
   });
   const rows = scoped.filter((r) => gstAmountOf(o.category, r) > 0.005);
@@ -402,7 +414,7 @@ function buildGstRowsPage(records, rowsQuery = {}) {
   const summary = o.category === "unpaid"
     ? ["pending", "ledger"].map((k) => {
         const part = rows.filter((r) => remainingAs(r) === k);
-        return { key: k, label: UNPAID_TYPE[k], amount: r2(part.reduce((a, r) => a + gstAmountOf("unpaid", r), 0)), sites: new Set(part.map((r) => str(r.siteId))).size };
+        return { key: k, label: UNPAID_TYPE[k], amount: r2(part.reduce((a, r) => a + gstAmountOf("unpaid", r), 0)), sites: sitesOf(part) };
       })
     : null;
   const units = rows.map((r) => ({
@@ -433,7 +445,7 @@ function buildAppraisalRowsPage(records, rowsQuery = {}) {
   const inCat = (key) => scoped.filter((r) => !kindOf(key) || str(r.kind) === kindOf(key));
   const cards = APPRAISAL_CATS.map(({ key, label }) => {
     const rows = inCat(key);
-    const sites = new Set(rows.map((r) => str(r.siteId))).size;
+    const sites = sitesOf(rows);
     return { key, label, bills: sites, sites, records: rows.length, amount: r2(rows.reduce((a, r) => a + num(r.amount), 0)) };
   });
   const rows = inCat(o.category);
@@ -486,11 +498,11 @@ function buildAgreementRowsPage(records, rowsQuery = {}) {
   const all = records || [];
   const cards = cats.map(({ key, label, test }) => {
     const rows = all.filter(test);
-    const sites = new Set(rows.map((r) => str(r.siteId))).size;
+    const sites = sitesOf(rows);
     return { key, label, bills: rows.length, agreements: rows.length, sites, amount: rows.length };
   });
   const rows = all.filter(cats.find((c) => c.key === o.category).test);
-  const totals = { sites: new Set(rows.map((r) => str(r.siteId))).size, agreements: rows.length };
+  const totals = { sites: sitesOf(rows), agreements: rows.length };
   const units = rows.map((r) => ({
     recs: [r],
     values: {},
@@ -511,11 +523,11 @@ function buildCampaignRowsPage(records, rowsQuery = {}) {
   const sumOf = (rows, k) => r2(rows.reduce((a, r) => a + num(r[k]), 0));
   const cards = CAMPAIGN_CATS.map(({ key, label }) => {
     const rows = scoped.filter((r) => str(r.status) === key);
-    const sites = new Set(rows.map((r) => str(r.siteId))).size;
+    const sites = sitesOf(rows);
     return { key, label, bills: sites, sites, records: rows.length, amount: sumOf(rows, "total") };
   });
   const rows = scoped.filter((r) => str(r.status) === o.category);
-  const totals = { sites: new Set(rows.map((r) => str(r.siteId))).size, siteMonths: rows.length, rental: sumOf(rows, "rent"), gst: sumOf(rows, "gst"), total: sumOf(rows, "total") };
+  const totals = { sites: sitesOf(rows), siteMonths: rows.length, rental: sumOf(rows, "rent"), gst: sumOf(rows, "gst"), total: sumOf(rows, "total") };
   const label = CAMPAIGN_CATS.find((c) => c.key === o.category).label;
   const units = rows.map((r) => ({
     recs: [r],
@@ -539,7 +551,6 @@ function buildTdsRowsPage(records, rowsQuery = {}, data = {}) {
     paid: lines(src.ledgerBuckets),
     upcoming: (records || []).filter((r) => (!o.bucket || str(r.bucket) === o.bucket) && str(r.status) === "upcoming"),
   };
-  const sitesOf = (rows) => new Set(rows.map((r) => str(r.siteId)).filter(Boolean)).size;
   const cards = TDS_CATS.map(({ key, label }) => ({ key, label, bills: sitesOf(linesOf[key]), sites: sitesOf(linesOf[key]), records: linesOf[key].length, amount: r2(linesOf[key].reduce((a, r) => a + num(r.amount), 0)) }));
   const rows = linesOf[o.category];
   const totals = { lines: rows.length, sites: sitesOf(rows), total: r2(rows.reduce((a, r) => a + num(r.amount), 0)) };

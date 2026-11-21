@@ -149,6 +149,7 @@ const buildSection = async (chart, f) => {
   // site-status filter (active / inactive / all) narrows the sites before any chart is computed;
   // the media chart counts faces like the dashboard, so it applies the status per face itself
   const loaded = await db.load(route.select);
+  RA.noteFaceCounts(loaded); // ✅ NEW — every "sites" count is in faces (mediaDetails): each media's active face count
   const docs = chart === "media" ? loaded : RA.applySiteStatus(loaded, f);
   const data = route.compute(docs, f);
   // ✅ NEW — rowsPaging: this server pages the Outstanding payments popup (upcoming-bills with body.rows)
