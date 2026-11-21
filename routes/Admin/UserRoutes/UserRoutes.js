@@ -8,7 +8,7 @@ const {
   resetPin,
   forgotPin,
   changePin,
-  verifyAdminAccess,
+  //verifyAdminAccess,
 } = require("../../../controllers/Admin/UserController/UserController");
 
 // ============================================================
@@ -34,6 +34,6 @@ router.post("/forgot-pin", forgotPin);
 router.post("/change-pin", changePin);
 
 // Hidden Admin login gate (password from ADMIN_ACCESS_PASSWORD in .env)
-router.post("/admin-access/verify", verifyAdminAccess);
+//router.post("/admin-access/verify", verifyAdminAccess);
 
 module.exports = router;
