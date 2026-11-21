@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const axios = require("axios");
@@ -551,9 +552,87 @@ const changePin = async (req, res) => {
   }
 };
 
+// ============================================================
+// VERIFY HIDDEN ADMIN LOGIN ACCESS PASSWORD
+// Gate for the hidden Admin login (web: /admin-login, mobile: 7 taps on logo).
+// Password comes from ADMIN_ACCESS_PASSWORD in .env.
+//
+// Wrong-attempt lock (from .env):
+//   ADMIN_ACCESS_LOCK=on|off        -> on: block after 5 wrong attempts; off: never block
+//   ADMIN_ACCESS_LOCK_MINUTES=15    -> block duration (used only when lock is on)
+// ============================================================
+const ADMIN_ACCESS_MAX_ATTEMPTS = 5;
+const ADMIN_ACCESS_DEFAULT_LOCK_MINUTES = 15;
+const adminAccessAttempts = new Map(); // ip -> { count, firstAt }
+
+const getAdminAccessLockConfig = () => {
+  const flag = String(process.env.ADMIN_ACCESS_LOCK ?? "on").trim().toLowerCase();
+  const enabled = ["on", "true", "1", "yes"].includes(flag);
+  const minutes = Number(process.env.ADMIN_ACCESS_LOCK_MINUTES);
+  const lockMinutes =
+    Number.isFinite(minutes) && minutes > 0 ? minutes : ADMIN_ACCESS_DEFAULT_LOCK_MINUTES;
+  return { enabled, windowMs: lockMinutes * 60 * 1000, lockMinutes };
+};
+
+const verifyAdminAccess = async (req, res) => {
+  try {
+    const expected = process.env.ADMIN_ACCESS_PASSWORD;
+    if (!expected) {
+      return errorResponse(res, "Admin access is not enabled", null, 403);
+    }
+
+    const lock = getAdminAccessLockConfig();
+    const ip = req.ip || req.headers["x-forwarded-for"] || "unknown";
+    const now = Date.now();
+
+    let current = null;
+    if (lock.enabled) {
+      const entry = adminAccessAttempts.get(ip);
+      if (entry && now - entry.firstAt > lock.windowMs) {
+        adminAccessAttempts.delete(ip);
+      }
+      current = adminAccessAttempts.get(ip) || null;
+      if (current && current.count >= ADMIN_ACCESS_MAX_ATTEMPTS) {
+        const remainingMin = Math.max(
+          1,
+          Math.ceil((current.firstAt + lock.windowMs - now) / 60000)
+        );
+        return errorResponse(
+          res,
+          `Too many attempts. Please try again after ${remainingMin} minute(s).`,
+          null,
+          429
+        );
+      }
+    } else if (adminAccessAttempts.size) {
+      adminAccessAttempts.clear(); // lock turned off: drop any existing blocks
+    }
+
+    const password = String(req.body?.password ?? "");
+    const a = crypto.createHash("sha256").update(password).digest();
+    const b = crypto.createHash("sha256").update(String(expected)).digest();
+    const ok = password.length > 0 && crypto.timingSafeEqual(a, b);
+
+    if (!ok) {
+      if (lock.enabled) {
+        if (current) current.count += 1;
+        else adminAccessAttempts.set(ip, { count: 1, firstAt: now });
+      }
+      return errorResponse(res, "Incorrect password", null, 401);
+    }
+
+    adminAccessAttempts.delete(ip);
+    return successResponse(res, "Access granted", null, 200);
+  } catch (err) {
+    console.error("Verify Admin Access Error:", err);
+    return errorResponse(res, "Server error during admin access verification", null, 500);
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
+  verifyAdminAccess,
   forgotPinVerify,
   resetPin,
   forgotPin,
