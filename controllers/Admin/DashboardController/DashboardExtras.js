@@ -166,6 +166,7 @@ function computeRental(docs, range, filters) {
       singleBillAsSite: true, // ✅ NEW — a single-bill site's faces share one bill stage
       pastOverdueOnly: true, // ✅ NEW — Overdue card = PAST months only (current month overdue not added)
       overdueAnyFacePending: true, // ✅ NEW — overdue: a past month where ANY active face's own bill is not CMD approved (full month amount), same as landowner/site-filter
+      includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill (e.g. whole month taken as advance) still counts its landlord / site (amount 0)
       onFace: ({ media, entry, amount, cycle, state, past, rolePending }) => {
         if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
         addLandlords(LL.due, media);
@@ -224,6 +225,7 @@ function computeRental(docs, range, filters) {
     year: n.getUTCFullYear(), month: n.getUTCMonth() + 1,
     singleBillAsSite: true, // ✅ NEW — same bill stage rule as the cards above
     overdueAnyFacePending: true, // ✅ NEW — same overdue rule as the cards above
+    includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill still counts
     onFace: ({ media, state }) => { if (state === "overdue") addLandlords(unLL, media); },
   });
   // current month: unfiltered overdue (as before). Last month / custom range: overdue of the selected period.
@@ -816,6 +818,7 @@ function computeOverdueDetails(docs, range, filters) {
     // ✅ NEW — same overdue rule as the cards: any active face's open bill makes the month overdue, full month amount
     singleBillAsSite: true,
     overdueAnyFacePending: true,
+    includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill still counts
     faceFilter: role ? (entry) => roleStatus(entry, role, { pendingAtRoleOnly: true }).isOpen : null,
     onFace: ({ media, entry, amount, state, past, cycleLabel, cycleDate, gstShare }) => {
       if (state !== "overdue") return;

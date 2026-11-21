@@ -333,8 +333,9 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
       const pastCycleAmount =
         Number(pastSummary.currentMonthRentalAmount || 0) +
         Number(pastSummary.currentMonthGstAmount || 0);
-      if (pastCycleAmount <= 0) continue;
-      const pastFaceAmount = pastCycleAmount / faceCount;
+      // ✅ CHANGED — includeZeroAmountBills: a ₹0 past month with a bill (e.g. whole month taken as advance) still counts (amount 0)
+      if (pastCycleAmount <= 0 && !(includeZeroAmountBills && (media.rentalDue || []).some((e) => e.dueMonth === cycleLabel))) continue;
+      const pastFaceAmount = Math.max(0, pastCycleAmount) / faceCount;
 
       const pastCycleEntries = (media.rentalDue || []).filter((e) => e.dueMonth === cycleLabel);
       const pastSiteBillEntry =
@@ -674,7 +675,8 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
     const pastCycleAmount =
       Number(pastSummary.currentMonthRentalAmount || 0) +
       Number(pastSummary.currentMonthGstAmount || 0);
-    if (pastCycleAmount <= 0) continue;
+    // ✅ CHANGED — includeZeroAmountBills: a ₹0 past month with a bill still counts (same as computeRentalDueStats)
+    if (pastCycleAmount <= 0 && !(includeZeroAmountBills && (media.rentalDue || []).some((e) => e.dueMonth === cycleLabel))) continue;
     const pastCycleEntries = (media.rentalDue || []).filter((e) => e.dueMonth === cycleLabel);
     const pastSiteBillEntry =
       singleBillAsSite && isSingleBillSite(activeFacesList)

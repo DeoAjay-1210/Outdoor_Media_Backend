@@ -539,7 +539,13 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
       const s = lib.getOverallSummaryForCycle(doc, { year: cycleDate.getUTCFullYear(), month: cycleDate.getUTCMonth() + 1 });
       const rentTarget = num(s.currentMonthRentalAmount);
       const gstTarget = num(s.currentMonthGstAmount);
-      if (rentTarget <= 0 && gstTarget <= 0) continue;
+      if (rentTarget <= 0 && gstTarget <= 0) {
+        // ✅ NEW — a ₹0 month that has a bill (e.g. whole month taken as advance): the bill approvals still list it (amount 0);
+        // nothing is added to any total here
+        const label = `${MONTH_NAMES[cycleDate.getUTCMonth()]} ${cycleDate.getUTCFullYear()}`;
+        if ((doc.rentalDue || []).some((e) => e && e.dueMonth === label)) onEntry?.({ kind: "cycle", doc, date: cycleDate, summary: s, direct: isDirectGstCycle(doc, cycleDate, lib), zeroAmount: true });
+        continue;
+      }
 
       const direct = isDirectGstCycle(doc, cycleDate, lib);
 
@@ -2378,6 +2384,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
       // most-progressed status and separate-bill row-level status.
       computeRentalDueStats([doc], {
         year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, singleBillAsSite: true,
+        includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill is listed (amount 0)
         onFace: (x) => { if (!x.past) rows.push(x); },
       });
     }
@@ -2422,6 +2429,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
     computeRentalDueStats([doc], {
       year: cap.getUTCFullYear(), month: cap.getUTCMonth() + 1, singleBillAsSite: true,
       overdueAnyFacePending: true, // ✅ NEW — same overdue rule as the period months above
+      includeZeroAmountBills: true, // ✅ NEW — a ₹0 past month with a bill still counts (amount 0)
       onFace: (x) => {
         if (!x.past) return; // ✅ CHANGED — current-month bills are never past due (past months only)
         if (!x.past && (capMonth >= startMonth || x.state === "approved")) return;
