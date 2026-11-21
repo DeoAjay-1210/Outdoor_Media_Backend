@@ -11,7 +11,7 @@ const { extractUtrFromThread, extractBillNumbers, findCandidates, stripQuoted, e
 const { extractExplicitPaymentDates, istDay } = require("./utrPaidDate");
 const { scopeThreadToBill } = require("./gmailReplyLink");
 const { collectBankRows } = require("./bankNarration");
-const { extractLandlordUtrLines, parseApprovalMailLandlords, splitNameKind, classifyPaymentLabel, matchLandlord } = require("./landlordUtrParser");
+const { extractLandlordUtrLines, extractRejectedUtrLines, parseApprovalMailLandlords, splitNameKind, classifyPaymentLabel, matchLandlord } = require("./landlordUtrParser");
 
 const BILL_NUMBER_FORMAT = /^[A-Za-z0-9][A-Za-z0-9\-\/]{5,39}$/;
 
@@ -66,7 +66,7 @@ const lookupLandlordUtrs = async (billNumber, maxResults = 10) => {
   const approval = th.messages.find((m) => /Owner Name/i.test(stripQuoted(m.bodyText)) && containsExactBill(stripQuoted(m.bodyText), billNumber));
   const replies = th.messages
     .filter((m) => m !== approval)
-    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), ...(m.explicitBill ? { billExplicit: true } : {}), lines: extractLandlordUtrLines(m.bodyText) }))
+    .map((m) => ({ messageId: m.id, from: m.from, sentAt: m.sentAt || m.date, sentDate: istDay(m.sentAt || m.date), ...(m.explicitBill ? { billExplicit: true } : {}), lines: extractLandlordUtrLines(m.bodyText), rejected: extractRejectedUtrLines(m.bodyText) }))
     .filter((r) => r.lines.length > 0);
   // Cash payments have no UTR: "<landlord> - Cash [- Paid Date: ...]" lines (never read from the approval mail itself)
   const cashReplies = th.messages

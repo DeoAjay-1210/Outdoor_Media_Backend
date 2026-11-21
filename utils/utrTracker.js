@@ -526,8 +526,9 @@ function trackerWorkbook(data) {
         else if (k === "data") {
           ws[addr].s = { border, alignment: { vertical: "center", wrapText: true, horizontal: CENTER.has(c) ? "center" : "left" } };
           if (isAmount) ws[addr].z = money;
-          if (c === COL_STATUS) ws[addr].s.font = { bold: true, color: { rgb: STATUS_COLOR[aoa[r][c]] || "000000" } };
-          if (c === COL_ERROR && aoa[r][c] && aoa[r][c] !== "-") ws[addr].s.font = { color: { rgb: "C00000" } };
+          if (aoa[r][COL_STATUS] === "Needs review") ws[addr].s.fill = { patternType: "solid", fgColor: { rgb: "E05555" } }; // wrong reply format: the WHOLE row is a strong red (other statuses stay white)
+          if (c === COL_STATUS) ws[addr].s.font = { bold: true, color: { rgb: aoa[r][c] === "Needs review" ? "000000" : STATUS_COLOR[aoa[r][c]] || "000000" } }; // black on the red row
+          if (c === COL_ERROR && aoa[r][c] && aoa[r][c] !== "-") ws[addr].s.font = { color: { rgb: aoa[r][COL_STATUS] === "Needs review" ? "000000" : "C00000" } }; // on the red row the Error text is black (readable)
         }
       }
     }
@@ -546,4 +547,4 @@ function trackerWorkbook(data) {
   try { return require("../controllers/Admin/MediaOnboardingController/RentalOOHExcelController").freezeHeaderInXlsxBuffer(raw, 4, 1); } catch (_) { return raw; } // header rows stay while scrolling
 }
 
-module.exports = { buildUtrTracker, trackerWorkbook, replyFormat, byBillMonth };
+module.exports = { buildUtrTracker, trackerWorkbook, replyFormat, byBillMonth, explain }; // ✅ NEW — explain: error code → plain English (UTR error chat)

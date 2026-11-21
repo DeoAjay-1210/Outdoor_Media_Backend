@@ -152,9 +152,9 @@ function computeRental(docs, range, filters) {
     matchStatus(entry, targetRole, filters.status, { pendingAtRoleOnly: true });
   const roleLL = { 1: { p: new Set(), a: new Set() }, 2: { p: new Set(), a: new Set() }, 3: { p: new Set(), a: new Set() } }; // distinct landlords behind each role card
   const roleStats = { 1: { p: [0, 0], a: [0, 0] }, 2: { p: [0, 0], a: [0, 0] }, 3: { p: [0, 0], a: [0, 0] } }; // Rental Master per-role Pending / Approved cards
-  const sum = { due: [0, 0], approved: [0, 0], overdue: [0, 0], gst: 0, tds: 0, hold: [0, 0] };
+  const sum = { due: [0, 0], approved: [0, 0], pending: [0, 0], overdue: [0, 0], gst: 0, tds: 0, hold: [0, 0] }; // ✅ CHANGED — + pending
   const gstSites = new Set(), tdsSites = new Set();
-  const LL = { due: new Set(), approved: new Set(), overdue: new Set(), gst: new Set(), tds: new Set(), hold: new Set() }; // distinct landlords per card
+  const LL = { due: new Set(), approved: new Set(), pending: new Set(), overdue: new Set(), gst: new Set(), tds: new Set(), hold: new Set() }; // distinct landlords per card (✅ + pending)
   const drill = { 1: { pending: new Set(), approved: new Set() }, 2: { pending: new Set(), approved: new Set() }, 3: { pending: new Set(), approved: new Set() } }; // site ids per donut bucket
   const bucket = () => ({ pending: { count: 0, amount: 0, ll: new Set() }, approved: { count: 0, amount: 0, ll: new Set() } });
   const donut = { 1: bucket(), 2: bucket(), 3: bucket() };
@@ -164,11 +164,15 @@ function computeRental(docs, range, filters) {
     const st = computeRentalDueStats(gdocs, {
       year, month, targetRole, faceFilter, pendingAtRoleOnly: true,
       singleBillAsSite: true, // ✅ NEW — a single-bill site's faces share one bill stage
-      onFace: ({ media, entry, amount, cycle, state, past }) => {
+      pastOverdueOnly: true, // ✅ NEW — Overdue card = PAST months only (current month overdue not added)
+      overdueAnyFacePending: true, // ✅ NEW — overdue: a past month where ANY active face's own bill is not CMD approved (full month amount), same as landowner/site-filter
+      includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill (e.g. whole month taken as advance) still counts its landlord / site (amount 0)
+      onFace: ({ media, entry, amount, cycle, state, past, rolePending }) => {
         if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
         addLandlords(LL.due, media);
         if (state === "approved") addLandlords(LL.approved, media);
-        if (state === "overdue") addLandlords(LL.overdue, media);
+        // ✅ CHANGED — a current-month overdue face is no longer in the Overdue card (past months only)
+        if (rolePending) addLandlords(LL.pending, media); // ✅ NEW — Pending card landlords (faces in pendingCount)
         const faceCount = (media.mediaDetails || []).filter((d) => num(d.status) === 1).length || 1;
         const gstFace = num(cycle.currentMonthGstAmount) / faceCount;
         const tdsFace = (media.landOwners || []).reduce((t, o) => t + (num(o.tdsApplicable) ? num(o.tdsAmount) : 0), 0) / faceCount;
@@ -207,6 +211,7 @@ function computeRental(docs, range, filters) {
     }
     sum.due[0] += st.dueThisMonthCount; sum.due[1] += st.dueThisMonthAmount;
     sum.approved[0] += st.approvedCount; sum.approved[1] += st.approvedAmountTotal;
+    sum.pending[0] += st.pendingCount; sum.pending[1] += st.pendingAmountTotal; // ✅ NEW — this month's pending
     // overdue is cumulative (current + past months): take it from the last month of the range
     if (idx === range.months.length - 1) { sum.overdue = [st.overdueCount, st.overdueAmountTotal]; }
   });
@@ -219,6 +224,8 @@ function computeRental(docs, range, filters) {
   const un = computeRentalDueStats(docs, {
     year: n.getUTCFullYear(), month: n.getUTCMonth() + 1,
     singleBillAsSite: true, // ✅ NEW — same bill stage rule as the cards above
+    overdueAnyFacePending: true, // ✅ NEW — same overdue rule as the cards above
+    includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill still counts
     onFace: ({ media, state }) => { if (state === "overdue") addLandlords(unLL, media); },
   });
   // current month: unfiltered overdue (as before). Last month / custom range: overdue of the selected period.
@@ -240,6 +247,7 @@ function computeRental(docs, range, filters) {
       tds: { landlords: LL.tds.size, amount: r0(sum.tds), sites: tdsSites.size },
       overdue: { landlords: LL.overdue.size, sites: sum.overdue[0], amount: r0(sum.overdue[1]) },
       approved: { landlords: LL.approved.size, sites: sum.approved[0], amount: r0(sum.approved[1]) },
+      pending: { landlords: LL.pending.size, sites: sum.pending[0], amount: r0(sum.pending[1]) }, // ✅ NEW — current month pending
       gstHold: { landlords: LL.hold.size, sites: sum.hold[0], amount: r0(sum.hold[1]) },
     },
     donut: {
@@ -807,6 +815,10 @@ function computeOverdueDetails(docs, range, filters) {
   const sites = new Map();
   computeRentalDueStats(applyGst(docs, filters.gst), {
     year: range.last.year, month: range.last.month, targetRole: null,
+    // ✅ NEW — same overdue rule as the cards: any active face's open bill makes the month overdue, full month amount
+    singleBillAsSite: true,
+    overdueAnyFacePending: true,
+    includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill still counts
     faceFilter: role ? (entry) => roleStatus(entry, role, { pendingAtRoleOnly: true }).isOpen : null,
     onFace: ({ media, entry, amount, state, past, cycleLabel, cycleDate, gstShare }) => {
       if (state !== "overdue") return;

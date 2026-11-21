@@ -1117,6 +1117,23 @@ const run = (o, opts = {}) => { const x = setup({ docs: [multiDoc(o.doc)], multi
 const one = (r) => r.results[0];
 const ids = (calls) => calls.saver.map((b) => [b.payments[0].landOwnerId, b.payments[0].utrNumber]);
 
+test("M0. a still-wrong reply: the same lines again write no new log row, a NEW wrong reply (other lines) does (UTR error chat)", async () => {
+  let text = `Ramesh - UTR: ${U.J}\nSuresh - UTR: ${U.S}\nMurali - UTR: ${U.M}`;
+  const x = await run({ lookupLandlords: (...a) => reply(text)(...a) });
+  assert.equal(one(x.r).reason, "landlord_name_not_found");
+  assert.equal(x.Log.rows.length, 1);
+  const age = () => x.Log.rows.forEach((r) => (r.createdAt = new Date(Date.now() - 5 * 60000))); // past the short retry wait
+  age();
+  await x.p.processPendingUtrs({ dryRun: false });
+  assert.equal(x.Log.rows.length, 1); // same reply, same answer: no new row
+  age();
+  text = `${text}\nRamesh K - UTR: ${U.J}`; // Finance replies again, still a wrong name
+  const again = await x.p.processPendingUtrs({ dryRun: false });
+  assert.equal(one(again).reason, "landlord_name_not_found");
+  assert.equal(x.Log.rows.length, 2); // new lines -> new row
+  assert.ok(x.Log.rows.some((r) => (r.replyLines || []).some((l) => l.includes("Ramesh K"))));
+});
+
 test("M1. three landlords, three different UTRs (first names only): each UTR saved to its own landlord, once", async () => {
   const x = await run({ lookupLandlords: reply(THREE) });
   assert.equal(one(x.r).status, "found_and_saved");

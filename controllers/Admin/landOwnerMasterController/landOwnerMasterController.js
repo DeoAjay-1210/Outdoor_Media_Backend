@@ -2546,8 +2546,13 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       // ✅ NEW — with roleType, approved / pending / overDue per face follow the
       // same role rule as the header counts (waiting on that role)
       const roleFaceFlags = targetRole
-        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, overdueByRole: true })
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, overdueByRole: true, pastOverdueOnly: true, includeZeroAmountBills: true, overdueAnyFacePending: true }) // ✅ CHANGED — overDue = past months only; ✅ NEW — a ₹0 bill counts; any face pending = overdue
         : null;
+      // ✅ NEW — overDue = PAST months only (same rule as the overDue header);
+      // without roleType: past bills not approved (overall status)
+      const pastOverdueFaceFlags = targetRole
+        ? null
+        : getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole: null, singleBillAsSite: true, pastOverdueOnly: true, includeZeroAmountBills: true, overdueAnyFacePending: true }); // ✅ NEW — a ₹0 bill counts; any face pending = overdue
       details.forEach((face) => {
         const faceId = String(face._id);
         const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
@@ -2617,10 +2622,13 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
           _gstOutstanding: face === details[0] ? mediaDoc.rentalPayment?.gstOutstandingHistory || [] : [],
           // ✅ NEW — internal: single bill site (no face on separate bill)
           _isSingleBill: !(mediaDoc.mediaDetails || []).some((d) => Number(d.siteBillMode) === 2),
+          // ✅ NEW — internal: the site's active face ids (overDue: an open bill of an active face keeps its month)
+          _activeFaceIds: (mediaDoc.mediaDetails || []).filter((d) => Number(d.status) === 1).map((d) => String(d._id)),
           rentalStatus: {
             hasApprovedSite: roleFaceFlags ? !!roleFlags?.approved : hasApprovedSite,
             hasPendingSite: roleFaceFlags ? !!roleFlags?.pending : hasPendingSite,
-            isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : isOverDueSite,
+            // ✅ CHANGED — past months only (was current + past: isOverDueSite)
+            isOverDueSite: roleFaceFlags ? !!roleFlags?.overdue : !!pastOverdueFaceFlags?.get(faceId)?.overdue,
             hasCmdApprovalSite, // ✅ NEW
             // ✅ CHANGED — every site with a bill this month (any roleType)
             hasDueThisMonthSite,
@@ -2740,7 +2748,15 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           const r = rank(d);
           if (r > (bestRankByMonth.get(d.dueMonth) || 0)) bestRankByMonth.set(d.dueMonth, r);
         });
-        siteDues = siteDues.filter((d) => rank(d) === bestRankByMonth.get(d.dueMonth));
+        // ✅ NEW — overDue (any face pending): a PAST month's not-approved bill of an ACTIVE face is kept even when another face
+        // of the month is approved, so the month is listed under overDue (same rule as the overDue header)
+        const activeFaceIds = new Set(site._activeFaceIds || []);
+        const keepForOverDue = (d) => {
+          if (Number(d.approvalStatus) === 3 || !d.mediaDetailId || !activeFaceIds.has(String(d.mediaDetailId))) return false;
+          const p = parseSiteFilterDueMonthLabel(d.dueMonth);
+          return !!p && (p.year < referenceYear || (p.year === referenceYear && p.monthIdx < referenceMonthIdx));
+        };
+        siteDues = siteDues.filter((d) => rank(d) === bestRankByMonth.get(d.dueMonth) || keepForOverDue(d));
       }
 
       siteDues.forEach((due) => {
@@ -2806,6 +2822,10 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           // so a lagging face copy no longer brings the site / its landowner in)
           matchesOverDue = matchesOverDue && roleOpen && !!site.rentalStatus?.isOverDueSite;
         }
+        // ✅ NEW — overDue = PAST months only (current month bill never listed),
+        // not approved, on a site counted in the overDue header
+        matchesOverDue =
+          matchesOverDue && isPast && due.approvalStatus !== 3 && !!site.rentalStatus?.isOverDueSite;
         const matchesCmdApproval =
           (!due.mediaDetailId || String(due.mediaDetailId) === String(site.mediaDetailId)) &&
           isDueInCmdApproval(due) &&
@@ -2865,10 +2885,15 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           const isDirect = Number(due.withGst) === 2;
 
           // Deduplicate by month (prefer approved entries if duplicates exist)
+          // ✅ NEW — at the same approval level, this row's OWN face bill (mediaDetailId) wins, then a site-wide bill (no
+          // mediaDetailId), then any other row: the site's rentalDue holds every face's bills (and stale rows of replaced faces),
+          // so the first row of the month showed another face's / a removed face's amount on this face.
+          const faceRankOf = (d) => (d.mediaDetailId && String(d.mediaDetailId) === String(site.mediaDetailId) ? 2 : !d.mediaDetailId ? 1 : 0);
           const existing = duesMap.get(due.dueMonth);
           if (
             !existing ||
-            (due.approvalStatus === 3 && existing.approvalStatus !== 3)
+            (due.approvalStatus === 3 && existing.approvalStatus !== 3) ||
+            ((due.approvalStatus === 3) === (existing.approvalStatus === 3) && faceRankOf(due) > (existing._faceRank || 0))
           ) {
             duesMap.set(due.dueMonth, {
               dueMonth: due.dueMonth,
@@ -2881,6 +2906,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
               baseAmount: due.baseAmount,
               isPaidForRent,
               isPaidForGst,
+              _faceRank: faceRankOf(due), // internal (removed below)
             });
           }
         }
@@ -2922,7 +2948,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         });
       }
 
-      const filteredDues = Array.from(duesMap.values()).sort((a, b) => {
+      const filteredDues = Array.from(duesMap.values()).map(({ _faceRank, ...d }) => d).sort((a, b) => {
         const dA = a.dueDate ? new Date(a.dueDate) : new Date(0);
         const dB = b.dueDate ? new Date(b.dueDate) : new Date(0);
         return dA - dB;
@@ -3863,6 +3889,19 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         overdueByRole: true,
         // ✅ NEW — roleType: dueThisMonth = this month's bills waiting on that role
         dueThisMonthByRole: true,
+        // ✅ NEW — overDue = past months only + month-wise breakdown
+        pastOverdueOnly: true,
+        overdueByMonth: true,
+        // ✅ NEW — past month bills approved in this month (pastMonthApprovedThisMonth)
+        pastApprovedInMonth: true,
+        // ✅ NEW — past month bills still pending (pastMonthPending)
+        pastPendingByMonth: true,
+        // ✅ NEW — overDue.months[].sites (that month's overdue sites)
+        overdueSitesByMonth: true,
+        // ✅ NEW — a ₹0 bill of the month (e.g. whole month taken as advance) still counts its sites / landowners
+        includeZeroAmountBills: true,
+        // ✅ NEW — overDue: a past month where ANY active face's own bill is not CMD approved (full month amount)
+        overdueAnyFacePending: true,
         ...(billDateFilter.length
           ? {
               // ✅ FIXED — never before the bill's OWN due date: billDate slot 15 but
@@ -3890,6 +3929,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             trackLandOwners: true,
             pendingAtRoleOnly: true,
             singleBillAsSite: true,
+            includeZeroAmountBills: true, // ✅ NEW — a ₹0 bill counts (same as rentalDueStats above)
+            overdueAnyFacePending: true, // ✅ NEW — same as rentalDueStats above
           })
         : rentalDueStats;
     const dueThisMonthOwners = (dueThisMonthStats.landOwners || {}).dueThisMonth || [];
@@ -4103,11 +4144,20 @@ const cityMatchQuery = city
           amount: Math.round(dueThisMonthStats.dueThisMonthAmount),
           landOwnerCount: dueThisMonthOwners.length, // ✅ NEW
         },
+        // ✅ CHANGED — past months only (current month overdue not added)
         overDue: {
           siteCount: overdueSiteCount,
-          amount: Math.round(overdueAmountTotal),
+          // ✅ CHANGED — = sum of months[].amount (no ₹1 rounding gap)
+          amount: (rentalDueStats.overdueMonths || []).length
+            ? rentalDueStats.overdueMonths.reduce((s, m) => s + m.amount, 0)
+            : Math.round(overdueAmountTotal),
           landOwnerCount: ownerStats.overdue.length, // ✅ NEW
+          months: rentalDueStats.overdueMonths || [], // ✅ NEW — month-wise breakdown, oldest first
         },
+        // ✅ NEW — past month bills (e.g. Sep / Oct) approved in this month (Nov)
+        pastMonthApprovedThisMonth: rentalDueStats.pastApprovedInMonth,
+        // ✅ NEW — past month bills still not approved + totalPendingThisMonth
+        pastMonthPending: rentalDueStats.pastMonthPending,
         approvedCount: approvedCount,
         approvedAmountTotal: Math.round(approvedAmountTotal),
         pendingCount: pendingCount,

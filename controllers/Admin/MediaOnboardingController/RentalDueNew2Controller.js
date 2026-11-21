@@ -301,6 +301,13 @@ async function generateMissedEntriesForMedia(media, userName) {
         continue;
       }
 
+      // ✅ NEW — a month already approved by the CMD stays as it was approved: a face added to mediaDetails later (or any face
+      // without a bill that month) never gets a new bill in that month. Months still in approval and the current month unchanged.
+      const monthAlreadyApproved = media.rentalDue.some(
+        (e) => e.dueMonth === candidateMonthLabel && Number(e.approvalStatus) === 3,
+      );
+      if (monthAlreadyApproved) continue;
+
       const chainSteps = buildApprovalSteps(2);
       const steps = [
         {
@@ -1339,6 +1346,13 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         };
       };
 
+      // ✅ NEW — the bill's own netPayable, even when it is 0 (e.g. the whole month taken as advance); the site's
+      // netPayable only when the bill has none stored. (`entry.netPayable || rp.netPayable` read a 0 bill as "missing".)
+      const entryNetPayable = (entry, rp) =>
+        entry && entry.netPayable !== undefined && entry.netPayable !== null && entry.netPayable !== "" && Number.isFinite(Number(entry.netPayable))
+          ? Number(entry.netPayable)
+          : Number(rp?.netPayable || 0);
+
       const buildLandOwnerObject = (o, siteEntry) => {
         const isGstHold = Number(siteEntry?.withGst) === 1 || Number(o.gstHold) === 1 ? 1 : 0;
         const isTdsHold = Number(siteEntry?.tdsHold) === 1 || Number(o.tdsHold) === 1 ? 1 : 0;
@@ -1460,7 +1474,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
       }
 
-      let netPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
+      let netPayableVal = entryNetPayable(siteEntry, rp); // ✅ CHANGED — a 0 bill stays 0
       const totalExpectedNet = totalRentalAmountVal + effectiveGst;
       if (netPayableVal <= 0 || netPayableVal < totalExpectedNet) {
         netPayableVal = totalExpectedNet;
@@ -1592,7 +1606,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         const totalNetPayableSum = itemsForTotals.reduce((sum, item) => {
           const siteEntry = item.entry || {};
           const rp = item.media?.rentalPayment || {};
-          const net = Number(siteEntry.netPayable || rp.netPayable || 0);
+          const net = entryNetPayable(siteEntry, rp); // ✅ CHANGED — a 0 bill stays 0
           if (net > 0 && !isSingleBill) return sum + net;
           const rent = Number(rp.totalRentalAmount || siteEntry.baseAmount || 0);
           const isSiteGstOn = Number(rp.gstApplicable || siteEntry.gstApplicable || 0) === 1;
@@ -1658,7 +1672,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
               siteGstAmountVal = Number(rp.gstAmount || siteEntry?.gstAmount || siteLandownerGstSum || 0);
             }
 
-            let siteNetPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
+            let siteNetPayableVal = entryNetPayable(siteEntry, rp); // ✅ CHANGED — a 0 bill stays 0
             const siteTotalExpectedNet = siteTotalRentalVal + (isGstApplicable ? siteGstAmountVal : siteLandownerGstSum);
             if (siteNetPayableVal <= 0 || siteNetPayableVal < siteTotalExpectedNet) {
               siteNetPayableVal = siteTotalExpectedNet;
@@ -6554,6 +6568,29 @@ const details = (item.mediaDetails || []).map((d) => ({
       // ✅ SITE-BASED RENTAL ENTRIES:
       // Always Return one entry per face per month to support tracking different campaigns.
       // Proportional amounts are handled by computeGstSplit during generation.
+      // ✅ NEW — an APPROVED month stays as it was approved: a site-wide (mediaDetailId null) approved bill is shown only on the
+      // faces that already existed when that bill was generated (a face's _id carries its creation time), so a face added to
+      // mediaDetails later never shows up in an old approved month. When no face qualifies (e.g. faces re-created with new ids),
+      // every face is used as before, so a row never disappears. Pending / current months are unchanged.
+      const createdAtOf = (id) => {
+        try {
+          return mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)).getTimestamp() : null;
+        } catch (err) {
+          return null;
+        }
+      };
+      const approvedFacesFor = new Map(); // site-wide approved entry id -> Set(face ids that existed when it was generated)
+      filteredRentalDueEntries.forEach((entry) => {
+        if (entry.mediaDetailId || Number(entry.approvalStatus) !== 3) return;
+        const generatedAt = entry.createdAt ? new Date(entry.createdAt) : createdAtOf(entry._id);
+        if (!generatedAt || Number.isNaN(generatedAt.getTime())) return;
+        const existed = details.filter((d) => {
+          const born = createdAtOf(d._id);
+          return born && born <= generatedAt;
+        });
+        if (existed.length) approvedFacesFor.set(String(entry._id), new Set(existed.map((d) => String(d._id))));
+      });
+
       const rentalDueEntries = [];
       details.forEach((face) => {
         const faceIdStr = String(face._id);
@@ -6571,6 +6608,9 @@ const details = (item.mediaDetails || []).map((d) => ({
               (e) => e.dueMonth === entry.dueMonth && String(e.mediaDetailId || "") === faceIdStr
             );
             if (!hasSpecificEntry) isMatch = true;
+            // ✅ NEW — an approved site-wide bill: only the faces of its own time (see approvedFacesFor)
+            const frozen = approvedFacesFor.get(String(entry._id));
+            if (isMatch && frozen && !frozen.has(faceIdStr)) isMatch = false;
           }
 
           if (!isMatch) return;

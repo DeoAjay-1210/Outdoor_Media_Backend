@@ -216,4 +216,43 @@ const utrTrackerExport = async (req, res) => {
   }
 };
 
-module.exports = { getAuthUrl, oauthCallback, connectionStatusApi, disconnectApi, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi, utrTrackerExport };
+/**
+ * ✅ NEW — POST /api/gmail/utr-errors/notify-chat   (CMD only)
+ * body: { dryRun?: true, from?: "YYYY-MM-DD", to?: "YYYY-MM-DD", billNumbers?: [], resend?: false, limit?: 20 (max 50) }
+ * Posts OLD wrong Finance UTR replies (gmail_utr_logs errors) to the UTR error Google Chat space.
+ * dryRun (default) only lists what would be sent.
+ */
+const notifyUtrErrorsChatApi = async (req, res) => {
+  if (!isCmd(req)) return errorResponse(res, "Only CMD can use this API", null, 403);
+  const body = req.body || {};
+  const dryRun = body.dryRun !== false;
+  const from = body.from ? String(body.from).trim() : "";
+  const to = body.to ? String(body.to).trim() : "";
+  const ymd = /^\d{4}-\d{2}-\d{2}$/;
+  if ((from && (!ymd.test(from) || Number.isNaN(Date.parse(from)))) || (to && (!ymd.test(to) || Number.isNaN(Date.parse(to))))) {
+    return errorResponse(res, "from and to must be YYYY-MM-DD", null, 400);
+  }
+  if (from && to && from > to) return errorResponse(res, "from must not be after to", null, 400);
+  if (body.billNumbers !== undefined && !Array.isArray(body.billNumbers)) {
+    return errorResponse(res, "billNumbers must be an array", null, 400);
+  }
+  const { notifyOldUtrErrors, isUtrErrorChatReady } = require("../../../utils/utrErrorChat");
+  if (!dryRun && !isUtrErrorChatReady()) {
+    return errorResponse(res, "UTR error chat is off on this server (GOOGLE_CHAT is off or UTR_ERROR_CHAT_URL is not set). Use dryRun:true.", null, 409);
+  }
+  try {
+    const summary = await notifyOldUtrErrors({
+      dryRun,
+      from: from || undefined,
+      to: to || undefined,
+      billNumbers: body.billNumbers,
+      resend: body.resend === true,
+      limit: body.limit,
+    });
+    return successResponse(res, dryRun ? "Dry run complete — nothing was sent" : "UTR error messages sent to Google Chat", summary);
+  } catch (err) {
+    return fail(res, err, "Could not send UTR error messages");
+  }
+};
+
+module.exports = { getAuthUrl, oauthCallback, connectionStatusApi, disconnectApi, testUtr, pendingUtrBills, processPendingUtrsApi, utrCorrectionsApi, utrTrackerExport, notifyUtrErrorsChatApi };
