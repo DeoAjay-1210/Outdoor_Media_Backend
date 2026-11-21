@@ -1346,6 +1346,13 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         };
       };
 
+      // ✅ NEW — the bill's own netPayable, even when it is 0 (e.g. the whole month taken as advance); the site's
+      // netPayable only when the bill has none stored. (`entry.netPayable || rp.netPayable` read a 0 bill as "missing".)
+      const entryNetPayable = (entry, rp) =>
+        entry && entry.netPayable !== undefined && entry.netPayable !== null && entry.netPayable !== "" && Number.isFinite(Number(entry.netPayable))
+          ? Number(entry.netPayable)
+          : Number(rp?.netPayable || 0);
+
       const buildLandOwnerObject = (o, siteEntry) => {
         const isGstHold = Number(siteEntry?.withGst) === 1 || Number(o.gstHold) === 1 ? 1 : 0;
         const isTdsHold = Number(siteEntry?.tdsHold) === 1 || Number(o.tdsHold) === 1 ? 1 : 0;
@@ -1467,7 +1474,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         gstNumberVal = rp.gstNumber || siteEntry?.gstNumber || "";
       }
 
-      let netPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
+      let netPayableVal = entryNetPayable(siteEntry, rp); // ✅ CHANGED — a 0 bill stays 0
       const totalExpectedNet = totalRentalAmountVal + effectiveGst;
       if (netPayableVal <= 0 || netPayableVal < totalExpectedNet) {
         netPayableVal = totalExpectedNet;
@@ -1599,7 +1606,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         const totalNetPayableSum = itemsForTotals.reduce((sum, item) => {
           const siteEntry = item.entry || {};
           const rp = item.media?.rentalPayment || {};
-          const net = Number(siteEntry.netPayable || rp.netPayable || 0);
+          const net = entryNetPayable(siteEntry, rp); // ✅ CHANGED — a 0 bill stays 0
           if (net > 0 && !isSingleBill) return sum + net;
           const rent = Number(rp.totalRentalAmount || siteEntry.baseAmount || 0);
           const isSiteGstOn = Number(rp.gstApplicable || siteEntry.gstApplicable || 0) === 1;
@@ -1665,7 +1672,7 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
               siteGstAmountVal = Number(rp.gstAmount || siteEntry?.gstAmount || siteLandownerGstSum || 0);
             }
 
-            let siteNetPayableVal = Number(siteEntry?.netPayable || rp.netPayable || 0);
+            let siteNetPayableVal = entryNetPayable(siteEntry, rp); // ✅ CHANGED — a 0 bill stays 0
             const siteTotalExpectedNet = siteTotalRentalVal + (isGstApplicable ? siteGstAmountVal : siteLandownerGstSum);
             if (siteNetPayableVal <= 0 || siteNetPayableVal < siteTotalExpectedNet) {
               siteNetPayableVal = siteTotalExpectedNet;
