@@ -171,7 +171,7 @@ const finalizeOwnerBucket = (bucket) =>
 // adds totalApprovedThisMonth (past approved in this month + this month's approved).
 // ✅ NEW — opts.overdueSitesByMonth (opt-in, with overdueByMonth): each
 // stats.overdueMonths[] item also gets sites[] = that month's overdue sites.
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false }) {
   const overdueSiteRows = overdueByMonth && overdueSitesByMonth ? new Map() : null; // ✅ NEW — month label → Map(faceKey → site row)
   const overdueMonthBuckets = overdueByMonth || pastPendingByMonth ? new Map() : null; // ✅ NEW
   const pastApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map(), months: new Map() } : null; // ✅ NEW
@@ -224,8 +224,11 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
       Number(cycleSummary.currentMonthRentalAmount || 0) +
       Number(cycleSummary.currentMonthGstAmount || 0);
 
-    if (currentSiteAmount > 0) {
-      const faceAmount = currentSiteAmount / faceCount;
+    // ✅ NEW — includeZeroAmountBills (opt-in, landowner/site-filter): a month whose bill is ₹0 (e.g. the whole month taken as
+    // advance) still counts its sites / landowners (amount 0); only when a bill exists for the month. Without it: unchanged.
+    const hasBillThisMonth = includeZeroAmountBills && currentSiteAmount <= 0 && (media.rentalDue || []).some((e) => e.dueDate && new Date(e.dueDate) >= monthStart && new Date(e.dueDate) <= monthEnd);
+    if (currentSiteAmount > 0 || hasBillThisMonth) {
+      const faceAmount = Math.max(0, currentSiteAmount) / faceCount;
       const currentMonthEntries = (media.rentalDue || []).filter((e) => {
         if (!e.dueDate) return false;
         const d = new Date(e.dueDate);
@@ -583,7 +586,7 @@ function finalizeMonthBuckets(buckets) {
  * @returns {Map<string, {approved:boolean, pending:boolean, overdue:boolean}>} keyed by face _id
  */
 // ✅ NEW — opts.pastOverdueOnly (opt-in): overdue = past months only (same as computeRentalDueStats)
-function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false, pastOverdueOnly = false }) {
+function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false, pastOverdueOnly = false, includeZeroAmountBills = false }) {
   // ✅ NEW — overdueByRole: overdue only while waiting on targetRole (same as computeRentalDueStats)
   const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   const result = new Map();
@@ -604,7 +607,9 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
   const currentSiteAmount =
     Number(cycleSummary.currentMonthRentalAmount || 0) +
     Number(cycleSummary.currentMonthGstAmount || 0);
-  if (currentSiteAmount > 0) {
+  // ✅ NEW — includeZeroAmountBills: a ₹0 bill of the month still gets its approved / pending flags (same as computeRentalDueStats)
+  const hasBillThisMonth = includeZeroAmountBills && currentSiteAmount <= 0 && (media.rentalDue || []).some((e) => e.dueDate && new Date(e.dueDate) >= monthStart && new Date(e.dueDate) <= monthEnd);
+  if (currentSiteAmount > 0 || hasBillThisMonth) {
     const currentMonthEntries = (media.rentalDue || []).filter((e) => {
       if (!e.dueDate) return false;
       const d = new Date(e.dueDate);

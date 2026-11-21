@@ -2546,13 +2546,13 @@ const restrictMediaIds = (Array.isArray(req.body?.mediaIds) ? req.body.mediaIds 
       // ✅ NEW — with roleType, approved / pending / overDue per face follow the
       // same role rule as the header counts (waiting on that role)
       const roleFaceFlags = targetRole
-        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, overdueByRole: true, pastOverdueOnly: true }) // ✅ CHANGED — overDue = past months only
+        ? getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, overdueByRole: true, pastOverdueOnly: true, includeZeroAmountBills: true }) // ✅ CHANGED — overDue = past months only; ✅ NEW — a ₹0 bill counts
         : null;
       // ✅ NEW — overDue = PAST months only (same rule as the overDue header);
       // without roleType: past bills not approved (overall status)
       const pastOverdueFaceFlags = targetRole
         ? null
-        : getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole: null, singleBillAsSite: true, pastOverdueOnly: true });
+        : getFaceRoleStatus(mediaDoc, { year: referenceYear, month: referenceMonthIdx + 1, targetRole: null, singleBillAsSite: true, pastOverdueOnly: true, includeZeroAmountBills: true }); // ✅ NEW — a ₹0 bill counts
       details.forEach((face) => {
         const faceId = String(face._id);
         const uniqueFaceKey = `${String(mediaDoc._id)}_${faceId}`;
@@ -3882,6 +3882,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         pastPendingByMonth: true,
         // ✅ NEW — overDue.months[].sites (that month's overdue sites)
         overdueSitesByMonth: true,
+        // ✅ NEW — a ₹0 bill of the month (e.g. whole month taken as advance) still counts its sites / landowners
+        includeZeroAmountBills: true,
         ...(billDateFilter.length
           ? {
               // ✅ FIXED — never before the bill's OWN due date: billDate slot 15 but
@@ -3909,6 +3911,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             trackLandOwners: true,
             pendingAtRoleOnly: true,
             singleBillAsSite: true,
+            includeZeroAmountBills: true, // ✅ NEW — a ₹0 bill counts (same as rentalDueStats above)
           })
         : rentalDueStats;
     const dueThisMonthOwners = (dueThisMonthStats.landOwners || {}).dueThisMonth || [];
