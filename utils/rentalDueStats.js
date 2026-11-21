@@ -48,6 +48,26 @@ function pickFaceEntry(entries, faceId) {
     })[0];
 }
 
+// ✅ NEW — opt-in replacedFaceApproval (landowner/site-filter): a face replaced in mediaDetails (removed, or re-created with
+// a new _id) leaves its month's CMD approved bill on an id that is no longer an active face, while the sweep may have
+// given the new face its own pending row for the same month. The month was approved, so the active face takes that
+// approved bill when its own row is not approved. Two ACTIVE faces (one approved, one pending) are never touched.
+function withReplacedFaceApproval(entry, entries, activeFacesList) {
+  if (entry && isApprovedDue(entry)) return entry;
+  const active = new Set(activeFacesList.map((d) => String(d._id)));
+  const orphanApproved = entries.find((e) => isApprovedDue(e) && e.mediaDetailId && !active.has(String(e.mediaDetailId)));
+  return orphanApproved || entry;
+}
+
+// ✅ NEW — opt-in overdueAnyFacePending (landowner/site-filter): a past month of a SINGLE-bill site is overdue when ANY active
+// face's own bill of that month is not CMD approved (not only when the site's most approved bill is open), and then every
+// active face counts → the month's full amount. A face with no bill of its own that month (e.g. added later) is skipped.
+// Returns that open bill, or null when every face's own bill is approved.
+function openFaceBillOf(entries, activeFacesList) {
+  const own = activeFacesList.map((d) => pickFaceEntry(entries, String(d._id))).filter(Boolean);
+  return own.find((e) => !isApprovedDue(e)) || null;
+}
+
 // ✅ NEW — opt-in (dashboard/v2): a SINGLE-bill site (every active face
 // siteBillMode ≠ 2, 2+ faces) has ONE bill, so all its faces take the stage
 // of the furthest-along row of the month (fully approved first, then the
@@ -171,7 +191,7 @@ const finalizeOwnerBucket = (bucket) =>
 // adds totalApprovedThisMonth (past approved in this month + this month's approved).
 // ✅ NEW — opts.overdueSitesByMonth (opt-in, with overdueByMonth): each
 // stats.overdueMonths[] item also gets sites[] = that month's overdue sites.
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false, replacedFaceApproval = false, overdueAnyFacePending = false }) {
   const overdueSiteRows = overdueByMonth && overdueSitesByMonth ? new Map() : null; // ✅ NEW — month label → Map(faceKey → site row)
   const overdueMonthBuckets = overdueByMonth || pastPendingByMonth ? new Map() : null; // ✅ NEW
   const pastApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map(), months: new Map() } : null; // ✅ NEW
@@ -242,7 +262,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           : undefined;
       for (const face of activeFacesList) {
         const faceId = String(face._id);
-        const entry = siteBillEntry !== undefined ? siteBillEntry : pickFaceEntry(currentMonthEntries, faceId);
+        const ownEntry = siteBillEntry !== undefined ? siteBillEntry : pickFaceEntry(currentMonthEntries, faceId);
+        const entry = replacedFaceApproval ? withReplacedFaceApproval(ownEntry, currentMonthEntries, activeFacesList) : ownEntry; // ✅ NEW
         // optional caller filter (e.g. login role) — default: no filtering
         if (faceFilter && !faceFilter(entry, media, face)) continue;
         // const entry = pickFaceEntry(currentMonthEntries, faceId);
@@ -320,9 +341,12 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         singleBillAsSite && isSingleBillSite(activeFacesList)
           ? pickSiteBillEntry(pastCycleEntries, activeFacesList)
           : undefined;
+      // ✅ NEW — overdueAnyFacePending: a single-bill site's month is open when any active face's own bill is open
+      const pastOpenFaceBill = overdueAnyFacePending && pastSiteBillEntry !== undefined ? openFaceBillOf(pastCycleEntries, activeFacesList) : null;
       for (const face of activeFacesList) {
         const faceId = String(face._id);
-        const entry = pastSiteBillEntry !== undefined ? pastSiteBillEntry : pickFaceEntry(pastCycleEntries, faceId);
+        const ownEntry = pastSiteBillEntry !== undefined ? pastSiteBillEntry : pickFaceEntry(pastCycleEntries, faceId);
+        const entry = replacedFaceApproval ? withReplacedFaceApproval(ownEntry, pastCycleEntries, activeFacesList) : ownEntry; // ✅ NEW
         if (faceFilter && !faceFilter(entry, media, face)) continue;
         // ✅ NEW — pastApprovedInMonth: this past bill approved inside this month
         if (pastApproved && approvedAtInRange(entry, targetRole, monthStart, monthEnd)) {
@@ -331,16 +355,17 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
           pastApproved.faces.add(`${String(media._id)}_${faceId}`);
           addFaceToOwnerBucket(pastApproved.owners, media, faceId, pastFaceAmount);
         }
-        const { isOpen } = roleStatus(entry, null); // overdue is role independent
+        const odEntry = pastOpenFaceBill || entry; // ✅ NEW — overdueAnyFacePending (same as entry without it)
+        const { isOpen } = roleStatus(odEntry, null); // overdue is role independent
         if (!isOpen) continue;
         // ✅ NEW — overdueByRole: only past bills waiting on this role
-        if (roleOverdue && !roleStatus(entry, targetRole, { pendingAtRoleOnly }).isOpen) continue;
+        if (roleOverdue && !roleStatus(odEntry, targetRole, { pendingAtRoleOnly }).isOpen) continue;
         overdueFaces.add(faceId);
         // ✅ NEW — overdueByMonth: past-month breakdown
         if (overdueMonthBuckets) addToMonthBucket(overdueMonthBuckets, cycleLabel, cycleYear * 12 + cycleMonthIdx, media, faceId, pastFaceAmount, Number(pastSummary.currentMonthGstAmount || 0) / faceCount);
-        if (overdueSiteRows) addOverdueSiteRow(overdueSiteRows, cycleLabel, media, face, entry, pastFaceAmount, Number(pastSummary.currentMonthGstAmount || 0) / faceCount); // ✅ NEW
+        if (overdueSiteRows) addOverdueSiteRow(overdueSiteRows, cycleLabel, media, face, odEntry, pastFaceAmount, Number(pastSummary.currentMonthGstAmount || 0) / faceCount); // ✅ NEW
         stats.overdueAmountTotal += pastFaceAmount;
-        if (onFace) onFace({ media, face, entry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate, gstShare: Number(pastSummary.currentMonthGstAmount || 0) / faceCount });
+        if (onFace) onFace({ media, face, entry: odEntry, amount: pastFaceAmount, state: "overdue", past: true, cycleLabel, cycleDate, gstShare: Number(pastSummary.currentMonthGstAmount || 0) / faceCount });
         trackOwner("overdue", media, faceId, pastFaceAmount);
       }
     }
@@ -586,7 +611,7 @@ function finalizeMonthBuckets(buckets) {
  * @returns {Map<string, {approved:boolean, pending:boolean, overdue:boolean}>} keyed by face _id
  */
 // ✅ NEW — opts.pastOverdueOnly (opt-in): overdue = past months only (same as computeRentalDueStats)
-function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false, pastOverdueOnly = false, includeZeroAmountBills = false }) {
+function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueByRole = false, pastOverdueOnly = false, includeZeroAmountBills = false, replacedFaceApproval = false, overdueAnyFacePending = false }) {
   // ✅ NEW — overdueByRole: overdue only while waiting on targetRole (same as computeRentalDueStats)
   const roleOverdue = overdueByRole && targetRole !== null && targetRole !== undefined;
   const result = new Map();
@@ -621,7 +646,8 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
         : undefined;
     for (const face of activeFacesList) {
       const flags = result.get(String(face._id));
-      const entry = siteBillEntry !== undefined ? siteBillEntry : pickFaceEntry(currentMonthEntries, String(face._id));
+      const ownEntry = siteBillEntry !== undefined ? siteBillEntry : pickFaceEntry(currentMonthEntries, String(face._id));
+      const entry = replacedFaceApproval ? withReplacedFaceApproval(ownEntry, currentMonthEntries, activeFacesList) : ownEntry; // ✅ NEW
       const { isApproved, isOpen } = roleStatus(entry, targetRole, { pendingAtRoleOnly });
       if (isApproved) flags.approved = true;
       else if (isOpen) flags.pending = true;
@@ -654,8 +680,11 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
       singleBillAsSite && isSingleBillSite(activeFacesList)
         ? pickSiteBillEntry(pastCycleEntries, activeFacesList)
         : undefined;
+    // ✅ NEW — overdueAnyFacePending (same rule as computeRentalDueStats)
+    const pastOpenFaceBill = overdueAnyFacePending && pastSiteBillEntry !== undefined ? openFaceBillOf(pastCycleEntries, activeFacesList) : null;
     for (const face of activeFacesList) {
-      const entry = pastSiteBillEntry !== undefined ? pastSiteBillEntry : pickFaceEntry(pastCycleEntries, String(face._id));
+      const ownEntry = pastSiteBillEntry !== undefined ? pastSiteBillEntry : pickFaceEntry(pastCycleEntries, String(face._id));
+      const entry = pastOpenFaceBill || (replacedFaceApproval ? withReplacedFaceApproval(ownEntry, pastCycleEntries, activeFacesList) : ownEntry); // ✅ NEW
       if (!roleStatus(entry, null).isOpen) continue;
       // ✅ NEW — overdueByRole: only past bills waiting on this role
       if (roleOverdue && !roleStatus(entry, targetRole, { pendingAtRoleOnly }).isOpen) continue;
@@ -666,4 +695,4 @@ function getFaceRoleStatus(media, { year, month, targetRole = null, pendingAtRol
   return result;
 }
 
-module.exports = { computeRentalDueStats, getFaceRoleStatus, roleStatus, startOfTodayIST, isSingleBillSite, pickSiteBillEntry };
+module.exports = { computeRentalDueStats, getFaceRoleStatus, roleStatus, startOfTodayIST, isSingleBillSite, pickSiteBillEntry, openFaceBillOf }; // ✅ CHANGED — + openFaceBillOf

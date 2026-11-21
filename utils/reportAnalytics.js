@@ -2361,6 +2361,16 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
     if (b) add(b, r);
     records.push(r);
   };
+  // ✅ NEW — overdue rule (same as landowner/site-filter and dashboard/v2): a past month of a single-bill site is past due when
+  // ANY active face's own bill of the month is not CMD approved — every face of it then (the month's full amount)
+  const { openFaceBillOf, isSingleBillSite } = require("./rentalDueStats");
+  const anyFaceOpen = (doc, date) => {
+    const active = faceList(doc).filter((fc) => num(fc.status) === 1);
+    if (!isSingleBillSite(active)) return false;
+    const key = date.getUTCFullYear() * 12 + date.getUTCMonth();
+    const entries = (doc.rentalDue || []).filter((e) => { const d = toDate(e?.dueDate); return d && d.getUTCFullYear() * 12 + d.getUTCMonth() === key; });
+    return !!openFaceBillOf(entries, active);
+  };
   const cycle = (doc, date, s, direct, historicalRows = null) => {
     const rows = historicalRows || [];
     if (!historicalRows) {
@@ -2377,13 +2387,15 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
     // Cumulative cent rounding conserves each cycle's rent and GST exactly,
     // including 3+ faces. Never floor each face's components independently.
     const share = (total, i) => r2(r2(total * (i + 1) / rows.length) - r2(total * i / rows.length));
+    const anyFaceOpenNow = !historicalRows && anyFaceOpen(doc, date); // ✅ NEW
     rows.forEach((x, i) => {
       const approved = x.state === "approved";
       const prior = !!historicalRows;
       const pending = !approved && !prior;
       const pastCycle = date.getUTCFullYear() * 12 + date.getUTCMonth() < capMonth;
       // ✅ CHANGED — past months only: a current-month bill past its due date is no longer pastDue
-      const pastDue = !approved && (prior || pastCycle);
+      // ✅ CHANGED — + a past month where any active face's own bill is open (overdue rule above)
+      const pastDue = (!approved && (prior || pastCycle)) || (!prior && pastCycle && anyFaceOpenNow);
       emit(doc, date, { rental: share(rental, i), gst: direct ? share(gst, i) : 0, holdGst: direct ? 0 : share(gst, i) }, x.entry, x.face,
         { generated: !prior, approved: approved && !prior, pending, pastDue: !!pastDue },
         { kind: "cycle", priorPeriod: prior });
@@ -2409,6 +2421,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
     const groups = new Map();
     computeRentalDueStats([doc], {
       year: cap.getUTCFullYear(), month: cap.getUTCMonth() + 1, singleBillAsSite: true,
+      overdueAnyFacePending: true, // ✅ NEW — same overdue rule as the period months above
       onFace: (x) => {
         if (!x.past) return; // ✅ CHANGED — current-month bills are never past due (past months only)
         if (!x.past && (capMonth >= startMonth || x.state === "approved")) return;
