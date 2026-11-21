@@ -481,7 +481,20 @@ function addOverdueSiteRow(rowsByMonth, label, media, face, entry, amount, gstAm
   }
   const row = rows.get(key);
   if (!row.faces.some((f) => f.faceId === String(face._id))) {
-    row.faces.push({ faceId: String(face._id), mediaCode: face.mediaCode || "", mediaName: face.mediaName || "" });
+    // + the site details of the "Combined Sites Details" popup (type, location, city/state, size, front view)
+    row.faces.push({
+      faceId: String(face._id),
+      mediaCode: face.mediaCode || "",
+      mediaName: face.mediaName || "",
+      mediaType: face.mediaType || "",
+      location: face.location || "",
+      city: face.city || "",
+      state: face.state || "",
+      width: face.width ?? null,
+      height: face.height ?? null,
+      totalSqFt: face.totalSqFt ?? null,
+      frontView: face.frontView && face.frontView.filePath ? { filePath: face.frontView.filePath } : null,
+    });
   }
   // separate-bill faces at different stages → the face still furthest behind
   if (approvalRank(entry) < approvalRank(row.entry)) row.entry = entry;
