@@ -42,7 +42,7 @@ test("L2 GST row: by _id, else rentalDueId + owner (virtual row, then paid row)"
   assert.equal(rows[3].paymentInfo, null);
 });
 
-test("L3 cmdApproval = site-filter bills: open CMD approved rentalDue bills, unpaid rows; GST only when held (withGst 1)", () => {
+test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only when held) with all rows; tabs filter rows", () => {
   const due = (id, o = {}) => ({ _id: id, approvalStatus: 3, approvalSteps: cmdSteps, withGst: 0, ...o });
   const cmd = {
     approved: new Set(["b1", "b3", "b4", "b5", "b6"]), // CMD approved up to the month
@@ -68,18 +68,29 @@ test("L3 cmdApproval = site-filter bills: open CMD approved rentalDue bills, unp
     ],
   };
   const cmdBySite = new Map([["s1", cmd]]);
+  // cmdApproval → the site (b1 open + unpaid) with ALL its rows, like the normal list
   const r = L.filterLedgerRows([site], { cmdApproval: true, cmdBySite });
-  assert.deepEqual(r.sites[0].ledger.map((x) => x.rentalDueId), ["b1"]);
-  assert.deepEqual(r.sites[0].gstBalanceHistory.map((x) => x.rentalDueId), ["b6"]);
+  assert.equal(r.sites.length, 1);
+  assert.equal(r.sites[0].ledger.length, 5);
+  assert.equal(r.sites[0].gstBalanceHistory.length, 2);
   assert.deepEqual(r.counts.yetToPayment, { sites: 1, landOwners: 1, rows: 1, amount: 10000 });
   assert.deepEqual(r.counts.completed, { sites: 1, landOwners: 1, rows: 1, amount: 7000 });
 
+  // tabs → only the rows in that state
   const yet = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 1, cmdBySite });
   assert.deepEqual(yet.sites[0].ledger.map((x) => x.rentalDueId), ["b1"]);
+  assert.deepEqual(yet.sites[0].gstBalanceHistory, []);
   const done = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 2, cmdBySite });
   assert.deepEqual(done.sites[0].ledger.map((x) => x.rentalDueId), ["b4"]);
-  const onlyGstDirect = { _id: "s1", ledger: [], gstBalanceHistory: [site.gstBalanceHistory[0]] };
-  assert.equal(L.filterLedgerRows([onlyGstDirect], { cmdApproval: true, cmdBySite }).sites.length, 0); // ADINCHN0070 case
+
+  // a site whose only unpaid CMD row is direct GST (withGst 2) is not a cmdApproval site (ADINCHN0070 case)
+  const onlyGstDirect = { _id: "s1", ledger: [site.ledger[3]], gstBalanceHistory: [site.gstBalanceHistory[0]] };
+  assert.equal(L.filterLedgerRows([onlyGstDirect], { cmdApproval: true, cmdBySite }).sites.length, 0);
+  // a site with only an unpaid GST hold row is (rows all kept)
+  const gstHoldOnly = { _id: "s1", ledger: [site.ledger[3]], gstBalanceHistory: [site.gstBalanceHistory[1]] };
+  const g = L.filterLedgerRows([gstHoldOnly], { cmdApproval: true, cmdBySite });
+  assert.equal(g.sites.length, 1);
+  assert.equal(g.sites[0].ledger.length, 1);
   const none = L.filterLedgerRows([{ _id: "s2", ledger: [{ rentalDueId: "x", isVirtual: true }], gstBalanceHistory: [] }], { paymentInfoStatus: 1 });
   assert.equal(none.sites.length, 0);
 });

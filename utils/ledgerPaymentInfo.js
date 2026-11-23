@@ -102,10 +102,13 @@ const rowAmount = (row, kind) => {
 };
 
 /**
- * Filters every site's ledger[] / gstBalanceHistory[] rows (already carrying
- * paymentInfo) by cmdApproval and / or paymentInfoStatus; sites with no row left
- * are dropped. counts = Yet to Payment / Completed rows with payment details
- * (cmdApproval = CMD approved bills, paid or not; paymentInfoStatus not applied).
+ * ledger-list row filters. Rows already carry paymentInfo.
+ *   cmdApproval (no paymentInfoStatus) → the sites of landowner/site-filter
+ *     cmdApproval (a CMD approved bill whose payment is not entered yet), each
+ *     with ALL its ledger[] / gstBalanceHistory[] rows (same as the normal list)
+ *   paymentInfoStatus 1 / 2 → only the rows with payment details in that state
+ *     (Yet to Payment / Completed), any site; sites without such a row dropped
+ * counts = Yet to Payment / Completed rows with payment details (= the two tabs).
  * sites: [{ _id, ledger, gstBalanceHistory }], cmdBySite: Map(siteId → cmd) (see isCmdRow)
  */
 function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null, cmdBySite = new Map() }) {
@@ -116,25 +119,34 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
   const out = [];
   (sites || []).forEach((m) => {
     const siteId = idStr(m._id || m.mediaId);
-    const bills = cmdBySite.get(siteId) || null;
-    const pick = (rows, kind) =>
-      (rows || []).filter((r) => {
-        if (!r) return false;
-        if (cmdApproval && !isCmdRow(r, bills, kind, false)) return false;
-        const st = r.paymentInfo ? r.paymentInfo.paymentInfoStatus : null;
-        if (st) {
-          const c = st === 2 ? counts.completed : counts.yetToPayment;
-          c.sites.add(siteId);
-          if (ownerOf(r)) c.landOwners.add(ownerOf(r));
-          c.rows += 1;
-          c.amount += rowAmount(r, kind);
-        }
-        if (paymentInfoStatus) return st === paymentInfoStatus;
-        return cmdApproval ? isCmdRow(r, bills, kind, true) : true; // cmdApproval list: payment not entered yet
+    const statusOf = (r) => (r && r.paymentInfo ? r.paymentInfo.paymentInfoStatus : null);
+    const tally = (rows, kind) =>
+      (rows || []).forEach((r) => {
+        const st = statusOf(r);
+        if (!st) return;
+        const c = st === 2 ? counts.completed : counts.yetToPayment;
+        c.sites.add(siteId);
+        if (ownerOf(r)) c.landOwners.add(ownerOf(r));
+        c.rows += 1;
+        c.amount += rowAmount(r, kind);
       });
-    const ledger = pick(m.ledger, "rent");
-    const gstBalanceHistory = pick(m.gstBalanceHistory, "gst");
-    if (ledger.length || gstBalanceHistory.length) out.push({ ...m, ledger, gstBalanceHistory });
+    tally(m.ledger, "rent");
+    tally(m.gstBalanceHistory, "gst");
+
+    if (paymentInfoStatus) {
+      const ledger = (m.ledger || []).filter((r) => statusOf(r) === paymentInfoStatus);
+      const gstBalanceHistory = (m.gstBalanceHistory || []).filter((r) => statusOf(r) === paymentInfoStatus);
+      if (ledger.length || gstBalanceHistory.length) out.push({ ...m, ledger, gstBalanceHistory });
+      return;
+    }
+    if (cmdApproval) {
+      const cmd = cmdBySite.get(siteId) || null;
+      const isCmdSite =
+        (m.ledger || []).some((r) => isCmdRow(r, cmd, "rent", true)) || (m.gstBalanceHistory || []).some((r) => isCmdRow(r, cmd, "gst", true));
+      if (isCmdSite) out.push(m);
+      return;
+    }
+    out.push(m);
   });
   const fin = (c) => ({ sites: c.sites.size, landOwners: c.landOwners.size, rows: c.rows, amount: Math.round(c.amount) });
   return { sites: out, counts: { yetToPayment: fin(counts.yetToPayment), completed: fin(counts.completed) } };
