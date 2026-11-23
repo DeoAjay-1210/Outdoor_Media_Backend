@@ -1084,6 +1084,9 @@ const MediaSchema = new mongoose.Schema(
     gstBalanceHistory: [gstBalanceSchema],
     // ✅ NEW — arrears bills from an approved rent revision (paid separately)
         arrearsDue: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    // ✅ NEW — /admin/ledger-payment-info-save: Payment Through / Type Of Payment /
+    // Bank Ref / Narration per ledger or GST row, saved before its UTR (utils/ledgerPaymentInfo.js)
+    ledgerPaymentInfo: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     createdAt: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
   },
