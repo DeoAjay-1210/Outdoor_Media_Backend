@@ -7862,6 +7862,17 @@ function pendingRevisionAmounts(r) {
   };
 }
 
+// ✅ NEW — the same Pending revision amounts per bill month: [{ month, rent, gst }]
+// BILL → monthsDetail months (else fromMonth), ADVANCE → the advance month (fromMonth).
+// Adds up to pendingRevisionAmounts(r) rent / gst.
+function pendingRevisionMonthParts(r) {
+  const p = pendingRevisionAmounts(r);
+  const detail = r.billType !== "ADVANCE" && Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : null;
+  if (!detail) return [{ month: r.fromMonth || "", rent: p.rent, gst: p.gst }];
+  const withGstPart = Number(r.gstOnIncrease) === 1;
+  return detail.map((d) => ({ month: d.month || "", rent: Math.max(0, Number(d.amount || 0)), gst: withGstPart ? Math.max(0, Number(d.gstAmount || 0)) : 0 }));
+}
+
 // ✅ CHANGED — options.pendingRevisions (optional, site-filter): rent revisions
 // still Pending are added to the New Bill / Advance OverAll + Remaining
 function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
@@ -7917,6 +7928,13 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
     newBill: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
     advance: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
   };
+  // ✅ NEW — the same totals by the bill's month: cur = requested month, past = before it
+  // (later months only in the all-months totals above)
+  const emptyRevisionTotals = () => ({ rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 });
+  const revisionMonthTotals = {
+    newBill: { cur: emptyRevisionTotals(), past: emptyRevisionTotals() },
+    advance: { cur: emptyRevisionTotals(), past: emptyRevisionTotals() },
+  };
   // ✅ NEW — Pending rent revisions of active sites (no bill yet → paid 0)
   if (Array.isArray(options.pendingRevisions) && options.pendingRevisions.length) {
     const activeIds = new Set(
@@ -7932,6 +7950,18 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
         tt[`gst${p.gstKind}Total`] += p.gst;
         tt.gstPendingApproval += p.gst;
       }
+      // ✅ NEW — by month
+      pendingRevisionMonthParts(rv).forEach((part) => {
+        const bucket = legacyBucket(part.month);
+        if (!bucket) return;
+        const mt = revisionMonthTotals[p.kind][bucket];
+        mt.rentTotal += part.rent;
+        mt.rentPendingApproval += part.rent;
+        if (part.gst > 0) {
+          mt[`gst${p.gstKind}Total`] += part.gst;
+          mt.gstPendingApproval += part.gst;
+        }
+      });
     });
   }
   const addRevisionTotals = (media) => {
@@ -7947,6 +7977,18 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
         const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
         tt[`gst${kind}Total`] += gst;
         tt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
+      }
+      // ✅ NEW — by the bill's month
+      const bucket = legacyBucket(b.dueMonth);
+      if (bucket) {
+        const mt = revisionMonthTotals[b.type === "advance" ? "advance" : "newBill"][bucket];
+        mt.rentTotal += rent;
+        mt.rentPaid += Math.min(rent, Number(b.rentPaid || 0));
+        if (gst > 0) {
+          const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
+          mt[`gst${kind}Total`] += gst;
+          mt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
+        }
       }
     });
   };
@@ -8083,12 +8125,27 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
       });
       acc[`${k}RentPendingApprovalAmount`] = r(tt.rentPendingApproval); // ✅ NEW — part of OverAll not yet CMD approved
       acc[`${k}GstPendingApprovalAmount`] = r(tt.gstPendingApproval); // ✅ NEW
+      // ✅ NEW — same keys for the requested month (CurrentMonth) and past months (PastMonth)
+      [["CurrentMonth", "cur"], ["PastMonth", "past"]].forEach(([label, bucket]) => {
+        const mt = revisionMonthTotals[k][bucket];
+        acc[`${k}${label}RentOverAllAmount`] = r(mt.rentTotal);
+        acc[`${k}${label}RentPaidAmount`] = r(mt.rentPaid);
+        acc[`${k}${label}RentRemainingAmount`] = r(mt.rentTotal - mt.rentPaid);
+        ["Hold", "CannotHold"].forEach((kind) => {
+          acc[`${k}${label}Gst${kind}OverAllAmount`] = r(mt[`gst${kind}Total`]);
+          acc[`${k}${label}Gst${kind}PaidAmount`] = r(mt[`gst${kind}Paid`]);
+          acc[`${k}${label}Gst${kind}RemainingAmount`] = r(mt[`gst${kind}Total`] - mt[`gst${kind}Paid`]);
+        });
+        acc[`${k}${label}RentPendingApprovalAmount`] = r(mt.rentPendingApproval);
+        acc[`${k}${label}GstPendingApprovalAmount`] = r(mt.gstPendingApproval);
+      });
       return acc;
     }, {}),
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;
 exports.pendingRevisionAmounts = pendingRevisionAmounts; // ✅ NEW
+exports.pendingRevisionMonthParts = pendingRevisionMonthParts; // ✅ NEW — site-filter month filters
 
 function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const includeLandOwnerCounts = !!options.includeLandOwnerCounts;
