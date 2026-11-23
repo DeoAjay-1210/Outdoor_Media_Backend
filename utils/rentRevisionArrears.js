@@ -1557,7 +1557,54 @@ function withRemarkKeys(out) {
 const decorateLedgerItem = (...args) => withRemarkKeys(decorateLedgerItemBase(...args));
 const decorateLedgerHistoryBlock = (...args) => withRemarkKeys(decorateLedgerHistoryBlockBase(...args));
 
+// ✅ NEW — a bill fully paid by a CMD approved advance (nothing left to pay)
+// gets the advance revision's RE / RM / CMD approval (no approval of its own).
+// revision = advance revision whose CMD step is Approved; null when it is not.
+const ADVANCE_STEP_STATUS = { Approved: 2, Skipped: 3 };
+function advanceApprovalFields(revision, { advanceBillId = null, advanceMonth = "", advanceAmount = 0 } = {}) {
+  const revSteps = revision?.approvalSteps || [];
+  const cmd = revSteps.find((s) => s && Number(s.role) === 3 && s.status === "Approved");
+  if (!cmd) return null;
+  const approvedAt = cmd.at || revision.approvedAt || null;
+  const approvalSteps = [1, 2, 3].map((role) => {
+    const st = revSteps.find((x) => x && Number(x.role) === role) || {};
+    const status = ADVANCE_STEP_STATUS[st.status] || 2;
+    // ✅ FIXED — a role skipped on the advance (CMD decided directly) stays a
+    // skipped step like a normal bill's: no user / time / doc verified
+    if (status === 3) {
+      return { role, userId: null, userName: "", approvedAt: null, status: 3, docVerified: false, remarks: st.remark || "Skipped — CMD decided directly" };
+    }
+    return {
+      role,
+      userId: st.byUserId || null,
+      userName: st.by || "",
+      approvedAt: st.at || null,
+      status,
+      docVerified: true,
+      ...(role === 1 ? { remarks: "Approved via advance (full amount advanced)" } : {}),
+    };
+  });
+  return {
+    approvalSteps,
+    approvalStatus: 3,
+    status: 3,
+    currentPendingRole: null,
+    agreementDocVerified: true,
+    ownerApprovalDate: approvedAt,
+    reason: String(revision.reason || "").trim(), // ✅ NEW — the reason given on the advance
+    approvedVia: "advance",
+    advanceApproval: {
+      revisionId: revision._id || null,
+      advanceRentalDueId: advanceBillId,
+      advanceMonth,
+      advanceAmount,
+      approvedAt,
+    },
+  };
+}
+
 module.exports = {
+  advanceApprovalFields, // ✅ NEW
   withSiteOwnerCategory, // ✅ NEW
   MONTHS,
   monthKey,

@@ -25,6 +25,7 @@ const {
   newBillLabel,
   buildAdvancePlan,
   toAdvanceBill,
+  advanceApprovalFields, // ✅ NEW — full-advance bill approval
   gstPercentageFor,
   cycleMonthsOf,
   nextBillDateAfter,
@@ -2668,6 +2669,27 @@ async function applyAdvance(revision, media, userName) {
   const withGstError = advanceWithGstError(media, plan.adjustInMonth, revision.withGst);
   if (withGstError) throw { message: withGstError, statusCode: 400 };
   const bill = withRevisionGst(toAdvanceBill(plan, { revisionId: revision._id, advanceDate: revision.fromDate, advanceAmount }, userName, now), revision); // ✅ CHANGED — + revision withGst
+  // ✅ NEW — bill already generated and now fully paid by advance(s) (rent and
+  // GST 0 left, not CMD approved) → approved with this advance's RE / RM / CMD
+  // steps (same as a bill generated after the advance). Partial → unchanged.
+  const fullyAdvanced =
+    plan.billsToUpdate.length > 0 &&
+    plan.billsToUpdate.every((b) => Number(b.newAmount || 0) <= 0 && Number(b.gstAmount || 0) <= 0) &&
+    Number(plan.billApprovalStatus) !== 3;
+  const advanceApproval = fullyAdvanced
+    ? advanceApprovalFields(revision, {
+        advanceBillId: bill._id,
+        advanceMonth: bill.dueMonth || "",
+        advanceAmount: Number(plan.previousAdvanceTotal || 0) + advanceAmount,
+      })
+    : null;
+  if (advanceApproval) {
+    plan.billsToUpdate.forEach((b, i) => {
+      Object.entries(advanceApproval).forEach(([k, v]) => {
+        $set[`rentalDue.$[v${i}].${k}`] = v;
+      });
+    });
+  }
   // ✅ NEW — month payment split → owners' cash / online of the advance bill
   if (revision.advancePayment) {
     const d = monthOwnerDeltas(media, revision.fromDate, advanceAmount, revision.advancePayment, revision.fromMonth);
@@ -2713,7 +2735,7 @@ async function applyAdvance(revision, media, userName) {
     try {
       await Media.updateOne(
         { _id: media._id },
-        { $set: { "rentalDueHistory.$[].months.$[].entries.$[h].netPayable": b.newAmount } },
+        { $set: { "rentalDueHistory.$[].months.$[].entries.$[h].netPayable": b.newAmount, ...(advanceApproval ? { "rentalDueHistory.$[].months.$[].entries.$[h].approvalStatus": 3 } : {}) } }, // ✅ CHANGED — + approved via advance
         { arrayFilters: [{ "h.rentalDueId": b.rentalDueId }], strict: false },
       );
     } catch (e) {
@@ -3099,6 +3121,7 @@ exports.revertCancelRevision = async (req, res) => {
   }
 };
 
+exports.applyAdvance = applyAdvance; // ✅ NEW — tests
 exports.approveRentRevision = async (req, res) => {
   try {
     const { remark } = req.body || {};
