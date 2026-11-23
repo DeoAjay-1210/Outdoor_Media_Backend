@@ -123,7 +123,8 @@ function planMediaBills(media) {
 
   const bases = [];
   byKey.forEach((groupRows, baseKey) => {
-    const approved = groupRows.filter((r) => Number(r.approvalStatus) === 3);
+    // ✅ CHANGED — a ₹0 bill approved via a full advance gets no number (the advance bill has it)
+    const approved = groupRows.filter((r) => Number(r.approvalStatus) === 3 && r.approvedVia !== "advance");
     if (!approved.length) return;
 
     const validDates = groupRows.map((r) => toValidDate(r.dueDate)).filter(Boolean);

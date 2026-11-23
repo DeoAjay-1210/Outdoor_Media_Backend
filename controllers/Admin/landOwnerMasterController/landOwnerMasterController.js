@@ -3630,7 +3630,12 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     };
     const allRevisions = await RentRevision.find({ status: { $in: ["Pending", "Approved"] }, billType: { $nin: ["NORMAL_BILL", "CANCEL"] } }).lean(); // ✅ CHANGED — also used for pending / approved split; NORMAL_BILL (no New Bill) not counted
     const revisionMonthItems = (r) =>
-      revisionItems(r).filter((i) => !includeDueThisMonth || parseRevisionMonth(i.month) === revisionStatsKey);
+      // ✅ CHANGED — dueThisMonth 1: every month UP TO the monthFilter month (was that month only), Pending + Approved
+      revisionItems(r).filter((i) => {
+        if (!includeDueThisMonth) return true;
+        const k = parseRevisionMonth(i.month);
+        return k !== null && k !== undefined && k <= revisionStatsKey;
+      });
     // mediaId → { bill: [items], advance: [items] }
     const buildRevisionsByMedia = (list) => {
       const map = new Map();
@@ -3902,6 +3907,8 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         includeZeroAmountBills: true,
         // ✅ NEW — overDue: a past month where ANY active face's own bill is not CMD approved (full month amount)
         overdueAnyFacePending: true,
+        // ✅ NEW — dueThisMonth: a bill approved via a full advance shows the full month amount (not ₹0)
+        advanceFullAmountInDue: true,
         ...(billDateFilter.length
           ? {
               // ✅ FIXED — never before the bill's OWN due date: billDate slot 15 but
@@ -3931,6 +3938,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             singleBillAsSite: true,
             includeZeroAmountBills: true, // ✅ NEW — a ₹0 bill counts (same as rentalDueStats above)
             overdueAnyFacePending: true, // ✅ NEW — same as rentalDueStats above
+            advanceFullAmountInDue: true, // ✅ NEW — same as rentalDueStats above
           })
         : rentalDueStats;
     const dueThisMonthOwners = (dueThisMonthStats.landOwners || {}).dueThisMonth || [];
@@ -4119,7 +4127,7 @@ const cityMatchQuery = city
             };
           };
           return {
-            monthScope: includeDueThisMonth ? "currentMonth" : "allMonths",
+            monthScope: includeDueThisMonth ? "upToMonth" : "allMonths", // ✅ CHANGED — "upToMonth": every month up to `month` (was "currentMonth")
             month: includeDueThisMonth ? `${REVISION_MONTHS[statsMonth - 1]} ${statsYear}` : null,
             roleType: revisionTargetRole,
             roleName: revisionTargetRole ? REVISION_ROLE_NAMES[revisionTargetRole] : null,

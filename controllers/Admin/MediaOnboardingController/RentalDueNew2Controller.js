@@ -21,6 +21,7 @@ const {
 const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate, keptOwnerSplit, withOwnerSplit } = require("../../../utils/appraisalRent"); // ✅ CHANGED — + keptOwnerSplit, withOwnerSplit
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
+const { advanceApprovalFields } = require("../../../utils/rentRevisionArrears"); // ✅ NEW — full-advance bill approval
 const {
   createRentalApprovalNotification,
   createOverdueRemarkNotification,
@@ -163,6 +164,30 @@ function ensureNextBillingDateSeed(media) {
   media.rentalPayment.nextBillingDate = seedDate;
   media.markModified("rentalPayment");
   return true;
+}
+
+// ✅ NEW — a new bill whose month is fully paid by CMD approved advance(s)
+// (rentalPayment.advanceAdjustments of that month, nothing left to pay) →
+// approval fields copied from the advance revision. null → normal flow.
+async function fullAdvanceApprovalFor(media, monthLabel, netPayable, gstAmount = 0) {
+  try {
+    if (Number(netPayable || 0) > 0 || Number(gstAmount || 0) > 0) return null; // ✅ GST still to pay → normal flow
+    const rows = (media?.rentalPayment?.advanceAdjustments || []).filter((a) => a && a.dueMonth === monthLabel);
+    const advanceAmount = rows.reduce((s, a) => s + Number(a.amount || 0), 0);
+    if (advanceAmount <= 0) return null;
+    const last = [...rows].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))[0];
+    if (!last.rentRevisionId || !mongoose.Types.ObjectId.isValid(String(last.rentRevisionId))) return null;
+    const revision = await RentRevision.findById(last.rentRevisionId).select("approvalSteps approvedAt reason").lean(); // ✅ CHANGED — + reason
+    if (!revision) return null;
+    const advanceBill = (media.arrearsDue || []).find((b) => b && String(b._id) === String(last.advanceBillId)) || {};
+    return advanceApprovalFields(
+      { ...revision, _id: last.rentRevisionId },
+      { advanceBillId: last.advanceBillId || null, advanceMonth: advanceBill.dueMonth || "", advanceAmount },
+    );
+  } catch (err) {
+    console.error("fullAdvanceApprovalFor:", err.message);
+    return null;
+  }
 }
 
 async function generateMissedEntriesForMedia(media, userName) {
@@ -362,6 +387,12 @@ async function generateMissedEntriesForMedia(media, userName) {
         updatedAt: nowIST(),
       };
 
+      // ✅ NEW — month fully covered by CMD approved advance(s) (₹0 left) → created
+      // approved with the advance's RE / RM / CMD steps (no new approval). Partial
+      // advance / no advance → unchanged (normal flow above).
+      const advanceApproved = await fullAdvanceApprovalFor(media, candidateMonthLabel, newEntry.netPayable, newEntry.gstAmount);
+      if (advanceApproved) Object.assign(newEntry, advanceApproved);
+
       const { result: atomicResult } = await atomicallyEnsureOrUpdateRentalDueEntry(media._id, newEntry);
 
       if (!atomicResult) continue;
@@ -425,6 +456,7 @@ async function generateMissedEntriesForMedia(media, userName) {
   return { generatedEntries };
 }
 exports.generateMissedEntriesForMedia = generateMissedEntriesForMedia;
+exports.fullAdvanceApprovalFor = fullAdvanceApprovalFor; // ✅ NEW — tests
 exports.sendRentalDueApprovalMail = sendRentalDueApprovalMail; // ✅ NEW — rent revision arrears mail
 
 function getAgreementVerificationStatus(item) {
@@ -5247,7 +5279,7 @@ async function atomicallyEnsureOrUpdateRentalDueEntry(mediaId, newEntry) {
     },
     { returnDocument: 'after',timestamps: false  },
   );
-  if (created) await assignBillNoToNewBill(Media, created, newEntry); // ✅ NEW — bill number
+  if (created && newEntry.approvedVia !== "advance") await assignBillNoToNewBill(Media, created, newEntry); // ✅ NEW — bill number; ✅ CHANGED — not for a full-advance ₹0 bill
   return created ? { result: created, action: "created" } : { result: null, action: "none" };
 }
 // ─────────────────────────────────────────────────────────────
@@ -5554,6 +5586,12 @@ function advanceFieldsForEntry(item, entry) {
     balanceAmount: Number(entry.netPayable || 0),
     balanceGstAmount: Number(entry.gstAmount || 0),
     advanceDetails: details,
+    // ✅ NEW — bill approved via a full advance → paid when its advance bill(s) are paid
+    ...(entry.approvedVia === "advance"
+      ? ((advBills) => ({ paymentStatus: advBills.length ? rrPaymentStatus(advBills) : "Pending" }))(
+          rows.map((a) => bills.find((x) => String(x._id) === String(a.advanceBillId))).filter(Boolean),
+        )
+      : {}),
   };
 }
 
@@ -6419,8 +6457,20 @@ if (Number(isPastPending) === 1) {
           monthSummaryCache.set(key, getOverallSummaryForCycle(item, { year, month }));
         }
         const s = monthSummaryCache.get(key) || {};
-        const totalRentalAmount = Math.round(Number(s.currentMonthRentalAmount || 0));
-        const gstAmount = Math.round(Number(s.currentMonthGstAmount || 0));
+        let totalRentalAmount = Math.round(Number(s.currentMonthRentalAmount || 0));
+        let gstAmount = Math.round(Number(s.currentMonthGstAmount || 0));
+        // ✅ NEW — bill approved via a full advance → full month amount (advance added back)
+        if (entry.approvedVia === "advance") {
+          const advRows = (item?.rentalPayment?.advanceAdjustments || []).filter((a) => a && a.dueMonth === entry.dueMonth);
+          totalRentalAmount += Math.round(advRows.reduce((t, a) => t + Number(a.amount || 0), 0));
+          gstAmount += Math.round(
+            advRows.reduce((t, a) => {
+              if (Number(a.gstDeducted) !== 1) return t;
+              const b = (item.advanceBills || []).find((x) => String(x._id) === String(a.advanceBillId));
+              return t + Number(b?.gstAmount || 0);
+            }, 0),
+          );
+        }
 
         return {
           dueMonth: entry.dueMonth,

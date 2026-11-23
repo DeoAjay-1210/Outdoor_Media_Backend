@@ -191,7 +191,16 @@ const finalizeOwnerBucket = (bucket) =>
 // adds totalApprovedThisMonth (past approved in this month + this month's approved).
 // ✅ NEW — opts.overdueSitesByMonth (opt-in, with overdueByMonth): each
 // stats.overdueMonths[] item also gets sites[] = that month's overdue sites.
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false, replacedFaceApproval = false, overdueAnyFacePending = false }) {
+// ✅ NEW — advance (+ its GST when deducted) adjusted in a bill month (rentalPayment.advanceAdjustments)
+function advanceAmountOfMonth(media, dueMonth) {
+  const rows = (media?.rentalPayment?.advanceAdjustments || []).filter((a) => a && a.dueMonth === dueMonth);
+  return rows.reduce((t, a) => {
+    const bill = Number(a.gstDeducted) === 1 ? (media.arrearsDue || []).find((b) => b && String(b._id) === String(a.advanceBillId)) : null;
+    return t + Number(a.amount || 0) + Number(bill?.gstAmount || 0);
+  }, 0);
+}
+
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false, replacedFaceApproval = false, overdueAnyFacePending = false, advanceFullAmountInDue = false }) {
   const overdueSiteRows = overdueByMonth && overdueSitesByMonth ? new Map() : null; // ✅ NEW — month label → Map(faceKey → site row)
   const overdueMonthBuckets = overdueByMonth || pastPendingByMonth ? new Map() : null; // ✅ NEW
   const pastApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map(), months: new Map() } : null; // ✅ NEW
@@ -260,6 +269,12 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         singleBillAsSite && isSingleBillSite(activeFacesList)
           ? pickSiteBillEntry(currentMonthEntries, activeFacesList)
           : undefined;
+      // ✅ NEW — advanceFullAmountInDue (opt-in, landowner/site-filter): a ₹0 bill approved via a full advance
+      // (approvedVia "advance") shows the full month amount (advance + its GST) in dueThisMonth. Without it: unchanged.
+      const dueFaceAmount =
+        advanceFullAmountInDue && currentSiteAmount <= 0 && currentMonthEntries.some((e) => e && e.approvedVia === "advance")
+          ? advanceAmountOfMonth(media, currentMonthEntries.find((e) => e && e.approvedVia === "advance").dueMonth) / faceCount
+          : faceAmount;
       for (const face of activeFacesList) {
         const faceId = String(face._id);
         const ownEntry = siteBillEntry !== undefined ? siteBillEntry : pickFaceEntry(currentMonthEntries, faceId);
@@ -271,8 +286,8 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         // ✅ NEW — dueThisMonthByRole: only this month's bills waiting on that role
         if (!roleDueThisMonth || isOpen) {
           stats.dueThisMonthCount += 1;
-          stats.dueThisMonthAmount += faceAmount;
-          trackOwner("dueThisMonth", media, faceId, faceAmount);
+          stats.dueThisMonthAmount += dueFaceAmount; // ✅ CHANGED — = faceAmount unless advanceFullAmountInDue
+          trackOwner("dueThisMonth", media, faceId, dueFaceAmount);
         }
         // overdue is role independent → always the overall approval status
         const isOpenOverall = roleStatus(entry, null).isOpen;

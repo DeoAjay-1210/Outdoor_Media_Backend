@@ -264,6 +264,12 @@ const rentalDueEntrySchema = new mongoose.Schema(
     gstApplicableFlag: { type: Number, default: 0 },
 pastgstApplicableFlag: { type: Number, default: 0 },
 
+    // ✅ NEW — bill fully covered by a CMD approved advance: created approved
+    // ("advance") with the advance's RE / RM / CMD steps; advanceApproval =
+    // { revisionId, advanceRentalDueId, advanceMonth, advanceAmount, approvedAt }
+    approvedVia: { type: String, default: undefined },
+    advanceApproval: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
     remarks: { type: String, trim: true },
     updatedBy: { type: String, trim: true },
     updatedAt: { type: Date, default: null },
