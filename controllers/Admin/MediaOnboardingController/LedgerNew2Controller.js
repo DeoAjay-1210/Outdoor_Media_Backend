@@ -4971,10 +4971,11 @@ const cityFilter = [
       const infosBySite = new Map(infoDocs.map((d) => [String(d._id), d.ledgerPaymentInfo || []]));
       finalMediaListData = finalMediaListData.map((m) => {
         const infos = infosBySite.get(String(m._id || m.mediaId)) || [];
+        const piOpts = { oldPaid: wantPaymentInfoStatus !== null }; // ✅ NEW — paymentInfoStatus tabs: old paid rows (UTR without saved details) = Completed
         return {
           ...m,
-          ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withRentPaymentInfo(m.ledger, infos) } : {}),
-          ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withGstPaymentInfo(m.gstBalanceHistory, infos) } : {}),
+          ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withRentPaymentInfo(m.ledger, infos, piOpts) } : {}),
+          ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withGstPaymentInfo(m.gstBalanceHistory, infos, piOpts) } : {}),
         };
       });
       if (rowFilterMode) {

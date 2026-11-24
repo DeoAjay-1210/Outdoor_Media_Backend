@@ -60,16 +60,45 @@ function toPaymentInfo(info, done) {
     narration: info.narration || "",
     paymentInfoStatus: status,
     paymentInfoStatusLabel: STATUS_LABEL[status],
+    source: "paymentInfo", // ✅ NEW — saved through ledger-payment-info-save
     updatedBy: info.updatedBy || "",
     updatedAt: info.updatedAt || null,
   };
 }
 
+// ✅ NEW — old paid row: UTR / cash entry done straight in the ledger, payment
+// details never saved → Completed with empty details (source "ledger")
+function oldPaidInfo(row) {
+  return {
+    paymentThrough: "",
+    typeOfPayment: "",
+    bankRefNo: String(row?.bankRefNo || ""),
+    narration: "",
+    paymentInfoStatus: 2,
+    paymentInfoStatusLabel: STATUS_LABEL[2],
+    source: "ledger",
+    updatedBy: row?.updatedBy || "",
+    updatedAt: row?.updatedAt || row?.date || null,
+  };
+}
+
 // rows + paymentInfo (null when nothing saved for that row)
-const withRentPaymentInfo = (rows, infos) =>
-  (rows || []).map((r) => (r ? { ...r, paymentInfo: toPaymentInfo(findRentInfo(infos, r), rentRowDone(r)) } : r));
-const withGstPaymentInfo = (rows, infos) =>
-  (rows || []).map((r) => (r ? { ...r, paymentInfo: toPaymentInfo(findGstInfo(infos, r), gstRowDone(r)) } : r));
+// ✅ CHANGED — opts.oldPaid (ledger-list with paymentInfoStatus): a paid row without
+// saved details gets oldPaidInfo instead of null
+const withRentPaymentInfo = (rows, infos, opts = {}) =>
+  (rows || []).map((r) => {
+    if (!r) return r;
+    const info = findRentInfo(infos, r);
+    const done = rentRowDone(r);
+    return { ...r, paymentInfo: info ? toPaymentInfo(info, done) : opts.oldPaid && done ? oldPaidInfo(r) : null };
+  });
+const withGstPaymentInfo = (rows, infos, opts = {}) =>
+  (rows || []).map((r) => {
+    if (!r) return r;
+    const info = findGstInfo(infos, r);
+    const done = gstRowDone(r);
+    return { ...r, paymentInfo: info ? toPaymentInfo(info, done) : opts.oldPaid && done ? oldPaidInfo(r) : null };
+  });
 
 // ── cmdApproval — same bills as landowner/site-filter cmdApproval: a rentalDue
 // bill up to the requested month, CMD approved and not fully settled (every
@@ -203,6 +232,7 @@ module.exports = {
   rentRowDone,
   gstRowDone,
   toPaymentInfo,
+  oldPaidInfo,
   withRentPaymentInfo,
   withGstPaymentInfo,
   isCmdRow,
