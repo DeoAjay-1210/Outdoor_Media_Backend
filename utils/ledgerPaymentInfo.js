@@ -173,13 +173,80 @@ function partialPaidOf(site) {
   return { pairs, rows };
 }
 
-function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null, cmdBySite = new Map() }) {
+// ✅ NEW — Unpaid (paymentInfoStatus 4): an approved bill (same rentalDueId / month,
+// same landowner) up to the reference month with NOTHING paid — rent unpaid and its
+// held GST (withGst 1) unpaid; a bill without a GST row (no GST / direct GST) → rent
+// unpaid only. ₹0 rent (e.g. fully covered by an advance) is not unpaid.
+// refKey = year * 12 + monthIndex (null → no month limit).
+// Returns { bills: [{ owner, rentRows, gstRow|null, rentAmount, gstAmount }], rows: Set(row) }
+const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const monthKeyOf = (label) => {
+  const p = String(label || "").trim().toLowerCase().split(/\s+/);
+  const i = MONTHS.indexOf(p[0]);
+  const y = Number(p[1]);
+  return i < 0 || !y ? null : y * 12 + i;
+};
+const rowApproved = (r) => Number(r?.rentalDueApprovalStatus ?? ((r?.billType || "bill") === "bill" ? 0 : 3)) === 3;
+
+function unpaidOf(site, refKey = null) {
+  const groupKey = (r) => `${r.billType || "bill"}|${idStr(r.rentalDueId) || r.dueMonth || r.month || ""}`;
+  const inScope = (r) => {
+    if (!r || !rowApproved(r)) return false;
+    if (refKey === null) return true;
+    const k = monthKeyOf(r.dueMonth || r.month);
+    return k === null || k <= refKey;
+  };
+  const rentByGroup = new Map();
+  (site.ledger || []).forEach((r) => {
+    if (!inScope(r)) return;
+    const k = groupKey(r);
+    if (!rentByGroup.has(k)) rentByGroup.set(k, []);
+    rentByGroup.get(k).push(r);
+  });
+  const gstByGroup = new Map();
+  (site.gstBalanceHistory || []).forEach((g) => {
+    if (!g || Number(g.withGst ?? 1) !== 1) return; // direct GST — paid with the rent
+    const k = groupKey(g);
+    if (!gstByGroup.has(k)) gstByGroup.set(k, []);
+    gstByGroup.get(k).push(g);
+  });
+  const bills = [];
+  const rows = new Set();
+  const gstCounted = new Set(); // a site level GST row is counted once per bill
+  rentByGroup.forEach((rentRowsAll, k) => {
+    const owners = [...new Set(rentRowsAll.map(ownerOf))];
+    owners.forEach((owner) => {
+      const rentRows = rentRowsAll.filter((r) => ownerOf(r) === owner);
+      if (rentRows.some(rentRowDone)) return; // rent (partly) paid → not unpaid
+      const rentAmount = rentRows.reduce((s, r) => s + rowAmount(r, "rent"), 0);
+      if (rentAmount <= 0) return;
+      const gsts = (gstByGroup.get(k) || []).filter((g) => !ownerOf(g) || ownerOf(g) === owner);
+      if (gsts.some(gstRowDone)) return; // GST paid → Partial Paid
+      const gstRow = gsts[0] || null;
+      let gstAmount = 0;
+      gsts.forEach((g) => {
+        rows.add(g);
+        if (!gstCounted.has(g)) {
+          gstCounted.add(g);
+          gstAmount += rowAmount(g, "gst");
+        }
+      });
+      rentRows.forEach((r) => rows.add(r));
+      bills.push({ owner, rentRows, gstRow, rentAmount, gstAmount });
+    });
+  });
+  return { bills, rows };
+}
+
+function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null, cmdBySite = new Map(), refKey = null }) {
   const counts = {
     yetToPayment: { sites: new Set(), landOwners: new Set(), rows: 0, amount: 0 },
     completed: { sites: new Set(), landOwners: new Set(), rows: 0, amount: 0 },
   };
   // ✅ NEW — Partial Paid count
   const partial = { sites: new Set(), landOwners: new Set(), bills: 0, rentPaidGstPending: 0, gstPaidRentPending: 0, paidAmount: 0, pendingAmount: 0 };
+  // ✅ NEW — Unpaid count
+  const unpaid = { sites: new Set(), landOwners: new Set(), bills: 0, rentAndGst: 0, rentOnly: 0, rentAmount: 0, gstAmount: 0 };
   const out = [];
   (sites || []).forEach((m0) => {
     let m = m0;
@@ -203,8 +270,25 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
         partial.pendingAmount += rentAmt;
       }
     });
-    if (paymentInfoStatus && pp.rows.size) {
-      const mark = (rows) => (rows || []).map((r) => (pp.rows.has(r) ? { ...r, isPartialPaid: true } : r));
+    // ✅ NEW — unpaid bills of the site (count; rows get isUnpaid in the status tabs)
+    const up = unpaidOf(m, refKey);
+    up.bills.forEach((b) => {
+      unpaid.sites.add(siteId);
+      if (b.owner) unpaid.landOwners.add(b.owner);
+      unpaid.bills += 1;
+      if (b.gstRow) unpaid.rentAndGst += 1;
+      else unpaid.rentOnly += 1;
+      unpaid.rentAmount += b.rentAmount;
+      unpaid.gstAmount += b.gstAmount;
+    });
+    if (paymentInfoStatus && (pp.rows.size || up.rows.size)) {
+      // ✅ CHANGED — + isUnpaid
+      const mark = (rows) =>
+        (rows || []).map((r) => {
+          const p = pp.rows.has(r);
+          const u = up.rows.has(r);
+          return p || u ? { ...r, ...(p ? { isPartialPaid: true } : {}), ...(u ? { isUnpaid: true } : {}) } : r;
+        });
       m = { ...m, ledger: Array.isArray(m.ledger) ? mark(m.ledger) : m.ledger, gstBalanceHistory: Array.isArray(m.gstBalanceHistory) ? mark(m.gstBalanceHistory) : m.gstBalanceHistory };
     }
     const statusOf = (r) => (r && r.paymentInfo ? r.paymentInfo.paymentInfoStatus : null);
@@ -224,6 +308,11 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
     // ✅ NEW — Partial Paid tab: sites with a bill paid on one side (rent or GST) only
     if (paymentInfoStatus === 3) {
       if (pp.pairs.length) out.push(m);
+      return;
+    }
+    // ✅ NEW — Unpaid tab: sites with an approved bill where nothing is paid
+    if (paymentInfoStatus === 4) {
+      if (up.bills.length) out.push(m);
       return;
     }
     if (paymentInfoStatus) {
@@ -256,6 +345,17 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
         gstPaidRentPending: partial.gstPaidRentPending,
         paidAmount: Math.round(partial.paidAmount),
         pendingAmount: Math.round(partial.pendingAmount),
+      },
+      // ✅ NEW
+      unpaid: {
+        sites: unpaid.sites.size,
+        landOwners: unpaid.landOwners.size,
+        bills: unpaid.bills,
+        rentAndGst: unpaid.rentAndGst,
+        rentOnly: unpaid.rentOnly,
+        rentAmount: Math.round(unpaid.rentAmount),
+        gstAmount: Math.round(unpaid.gstAmount),
+        amount: Math.round(unpaid.rentAmount + unpaid.gstAmount),
       },
     },
   };
@@ -318,6 +418,7 @@ module.exports = {
   cmdApprovedBill,
   filterLedgerRows,
   partialPaidOf,
+  unpaidOf,
   parsePaymentInfoBody,
   findInfoIndex,
 };

@@ -2873,7 +2873,7 @@ exports.listMediaByLedger = async (req, res) => {
     // ✅ NEW — row filters (ledger[] / gstBalanceHistory[] rows): every site is built,
     // filtered by its rows, then paged. Not sent → unchanged.
     const wantCmdApprovalRows = Number(cmdApproval) === 1;
-    const wantPaymentInfoStatus = [1, 2, 3].includes(Number(paymentInfoStatus)) ? Number(paymentInfoStatus) : null; // ✅ CHANGED — + 3 Partial Paid (rent or GST paid, not both)
+    const wantPaymentInfoStatus = [1, 2, 3, 4].includes(Number(paymentInfoStatus)) ? Number(paymentInfoStatus) : null; // ✅ CHANGED — + 3 Partial Paid (rent or GST paid, not both), 4 Unpaid (nothing paid)
     const rowFilterMode = wantCmdApprovalRows || wantPaymentInfoStatus !== null;
 
     const pageNumbers = parseInt(pageNumber) || 1;
@@ -5003,6 +5003,8 @@ const cityFilter = [
           cmdApproval: wantCmdApprovalRows,
           paymentInfoStatus: wantPaymentInfoStatus,
           cmdBySite,
+          // ✅ NEW — Unpaid: bills up to currentMonth (else this month)
+          refKey: (() => { const ref = requestedMonthYearParsed || (() => { const n = nowIST(); return { year: n.getUTCFullYear(), month: n.getUTCMonth() + 1 }; })(); return ref.year * 12 + (ref.month - 1); })(),
         });
         paymentInfoCounts = r.counts;
         effectiveTotalCount = r.sites.length;
