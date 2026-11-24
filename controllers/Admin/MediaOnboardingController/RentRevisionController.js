@@ -34,6 +34,7 @@ const {
 } = require("../../../utils/rentRevisionArrears");
 const { rentPartsForDueDate, landOwnersAsOfDate } = require("../../../utils/appraisalRent"); // ✅ NEW — BILL decrease; ✅ CHANGED — + landOwnersAsOfDate (payment split)
 const { ensureRevisionAdinnOohBill } = require("../../../utils/adinnOohBills"); // ✅ NEW — New Bill / Advance bill number
+const { isCmdApprovalMailOn, CMD_APPROVAL_MAIL_OFF_MESSAGE } = require("../../../utils/cmdApprovalMailSwitch"); // ✅ NEW — CMD_APPROVAL_MAIL on / off
 
 const ROLE_NAMES = { 1: "Rental Executive", 2: "Rental Manager", 3: "CMD" };
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -2253,6 +2254,10 @@ async function sendNewBillCmdMail(media, revision, { rows = [], advanceBill = nu
     : { increaseAmount: amount, increaseGstAmount: gstAmount };
   console.log("📧 NEW BILL CMD MAIL PAYLOAD:", JSON.stringify(mailPayload, null, 2));
 
+  // ✅ NEW — CMD_APPROVAL_MAIL off / not set → no mail (New Bill and Advance)
+  if (!isCmdApprovalMailOn()) {
+    return { mailtype: NEW_BILL_MAIL_TYPE, sent: false, ...amounts, message: CMD_APPROVAL_MAIL_OFF_MESSAGE };
+  }
   if (mailMode !== "production") {
     return { mailtype: NEW_BILL_MAIL_TYPE, sent: false, ...amounts, message: `Mail skipped (MAIL_MODE=${mailMode}) — not sent` };
   }
