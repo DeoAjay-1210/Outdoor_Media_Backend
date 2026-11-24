@@ -2873,7 +2873,7 @@ exports.listMediaByLedger = async (req, res) => {
     // ✅ NEW — row filters (ledger[] / gstBalanceHistory[] rows): every site is built,
     // filtered by its rows, then paged. Not sent → unchanged.
     const wantCmdApprovalRows = Number(cmdApproval) === 1;
-    const wantPaymentInfoStatus = [1, 2].includes(Number(paymentInfoStatus)) ? Number(paymentInfoStatus) : null;
+    const wantPaymentInfoStatus = [1, 2, 3].includes(Number(paymentInfoStatus)) ? Number(paymentInfoStatus) : null; // ✅ CHANGED — + 3 Partial Paid (rent or GST paid, not both)
     const rowFilterMode = wantCmdApprovalRows || wantPaymentInfoStatus !== null;
 
     const pageNumbers = parseInt(pageNumber) || 1;

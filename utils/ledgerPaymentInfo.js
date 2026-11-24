@@ -141,14 +141,72 @@ const rowAmount = (row, kind) => {
  * counts = Yet to Payment / Completed rows with payment details (= the two tabs).
  * sites: [{ _id, ledger, gstBalanceHistory }], cmdBySite: Map(siteId → cmd) (see isCmdRow)
  */
+// ✅ NEW — Partial Paid (paymentInfoStatus 3): a bill (same rentalDueId / month, same
+// landowner) whose rent OR GST is paid, not both. Only GST held bills (withGst 1);
+// direct GST is paid with the rent. Rent paid = every rent row (Cash / Online) of that
+// landowner done. New Bill / Advance GST is site level → all rent rows of the bill.
+// Returns { pairs: [{ owner, rentRows, gstRow, rentDone, gstDone }], rows: Set(row) }
+function partialPaidOf(site) {
+  const groupKey = (r) => `${r.billType || "bill"}|${idStr(r.rentalDueId) || r.dueMonth || r.month || ""}`;
+  const rentByGroup = new Map();
+  (site.ledger || []).forEach((r) => {
+    if (!r) return;
+    const k = groupKey(r);
+    if (!rentByGroup.has(k)) rentByGroup.set(k, []);
+    rentByGroup.get(k).push(r);
+  });
+  const pairs = [];
+  const rows = new Set();
+  (site.gstBalanceHistory || []).forEach((g) => {
+    if (!g) return;
+    if (Number(g.withGst ?? 1) !== 1) return; // direct GST — paid with the rent
+    const owner = ownerOf(g);
+    const rentRows = (rentByGroup.get(groupKey(g)) || []).filter((r) => !owner || ownerOf(r) === owner);
+    if (!rentRows.length) return;
+    const rentDone = rentRows.every(rentRowDone);
+    const gstDone = gstRowDone(g);
+    if (rentDone === gstDone) return;
+    pairs.push({ owner, rentRows, gstRow: g, rentDone, gstDone });
+    rows.add(g);
+    rentRows.forEach((r) => rows.add(r));
+  });
+  return { pairs, rows };
+}
+
 function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null, cmdBySite = new Map() }) {
   const counts = {
     yetToPayment: { sites: new Set(), landOwners: new Set(), rows: 0, amount: 0 },
     completed: { sites: new Set(), landOwners: new Set(), rows: 0, amount: 0 },
   };
+  // ✅ NEW — Partial Paid count
+  const partial = { sites: new Set(), landOwners: new Set(), bills: 0, rentPaidGstPending: 0, gstPaidRentPending: 0, paidAmount: 0, pendingAmount: 0 };
   const out = [];
-  (sites || []).forEach((m) => {
+  (sites || []).forEach((m0) => {
+    let m = m0;
     const siteId = idStr(m._id || m.mediaId);
+    // ✅ NEW — partial paid bills of the site (count; rows get isPartialPaid in the status tabs)
+    const pp = partialPaidOf(m);
+    pp.pairs.forEach((p) => {
+      partial.sites.add(siteId);
+      if (p.owner) partial.landOwners.add(p.owner);
+      else p.rentRows.forEach((r) => ownerOf(r) && partial.landOwners.add(ownerOf(r)));
+      partial.bills += 1;
+      const rentAmt = p.rentRows.reduce((s, r) => s + rowAmount(r, "rent"), 0);
+      const gstAmt = rowAmount(p.gstRow, "gst");
+      if (p.rentDone) {
+        partial.rentPaidGstPending += 1;
+        partial.paidAmount += rentAmt;
+        partial.pendingAmount += gstAmt;
+      } else {
+        partial.gstPaidRentPending += 1;
+        partial.paidAmount += gstAmt;
+        partial.pendingAmount += rentAmt;
+      }
+    });
+    if (paymentInfoStatus && pp.rows.size) {
+      const mark = (rows) => (rows || []).map((r) => (pp.rows.has(r) ? { ...r, isPartialPaid: true } : r));
+      m = { ...m, ledger: Array.isArray(m.ledger) ? mark(m.ledger) : m.ledger, gstBalanceHistory: Array.isArray(m.gstBalanceHistory) ? mark(m.gstBalanceHistory) : m.gstBalanceHistory };
+    }
     const statusOf = (r) => (r && r.paymentInfo ? r.paymentInfo.paymentInfoStatus : null);
     const tally = (rows, kind) =>
       (rows || []).forEach((r) => {
@@ -163,6 +221,11 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
     tally(m.ledger, "rent");
     tally(m.gstBalanceHistory, "gst");
 
+    // ✅ NEW — Partial Paid tab: sites with a bill paid on one side (rent or GST) only
+    if (paymentInfoStatus === 3) {
+      if (pp.pairs.length) out.push(m);
+      return;
+    }
     if (paymentInfoStatus) {
       // ✅ CHANGED — all rows of the site (a site with only its GST row saved still shows its rent rows)
       const hasStatusRow = (m.ledger || []).some((r) => statusOf(r) === paymentInfoStatus) || (m.gstBalanceHistory || []).some((r) => statusOf(r) === paymentInfoStatus);
@@ -179,7 +242,23 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
     out.push(m);
   });
   const fin = (c) => ({ sites: c.sites.size, landOwners: c.landOwners.size, rows: c.rows, amount: Math.round(c.amount) });
-  return { sites: out, counts: { yetToPayment: fin(counts.yetToPayment), completed: fin(counts.completed) } };
+  return {
+    sites: out,
+    counts: {
+      yetToPayment: fin(counts.yetToPayment),
+      completed: fin(counts.completed),
+      // ✅ NEW
+      partialPaid: {
+        sites: partial.sites.size,
+        landOwners: partial.landOwners.size,
+        bills: partial.bills,
+        rentPaidGstPending: partial.rentPaidGstPending,
+        gstPaidRentPending: partial.gstPaidRentPending,
+        paidAmount: Math.round(partial.paidAmount),
+        pendingAmount: Math.round(partial.pendingAmount),
+      },
+    },
+  };
 }
 
 /**
@@ -238,6 +317,7 @@ module.exports = {
   isCmdRow,
   cmdApprovedBill,
   filterLedgerRows,
+  partialPaidOf,
   parsePaymentInfoBody,
   findInfoIndex,
 };
