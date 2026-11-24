@@ -42,7 +42,7 @@ test("L2 GST row: by _id, else rentalDueId + owner (virtual row, then paid row)"
   assert.equal(rows[3].paymentInfo, null);
 });
 
-test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only when held) with all rows; tabs filter rows", () => {
+test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only when held) with all rows; tabs = sites with that status, all rows", () => {
   const due = (id, o = {}) => ({ _id: id, approvalStatus: 3, approvalSteps: cmdSteps, withGst: 0, ...o });
   const cmd = {
     approved: new Set(["b1", "b3", "b4", "b5", "b6"]), // CMD approved up to the month
@@ -76,12 +76,17 @@ test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only wh
   assert.deepEqual(r.counts.yetToPayment, { sites: 1, landOwners: 1, rows: 1, amount: 10000 });
   assert.deepEqual(r.counts.completed, { sites: 1, landOwners: 1, rows: 1, amount: 7000 });
 
-  // tabs → only the rows in that state
+  // tabs → sites with a row in that state, ALL rows kept (each row has its paymentInfo)
   const yet = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 1, cmdBySite });
-  assert.deepEqual(yet.sites[0].ledger.map((x) => x.rentalDueId), ["b1"]);
-  assert.deepEqual(yet.sites[0].gstBalanceHistory, []);
+  assert.equal(yet.sites.length, 1);
+  assert.equal(yet.sites[0].ledger.length, 5);
+  assert.equal(yet.sites[0].gstBalanceHistory.length, 2);
   const done = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 2, cmdBySite });
-  assert.deepEqual(done.sites[0].ledger.map((x) => x.rentalDueId), ["b4"]);
+  assert.equal(done.sites[0].ledger.length, 5);
+  const gstOnlySaved = { _id: "s9", ledger: [{ rentalDueId: "b1", isVirtual: true, paymentInfo: null }], gstBalanceHistory: [{ rentalDueId: "b1", paymentInfo: { paymentInfoStatus: 1 } }] };
+  const g1 = L.filterLedgerRows([gstOnlySaved], { paymentInfoStatus: 1 });
+  assert.equal(g1.sites[0].ledger.length, 1); // i32423u4 case: rent row shown though only GST saved
+  assert.equal(L.filterLedgerRows([gstOnlySaved], { paymentInfoStatus: 2 }).sites.length, 0);
 
   // a site whose only unpaid CMD row is direct GST (withGst 2) is not a cmdApproval site (ADINCHN0070 case)
   const onlyGstDirect = { _id: "s1", ledger: [site.ledger[3]], gstBalanceHistory: [site.gstBalanceHistory[0]] };

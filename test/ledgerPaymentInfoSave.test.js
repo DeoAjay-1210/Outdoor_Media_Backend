@@ -115,7 +115,7 @@ test("B3 partial: bad items in errors[] with index, valid ones saved; duplicate 
       [0, "duplicate row in this request — later item used"],
       [1, "rentalDueId not found on this site"],
       [2, "landOwnerId is not a landowner of this bill"],
-      [3, "landOwnerId is required for a GST row without gstBalanceHistoryId (send the row's ownerId / landOwnerId)"],
+      [3, "landOwnerId is required — this bill has 2 landowners"],
       [5, "mediaId is not a valid ObjectId"],
       [6, "Send at least one of paymentThrough, typeOfPayment, bankRefNo, narration"],
     ],
@@ -133,4 +133,28 @@ test("B4 all fail → 400 with errors; bad items array → 400; single object �
   assert.equal(one.code, 200);
   assert.equal(one.body.data.narration, "single");
   assert.equal(one.body.data.total, undefined); // single response shape unchanged
+});
+
+test("B5 landOwnerId / paymentMode not sent: single-landowner site → filled (rent + bill GST); 2 landowners → error", async () => {
+  reset();
+  sites.get(String(s1._id)).landOwners[0].paymentCategory = 2; // Online
+  const r = await call({
+    items: [
+      { mediaId: s1._id, entryType: "rent", rentalDueId: s1.oct, narration: "auto owner + mode" },
+      { mediaId: s1._id, entryType: "gst", rentalDueId: s1.nov, narration: "auto owner gst" },
+      { mediaId: s1._id, entryType: "gst", rentalDueId: s1.adv, gstBalanceHistoryId: s1.adv, billType: "advance", narration: "advance gst stays site-level" },
+      { mediaId: s2._id, entryType: "rent", rentalDueId: s2.oct, paymentMode: "Online", narration: "2 owners" },
+    ],
+  });
+  const d = r.body.data;
+  assert.equal(d.savedCount, 3);
+  assert.equal(String(d.saved[0].landOwnerId), String(s1.owner));
+  assert.equal(d.saved[0].paymentMode, "Online");
+  assert.equal(String(d.saved[1].landOwnerId), String(s1.owner));
+  assert.equal(d.saved[2].landOwnerId, null);
+  assert.deepEqual(d.errors.map((e) => [e.index, e.message]), [[3, "landOwnerId is required — this bill has 2 landowners"]]);
+  sites.get(String(s1._id)).landOwners[0].paymentCategory = 3; // Cash + Online → mode needed
+  const m = await call({ mediaId: s1._id, entryType: "rent", rentalDueId: s1.nov, narration: "x" });
+  assert.equal(m.code, 400);
+  assert.equal(m.body.message, "paymentMode is required — this landowner is paid Cash + Online");
 });

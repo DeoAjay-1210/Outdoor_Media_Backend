@@ -5066,10 +5066,42 @@ function isYMInRange(ym, rangeStart, rangeEnd) {
   if (rangeEnd && compareYM(ym, rangeEnd) > 0) return false;
   return true;
 }
+// ✅ NEW — landOwnerId (and a rent row's paymentMode) not sent: a site with ONE
+// landowner → that landowner (paymentMode from its category: Cash / Online; Cash +
+// Online → must be sent). Rent rows and a bill's GST rows only (New Bill / Advance
+// GST rows are site-level, no landowner). More landowners → error. Sent → unchanged.
+// Returns { body } or { statusCode, message }.
+async function fillSingleLandOwner(body) {
+  const b = body || {};
+  const isGst = String(b.entryType || "rent").toLowerCase() === "gst";
+  const needOwner = !b.landOwnerId && (!isGst || (!b.gstBalanceHistoryId && b.rentalDueId));
+  const needMode = !isGst && !b.paymentMode;
+  if (!needOwner && !needMode) return { body: b };
+  const media = await Media.findById(b.mediaId).select("landOwners._id landOwners.paymentCategory rentalDue._id").lean();
+  if (!media) return { statusCode: 404, message: "Media not found" };
+  // GST: only a rentalDue bill's GST row is per landowner
+  if (isGst && !(media.rentalDue || []).some((r) => String(r._id) === String(b.rentalDueId))) return { body: b };
+  const owners = media.landOwners || [];
+  let owner = null;
+  if (b.landOwnerId) owner = owners.find((o) => String(o._id) === String(b.landOwnerId)) || null;
+  else if (owners.length === 1) owner = owners[0];
+  else return { statusCode: 400, message: `landOwnerId is required — this bill has ${owners.length} landowners` };
+  const out = { ...b, landOwnerId: b.landOwnerId || (owner ? String(owner._id) : b.landOwnerId) };
+  if (needMode && owner) {
+    const category = Number(owner.paymentCategory || 1);
+    if (category === 3) return { statusCode: 400, message: "paymentMode is required — this landowner is paid Cash + Online" };
+    out.paymentMode = category === 2 ? "Online" : "Cash";
+  }
+  return { body: out };
+}
+
 // one row's payment details → { statusCode, message } on error, else { action, data }
-async function saveOneLedgerPaymentInfo(body, userName, now) {
-  const { mediaId } = body || {};
+async function saveOneLedgerPaymentInfo(bodyIn, userName, now) {
+  const { mediaId } = bodyIn || {};
   if (!mongoose.Types.ObjectId.isValid(String(mediaId || ""))) return { statusCode: 400, message: "mediaId is not a valid ObjectId" };
+  const filled = await fillSingleLandOwner(bodyIn);
+  if (filled.message) return filled;
+  const body = filled.body;
   const parsed = LedgerPaymentInfo.parsePaymentInfoBody(body);
   if (parsed.error) return { statusCode: 400, message: parsed.error };
   const { key, values } = parsed;
@@ -7933,7 +7965,13 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
   const emptyRevisionTotals = () => ({ rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 });
   const revisionMonthTotals = {
     newBill: { cur: emptyRevisionTotals(), past: emptyRevisionTotals() },
-    advance: { cur: emptyRevisionTotals(), past: emptyRevisionTotals() },
+    advance: { cur: emptyRevisionTotals(), past: emptyRevisionTotals(), future: emptyRevisionTotals() }, // ✅ NEW — future: advance only
+  };
+  // ✅ NEW — advance month after the requested month → "future" (advance only; New Bill unchanged)
+  const revisionBucket = (kind, dueMonthLabel) => {
+    const bucket = legacyBucket(dueMonthLabel);
+    if (bucket) return bucket;
+    return kind === "advance" && targetIndex !== null ? "future" : null;
   };
   // ✅ NEW — Pending rent revisions of active sites (no bill yet → paid 0)
   if (Array.isArray(options.pendingRevisions) && options.pendingRevisions.length) {
@@ -7952,7 +7990,7 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
       }
       // ✅ NEW — by month
       pendingRevisionMonthParts(rv).forEach((part) => {
-        const bucket = legacyBucket(part.month);
+        const bucket = revisionBucket(p.kind, part.month);
         if (!bucket) return;
         const mt = revisionMonthTotals[p.kind][bucket];
         mt.rentTotal += part.rent;
@@ -7979,7 +8017,7 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
         tt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
       }
       // ✅ NEW — by the bill's month
-      const bucket = legacyBucket(b.dueMonth);
+      const bucket = revisionBucket(b.type === "advance" ? "advance" : "newBill", b.dueMonth);
       if (bucket) {
         const mt = revisionMonthTotals[b.type === "advance" ? "advance" : "newBill"][bucket];
         mt.rentTotal += rent;
@@ -8126,7 +8164,8 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
       acc[`${k}RentPendingApprovalAmount`] = r(tt.rentPendingApproval); // ✅ NEW — part of OverAll not yet CMD approved
       acc[`${k}GstPendingApprovalAmount`] = r(tt.gstPendingApproval); // ✅ NEW
       // ✅ NEW — same keys for the requested month (CurrentMonth) and past months (PastMonth)
-      [["CurrentMonth", "cur"], ["PastMonth", "past"]].forEach(([label, bucket]) => {
+      // ✅ NEW — advance also FutureMonth (advance month after the requested month)
+      [["CurrentMonth", "cur"], ["PastMonth", "past"], ...(k === "advance" ? [["FutureMonth", "future"]] : [])].forEach(([label, bucket]) => {
         const mt = revisionMonthTotals[k][bucket];
         acc[`${k}${label}RentOverAllAmount`] = r(mt.rentTotal);
         acc[`${k}${label}RentPaidAmount`] = r(mt.rentPaid);

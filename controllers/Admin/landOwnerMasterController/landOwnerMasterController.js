@@ -3735,7 +3735,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // ✅ NEW — + CurrentMonth / PastMonth (bill month = monthFilter month / before it),
     // e.g. newBillPastMonthRentRemaining, advanceCurrentMonthHoldGstPaid
     const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) =>
-      [["", "all"], ["CurrentMonth", "cur"], ["PastMonth", "past"]].flatMap(([label, scope]) => [
+      [["", "all"], ["CurrentMonth", "cur"], ["PastMonth", "past"], ...(kind === "advance" ? [["FutureMonth", "future"]] : [])].flatMap(([label, scope]) => [ // ✅ NEW — advance FutureMonth
         ...["Remaining", "Paid"].map((state) => ({ name: `${kind}${label}Rent${state}`, kind, scope, part: "Rent", state })),
         ...["Remaining", "Paid"].map((state) => ({ name: `${kind}${label}HoldGst${state}`, kind, scope, part: "GstHold", state })), // ✅ CHANGED — key name
         ...["Remaining", "Paid"].map((state) => ({ name: `${kind}${label}CannotHoldGst${state}`, kind, scope, part: "GstCannotHold", state })), // ✅ CHANGED — Paid / Remaining
@@ -3750,7 +3750,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
       const year = Number(parts[1]);
       if (mIdx < 0 || !year) return null;
       const idx = year * 12 + mIdx;
-      return idx < revisionMonthIndex ? "past" : idx === revisionMonthIndex ? "cur" : null;
+      return idx < revisionMonthIndex ? "past" : idx === revisionMonthIndex ? "cur" : "future"; // ✅ CHANGED — later → "future" (only advance has future flags)
     };
     if (revisionPaidFlags.length) {
       const entryMediaIds = [...new Set(entries.flatMap((e) => (e.sites || []).map((s) => String(s.mediaId))))];
@@ -3764,7 +3764,7 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
         };
         // ✅ NEW — the same per month scope (acc stays the all-months one)
         const scoped = () => ({ Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() });
-        const accByScope = { cur: { newBill: scoped(), advance: scoped() }, past: { newBill: scoped(), advance: scoped() } };
+        const accByScope = { cur: { newBill: scoped(), advance: scoped() }, past: { newBill: scoped(), advance: scoped() }, future: { newBill: scoped(), advance: scoped() } }; // ✅ NEW — future
         const mark = (st, total, paid) => {
           if (total <= 0) return;
           if (total - Math.min(total, paid) > 0) st.Remaining = true;

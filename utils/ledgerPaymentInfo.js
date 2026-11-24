@@ -106,8 +106,9 @@ const rowAmount = (row, kind) => {
  *   cmdApproval (no paymentInfoStatus) → the sites of landowner/site-filter
  *     cmdApproval (a CMD approved bill whose payment is not entered yet), each
  *     with ALL its ledger[] / gstBalanceHistory[] rows (same as the normal list)
- *   paymentInfoStatus 1 / 2 → only the rows with payment details in that state
- *     (Yet to Payment / Completed), any site; sites without such a row dropped
+ *   paymentInfoStatus 1 / 2 → the sites with a row whose payment details are in
+ *     that state (Yet to Payment / Completed), each with ALL its rows (every row
+ *     carries its own paymentInfo); sites without such a row dropped
  * counts = Yet to Payment / Completed rows with payment details (= the two tabs).
  * sites: [{ _id, ledger, gstBalanceHistory }], cmdBySite: Map(siteId → cmd) (see isCmdRow)
  */
@@ -134,9 +135,9 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
     tally(m.gstBalanceHistory, "gst");
 
     if (paymentInfoStatus) {
-      const ledger = (m.ledger || []).filter((r) => statusOf(r) === paymentInfoStatus);
-      const gstBalanceHistory = (m.gstBalanceHistory || []).filter((r) => statusOf(r) === paymentInfoStatus);
-      if (ledger.length || gstBalanceHistory.length) out.push({ ...m, ledger, gstBalanceHistory });
+      // ✅ CHANGED — all rows of the site (a site with only its GST row saved still shows its rent rows)
+      const hasStatusRow = (m.ledger || []).some((r) => statusOf(r) === paymentInfoStatus) || (m.gstBalanceHistory || []).some((r) => statusOf(r) === paymentInfoStatus);
+      if (hasStatusRow) out.push(m);
       return;
     }
     if (cmdApproval) {
