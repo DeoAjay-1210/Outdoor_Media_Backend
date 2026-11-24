@@ -4966,7 +4966,7 @@ const cityFilter = [
     {
       const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
       const infoDocs = await Media.find({ _id: { $in: pageIds } })
-        .select(wantCmdApprovalRows ? "ledgerPaymentInfo rentalDue landOwners ledger ledgerHistory gstBalanceHistory" : "ledgerPaymentInfo")
+        .select(wantCmdApprovalRows ? "ledgerPaymentInfo rentalDue landOwners ledger ledgerHistory gstBalanceHistory arrearsDue" : "ledgerPaymentInfo") // ✅ CHANGED — + arrearsDue (last CMD approval sort)
         .lean();
       const infosBySite = new Map(infoDocs.map((d) => [String(d._id), d.ledgerPaymentInfo || []]));
       finalMediaListData = finalMediaListData.map((m) => {
@@ -5005,6 +5005,34 @@ const cityFilter = [
         });
         paymentInfoCounts = r.counts;
         effectiveTotalCount = r.sites.length;
+        // ✅ NEW — cmdApproval: last CMD approved site on top. ✅ CHANGED — the site's latest CMD
+        // approval of ANY kind: rentalDue bill (CMD step approvedAt, any month) or New Bill /
+        // Advance (arrearsDue approved on CMD approval: ownerApprovalDate / createdAt)
+        if (wantCmdApprovalRows) {
+          const ms = (v) => (v ? new Date(v).getTime() || 0 : 0);
+          const docById = new Map(infoDocs.map((d) => [String(d._id), d]));
+          const lastAt = (m) => {
+            const d = docById.get(String(m._id || m.mediaId));
+            if (!d) return 0;
+            let t = 0;
+            (d.rentalDue || []).forEach((due) => {
+              if (!LedgerPaymentInfo.cmdApprovedBill(due)) return;
+              (due.approvalSteps || []).forEach((s) => {
+                if (Number(s.role) === 3 && Number(s.status) === 2) t = Math.max(t, ms(s.approvedAt));
+              });
+            });
+            (d.arrearsDue || []).forEach((b) => {
+              if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+              if (Number(b.approvalStatus || 3) !== 3) return;
+              t = Math.max(t, ms(b.ownerApprovalDate || b.createdAt));
+            });
+            return t;
+          };
+          r.sites = r.sites
+            .map((m, i) => ({ m, i, t: lastAt(m) }))
+            .sort((a, b) => b.t - a.t || a.i - b.i)
+            .map(({ m, t }) => ({ ...m, lastCmdApprovedAt: t ? new Date(t).toISOString() : null }));
+        }
         finalMediaListData = r.sites.slice(skip, skip + pageSize);
       }
     }

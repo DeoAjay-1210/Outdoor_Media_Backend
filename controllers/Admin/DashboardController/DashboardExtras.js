@@ -7,6 +7,7 @@ const {
   calculateOverallLedgerSummary,
   calculateNewOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
+const { pendingRevisionAmounts, pendingRevisionMonthParts } = require("../MediaOnboardingController/LedgerNew2Controller"); // ✅ NEW — Pending card New Bill / Advance
 const {
   computeRentalDueStats,
   roleStatus,
@@ -141,7 +142,8 @@ const stageText = (entry) => {
 const addLandlords = (set, media) => (media.landOwners || []).forEach((o) => set.add(String(o.landOwnerMasterId || o._id)));
 
 // ── Rental section: cards + donut ────────────────────────────
-function computeRental(docs, range, filters) {
+// ✅ CHANGED — opts.pendingRevisions (optional): Pending rent revisions → Pending card New Bill / Advance
+function computeRental(docs, range, filters, opts = {}) {
   const gdocs = applyGst(docs, filters.gst);
   const targetRole = filters.loginRole || null; // Login = Rental Master "View for" role
   let curMonth = null;
@@ -159,6 +161,21 @@ function computeRental(docs, range, filters) {
   const bucket = () => ({ pending: { count: 0, amount: 0, ll: new Set() }, approved: { count: 0, amount: 0, ll: new Set() } });
   const donut = { 1: bucket(), 2: bucket(), 3: bucket() };
 
+  // ✅ NEW — Approved card breakdown: bills CMD approved inside the range
+  //   cur  = this month's bills (same as cards.approved)
+  //   past = past month bills (e.g. Sep / Oct) approved in the range
+  //   newBill / advance = New Bill / Advance bills (media.arrearsDue[]) approved in the range
+  const aprBucket = () => ({ faces: new Set(), ll: new Set(), amount: 0 });
+  // ✅ NEW — Pending card: this period's pending faces (total) + New Bill / Advance not CMD approved yet
+  const pend = { curFaces: new Set(), newBill: aprBucket(), advance: aprBucket(), newBillMonths: new Map(), advanceMonths: new Map() };
+  const apr = { cur: aprBucket(), past: aprBucket(), newBill: aprBucket(), advance: aprBucket(), pastMonths: new Map(), newBillMonths: new Map(), advanceMonths: new Map() };
+  const monthSortKey = (label) => {
+    const p = String(label || "").split(" ");
+    const i = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].indexOf(p[0]);
+    return i < 0 ? 0 : Number(p[1]) * 12 + i;
+  };
+  const activeFaceKeys = (media) => (media.mediaDetails || []).filter((d) => num(d.status) === 1).map((d) => String(media._id) + "_" + String(d._id));
+
   range.months.forEach(({ year, month }, idx) => {
     curMonth = { year, month };
     const st = computeRentalDueStats(gdocs, {
@@ -167,12 +184,12 @@ function computeRental(docs, range, filters) {
       pastOverdueOnly: true, // ✅ NEW — Overdue card = PAST months only (current month overdue not added)
       overdueAnyFacePending: true, // ✅ NEW — overdue: a past month where ANY active face's own bill is not CMD approved (full month amount), same as landowner/site-filter
       includeZeroAmountBills: true, // ✅ NEW — a ₹0 month with a bill (e.g. whole month taken as advance) still counts its landlord / site (amount 0)
-      onFace: ({ media, entry, amount, cycle, state, past, rolePending }) => {
+      onFace: ({ media, face, entry, amount, cycle, state, past, rolePending }) => {
         if (past) { addLandlords(LL.overdue, media); return; } // past-month overdue face: only the overdue landlords
         addLandlords(LL.due, media);
-        if (state === "approved") addLandlords(LL.approved, media);
+        if (state === "approved") { addLandlords(LL.approved, media); if (face) apr.cur.faces.add(String(media._id) + "_" + String(face._id)); } // ✅ CHANGED — + face key (approved total)
         // ✅ CHANGED — a current-month overdue face is no longer in the Overdue card (past months only)
-        if (rolePending) addLandlords(LL.pending, media); // ✅ NEW — Pending card landlords (faces in pendingCount)
+        if (rolePending) { addLandlords(LL.pending, media); if (face) pend.curFaces.add(String(media._id) + "_" + String(face._id)); } // ✅ NEW — Pending card landlords (faces in pendingCount); ✅ CHANGED — + face key (pending total)
         const faceCount = (media.mediaDetails || []).filter((d) => num(d.status) === 1).length || 1;
         const gstFace = num(cycle.currentMonthGstAmount) / faceCount;
         const tdsFace = (media.landOwners || []).reduce((t, o) => t + (num(o.tdsApplicable) ? num(o.tdsAmount) : 0), 0) / faceCount;
@@ -193,6 +210,48 @@ function computeRental(docs, range, filters) {
         }
       },
     });
+    // ✅ NEW — past month bills approved inside this month (approval date of the bill)
+    computeRentalDueStats(gdocs, {
+      year, month, targetRole, pendingAtRoleOnly: true, singleBillAsSite: true, includeZeroAmountBills: true,
+      onPastApproved: ({ media, face, amount, cycleLabel, cycleSortKey }) => {
+        const key = String(media._id) + "_" + String(face._id);
+        apr.past.faces.add(key);
+        addLandlords(apr.past.ll, media);
+        apr.past.amount += amount;
+        if (!apr.pastMonths.has(cycleLabel)) apr.pastMonths.set(cycleLabel, { sortKey: cycleSortKey, ...aprBucket() });
+        const pm = apr.pastMonths.get(cycleLabel);
+        pm.faces.add(key);
+        addLandlords(pm.ll, media);
+        pm.amount += amount;
+      },
+    });
+    // ✅ NEW — New Bill / Advance bills approved inside this month (created on CMD approval)
+    {
+      const from = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+      const to = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+      gdocs.forEach((media) => {
+        (media.arrearsDue || []).forEach((b) => {
+          if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+          if (num(b.approvalStatus || 3) !== 3) return;
+          const at = new Date(b.ownerApprovalDate || b.createdAt || 0);
+          if (Number.isNaN(at.getTime()) || at < from || at > to) return;
+          const bucket = b.type === "advance" ? apr.advance : apr.newBill;
+          // ✅ NEW — + by the bill's own month (New Bill month / advance month)
+          const byMonth = b.type === "advance" ? apr.advanceMonths : apr.newBillMonths;
+          const label = b.dueMonth || "";
+          if (!byMonth.has(label)) byMonth.set(label, { sortKey: monthSortKey(label), ...aprBucket() });
+          const mb = byMonth.get(label);
+          const faces = b.mediaDetailId ? [String(media._id) + "_" + String(b.mediaDetailId)] : activeFaceKeys(media);
+          const owners = (b.owners || []).filter((o) => o && (o.landOwnerMasterId || o.landOwnerId));
+          [bucket, mb].forEach((t) => {
+            t.amount += num(b.netPayable) + num(b.gstAmount);
+            faces.forEach((k) => t.faces.add(k));
+            if (owners.length) owners.forEach((o) => t.ll.add(String(o.landOwnerMasterId || o.landOwnerId)));
+            else addLandlords(t.ll, media);
+          });
+        });
+      });
+    }
     // SAME shared rule Rental Master uses for "View for <role>": computeRentalDueStats(..., targetRole)
     for (const r of [1, 2, 3]) {
       const sr = computeRentalDueStats(gdocs, {
@@ -215,6 +274,40 @@ function computeRental(docs, range, filters) {
     // overdue is cumulative (current + past months): take it from the last month of the range
     if (idx === range.months.length - 1) { sum.overdue = [st.overdueCount, st.overdueAmountTotal]; }
   });
+
+  // ✅ NEW — Pending rent revisions (New Bill / Advance not CMD approved yet) whose bill
+  // month is inside the period; with a login role, only those waiting on that role
+  {
+    const MONTHS_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const inPeriod = new Map(range.months.map(({ year, month }) => [year * 12 + (month - 1), true]));
+    const keyOf = (label) => {
+      const p = String(label || "").split(" ");
+      const i = MONTHS_FULL.indexOf(p[0]);
+      return i < 0 ? null : Number(p[1]) * 12 + i;
+    };
+    const mediaById = new Map(gdocs.map((m) => [String(m._id), m]));
+    const activeFaces = (media) => (media.mediaDetails || []).filter((d) => num(d.status) === 1).map((d) => String(media._id) + "_" + String(d._id));
+    (opts.pendingRevisions || []).forEach((rv) => {
+      if (!rv || rv.status !== "Pending") return;
+      if (targetRole && num(rv.currentPendingRole) !== num(targetRole)) return;
+      const media = mediaById.get(String(rv.mediaId));
+      if (!media) return;
+      const kind = pendingRevisionAmounts(rv).kind; // "newBill" | "advance"
+      pendingRevisionMonthParts(rv).forEach((part) => {
+        const k = keyOf(part.month);
+        if (k === null || !inPeriod.has(k)) return;
+        const amount = num(part.rent) + num(part.gst);
+        if (amount <= 0) return;
+        const byMonth = kind === "advance" ? pend.advanceMonths : pend.newBillMonths;
+        if (!byMonth.has(part.month)) byMonth.set(part.month, { sortKey: k, ...aprBucket() });
+        [pend[kind], byMonth.get(part.month)].forEach((t) => {
+          t.amount += amount;
+          activeFaces(media).forEach((f) => t.faces.add(f));
+          addLandlords(t.ll, media);
+        });
+      });
+    });
+  }
 
   // approval filter narrows the donut to the chosen role
 
@@ -248,8 +341,55 @@ function computeRental(docs, range, filters) {
       gst: { landlords: LL.gst.size, amount: r0(sum.gst), sites: gstSites.size },
       tds: { landlords: LL.tds.size, amount: r0(sum.tds), sites: tdsSites.size },
       overdue: { landlords: LL.overdue.size, sites: sum.overdue[0], amount: r0(sum.overdue[1]) },
-      approved: { landlords: LL.approved.size, sites: sum.approved[0], amount: r0(sum.approved[1]) },
-      pending: { landlords: LL.pending.size, sites: sum.pending[0], amount: r0(sum.pending[1]) }, // ✅ NEW — current month pending
+      approved: {
+        landlords: LL.approved.size, sites: sum.approved[0], amount: r0(sum.approved[1]),
+        // ✅ NEW — breakdown + total (bills CMD approved inside the range)
+        ...(() => {
+          const out = (b) => ({ landlords: b.ll.size, sites: b.faces.size, amount: r0(b.amount) });
+          const all = aprBucket();
+          [apr.past, apr.newBill, apr.advance].forEach((b) => {
+            b.faces.forEach((k) => all.faces.add(k));
+            b.ll.forEach((k) => all.ll.add(k));
+            all.amount += b.amount;
+          });
+          LL.approved.forEach((k) => all.ll.add(k));
+          apr.cur.faces.forEach((k) => all.faces.add(k));
+          all.amount += sum.approved[1];
+          return {
+            currentMonth: { landlords: LL.approved.size, sites: sum.approved[0], amount: r0(sum.approved[1]) },
+            pastMonthApprovedThisMonth: {
+              ...out(apr.past),
+              months: [...apr.pastMonths.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey).map(([month, b]) => ({ month, ...out(b) })),
+            },
+            newBill: { ...out(apr.newBill), months: [...apr.newBillMonths.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey).map(([month, b]) => ({ month, ...out(b) })) },
+            advance: { ...out(apr.advance), months: [...apr.advanceMonths.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey).map(([month, b]) => ({ month, ...out(b) })) },
+            total: { landlords: all.ll.size, sites: all.faces.size, amount: r0(all.amount) },
+          };
+        })(),
+      },
+      pending: {
+        landlords: LL.pending.size, sites: sum.pending[0], amount: r0(sum.pending[1]), // ✅ NEW — current month pending
+        // ✅ NEW — + New Bill / Advance pending (Pending revisions of the period) and the total
+        ...(() => {
+          const out = (b) => ({ landlords: b.ll.size, sites: b.faces.size, amount: r0(b.amount) });
+          const outMonths = (m) => [...m.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey).map(([month, b]) => ({ month, ...out(b) }));
+          const all = aprBucket();
+          LL.pending.forEach((k) => all.ll.add(k));
+          pend.curFaces.forEach((k) => all.faces.add(k));
+          all.amount += sum.pending[1];
+          [pend.newBill, pend.advance].forEach((b) => {
+            b.faces.forEach((k) => all.faces.add(k));
+            b.ll.forEach((k) => all.ll.add(k));
+            all.amount += b.amount;
+          });
+          return {
+            currentMonth: { landlords: LL.pending.size, sites: sum.pending[0], amount: r0(sum.pending[1]) },
+            newBill: { ...out(pend.newBill), months: outMonths(pend.newBillMonths) },
+            advance: { ...out(pend.advance), months: outMonths(pend.advanceMonths) },
+            total: { landlords: all.ll.size, sites: all.faces.size, amount: r0(all.amount) },
+          };
+        })(),
+      },
       gstHold: { landlords: LL.hold.size, sites: sum.hold[0], amount: r0(sum.hold[1]) },
     },
     donut: {
