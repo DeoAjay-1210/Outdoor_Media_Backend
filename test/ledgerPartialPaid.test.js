@@ -80,17 +80,39 @@ test("U3. New Bill site-level GST shared by two owners is counted once", () => {
   assert.strictEqual(r.counts.unpaid.gstAmount, 12600);
 });
 
+test("D1. Paid tab: only sites where every approved month up to the reference month is paid", () => {
+  const pi2 = { paymentInfo: { paymentInfoStatus: 2 } };
+  const oct = { ...ap, dueMonth: "October 2026", rentalDueId: "oct" };
+  // M.Vidya case: Oct paid, Nov Yet to Payment → not Paid (stays in Yet to Payment)
+  const half = { _id: "h", ledger: [rent({ ...oct, utrNumber: "u", ...pi2 }), rent({ ...ap, paymentInfo: { paymentInfoStatus: 1 } })], gstBalanceHistory: [] };
+  // every month paid; Dec bill (later month) and a not approved bill do not block; direct GST ignored
+  const full = {
+    _id: "f",
+    ledger: [rent({ ...oct, utrNumber: "u1", ...pi2 }), rent({ ...ap, utrNumber: "u2", ...pi2 }), rent({ ...ap, dueMonth: "December 2026", rentalDueId: "dec" }), rent({ rentalDueApprovalStatus: 1, rentalDueId: "x" })],
+    gstBalanceHistory: [gst({ ...oct, withGst: 2 })],
+  };
+  // rent paid but held GST unpaid → not Paid
+  const gstOpen = { _id: "g", ledger: [rent({ ...ap, utrNumber: "u", ...pi2 })], gstBalanceHistory: [gst(ap)] };
+  const r = filterLedgerRows([half, full, gstOpen], { paymentInfoStatus: 2, refKey: NOV });
+  assert.deepStrictEqual(r.sites.map((s) => s._id), ["f"]);
+  assert.strictEqual(r.counts.completed.sites, 1);
+  assert.strictEqual(r.counts.completed.rows, 2);
+  assert.strictEqual(filterLedgerRows([half], { paymentInfoStatus: 1, refKey: NOV }).sites.length, 1);
+});
+
 test("P5. New Bill site-level GST (ownerId null) vs all rent rows of the bill; status 1/2 tabs keep counts + isPartialPaid", () => {
   const site = {
     _id: "s1",
     ledger: [rent({ billType: "newBill", rentalDueId: "nb", utrNumber: "u1", paymentInfo: { paymentInfoStatus: 2 } })],
     gstBalanceHistory: [gst({ billType: "newBill", rentalDueId: "nb", ownerId: null })],
   };
+  // ✅ CHANGED — GST still unpaid → not in the Paid tab / Completed count; Partial tab marks it
   const r = filterLedgerRows([site], { paymentInfoStatus: 2 });
-  assert.strictEqual(r.sites.length, 1);
-  assert.strictEqual(r.sites[0].ledger[0].isPartialPaid, true);
-  assert.strictEqual(r.counts.completed.rows, 1);
+  assert.strictEqual(r.sites.length, 0);
+  assert.strictEqual(r.counts.completed.rows, 0);
   assert.strictEqual(r.counts.partialPaid.rentPaidGstPending, 1);
+  const r3 = filterLedgerRows([site], { paymentInfoStatus: 3 });
+  assert.strictEqual(r3.sites[0].ledger[0].isPartialPaid, true);
   // without paymentInfoStatus rows are not marked
   const r2 = filterLedgerRows([site], { cmdApproval: false });
   assert.strictEqual(r2.sites[0].ledger[0].isPartialPaid, undefined);

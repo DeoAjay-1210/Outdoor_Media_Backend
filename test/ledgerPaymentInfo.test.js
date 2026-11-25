@@ -74,15 +74,17 @@ test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only wh
   assert.equal(r.sites[0].ledger.length, 5);
   assert.equal(r.sites[0].gstBalanceHistory.length, 2);
   assert.deepEqual(r.counts.yetToPayment, { sites: 1, landOwners: 1, rows: 1, amount: 10000 });
-  assert.deepEqual(r.counts.completed, { sites: 1, landOwners: 1, rows: 1, amount: 7000 });
+  // ✅ CHANGED — Completed counts only sites where every month is paid (b1 still unpaid)
+  assert.deepEqual(r.counts.completed, { sites: 0, landOwners: 0, rows: 0, amount: 0 });
 
   // tabs → sites with a row in that state, ALL rows kept (each row has its paymentInfo)
   const yet = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 1, cmdBySite });
   assert.equal(yet.sites.length, 1);
   assert.equal(yet.sites[0].ledger.length, 5);
   assert.equal(yet.sites[0].gstBalanceHistory.length, 2);
+  // ✅ CHANGED — Paid tab: a site with a month still unpaid (b1) is not listed
   const done = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 2, cmdBySite });
-  assert.equal(done.sites[0].ledger.length, 5);
+  assert.equal(done.sites.length, 0);
   const gstOnlySaved = { _id: "s9", ledger: [{ rentalDueId: "b1", isVirtual: true, paymentInfo: null }], gstBalanceHistory: [{ rentalDueId: "b1", paymentInfo: { paymentInfoStatus: 1 } }] };
   const g1 = L.filterLedgerRows([gstOnlySaved], { paymentInfoStatus: 1 });
   assert.equal(g1.sites[0].ledger.length, 1); // i32423u4 case: rent row shown though only GST saved

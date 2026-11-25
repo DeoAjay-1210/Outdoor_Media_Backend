@@ -254,6 +254,31 @@ function unpaidOf(site, refKey = null) {
   return { bills, rows };
 }
 
+// ✅ NEW — Paid tab (paymentInfoStatus 2): every approved bill up to the reference
+// month is paid — rent rows (every landowner / mode) and GST Hold rows (withGst 1);
+// direct GST is paid with the rent. ₹0 rent rows, not approved bills and later
+// months do not block. A site with nothing to check is not "fully paid".
+function siteFullyPaid(site, refKey = null) {
+  const inScope = (r) => {
+    if (!r || !rowApproved(r)) return false;
+    if (refKey === null) return true;
+    const k = monthKeyOf(r.dueMonth || r.month);
+    return k === null || k <= refKey;
+  };
+  let checked = 0;
+  for (const r of site.ledger || []) {
+    if (!inScope(r) || rowAmount(r, "rent") <= 0) continue;
+    checked += 1;
+    if (!rentRowDone(r)) return false;
+  }
+  for (const g of site.gstBalanceHistory || []) {
+    if (!inScope(g) || Number(g.withGst ?? 1) !== 1) continue;
+    checked += 1;
+    if (!gstRowDone(g)) return false;
+  }
+  return checked > 0;
+}
+
 function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null, cmdBySite = new Map(), refKey = null }) {
   const counts = {
     yetToPayment: { sites: new Set(), landOwners: new Set(), rows: 0, amount: 0 },
@@ -308,10 +333,12 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
       m = { ...m, ledger: Array.isArray(m.ledger) ? mark(m.ledger) : m.ledger, gstBalanceHistory: Array.isArray(m.gstBalanceHistory) ? mark(m.gstBalanceHistory) : m.gstBalanceHistory };
     }
     const statusOf = (r) => (r && r.paymentInfo ? r.paymentInfo.paymentInfoStatus : null);
+    const fullyPaid = siteFullyPaid(m, refKey); // ✅ NEW — Paid tab / completed count: every month paid
     const tally = (rows, kind) =>
       (rows || []).forEach((r) => {
         const st = statusOf(r);
         if (!st) return;
+        if (st === 2 && !fullyPaid) return; // ✅ NEW — a site with a month still unpaid is not in Completed
         const c = st === 2 ? counts.completed : counts.yetToPayment;
         c.sites.add(siteId);
         if (ownerOf(r)) c.landOwners.add(ownerOf(r));
@@ -329,6 +356,12 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
     // ✅ NEW — Unpaid tab: sites with an approved bill where nothing is paid
     if (paymentInfoStatus === 4) {
       if (up.bills.length) out.push(m);
+      return;
+    }
+    // ✅ NEW — Paid tab: only sites where every month is paid (a paid row + nothing unpaid)
+    if (paymentInfoStatus === 2) {
+      const hasPaidRow = (m.ledger || []).some((r) => statusOf(r) === 2) || (m.gstBalanceHistory || []).some((r) => statusOf(r) === 2);
+      if (hasPaidRow && fullyPaid) out.push(m);
       return;
     }
     if (paymentInfoStatus) {
@@ -437,6 +470,7 @@ module.exports = {
   filterLedgerRows,
   partialPaidOf,
   unpaidOf,
+  siteFullyPaid,
   parsePaymentInfoBody,
   findInfoIndex,
 };
