@@ -80,6 +80,16 @@ test("U3. New Bill site-level GST shared by two owners is counted once", () => {
   assert.strictEqual(r.counts.unpaid.gstAmount, 12600);
 });
 
+test("U4. payment details saved (Yet to Payment) → not Unpaid (rent or GST hold row)", () => {
+  const saved = { paymentInfo: { paymentInfoStatus: 1, source: "paymentInfo" } };
+  const rentSaved = { _id: "r", ledger: [rent({ ...ap, ...saved })], gstBalanceHistory: [] };
+  const gstSaved = { _id: "g", ledger: [rent({ ...ap, rentalDueId: "b9" })], gstBalanceHistory: [gst({ ...ap, rentalDueId: "b9", ...saved })] };
+  const r = filterLedgerRows([rentSaved, gstSaved], { paymentInfoStatus: 4, refKey: NOV });
+  assert.strictEqual(r.sites.length, 0);
+  assert.strictEqual(r.counts.unpaid.bills, 0);
+  assert.strictEqual(filterLedgerRows([rentSaved], { paymentInfoStatus: 1, refKey: NOV }).sites.length, 1);
+});
+
 test("D1. Paid tab: only sites where every approved month up to the reference month is paid", () => {
   const pi2 = { paymentInfo: { paymentInfoStatus: 2 } };
   const oct = { ...ap, dueMonth: "October 2026", rentalDueId: "oct" };

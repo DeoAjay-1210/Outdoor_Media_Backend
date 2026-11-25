@@ -202,6 +202,8 @@ const monthKeyOf = (label) => {
   const y = Number(p[1]);
   return i < 0 || !y ? null : y * 12 + i;
 };
+// ✅ NEW — payment details saved through ledger-payment-info-save (not the old-paid fallback)
+const hasSavedInfo = (r) => !!(r && r.paymentInfo && r.paymentInfo.source === "paymentInfo");
 const rowApproved = (r) => Number(r?.rentalDueApprovalStatus ?? ((r?.billType || "bill") === "bill" ? 0 : 3)) === 3;
 
 function unpaidOf(site, refKey = null) {
@@ -234,10 +236,12 @@ function unpaidOf(site, refKey = null) {
     owners.forEach((owner) => {
       const rentRows = rentRowsAll.filter((r) => ownerOf(r) === owner);
       if (rentRows.some(rentRowDone)) return; // rent (partly) paid → not unpaid
+      if (rentRows.some(hasSavedInfo)) return; // ✅ NEW — payment details saved → Yet to Payment, not Unpaid
       const rentAmount = rentRows.reduce((s, r) => s + rowAmount(r, "rent"), 0);
       if (rentAmount <= 0) return;
       const gsts = (gstByGroup.get(k) || []).filter((g) => !ownerOf(g) || ownerOf(g) === owner);
       if (gsts.some(gstRowDone)) return; // GST paid → Partial Paid
+      if (gsts.some(hasSavedInfo)) return; // ✅ NEW — GST payment details saved → Yet to Payment
       const gstRow = gsts[0] || null;
       let gstAmount = 0;
       gsts.forEach((g) => {
