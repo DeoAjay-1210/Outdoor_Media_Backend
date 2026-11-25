@@ -434,7 +434,141 @@ function notifyApprovalReminderChat({ media, entry, userType, userName, remarks 
     .catch((err) => console.error("[GoogleChat] send failed:", err.response?.status || err.message));
 }
 
+// ─────────────────────────────────────────────────────────────
+// ✅ NEW — NEW BILL / ADVANCE (rent revision BILL / ADVANCE) messages.
+//   entered            → space of the role it waits on (Rental Executive)
+//   approved by Exec   → Rental Manager space ("Awaiting your approval")
+//   approved by Mgr    → CMD space
+//   approved by CMD    → Rental Executive + Rental Manager spaces
+//   rejected           → the other roles' spaces (Exec → Mgr, Mgr → Exec, CMD → Exec + Mgr)
+// NORMAL_BILL / CANCEL (auto approved) → no message. Same GOOGLE_CHAT switch;
+// built at once, posted in the background, never throws.
+// ─────────────────────────────────────────────────────────────
+const ROLE_URL_KEY = { 1: "RENTAL_EXECUTIVE_URL", 2: "RENTAL_MANAGER_URL", 3: "CMD_URL" };
+const REVISION_REJECT_ROUTES = {
+  1: ["RENTAL_MANAGER_URL"],
+  2: ["RENTAL_EXECUTIVE_URL"],
+  3: ["RENTAL_EXECUTIVE_URL", "RENTAL_MANAGER_URL"],
+};
+
+const revisionKindLabel = (r) =>
+  r.billType === "ADVANCE" ? "Advance" : r.revisionAction === "decrease" ? "Bill Decrease" : "New Bill";
+
+function buildRentRevisionMessage({ revision, media, event, role, userName, remark = "" }) {
+  const r = typeof revision?.toObject === "function" ? revision.toObject() : revision || {};
+  const plain = typeof media?.toObject === "function" ? media.toObject() : media || {};
+  const isAdvance = r.billType === "ADVANCE";
+  const kind = revisionKindLabel(r);
+  const eventLabel = event === "created" ? "Entered" : event === "rejected" ? "Rejected" : "Approved";
+  const actorRole = event === "created" ? r.requestedByRole : role;
+  const actorName = event === "created" ? r.requestedBy : userName;
+  const by = `${ROLE_LABEL[Number(actorRole)] || "User"}${actorName ? ` (${actorName})` : ""}`;
+
+  let status = "";
+  if (event === "created") {
+    const p = Number(r.currentPendingRole);
+    status = p ? `*Awaiting your approval* (${ROLE_LABEL[p]})` : "";
+  } else if (event === "rejected") {
+    status = `*Rejected by ${ROLE_LABEL[Number(role)] || "User"}*`;
+  } else {
+    status = APPROVAL_ROUTES[Number(role)]?.status || "";
+  }
+
+  const faces = (plain.mediaDetails || []).filter((d) => Number(d.status) === 1);
+  const siteName = r.mediaName || faces.map((d) => d.mediaName).filter(Boolean).join(", ") || "-";
+  const siteCode = r.mediaCode || faces.map((d) => d.mediaCode).filter(Boolean).join(", ") || "-";
+  const landOwnerName = (plain.landOwners || []).map((o) => o.name).filter(Boolean).join(", ") || "-";
+
+  const lines = [
+    `*${kind} ${eventLabel}* — by ${by}`,
+    ...(status ? [status] : []),
+    `*Site Name:* ${siteName}`,
+    `*Site Code:* ${siteCode}`,
+    `*Landowner Name:* ${landOwnerName}`,
+    ...(plain.rentalPayment ? [`*Payment Frequency:* ${frequencyLabelOf(plain.rentalPayment)}`] : []),
+  ];
+
+  let amount = 0;
+  let gstAmount = 0;
+  if (isAdvance) {
+    amount = Number(r.advanceAmount || 0);
+    gstAmount = Number(r.advanceGstAmount || 0);
+    lines.push(`*Advance Month:* ${r.fromMonth || "-"}`);
+    lines.push(`*Advance Amount:* ${formatINR(amount)}`);
+  } else {
+    const detail = Array.isArray(r.monthsDetail) ? r.monthsDetail.filter(Boolean) : [];
+    const first = detail[0]?.month || r.fromMonth || "-";
+    const last = detail.length ? detail[detail.length - 1].month : r.toMonth || first;
+    lines.push(`*Bill Months:* ${first === last || !last ? first : `${first} to ${last}`}`);
+    if (Number(r.newRent || 0) > 0) {
+      lines.push(`*Old Rent:* ${formatINR(r.oldRent)}`);
+      lines.push(`*New Rent:* ${formatINR(r.newRent)}`);
+    }
+    if (detail.length) {
+      amount = detail.reduce((s, d) => s + Number(d.amount || 0), 0);
+      gstAmount = detail.reduce((s, d) => s + Number(d.gstAmount || 0), 0);
+      if (detail.length > 1) {
+        lines.push("*Month-wise:*");
+        detail.forEach((d) => {
+          const g = Number(d.gstAmount || 0);
+          lines.push(`   • ${d.month} — ${formatINR(d.amount)}${g ? ` + GST ${formatINR(g)}` : ""}`);
+        });
+      }
+    } else {
+      amount = Number(r.increaseAmount ?? r.difference ?? 0);
+      gstAmount = Number(r.increaseGstAmount || 0);
+    }
+    lines.push(`*Total Amount:* ${formatINR(amount)}`);
+  }
+  const gstPct = Number(r.gstPercentage || 0);
+  if (gstAmount) lines.push(`*GST Amount${gstPct ? ` (${gstPct}%)` : ""}:* ${formatINR(gstAmount)}`);
+  lines.push(`*Total Net Payable:* ${formatINR(amount + gstAmount)}`);
+  if (isAdvance && r.adjustInMonth) lines.push(`*Adjust In Month:* ${r.adjustInMonth}`);
+  if (!isAdvance && r.nextBillFromMonth) lines.push(`*Next Bill From:* ${r.nextBillFromMonth}`);
+  if (r.reason) lines.push(`*Reason:* ${r.reason}`);
+  if (r.invoice?.filePath) lines.push(`*Invoice:* ${r.invoice.filePath}`);
+  if (event !== "created" && r.requestedBy) {
+    lines.push(`*Requested By:* ${ROLE_LABEL[Number(r.requestedByRole)] || "User"} (${r.requestedBy})`);
+  }
+  if (remark && String(remark).trim()) lines.push(`*Remark:* ${String(remark).trim()}`);
+  if (r.adinn_ooh_bills && typeof r.adinn_ooh_bills !== "object") lines.push(`*Bill No:* ${r.adinn_ooh_bills}`);
+  return lines.join("\n");
+}
+
+// event: "created" | "approved" | "rejected"; role = who approved / rejected
+// webhook URLs for this event ([] → nothing to send: chat off, NORMAL_BILL / CANCEL, URL not set)
+function rentRevisionChatUrls({ revision, event, role }) {
+  if (!isGoogleChatEnabled() || !revision) return [];
+  if (revision.billType !== "BILL" && revision.billType !== "ADVANCE") return []; // NORMAL_BILL / CANCEL → no message
+  let envKeys = [];
+  if (event === "created") envKeys = ROLE_URL_KEY[Number(revision.currentPendingRole)] ? [ROLE_URL_KEY[Number(revision.currentPendingRole)]] : [];
+  else if (event === "approved") envKeys = APPROVAL_ROUTES[Number(role)]?.envKeys || [];
+  else if (event === "rejected") envKeys = REVISION_REJECT_ROUTES[Number(role)] || [];
+  return [...new Set(envKeys.map((k) => process.env[k]).filter(Boolean))];
+}
+
+function notifyRentRevisionChat({ revision, media, event, role, userName, remark = "" }) {
+  const urls = rentRevisionChatUrls({ revision, event, role });
+  if (urls.length === 0) return;
+
+  let text;
+  try {
+    text = buildRentRevisionMessage({ revision, media, event, role, userName, remark });
+  } catch (err) {
+    console.error("[GoogleChat] rent revision message build failed:", err.message);
+    return;
+  }
+  urls.forEach((url) => {
+    axios
+      .post(url, { text }, { timeout: 10000, headers: { "Content-Type": "application/json; charset=UTF-8" } })
+      .catch((err) => console.error("[GoogleChat] rent revision send failed:", err.response?.status || err.message));
+  });
+}
+
 module.exports = {
+  notifyRentRevisionChat, // ✅ NEW — New Bill / Advance
+  buildRentRevisionMessage, // ✅ NEW
+  rentRevisionChatUrls, // ✅ NEW
   notifyApprovalReminderChat, // ✅ NEW
   notifyOverdueRemarkChat,
   buildOverdueRemarkMessage,
