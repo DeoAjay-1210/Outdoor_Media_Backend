@@ -5038,6 +5038,13 @@ const cityFilter = [
         }
         finalMediaListData = r.sites.slice(skip, skip + pageSize);
       }
+      // ✅ NEW — output only: a row without payment details gets an empty
+      // paymentInfo (status 0) instead of null; filters / counts above used null
+      finalMediaListData = finalMediaListData.map((m) => ({
+        ...m,
+        ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withDefaultPaymentInfo(m.ledger) } : {}),
+        ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withDefaultPaymentInfo(m.gstBalanceHistory) } : {}),
+      }));
     }
 
     return successResponse(

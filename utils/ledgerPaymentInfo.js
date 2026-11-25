@@ -82,6 +82,22 @@ function oldPaidInfo(row) {
   };
 }
 
+// ✅ NEW — empty payment details (nothing saved, nothing paid): status 0, label ""
+const EMPTY_PAYMENT_INFO = Object.freeze({
+  paymentThrough: "",
+  typeOfPayment: "",
+  bankRefNo: "",
+  narration: "",
+  paymentInfoStatus: 0,
+  paymentInfoStatusLabel: "",
+  source: "",
+  updatedBy: "",
+  updatedAt: null,
+});
+// ✅ NEW — response only: paymentInfo null → the empty object (call after the filters)
+const withDefaultPaymentInfo = (rows) =>
+  (rows || []).map((r) => (r && r.paymentInfo == null ? { ...r, paymentInfo: { ...EMPTY_PAYMENT_INFO } } : r));
+
 // rows + paymentInfo (null when nothing saved for that row)
 // ✅ CHANGED — opts.oldPaid (ledger-list with paymentInfoStatus): a paid row without
 // saved details gets oldPaidInfo instead of null
@@ -412,6 +428,8 @@ module.exports = {
   gstRowDone,
   toPaymentInfo,
   oldPaidInfo,
+  EMPTY_PAYMENT_INFO,
+  withDefaultPaymentInfo,
   withRentPaymentInfo,
   withGstPaymentInfo,
   isCmdRow,
