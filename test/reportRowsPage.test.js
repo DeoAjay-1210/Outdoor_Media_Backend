@@ -1,7 +1,7 @@
 // Report Analytics popup pages (utils/reportRowsPage.js): one row per landlord, the app's card rules, search, sort, pages. Pure, no DB.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { buildBillRowsPage, buildPaymentRowsPage, buildGstRowsPage, parseRowsQuery } = require("../utils/reportRowsPage");
+const { buildBillRowsPage, buildPaymentRowsPage, buildGstRowsPage, buildRentRowsPage, parseRowsQuery } = require("../utils/reportRowsPage");
 
 const rec = (o) => ({
   siteId: o.siteId, siteName: o.siteName || `Site ${o.siteId}`, city: o.city || "Chennai", paymentCycle: "Monthly", mediaType: "Hoarding",
@@ -24,7 +24,7 @@ test("P1. one row per landlord; cards and totals count every bill; records = the
   assert.equal(p.totalRows, 3);
   assert.equal(p.limit, 25); // default page size
   assert.deepEqual(p.totals, { bills: 4, sites: 4, rental: 420, gst: 0, holdGst: 0, total: 420 });
-  assert.deepEqual(p.cards.map((c) => [c.key, c.bills, c.amount]), [["generated", 5, 450], ["approved", 4, 420], ["pending", 1, 30], ["pastDue", 1, 30]]);
+  assert.deepEqual(p.cards.map((c) => [c.key, c.bills, c.amount]), [["generated", 5, 450], ["approved", 4, 420], ["pending", 1, 30], ["pastDue", 1, 30], ["advance", 0, 0]]);
   assert.equal(p.records.length, 4);
 });
 
@@ -91,6 +91,23 @@ test("D2. GST: one row per bill cycle; paid / unpaid (pending or ledger) / hold 
   const hold = buildGstRowsPage(recs, { category: "hold", bucket: "2026-09" });
   assert.equal(hold.totalRows, 0);
   assert.equal(buildGstRowsPage(recs, { category: "generated", search: "₹18" }).totalRows, 1);
+});
+
+test("R1. rent: same rows and split as GST, cards labelled Total Rent / Hold Rent, sort by rent = amount", () => {
+  const recs = [
+    base("s1", "RAVI", { bucket: "2026-10", paid: 1000, remaining: 0 }),
+    base("s1", "RAVI", { bucket: "2026-09", paid: 0, remaining: 1000, remainingAs: "pending" }),
+    base("s2", "MALA", { bucket: "2026-10", paid: 0, remaining: 500, remainingAs: "hold" }),
+    base("s3", null, { bucket: "2026-10", paid: 0, remaining: 300, remainingAs: "ledger", kind: "opening" }),
+  ];
+  const p = buildRentRowsPage(recs, { category: "unpaid" });
+  assert.deepEqual(p.cards.map((c) => [c.key, c.label, c.sites, c.amount]).map((x) => [x[0], x[2], x[3]]), [["generated", 3, 2800], ["paid", 1, 1000], ["unpaid", 2, 1300], ["hold", 1, 500]]);
+  assert.equal(p.cards.find((c) => c.key === "generated").label, "Total Rent");
+  assert.equal(p.cards.find((c) => c.key === "hold").label, "Hold Rent");
+  assert.deepEqual(p.summary.map((s) => [s.label, s.amount]), [["Pending Approval", 1000], ["Ledger Entry", 300]]);
+  assert.deepEqual(buildGstRowsPage(recs, { category: "unpaid" }).totals, p.totals); // same numbers as the GST page
+  const desc = buildRentRowsPage(recs, { category: "generated", sortBy: "rent", sortDir: "desc" });
+  assert.equal(desc.records[0].siteId, "s1");
 });
 
 test("A1. appraisal: one row per entry by kind; cards = distinct sites + amount; Total = every kind; amount sorts", () => {

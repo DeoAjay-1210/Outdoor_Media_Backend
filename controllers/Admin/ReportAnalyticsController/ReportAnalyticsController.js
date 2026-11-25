@@ -34,7 +34,7 @@ const FACE = "siteCode mediaDetails.mediaName mediaDetails.mediaCode mediaDetail
 
 // Payments under Rental Master = the Rental Master cycle calculation: ledger rules need owner amounts,
 // paid-state rows, bill labels, billing anchors and appraisal history (no bank, PAN or contact fields).
-const RM_PAYMENTS = `${FACE} mediaDetails.status ledgerHistory ledger gstApplicableFlag appraisal.history rentalPayment.billingStartDate rentalPayment.lastBillPaidDate rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable rentalPayment.rentalOutstandingHistory rentalPayment.gstOutstandingHistory gstBalanceHistory.dueMonth gstBalanceHistory.gstAmount gstBalanceHistory.isPaid gstBalanceHistory.utrNumber gstBalanceHistory.ownerId gstBalanceHistory.landOwnerId rentalDue.dueDate rentalDue.dueMonth rentalDue.withGst rentalDue.approvalStatus rentalDue.updatedAt landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.cashAmount landOwners.onlineAmount landOwners.shareAmount landOwners.gstApplicable landOwners.gstAmount landOwners.tdsAmount`;
+const RM_PAYMENTS = `${FACE} mediaDetails._id mediaDetails.status ledgerHistory ledger gstApplicableFlag appraisal.history rentalPayment.billingStartDate rentalPayment.lastBillPaidDate rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency rentalPayment.totalRentalAmount rentalPayment.gstAmount rentalPayment.gstApplicable rentalPayment.rentalOutstandingHistory rentalPayment.gstOutstandingHistory gstBalanceHistory.dueMonth gstBalanceHistory.gstAmount gstBalanceHistory.isPaid gstBalanceHistory.utrNumber gstBalanceHistory.ownerId gstBalanceHistory.landOwnerId rentalDue.dueDate rentalDue.dueMonth rentalDue.withGst rentalDue.approvalStatus rentalDue.updatedAt arrearsDue._id arrearsDue.type arrearsDue.label arrearsDue.dueMonth arrearsDue.dueDate arrearsDue.baseAmount arrearsDue.gstAmount arrearsDue.netPayable arrearsDue.approvalStatus arrearsDue.approvalSteps.role arrearsDue.approvalSteps.status arrearsDue.approvalSteps.userName arrearsDue.approvalSteps.approvedAt arrearsDue.adjustInMonth arrearsDue.mediaDetailId arrearsDue.rentPaid arrearsDue.gstPaid arrearsDue.payments landOwners._id landOwners.landOwnerMasterId landOwners.paymentCategory landOwners.cashAmount landOwners.onlineAmount landOwners.shareAmount landOwners.gstApplicable landOwners.gstAmount landOwners.tdsAmount`;
 
 // the site's stored payment cycle (rentalPayment.paymentFrequency, + months when custom): the "Payment Cycle" column of the detail popups
 const CYCLE = "rentalPayment.paymentFrequency rentalPayment.customPaymentFrequency";
@@ -52,7 +52,7 @@ const DETAIL_IDS = "landOwners.name";
 const SELECT = {
   filters: `${FACE} createdAt`,
   payments: {
-    ledger: `${FACE} ledgerHistory ${CYCLE}`,
+    ledger: `${FACE} mediaDetails._id ledgerHistory ${CYCLE} arrearsDue._id arrearsDue.type arrearsDue.label arrearsDue.dueMonth arrearsDue.dueDate arrearsDue.baseAmount arrearsDue.gstAmount arrearsDue.netPayable arrearsDue.approvalStatus arrearsDue.approvalSteps.role arrearsDue.approvalSteps.status arrearsDue.approvalSteps.userName arrearsDue.approvalSteps.approvedAt arrearsDue.adjustInMonth arrearsDue.mediaDetailId arrearsDue.rentPaid arrearsDue.gstPaid arrearsDue.payments`,
     rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS}`,
   },
   media: { both: `${FACE} createdAt ${CYCLE}` },
@@ -63,14 +63,20 @@ const SELECT = {
   // the face ids on BOTH sides — a projection keeps a nested _id only when listed — so stale rows
   // (rentalDue.mediaDetailId not on a current face) can be left out before cycles are walked.
   // (bill amounts feed the optional export detail rows, `details: true`)
-  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id mediaDetails.siteBillMode rentalPayment.status rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt` },
+  bills: { rentalMaster: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id mediaDetails.siteBillMode rentalPayment.status rentalDue._id rentalDue.mediaDetailId rentalDue.status rentalDue.baseAmount rentalDue.gstAmount rentalDue.netPayable rentalDue.currentPendingRole rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt arrearsDue._id arrearsDue.type arrearsDue.label arrearsDue.dueMonth arrearsDue.dueDate arrearsDue.baseAmount arrearsDue.gstAmount arrearsDue.netPayable arrearsDue.approvalStatus arrearsDue.approvalSteps.role arrearsDue.approvalSteps.status arrearsDue.approvalSteps.userName arrearsDue.approvalSteps.approvedAt arrearsDue.adjustInMonth arrearsDue.mediaDetailId arrearsDue.rentPaid arrearsDue.gstPaid arrearsDue.payments` },
   // GST under Ledger = the Ledger Entry GST calculation (expected GST per bill cycle, paid from
   // gstBalanceHistory / the ledger) + onboarding GST rows — the same fields as the cycle calculation.
   gst: {
     // (+ the bill's approval steps: the Pending Approval rows show who approved and who is pending)
-    ledger: `${RM_PAYMENTS} ${DETAIL_IDS} rentalDue.approvalFlow rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt`,
+    ledger: `${RM_PAYMENTS} ${DETAIL_IDS} rentalDue.approvalFlow rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt arrearsDue._id arrearsDue.type arrearsDue.label arrearsDue.dueMonth arrearsDue.dueDate arrearsDue.baseAmount arrearsDue.gstAmount arrearsDue.netPayable arrearsDue.approvalStatus arrearsDue.approvalSteps.role arrearsDue.approvalSteps.status arrearsDue.approvalSteps.userName arrearsDue.approvalSteps.approvedAt arrearsDue.adjustInMonth arrearsDue.mediaDetailId arrearsDue.rentPaid arrearsDue.gstPaid arrearsDue.payments`,
     // (the bill month and status label the optional per-bill detail rows)
     rentalMaster: `${FACE} rentalDue.dueDate rentalDue.dueMonth rentalDue.approvalStatus rentalDue.status rentalDue.gstAmount rentalDue.withGst rentalPayment.gstOutstandingHistory ${CYCLE} ${DETAIL_IDS}`,
+  },
+  // Rent = the Ledger Entry RENT calculation (rent per bill cycle, GST excluded) + onboarding rent outstanding rows, with the
+  // CMD appraisal hold (bill hold / site hold) that moves a cycle's unpaid rent to Hold. Source-independent: rent is a Ledger figure.
+  rent: {
+    // (+ the face ids / bill mode: the bill index leaves stale rows out and follows a single-bill site's furthest-along row)
+    both: `${RM_PAYMENTS} ${DETAIL_IDS} mediaDetails._id mediaDetails.siteBillMode rentalDue._id rentalDue.mediaDetailId rentalDue.approvalFlow rentalDue.status rentalDue.approvalSteps.role rentalDue.approvalSteps.status rentalDue.approvalSteps.userName rentalDue.approvalSteps.approvedAt rentalDue.appraisalHold.hold rentalDue.appraisalHold.heldAt rentalDue.appraisalHold.releasedAt appraisal.appraisalHold appraisal.appraisalHoldDate arrearsDue._id arrearsDue.type arrearsDue.label arrearsDue.dueMonth arrearsDue.dueDate arrearsDue.baseAmount arrearsDue.gstAmount arrearsDue.netPayable arrearsDue.approvalStatus arrearsDue.approvalSteps.role arrearsDue.approvalSteps.status arrearsDue.approvalSteps.userName arrearsDue.approvalSteps.approvedAt arrearsDue.adjustInMonth arrearsDue.mediaDetailId arrearsDue.rentPaid arrearsDue.gstPaid arrearsDue.payments`,
   },
   tds: {
     // + the rent ledger rows (the Ledger records the TDS deduction with the rent payment) and the owner TDS settings they are priced with
@@ -114,6 +120,7 @@ const COMPUTE = {
   bills: { rentalMaster: (d, f) => RA.computeOutstanding(d, f, LEDGER_LIB) },
   gst: { ledger: (d, f) => RA.computeLedgerGst(d, f, LEDGER_LIB), rentalMaster: (d, f) => RA.computeGst(d, f) },
   campaign: { both: (d, f) => RA.computeCampaign(d, f, LEDGER_LIB) },
+  rent: { both: (d, f) => RA.computeLedgerRent(d, f, LEDGER_LIB) },
   tdsStatus: { both: (d, f) => RA.computeTdsOverview(d, f, { landOwnersAsOfDate }) },
   tds: {
     ledger: (d, f) => RA.computeTds(d, f, { landOwnersAsOfDate }),
@@ -154,7 +161,7 @@ const buildSection = async (chart, f) => {
   const data = route.compute(docs, f);
   // ✅ NEW — rowsPaging: this server pages the Outstanding payments popup (upcoming-bills with body.rows)
   return { ...data, supported: true, sourceIndependent: route.sourceIndependent, // popups paged on the server: Outstanding payments, Payment analytics (Rental Master cycle rows), GST (Ledger GST rows)
-...((chart === "bills" || (chart === "payments" && f.source === "rentalMaster") || (chart === "gst" && f.source === "ledger") || ["appraisal", "agreements", "tdsStatus", "campaign"].includes(chart)) ? { rowsPaging: true } : {}) };
+...((chart === "bills" || (chart === "payments" && f.source === "rentalMaster") || (chart === "gst" && f.source === "ledger") || ["appraisal", "agreements", "tdsStatus", "campaign", "rent"].includes(chart)) ? { rowsPaging: true } : {}) };
 };
 
 const makeHandler = (chart, message) => async (req, res) => {
@@ -170,7 +177,7 @@ const makeHandler = (chart, message) => async (req, res) => {
 
 // ✅ NEW — /report-analytics/upcoming-bills with body.rows: the Outstanding payments popup's page (one row per landlord,
 // searched / sorted / paginated on the server) under data.billRows. Without body.rows the response is unchanged.
-const { buildBillRowsPage, buildPaymentRowsPage, buildGstRowsPage, buildAppraisalRowsPage, buildAgreementRowsPage, buildCampaignRowsPage, buildTdsRowsPage } = require("../../../utils/reportRowsPage"); // ✅ one file for every popup page
+const { buildBillRowsPage, buildPaymentRowsPage, buildGstRowsPage, buildAppraisalRowsPage, buildAgreementRowsPage, buildCampaignRowsPage, buildTdsRowsPage, buildRentRowsPage } = require("../../../utils/reportRowsPage"); // ✅ one file for every popup page
 const billsHandler = makeHandler("bills", "Upcoming bill analytics fetched");
 const getBillAnalytics = async (req, res) => {
   const body = { ...(req.query || {}), ...(req.body || {}) };
@@ -227,6 +234,7 @@ const getAppraisalAnalytics = makeRowsHandler("appraisal", "Appraisal analytics 
 const getAgreementAnalytics = makeRowsHandler("agreements", "Agreement analytics fetched", buildAgreementRowsPage); // ✅ NEW — + body.rows
 const getTdsStatusAnalytics = makeRowsHandler("tdsStatus", "TDS status analytics fetched", buildTdsRowsPage); // ✅ NEW — + body.rows
 const getCampaignAnalytics = makeRowsHandler("campaign", "Campaign live status analytics fetched", buildCampaignRowsPage); // ✅ NEW — + body.rows
+const getRentAnalytics = makeRowsHandler("rent", "Rent analytics fetched", buildRentRowsPage); // ✅ NEW — Rent (Ledger rent per bill cycle)
 
 const getFilterOptions = async (req, res) => {
   try {
@@ -250,6 +258,7 @@ const OVERVIEW_SECTIONS = {
   agreements: "agreements",
   tdsStatus: "tdsStatus",
   campaign: "campaign", // appended: the keys above keep their order
+  rent: "rent", // ✅ NEW — appended
 };
 const OVERVIEW_CONCURRENCY = 3; // each section reads the collection once: bounded, not 9 at once
 
@@ -318,4 +327,5 @@ module.exports = {
   getTdsAnalytics: makeHandler("tds", "TDS analytics fetched"),
   getTdsStatusAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
   getCampaignAnalytics, // ✅ CHANGED — + body.rows (popup page); without it the same as before
+  getRentAnalytics, // ✅ NEW — Rent analytics (+ body.rows popup page)
 };

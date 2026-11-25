@@ -33,6 +33,7 @@ const CATEGORIES = [
   { key: "approved", label: "Approved" },
   { key: "pending", label: "Pending Approval" },
   { key: "pastDue", label: "Past Due / Overdue" },
+  { key: "advance", label: "Advance Bill" },
 ];
 const STAGE_LABELS = { sales: "Rental Executive", manager: "Rental Manager", cmd: "CMD", unknown: "Stage unavailable" };
 const STAGE_ORDER = ["Rental Executive", "Rental Manager", "CMD"];
@@ -167,6 +168,7 @@ function parseRowsQuery(q = {}) {
     sortDir: String(q.sortDir).toLowerCase() === "desc" ? "desc" : "asc",
     page: Math.max(parseInt(q.page, 10) || 1, 1),
     limit,
+    newBill: Boolean(q.newBill === true || q.newBill === "true"),
   };
 }
 
@@ -178,7 +180,7 @@ function parseRowsQuery(q = {}) {
 function buildBillRowsPage(records, rowsQuery = {}) {
   const o = parseRowsQuery(rowsQuery);
   const all = Array.isArray(records) ? records : [];
-  const scoped = all.filter((r) => !o.bucket || str(r.bucket) === o.bucket);
+  const scoped = all.filter((r) => (!o.bucket || str(r.bucket) === o.bucket) && (!o.newBill || str(r.billKind) === "newBill"));
 
   const cards = CATEGORIES.map(({ key, label }) => {
     const list = scoped.filter((r) => inCategory(r, key));
@@ -249,6 +251,7 @@ function parseQuery(q, categories, fallback) {
     sortDir: String(q.sortDir).toLowerCase() === "desc" ? "desc" : "asc",
     page: Math.max(parseInt(q.page, 10) || 1, 1),
     limit: Math.min(Math.max(parseInt(q.limit, 10) || DEFAULT_LIMIT, 1), MAX_LIMIT),
+    newBill: Boolean(q.newBill === true || q.newBill === "true"),
   };
 }
 
@@ -350,6 +353,7 @@ function buildPaymentRowsPage(records, rowsQuery = {}) {
   const bySite = new Map();
   (records || []).forEach((r) => {
     if (o.bucket && str(r.month) !== o.bucket) return;
+    if (o.newBill && r.kind !== "newBill") return;
     const id = str(r.siteId);
     const s = bySite.get(id) || { recs: [], due: [0, 0, 0], unpaid: [0, 0, 0], approvals: new Set() };
     s.recs.push(r);
@@ -402,7 +406,7 @@ const UNPAID_TYPE = { pending: "Pending Approval", ledger: "Ledger Entry" };
 function buildGstRowsPage(records, rowsQuery = {}) {
   const o = parseQuery(rowsQuery, GST_CATS.map((c) => c.key), "generated");
   if (o.sortBy === "gst") o.sortBy = "amount"; // the GST popup's amount column is titled "GST" on the Total GST card
-  const scoped = (records || []).filter((r) => !o.bucket || str(r.bucket) === o.bucket);
+  const scoped = (records || []).filter((r) => (!o.bucket || str(r.bucket) === o.bucket) && (!o.newBill || r.kind === "newBill"));
   const cards = GST_CATS.map(({ key, label }) => {
     const rows = scoped.filter((r) => gstAmountOf(key, r) > 0.005);
     const sites = sitesOf(rows);
@@ -424,6 +428,15 @@ function buildGstRowsPage(records, rowsQuery = {}) {
     groupExtra: o.category === "unpaid" ? [UNPAID_TYPE[remainingAs(r)] || "", str(r.approvalStatus)] : undefined,
   }));
   return { ...pageUnits(units, o), cards, totals, ...(summary ? { summary } : {}) };
+}
+
+// ── Rent: Total Rent / Paid / Unpaid / Hold — one row per site bill cycle (rentChoices); the GST page's rules on the rent rows ──
+const RENT_LABELS = { generated: "Total Rent", hold: "Hold Rent" };
+function buildRentRowsPage(records, rowsQuery = {}) {
+  const q = { ...(rowsQuery || {}) };
+  if (q.sortBy === "rent") q.sortBy = "amount"; // the Rent popup's amount column is titled "Rent" on the Total Rent card
+  const page = buildGstRowsPage(records, q);
+  return { ...page, cards: page.cards.map((c) => (RENT_LABELS[c.key] ? { ...c, label: RENT_LABELS[c.key] } : c)) };
 }
 
 // ── Appraisals: Total Appraisal / Paid / Unpaid / Hold (Pending Approval) / Upcoming — one row per appraisal entry (appraisalChoices) ──
@@ -572,6 +585,7 @@ module.exports = {
   buildBillRowsPage,
   buildPaymentRowsPage,
   buildGstRowsPage,
+  buildRentRowsPage,
   parseRowsQuery,
   groupRecords,
   pageUnits,
