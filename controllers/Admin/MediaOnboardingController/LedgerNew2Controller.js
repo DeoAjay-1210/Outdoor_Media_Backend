@@ -4969,6 +4969,20 @@ const cityFilter = [
         .select(wantCmdApprovalRows ? "ledgerPaymentInfo rentalDue landOwners ledger ledgerHistory gstBalanceHistory arrearsDue" : "ledgerPaymentInfo") // ✅ CHANGED — + arrearsDue (last CMD approval sort)
         .lean();
       const infosBySite = new Map(infoDocs.map((d) => [String(d._id), d.ledgerPaymentInfo || []]));
+      // ✅ NEW — counts always with the old paid fallback (same numbers as the
+      // paymentInfoStatus 1 / 2 / 3 / 4 tabs); rows of the cmdApproval-only list unchanged
+      const countSourceData =
+        rowFilterMode && wantPaymentInfoStatus === null
+          ? finalMediaListData.map((m) => {
+              const infos = infosBySite.get(String(m._id || m.mediaId)) || [];
+              const opts = { oldPaid: true };
+              return {
+                ...m,
+                ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withRentPaymentInfo(m.ledger, infos, opts) } : {}),
+                ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withGstPaymentInfo(m.gstBalanceHistory, infos, opts) } : {}),
+              };
+            })
+          : null;
       finalMediaListData = finalMediaListData.map((m) => {
         const infos = infosBySite.get(String(m._id || m.mediaId)) || [];
         const piOpts = { oldPaid: wantPaymentInfoStatus !== null }; // ✅ NEW — paymentInfoStatus tabs: old paid rows (UTR without saved details) = Completed
@@ -4999,14 +5013,16 @@ const cityFilter = [
             cmdBySite.set(String(d._id), cmd);
           });
         }
-        const r = LedgerPaymentInfo.filterLedgerRows(finalMediaListData, {
+        const filterOpts = {
           cmdApproval: wantCmdApprovalRows,
           paymentInfoStatus: wantPaymentInfoStatus,
           cmdBySite,
           // ✅ NEW — Unpaid: bills up to currentMonth (else this month)
           refKey: (() => { const ref = requestedMonthYearParsed || (() => { const n = nowIST(); return { year: n.getUTCFullYear(), month: n.getUTCMonth() + 1 }; })(); return ref.year * 12 + (ref.month - 1); })(),
-        });
-        paymentInfoCounts = r.counts;
+        };
+        const r = LedgerPaymentInfo.filterLedgerRows(finalMediaListData, filterOpts);
+        // ✅ CHANGED — cmdApproval only → counts from the old-paid-aware rows (same as the tabs)
+        paymentInfoCounts = countSourceData ? LedgerPaymentInfo.filterLedgerRows(countSourceData, filterOpts).counts : r.counts;
         effectiveTotalCount = r.sites.length;
         // ✅ NEW — cmdApproval: last CMD approved site on top. ✅ CHANGED — the site's latest CMD
         // approval of ANY kind: rentalDue bill (CMD step approvedAt, any month) or New Bill /

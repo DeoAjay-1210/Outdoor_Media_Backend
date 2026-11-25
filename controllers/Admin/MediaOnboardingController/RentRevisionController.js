@@ -1840,6 +1840,7 @@ exports.createRentRevision = async (req, res) => {
           });
       if (r.error) failed.push({ mediaId: id, message: r.error, ...(r.revisionId ? { revisionId: r.revisionId } : {}) });
       else {
+        if (r.action === "created") chatRentRevision(r.revision, "created"); // ✅ NEW — Google Chat
         created.push({
           action: r.action, // created | updated (a Pending revision already existed) | unchanged
           ...revisionSummary(r.revision, r.plan || null),
@@ -2080,6 +2081,7 @@ async function createSitesRevisions(req, res, billType, gstOnIncrease, withGst =
     for (const it of items) {
       const r = await runOne(it, false);
       if (r.error) throw new Error(`sites[${it.index}] (${it.mediaId}): ${r.error}`);
+      if (r.action === "created") chatRentRevision(r.revision, "created"); // ✅ NEW — Google Chat
       created.push({
         action: r.action,
         ...revisionSummary(r.revision, r.plan || null),
@@ -2784,6 +2786,24 @@ function increaseMailBill(media, { month, amount, gstAmount, currentAmount, rent
   };
 }
 
+// ✅ NEW — New Bill / Advance Google Chat message (entered / approved / rejected).
+// Background only: not awaited, never throws, never changes the revision.
+function chatRentRevision(revision, event, { role = null, userName = "", remark = "" } = {}) {
+  try {
+    if (!revision || (revision.billType !== "BILL" && revision.billType !== "ADVANCE")) return;
+    const { notifyRentRevisionChat, rentRevisionChatUrls } = require("../../../utils/googleChat");
+    const snapshot = typeof revision.toObject === "function" ? revision.toObject() : { ...revision };
+    if (rentRevisionChatUrls({ revision: snapshot, event, role }).length === 0) return; // chat off / URL not set → no DB read
+    Media.findById(snapshot.mediaId)
+      .select("mediaDetails landOwners rentalPayment")
+      .lean()
+      .then((media) => notifyRentRevisionChat({ revision: snapshot, media, event, role, userName, remark }))
+      .catch((err) => console.error("[GoogleChat] rent revision chat error:", err?.message || err));
+  } catch (err) {
+    console.error("[GoogleChat] rent revision chat error:", err?.message || err);
+  }
+}
+
 // one revision → { statusCode, message, data } (statusCode >= 400 = not done)
 async function approveOneRevision(revisionId, { action, remark, role, user, withGst = null, invoice = null }) {
   const userName = user?.userName || "";
@@ -2886,6 +2906,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
     revision.currentPendingRole = null;
     revision.rejectedAt = now;
     await revision.save();
+    chatRentRevision(revision, "rejected", { role, userName, remark: step.remark }); // ✅ NEW — Google Chat
     return {
       statusCode: 200,
       message: `${noun} rejected by ${ROLE_NAMES[role]}`,
@@ -2897,6 +2918,7 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
   if (role !== 3) {
     revision.currentPendingRole = role + 1;
     await revision.save();
+    chatRentRevision(revision, "approved", { role, userName, remark: step.remark }); // ✅ NEW — Google Chat → next role
     return {
       statusCode: 200,
       message: `${noun} approved by ${ROLE_NAMES[role]} — waiting for ${ROLE_NAMES[role + 1]}`,
@@ -3070,6 +3092,8 @@ async function approveOneRevision(revisionId, { action, remark, role, user, with
       await revision.save();
     }
   }
+
+  chatRentRevision(revision, "approved", { role, userName, remark: step.remark }); // ✅ NEW — Google Chat → Executive + Manager
 
   return {
     statusCode: 200,
