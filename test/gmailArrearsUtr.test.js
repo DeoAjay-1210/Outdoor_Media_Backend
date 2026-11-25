@@ -757,3 +757,30 @@ test("C14. correction check for New Bill / Advance: a named line without GST is 
     assert.equal(at(""), "line_matches_several_payments");
   }
 });
+
+// ✅ NEW — New Bill / Advance with GST on hold: Rent right + GST wrong → rent saved, error row for the GST (→ UTR error chat)
+const { extractRejectedUtrLines } = require("../utils/landlordUtrParser");
+const withRejected = (id, text) => ({ ...reply(id, text), rejected: extractRejectedUtrLines(text) });
+for (const isAdvance of [false, true]) {
+  const k = kindOf(isAdvance);
+  for (const n of [1, 2]) {
+    const rentLines = Array.from({ length: n }, (_, i) => `Landlord${i + 1} - ${k.word} - Rent - UTR: ${[U.a, U.b][i]}`).join("\n");
+    for (const [name, gstLine, reason] of [
+      ["GST value with no digit", `Landlord1 - ${k.word} - GST - UTR: ABCDEFGH`, "invalid_utr"],
+      ["wrong GST label", `Landlord1 - ${k.word} - GSTT - UTR: ${U.c}`, "landlord_name_not_found"],
+      ["two different GST UTRs", `Landlord1 - ${k.word} - GST - UTR: ${U.c}\nLandlord1 - ${k.word} - GST - UTR: ${U.d}`, "conflicting_utr_for_landlord_payment"],
+    ]) {
+      test(`PS ${k.word}, ${n} landlord(s), ${name} → rent saved, GST error row`, async () => {
+        const x = setup({ docs: [site([scenario({ isAdvance, n, hold: true })], n)], replies: [withRejected("m1", `${rentLines}\n${gstLine}`)] });
+        const r = await run(x);
+        assert.equal(res(r, k.number).status, "found_and_saved");
+        assert.deepEqual(x.calls.saver.map((c) => c.entryType), Array(n).fill("rental"));
+        const err = x.logRows.filter((l) => l.status === "ambiguous_mapping");
+        assert.deepEqual(err.map((l) => l.reason), [reason]);
+        assert.equal(err[0].billKind, isAdvance ? "advance" : "newBill");
+        assert.ok(err[0].partialPending.every((p) => p.kind === "gst"));
+        assert.ok(err[0].partialSaved.every((p) => p.kind === "rent"));
+      });
+    }
+  }
+}

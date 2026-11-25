@@ -132,7 +132,18 @@ function buildUtrErrorMessage(log, media = null) {
   } else if (log.utr) lines.push(`*UTR in reply:* ${log.utr}`);
   lines.push(`*Error:* ${explain(code)}  (${code})`);
 
-  const { replyLines: correct, notes } = expectedReplyLines(media, rows);
+  const expected = expectedReplyLines(media, rows);
+  const notes = expected.notes;
+  let correct = expected.replyLines;
+  // ✅ NEW — part saved: say what is saved and ask only for the lines still pending
+  const pending = Array.isArray(log.partialPending) ? log.partialPending : [];
+  if (pending.length) {
+    const label = (p) => `${p.landlord ? `${p.landlord} – ` : ""}${p.kind === "gst" ? "GST" : "Rent"}`;
+    if ((log.partialSaved || []).length) lines.push(`*Already saved:* ${log.partialSaved.map(label).join(", ")}`);
+    lines.push(`*Still pending:* ${pending.map(label).join(", ")}`);
+    const wanted = correct.filter((l) => pending.some((p) => /- GST - UTR/.test(l) === (p.kind === "gst") && (!p.landlord || l.startsWith(p.landlord))));
+    if (wanted.length) correct = wanted;
+  }
   lines.push("");
   lines.push("*Reply like this* (copy, put the real UTR, one line per landlord):");
   correct.forEach((l) => lines.push(l)); // ✅ CHANGED — plain lines (a ``` code box shows Chat's wrap icon)

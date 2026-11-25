@@ -30,6 +30,7 @@ const { senderName } = require("./senderName");
 const actorOf = (d, messageId) => { const r = [...(d.replies || []), ...(d.cashReplies || [])].find((x) => x.messageId === messageId); return senderName(r ? r.from : d.senderEmail); };
 const { splitCashName, splitNameKind, classifyPaymentLabel, mapLandlords, mapLandlordKinds, mapArrearsLines, mapPaymentKinds, validateAgainstMail, matchLandlord } = require("./landlordUtrParser");
 const { resolvePaidDate } = require("./utrPaidDate");
+const { USER_ERRORS } = require("./utrErrorChat");
 /**
  * CASH-ONLY landlords need no "Cash" line any more: Finance's "Approved through this bank" mail of the bill's chain is the approval and
  * its Gmail Date is the Paid Date. For every named Cash-only landlord WITHOUT an explicit Cash line of its own, a "<name> - Cash" line is
@@ -52,6 +53,31 @@ function addBankApprovedCash(d, names) {
     if (!typed) lines.push({ name: `${name} - Cash`, utr: "", cash: true, dates: [], line: "(Approved through this bank)", fromBankApproval: true });
   }
   if (lines.length) d.cashReplies = [...(d.cashReplies || []), { messageId: first.messageId, from: first.from, sentAt: first.sentAt, sentDate: first.sentDate, cashLines: lines }];
+}
+
+/**
+ * ✅ NEW — one payment line is right (saved) and another is wrong (e.g. Rent saved, GST wrong): the wrong line must still be
+ * reported. Returns { reason, pending: [{ landlord, kind }] } or null. Only lines that are actually there count — a payment
+ * Finance has simply not written yet is not an error.
+ */
+function leftoverProblem(extra, d) {
+  const blocked = extra.blockedKinds || extra.blockedPayments || [];
+  const waiting = (extra.pendingKinds || extra.pendingPayments || []).map((p) => (typeof p === "string" ? { kind: p } : p));
+  const pending = [...blocked, ...waiting].map((p) => ({ landlord: p.landlord || "", kind: p.kind || "" }));
+  if (!pending.length) return null;
+  const bad = blocked.find((b) => USER_ERRORS.has(b.reason));
+  if (bad) return { reason: bad.reason, pending };
+  const kinds = new Set(pending.map((p) => p.kind));
+  // a line whose "UTR" has no digit never reaches the mapping ("GST - UTR : abcd")
+  const rejected = ((d && d.replies) || []).flatMap((r) => r.rejected || []).some((l) => {
+    const kind = classifyPaymentLabel(l.name) || splitNameKind(l.name, null).kind;
+    return !kind || kinds.has(kind);
+  });
+  if (rejected) return { reason: "invalid_utr", pending };
+  // a line that matched nothing: wrong landlord name / wrong label ("GSTT - UTR : X")
+  const alias = { label_is_not_rent_or_gst: "no_rent_or_gst_label", unlabelled_utr_line: "unnamed_utr_line" };
+  const lost = [...(extra.wrongNameLines || []), ...(extra.ignoredLines || [])].map((x) => alias[x.reason] || x.reason).find((r) => USER_ERRORS.has(r));
+  return lost ? { reason: lost, pending } : null;
 }
 
 const LOCK_ID = "gmail_utr_lock";
@@ -779,7 +805,7 @@ function createUtrProcessor(deps = {}) {
       if (!pd.date) { blocked.push({ ...who, reason: "paid_date_not_determined" }); continue; }
       plan.push({ kind: "rent", landlord: slot.landOwnerName, utr: "", paymentType: "cash", paymentMode: "Cash", companion: true, paidDate: pd.date, paidDateSource: pd.source, paidDateNote: "cash_date_from_rent_utr_mail", sourceMessageId: rm.reply.messageId, slot });
     }
-    const extra = { ...gm, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(map.ignored.length ? { ignoredLines: map.ignored } : {}) };
+    const extra = { ...gm, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(map.ignored.length ? { ignoredLines: map.ignored } : {}), ...(nameOnly.length ? { wrongNameLines: nameOnly } : {}) };
     if (!plan.length) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
       if (nameOnly.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: nameOnly });
@@ -982,7 +1008,7 @@ function createUtrProcessor(deps = {}) {
     }
     const unused = [...map.byKey.keys()].filter((k) => !groups.has(k));
     const ignoredLines = [...map.ignored, ...unused.map((k) => ({ key: k, reason: "no_open_payment_for_line" }))];
-    const extra = { ...gm, billKind: cur.billKind, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(ignoredLines.length ? { ignoredLines } : {}) };
+    const extra = { ...gm, billKind: cur.billKind, ...(notYet.length ? { pendingPayments: notYet } : {}), ...(blocked.length ? { blockedPayments: blocked } : {}), ...(ignoredLines.length ? { ignoredLines } : {}), ...(nameOnly.length ? { wrongNameLines: nameOnly } : {}) };
     if (!plan.length) {
       if (blocked.length) return done("ambiguous_mapping", blocked[0].reason, extra);
       if (nameOnly.length) return done("ambiguous_mapping", "landlord_name_not_found", { ...extra, landlordMappingProblems: nameOnly });
@@ -1130,6 +1156,25 @@ function createUtrProcessor(deps = {}) {
     const done = async (status, reason = "", extra = {}) => {
       const entry = { ...base, status, reason, ...extra };
       if (["ambiguous_mapping", "multiple_review_required"].includes(status) && item._d) { const rl = replyLinesOf(item._d); if (rl.length) entry.replyLines = rl; }
+      // ✅ NEW — part saved / part wrong → an error row for the wrong part (it goes to the UTR error chat)
+      const left = !ctx.dryRun && ["found_and_saved", "utr_not_found"].includes(status) ? leftoverProblem(extra, item._d) : null;
+      if (left) {
+        const rl = replyLinesOf(item._d || {});
+        const errorRow = {
+          ...base,
+          status: "ambiguous_mapping",
+          reason: left.reason,
+          gmailThreadId: extra.gmailThreadId || "",
+          ...(extra.billKind ? { billKind: extra.billKind } : {}),
+          partialPending: left.pending,
+          partialSaved: status === "found_and_saved" ? (extra.splitPayments || []).map((p) => ({ landlord: p.landlord || "", kind: p.kind })) : [],
+          ...(rl.length ? { replyLines: rl } : {}),
+        };
+        if (status === "found_and_saved") await writeLog(entry, ctx); // the save first, the error row stays the newest
+        const same = item._last && item._last.status === "ambiguous_mapping" && item._last.reason === left.reason && sameLines(errorRow.replyLines, item._last.replyLines);
+        if (!same) await writeLog(errorRow, ctx);
+        return entry;
+      }
       // A block decided BEFORE Gmail is touched (list rules, switches) is re-evaluated on every run: it costs no Gmail call, so it
       // is neither logged nor put in a cooldown (a stale "blocked" log must never hide a bill after a switch or rule changes).
       if (status === "ambiguous_mapping" && BLOCKED_BEFORE_GMAIL.has(reason)) entry.preGmail = true;

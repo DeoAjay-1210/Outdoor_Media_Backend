@@ -44,6 +44,8 @@ const gmailUtrLogSchema = new mongoose.Schema(
     paymentType: { type: String, default: "" }, // cash | online_rent
     correction: { type: mongoose.Schema.Types.Mixed, default: null }, // { kind, landlord, oldUtr, newUtr, ... }
     replyLines: { type: [String], default: undefined }, // what Finance actually wrote (name + UTR / Cash lines) when the reply needed manual review
+    partialSaved: { type: mongoose.Schema.Types.Mixed, default: undefined }, // ✅ NEW — error row of a part-saved reply: payments saved [{ landlord, kind }]
+    partialPending: { type: mongoose.Schema.Types.Mixed, default: undefined }, // ✅ NEW — … payments still waiting
     dryRun: { type: Boolean, default: false },
     triggeredBy: { type: String, default: "api" }, // api | cron
     chatNotifiedAt: { type: Date, default: null }, // ✅ NEW — when this error was posted to the UTR error Google Chat space (utils/utrErrorChat.js)

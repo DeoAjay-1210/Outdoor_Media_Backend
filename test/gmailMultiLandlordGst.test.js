@@ -393,3 +393,21 @@ test("MG-C2. GST hold, several landlords: a Cash-ONLY landlord needs a Cash line
   assert.equal(one(await withLine.p.processPendingUtrs({ dryRun: false })).status, "found_and_saved");
   assert.ok(withLine.calls.saver.some((b) => simple(b).landOwnerId === "o1" && simple(b).paymentMode === "Cash" && simple(b).utrNumber === "" && b.date === "2026-11-08"));
 });
+
+// ✅ NEW — multi-landlord GST on hold: Rent lines right + one GST line wrong → rents saved, error row for the GST
+const { extractRejectedUtrLines } = require("../utils/landlordUtrParser");
+for (const [name, gstLine, reason] of [
+  ["GST value with no digit", "Landlord1 - GST - UTR: ABCDEFGH", "invalid_utr"],
+  ["wrong GST label", `Landlord1 - GSTT - UTR: ${U.g1}`, "landlord_name_not_found"],
+  ["two different GST UTRs", `Landlord1 - GST - UTR: ${U.g1}\nLandlord1 - GST - UTR: ${U.g2}`, "conflicting_utr_for_landlord_payment"],
+]) {
+  test(`MG-PS ${name} → rents saved, GST error row`, async () => {
+    const text = `Landlord1 - Rent - UTR: ${U.r1}\nLandlord2 - Rent - UTR: ${U.r2}\n${gstLine}`;
+    const x = setup({ replies: [{ ...reply("m1", text), rejected: extractRejectedUtrLines(text) }] });
+    await x.p.processPendingUtrs({ dryRun: false, force: true });
+    assert.equal(x.calls.saver.length, 2);
+    const err = x.logRows.filter((l) => l.status === "ambiguous_mapping");
+    assert.deepEqual(err.map((l) => l.reason), [reason]);
+    assert.ok(err[0].partialPending.every((p) => p.kind === "gst"));
+  });
+}
