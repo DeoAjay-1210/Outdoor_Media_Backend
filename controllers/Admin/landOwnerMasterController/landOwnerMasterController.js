@@ -3652,6 +3652,12 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // ✅ CHANGED — rentRevisionAmount (summary) → every revision in scope;
     // entries[] → revisionStatus aware (absent → same as the summary)
     const revisionsByMedia = buildRevisionsByMedia(allRevisions.filter(revisionInScope));
+    // ✅ NEW — summary totals with roleType → pending at that role + approved by
+    // that role (same as pendingAmount + approvedAmount), so the amount stays
+    // after the role approves. Without roleType → unchanged.
+    const revisionsByMediaSummary = revisionTargetRole
+      ? buildRevisionsByMedia(allRevisions.filter((r) => revisionState(r) !== null))
+      : revisionsByMedia;
     const revisionsByMediaForEntries = revisionStatusFilter
       ? buildRevisionsByMedia(allRevisions.filter(revisionInTotals))
       : revisionsByMedia;
@@ -4141,7 +4147,7 @@ const cityMatchQuery = city
             let count = 0;
             let amount = 0;
             let gstAmount = 0;
-            revisionsByMedia.forEach((rev, mediaId) => {
+            revisionsByMediaSummary.forEach((rev, mediaId) => {
               if (!ownerKeysById.has(mediaId) || rev[kind].length === 0) return;
               sites.add(mediaId);
               ownerKeysById.get(mediaId).forEach((k) => owners.add(k));
