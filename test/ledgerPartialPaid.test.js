@@ -7,7 +7,7 @@ const rent = (o) => ({ billType: "bill", rentalDueId: "b1", dueMonth: "November 
 const gst = (o) => ({ billType: "bill", rentalDueId: "b1", dueMonth: "November 2026", ownerId: "o1", withGst: 1, isPaid: false, utrNumber: "", gstAmount: 12600, ...o });
 
 test("P1. GST paid, rent not → partial (gstPaidRentPending)", () => {
-  const site = { _id: "s1", ledger: [rent()], gstBalanceHistory: [gst({ isPaid: true, utrNumber: "g1" })] };
+  const site = { _id: "s1", ledger: [rent({ rentalDueApprovalStatus: 3 })], gstBalanceHistory: [gst({ rentalDueApprovalStatus: 3, isPaid: true, utrNumber: "g1" })] };
   const r = filterLedgerRows([site], { paymentInfoStatus: 3 });
   assert.strictEqual(r.sites.length, 1);
   assert.strictEqual(r.sites[0].ledger[0].isPartialPaid, true);
@@ -94,7 +94,7 @@ test("D1. Paid tab: only sites where every approved month up to the reference mo
   const pi2 = { paymentInfo: { paymentInfoStatus: 2 } };
   const oct = { ...ap, dueMonth: "October 2026", rentalDueId: "oct" };
   // M.Vidya case: Oct paid, Nov Yet to Payment → not Paid (stays in Yet to Payment)
-  const half = { _id: "h", ledger: [rent({ ...oct, utrNumber: "u", ...pi2 }), rent({ ...ap, paymentInfo: { paymentInfoStatus: 1 } })], gstBalanceHistory: [] };
+  const half = { _id: "h", ledger: [rent({ ...oct, utrNumber: "u", ...pi2 }), rent({ ...ap, paymentInfo: { paymentInfoStatus: 1, source: "paymentInfo" } })], gstBalanceHistory: [] };
   // every month paid; Dec bill (later month) and a not approved bill do not block; direct GST ignored
   const full = {
     _id: "f",

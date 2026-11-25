@@ -283,6 +283,47 @@ function siteFullyPaid(site, refKey = null) {
   return checked > 0;
 }
 
+
+// ✅ NEW — ONE overall status per site (filter + table chip use this, same value).
+// Codes: 1 Yet to Payment, 2 Paid, 3 Partially Paid, 4 Unpaid, 5 Partially Yet to Payment, null = nothing to check.
+// Items = every approved rent row (₹0 skipped) and GST Hold row (withGst 1) up to refKey:
+//   done → P, payment details saved (UTR not yet) → Y, else U.
+// Paid items never decide U / Y; they count only when their month is the earliest open month or later.
+//   U only (P irrelevant) → Unpaid | Y only → Yet to Payment (+ such a P → Partially Paid)
+//   U + Y in ONE month → Yet to Payment | U + Y over MANY months → Partially Yet to Payment | all P → Paid
+function siteOverallStatus(site, refKey = null) {
+  const inScope = (r) => {
+    if (!r || !rowApproved(r)) return false;
+    if (refKey === null) return true;
+    const k = monthKeyOf(r.dueMonth || r.month);
+    return k === null || k <= refKey;
+  };
+  const items = [];
+  const add = (r, kind, done) => {
+    const state = done ? "P" : hasSavedInfo(r) ? "Y" : "U";
+    items.push({ state, month: `${r.billType || "bill"}|${idStr(r.rentalDueId) || r.dueMonth || r.month || ""}`, key: monthKeyOf(r.dueMonth || r.month) ?? 0 });
+  };
+  (site.ledger || []).forEach((r) => {
+    if (inScope(r) && rowAmount(r, "rent") > 0) add(r, "rent", rentRowDone(r));
+  });
+  (site.gstBalanceHistory || []).forEach((g) => {
+    if (inScope(g) && Number(g.withGst ?? 1) === 1) add(g, "gst", gstRowDone(g));
+  });
+  if (!items.length) return null;
+  const open = items.filter((i) => i.state !== "P");
+  if (!open.length) return 2;
+  const hasU = open.some((i) => i.state === "U");
+  const hasY = open.some((i) => i.state === "Y");
+  if (hasU && !hasY) {
+    // every pending month is half paid (rent OR GST paid in the same month) → Partially Paid, else Unpaid
+    const paidMonths = new Set(items.filter((i) => i.state === "P").map((i) => i.month));
+    return open.every((i) => paidMonths.has(i.month)) ? 3 : 4;
+  }
+  if (hasU && hasY) return new Set(open.map((i) => i.month)).size > 1 ? 5 : 1;
+  const earliest = Math.min(...open.map((i) => i.key));
+  return items.some((i) => i.state === "P" && i.key >= earliest) ? 3 : 1;
+}
+
 function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null, cmdBySite = new Map(), refKey = null }) {
   const counts = {
     yetToPayment: { sites: new Set(), landOwners: new Set(), rows: 0, amount: 0 },
@@ -336,6 +377,8 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
         });
       m = { ...m, ledger: Array.isArray(m.ledger) ? mark(m.ledger) : m.ledger, gstBalanceHistory: Array.isArray(m.gstBalanceHistory) ? mark(m.gstBalanceHistory) : m.gstBalanceHistory };
     }
+    const overall = siteOverallStatus(m, refKey); // ✅ NEW — same value for filter and chip
+    if (overall !== null) m = { ...m, overallPaymentStatus: overall };
     const statusOf = (r) => (r && r.paymentInfo ? r.paymentInfo.paymentInfoStatus : null);
     const fullyPaid = siteFullyPaid(m, refKey); // ✅ NEW — Paid tab / completed count: every month paid
     const tally = (rows, kind) =>
@@ -354,24 +397,22 @@ function filterLedgerRows(sites, { cmdApproval = false, paymentInfoStatus = null
 
     // ✅ NEW — Partial Paid tab: sites with a bill paid on one side (rent or GST) only
     if (paymentInfoStatus === 3) {
-      if (pp.pairs.length) out.push(m);
+      if (overall === 3) out.push(m);
       return;
     }
     // ✅ NEW — Unpaid tab: sites with an approved bill where nothing is paid
     if (paymentInfoStatus === 4) {
-      if (up.bills.length) out.push(m);
+      if (overall === 4) out.push(m);
       return;
     }
     // ✅ NEW — Paid tab: only sites where every month is paid (a paid row + nothing unpaid)
     if (paymentInfoStatus === 2) {
-      const hasPaidRow = (m.ledger || []).some((r) => statusOf(r) === 2) || (m.gstBalanceHistory || []).some((r) => statusOf(r) === 2);
-      if (hasPaidRow && fullyPaid) out.push(m);
+      if (overall === 2) out.push(m);
       return;
     }
     if (paymentInfoStatus) {
-      // ✅ CHANGED — all rows of the site (a site with only its GST row saved still shows its rent rows)
-      const hasStatusRow = (m.ledger || []).some((r) => statusOf(r) === paymentInfoStatus) || (m.gstBalanceHistory || []).some((r) => statusOf(r) === paymentInfoStatus);
-      if (hasStatusRow) out.push(m);
+      // ✅ CHANGED — Yet to Payment = chip Yet to Payment or Partially Yet to Payment
+      if (overall === 1 || overall === 5) out.push(m);
       return;
     }
     if (cmdApproval) {
@@ -475,6 +516,7 @@ module.exports = {
   partialPaidOf,
   unpaidOf,
   siteFullyPaid,
+  siteOverallStatus,
   parsePaymentInfoBody,
   findInfoIndex,
 };

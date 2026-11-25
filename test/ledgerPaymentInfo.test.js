@@ -54,7 +54,7 @@ test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only wh
     _id: "s1",
     ledger: L.withRentPaymentInfo(
       [
-        { rentalDueId: "b1", landOwnerId: "o1", paymentMode: "Online", isVirtual: true, onlineAmount: 10000 },
+        { rentalDueId: "b1", landOwnerId: "o1", paymentMode: "Online", isVirtual: true, onlineAmount: 10000, rentalDueApprovalStatus: 3 },
         { rentalDueId: "b2", landOwnerId: "o1", paymentMode: "Online", isVirtual: true, onlineAmount: 5000 }, // not CMD approved
         { rentalDueId: "b3", landOwnerId: "o1", paymentMode: "Online", isVirtual: true, onlineAmount: 0 }, // ₹0 advance bill
         { rentalDueId: "b4", landOwnerId: "o1", paymentMode: "Online", utrNumber: "U4", onlineAmount: 7000 }, // settled
@@ -85,7 +85,7 @@ test("L3 cmdApproval = site-filter sites (open CMD bill, unpaid row; GST only wh
   // ✅ CHANGED — Paid tab: a site with a month still unpaid (b1) is not listed
   const done = L.filterLedgerRows([site], { cmdApproval: true, paymentInfoStatus: 2, cmdBySite });
   assert.equal(done.sites.length, 0);
-  const gstOnlySaved = { _id: "s9", ledger: [{ rentalDueId: "b1", isVirtual: true, paymentInfo: null }], gstBalanceHistory: [{ rentalDueId: "b1", paymentInfo: { paymentInfoStatus: 1 } }] };
+  const gstOnlySaved = { _id: "s9", ledger: [{ rentalDueId: "b1", isVirtual: true, paymentInfo: null, rentalDueApprovalStatus: 3, onlineAmount: 100 }], gstBalanceHistory: [{ rentalDueId: "b1", rentalDueApprovalStatus: 3, paymentInfo: { paymentInfoStatus: 1, source: "paymentInfo" } }] };
   const g1 = L.filterLedgerRows([gstOnlySaved], { paymentInfoStatus: 1 });
   assert.equal(g1.sites[0].ledger.length, 1); // i32423u4 case: rent row shown though only GST saved
   assert.equal(L.filterLedgerRows([gstOnlySaved], { paymentInfoStatus: 2 }).sites.length, 0);
