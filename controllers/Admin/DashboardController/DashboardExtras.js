@@ -7,7 +7,8 @@ const {
   calculateOverallLedgerSummary,
   calculateNewOverallLedgerSummary,
 } = require("../MediaOnboardingController/LedgerNew2Controller");
-const { pendingRevisionAmounts, pendingRevisionMonthParts } = require("../MediaOnboardingController/LedgerNew2Controller"); // ✅ NEW — Pending card New Bill / Advance
+const { pendingRevisionAmounts, pendingRevisionMonthParts } = require("../MediaOnboardingController/LedgerNew2Controller");
+const { effectiveWithGst: arrearsWithGst } = require("../../../utils/rentRevisionArrears"); // ✅ NEW — New Bill / Advance ledger cards // ✅ NEW — Pending card New Bill / Advance
 const {
   computeRentalDueStats,
   roleStatus,
@@ -622,7 +623,63 @@ function computeLedgerEntries(docs, range, gst) {
   const split = (total, paid, remaining, landOwnerCount, siteCount) => ({
     totalAmount: num(total), paidAmount: num(paid), remainingAmount: num(remaining), landOwnerCount: num(landOwnerCount), siteCount,
   });
+  // ✅ NEW — New Bill / Advance Ledger Entries: generated bills (media.arrearsDue, all
+  // months), same amounts as the ledger summary newBill* / advance* fields.
+  // amount = paid (rent + GST); landlords / sites = sites with a payment.
+  const revisionLedger = () => {
+    const mk = () => ({ total: 0, paid: 0 });
+    const kindOut = () => ({ rent: mk(), gstHold: mk(), gstWithoutHold: mk(), months: new Map(), ll: new Set(), sites: new Set() });
+    const out = { newBill: kindOut(), advance: kindOut() };
+    const msk = (label) => {
+      const p = String(label || "").split(" ");
+      const i = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].indexOf(p[0]);
+      return i < 0 ? 0 : Number(p[1]) * 12 + i;
+    };
+    for (const d of list) {
+      if (!(d.mediaDetails || []).some((f) => num(f.status) === 1)) continue;
+      const parentWithGst = new Map((d.rentalDue || []).map((x) => [String(x._id), x.withGst]));
+      (d.arrearsDue || []).forEach((b) => {
+        if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+        const o = out[b.type === "advance" ? "advance" : "newBill"];
+        const rent = num(b.netPayable);
+        const rentPaid = Math.min(rent, num(b.rentPaid));
+        const gst = num(b.gstAmount);
+        const gstPaid = gst > 0 ? Math.min(gst, num(b.gstPaid)) : 0;
+        o.rent.total += rent; o.rent.paid += rentPaid;
+        if (gst > 0) {
+          const g = Number(arrearsWithGst(b, parentWithGst.get(String(b.parentRentalDueId)))) === 2 ? o.gstWithoutHold : o.gstHold;
+          g.total += gst; g.paid += gstPaid;
+        }
+        const label = String(b.dueMonth || "").trim() || "-";
+        if (!o.months.has(label)) o.months.set(label, { sortKey: msk(label), total: 0, paid: 0 });
+        const mm = o.months.get(label);
+        mm.total += rent + gst; mm.paid += rentPaid + gstPaid;
+        if (rentPaid + gstPaid > 0) {
+          o.sites.add(String(d._id));
+          const owners = (b.owners || []).filter((x) => x && (x.landOwnerMasterId || x.landOwnerId) && num(x.shareAmount) + num(x.gstAmount) > 0);
+          if (owners.length) owners.forEach((x) => o.ll.add(String(x.landOwnerMasterId || x.landOwnerId)));
+          else addLandlords(o.ll, d);
+        }
+      });
+    }
+    const r = Math.round;
+    const part = (x) => ({ total: r(x.total), paid: r(x.paid), remaining: r(x.total - x.paid) });
+    const fin = (o) => {
+      const total = o.rent.total + o.gstHold.total + o.gstWithoutHold.total;
+      const paid = o.rent.paid + o.gstHold.paid + o.gstWithoutHold.paid;
+      return {
+        count: o.ll.size, sites: o.sites.size, amount: r(paid),
+        totalAmount: r(total), paidAmount: r(paid), remainingAmount: r(total - paid),
+        rent: part(o.rent), gstHold: part(o.gstHold), gstWithoutHold: part(o.gstWithoutHold),
+        months: [...o.months.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey).map(([month, m]) => ({ month, ...part(m) })),
+      };
+    };
+    return { newBill: fin(out.newBill), advance: fin(out.advance) };
+  };
+  const revLedger = revisionLedger();
   return {
+    newBill: revLedger.newBill, // ✅ NEW — New Bill Ledger Entries card
+    advance: revLedger.advance, // ✅ NEW — Advance Ledger Entries card
     currentMonthGstHold: split(nw.newOverAllCurrentMonthGstHoldAmount, nw.newCurrentMonthGstHoldAmountPaid, nw.newCurrentMonthGstHoldRemaining, nw.newCurrentMonthGstHoldPendingLandOwners, faces.curHold),
     currentMonthGstWithoutHold: split(nw.newOverAllCurrentMonthGstCannotHoldAmount, nw.newCurrentMonthGstCannotHoldAmountPaid, nw.newCurrentMonthGstCannotHoldRemaining, nw.newCurrentMonthGstCannotHoldLandOwners, faces.curWithout),
     pastMonthGstHold: split(nw.newOverAllPastGstHoldAmount, nw.newPastGstHoldAmountPaid, nw.newPastGstHoldRemaining, nw.newPastGstHoldPendingLandOwners, faces.pastHold),
