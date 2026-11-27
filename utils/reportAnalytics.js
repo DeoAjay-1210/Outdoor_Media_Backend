@@ -450,13 +450,14 @@ const isDirectGstCycle = (doc, cycleDate, lib) => {
 
 const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
   const excl = newExclusions();
-  const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0, newBillsCounted: 0, newBillsWithoutDate: 0 };
+  const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0, newBillsCounted: 0, newBillsWithoutDate: 0, advanceBillsCounted: 0, advanceBillsWithoutDate: 0 };
   const zero = () => ({ toBePaid: 0, unpaid: 0 });
-  const acc = { rentDirect: zero(), hold: zero(), openingRent: zero(), openingGst: zero(), newBill: zero() };
+  const acc = { rentDirect: zero(), hold: zero(), openingRent: zero(), openingGst: zero(), newBill: zero(), advanceBill: zero(), rent: zero(), gst: zero(), cycle: zero() };
   const sites = new Set();
   const unpaidSites = new Set();
   // monthly view of the same figures (by bill-cycle / opening-due month)
-  const months = buildBuckets({ ...f, granularity: "month" }, () => ({ toBePaid: 0, unpaid: 0, sites: new Set(), unpaidSites: new Set(), paidSites: new Set() }));
+  // each month also keeps the split behind its figures: rent / GST and cycle (incl. opening) / new bill / advance bill
+  const months = buildBuckets({ ...f, granularity: "month" }, () => ({ toBePaid: 0, unpaid: 0, sites: new Set(), unpaidSites: new Set(), paidSites: new Set(), rent: zero(), gst: zero(), cycle: zero(), newBill: zero(), advanceBill: zero() }));
   const paidSites = new Set(); // sites with something paid in the period (paid = to be paid − unpaid, per site cycle)
   const siteTotals = new Map(); // sid -> { due, unpaid }
   // per site and month: the rent / GST behind the figures above (only when asked for: `details`)
@@ -477,11 +478,24 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
     for (const c of COMPONENTS) r[c] += x[c] || 0;
     rows.set(key, r);
   };
-  const addMonth = (d, sid, toBePaid, unpaid) => {
+  // x = { rent, gst, rentUnpaid, gstUnpaid, kind } — rent + gst === toBePaid, rentUnpaid + gstUnpaid === unpaid
+  const addMonth = (d, sid, toBePaid, unpaid, x = {}) => {
+    const kind = x.kind === "newBill" || x.kind === "advanceBill" ? x.kind : "cycle";
+    acc.rent.toBePaid += x.rent || 0;
+    acc.rent.unpaid += x.rentUnpaid || 0;
+    acc.gst.toBePaid += x.gst || 0;
+    acc.gst.unpaid += x.gstUnpaid || 0;
+    if (kind === "cycle") { acc.cycle.toBePaid += toBePaid; acc.cycle.unpaid += unpaid; }
     const m = months.get(monthKeyOf(d));
     if (!m) return;
     m.toBePaid += toBePaid;
     m.unpaid += unpaid;
+    m.rent.toBePaid += x.rent || 0;
+    m.rent.unpaid += x.rentUnpaid || 0;
+    m.gst.toBePaid += x.gst || 0;
+    m.gst.unpaid += x.gstUnpaid || 0;
+    m[kind].toBePaid += toBePaid;
+    m[kind].unpaid += unpaid;
     m.sites.add(sid);
     if (unpaid > 0) m.unpaidSites.add(sid);
     if (toBePaid - unpaid > 0.005) { m.paidSites.add(sid); paidSites.add(sid); }
@@ -516,8 +530,8 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
         bucket.toBePaid += amount;
         (hold ? acc.hold : acc.rentDirect).toBePaid += amount;
         sites.add(sid);
-        addMonth(d, sid, amount, isPaidRow(o) ? 0 : amount);
         const open = isPaidRow(o) ? 0 : amount;
+        addMonth(d, sid, amount, open, { rent: hold ? 0 : amount, gst: hold ? amount : 0, rentUnpaid: hold ? 0 : open, gstUnpaid: hold ? open : 0, kind: "cycle" });
         addRow(d, sid, hold ? 0 : amount, hold ? amount : 0, hold ? 0 : open, hold ? open : 0, { ...(hold ? { holdGstDue: amount, holdGstUnpaid: open } : { rentalDue: amount, rentalUnpaid: open }), kind: "opening" });
         if (!isPaidRow(o)) {
           bucket.unpaid += amount;
@@ -558,11 +572,13 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
       acc.hold.unpaid += num(s.currentMonthGstPending);
       meta.cyclesCounted += 1;
       sites.add(sid);
-      addMonth(cycleDate, sid, rentTarget + gstTarget, num(s.currentMonthRentPending) + num(s.currentMonthGstPending));
       // direct GST rides with the rent: its unpaid part is the pending rent share in proportion to GST / (rent + GST)
       // (the ledger pays rent + direct GST together, per landlord share); hold GST is paid separately (currentMonthGstPending)
       const rentPending = num(s.currentMonthRentPending);
       const directUnpaid = direct && rentTarget + gstTarget > 0 ? r2(Math.min(rentPending, (rentPending * gstTarget) / (rentTarget + gstTarget))) : 0;
+      addMonth(cycleDate, sid, rentTarget + gstTarget, rentPending + num(s.currentMonthGstPending), {
+        rent: rentTarget, gst: gstTarget, rentUnpaid: rentPending - directUnpaid, gstUnpaid: directUnpaid + num(s.currentMonthGstPending), kind: "cycle",
+      });
       addRow(cycleDate, sid, rentTarget, gstTarget, rentPending, num(s.currentMonthGstPending), {
         rentalDue: rentTarget,
         directGstDue: direct ? gstTarget : 0,
@@ -581,13 +597,15 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
       if (num(s.currentMonthRentPending) > 0 || num(s.currentMonthGstPending) > 0) unpaidSites.add(sid);
     }
 
-    // New Bills in the period
-    for (const nb of newBillsOf(doc)) {
+    // ✅ CHANGED — New Bills AND Advance Bills in the period. Each stored bill is counted once, in its billing
+    // month (dueMonth); an Advance Bill may be for a future month, so it is bounded by the period end only.
+    for (const nb of storedBillParts(doc, lib?.allRevisions)) {
+      const sk = nb.kind; // "newBill" | "advanceBill"
       if (nb.rent <= 0 && nb.gst <= 0) continue;
-      if (!nb.date) { meta.newBillsWithoutDate += 1; continue; }
+      if (!nb.date) { meta[`${sk}sWithoutDate`] += 1; continue; }
       if (!inPeriod(nb.date)) continue;
-      meta.newBillsCounted += 1;
-      onEntry?.({ kind: "newBill", doc, date: nb.date, rent: nb.rent, gst: nb.gst, rentPaid: nb.rentPaid, gstPaid: nb.gstPaid, direct: nb.directGst, bill: nb.bill });
+      meta[`${sk}sCounted`] += 1;
+      onEntry?.({ kind: sk, doc, date: nb.date, rent: nb.rent, gst: nb.gst, rentPaid: nb.rentPaid, gstPaid: nb.gstPaid, direct: nb.directGst, bill: nb.bill });
 
       const rentTarget = nb.rent;
       const gstTarget = nb.gst;
@@ -599,11 +617,11 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
       acc.hold.toBePaid += direct ? 0 : gstTarget;
       acc.rentDirect.unpaid += rentPending + (direct ? gstPending : 0);
       acc.hold.unpaid += direct ? 0 : gstPending;
-      acc.newBill.toBePaid += rentTarget + gstTarget;
-      acc.newBill.unpaid += rentPending + gstPending;
+      acc[sk].toBePaid += rentTarget + gstTarget;
+      acc[sk].unpaid += rentPending + gstPending;
 
       sites.add(sid);
-      addMonth(nb.date, sid, rentTarget + gstTarget, rentPending + gstPending);
+      addMonth(nb.date, sid, rentTarget + gstTarget, rentPending + gstPending, { rent: rentTarget, gst: gstTarget, rentUnpaid: rentPending, gstUnpaid: gstPending, kind: sk });
 
       const directUnpaid = direct ? gstPending : 0;
       addRow(nb.date, sid, rentTarget, gstTarget, rentPending, gstPending, {
@@ -613,23 +631,24 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
         rentalUnpaid: rentPending,
         directGstUnpaid: directUnpaid,
         holdGstUnpaid: direct ? 0 : gstPending,
-        kind: "newBill",
+        kind: sk,
       });
 
       if (rows && nb.bill) {
-        const key = `${sid}|${monthKeyOf(nb.date)}|newBill`;
+        const key = `${sid}|${monthKeyOf(nb.date)}|${sk}`;
         const storedApprovalStatus = num(nb.bill.approvalStatus ?? nb.bill.status);
         const approved = isCmdApproved(nb.bill);
         const approvalStatus = !approved && storedApprovalStatus === 3
           ? "Approval steps incomplete"
           : BILL_STATUS[storedApprovalStatus] || "Unknown";
-        if (rows.get(key)) rows.get(key).approvalStatus = approvalStatus;
+        const row = rows.get(key);
+        if (row) Object.assign(row, { approvalStatus }, storedBillRowInfo(sk, nb.bill));
       }
 
       if (rentPending > 0 || gstPending > 0) unpaidSites.add(sid);
     }
   }
-  const part = (p) => ({ toBePaid: r2(p.toBePaid), unpaid: r2(p.unpaid) });
+  const part = (p) => ({ toBePaid: r2(p.toBePaid), unpaid: r2(p.unpaid), paid: r2(p.toBePaid - p.unpaid) });
   const due = {
     toBePaid: r2(acc.rentDirect.toBePaid + acc.hold.toBePaid),
     unpaid: r2(acc.rentDirect.unpaid + acc.hold.unpaid),
@@ -641,10 +660,16 @@ const computePeriodDue = (docs, f, lib, now = nowIST(), onEntry = null) => {
       hold: part(acc.hold), // expected hold GST (opening GST included)
       opening: { rent: part(acc.openingRent), gst: part(acc.openingGst) }, // already inside the two lines above
       newBill: part(acc.newBill), // new bill total inside the two lines above
+      advanceBill: part(acc.advanceBill), // advance bill total inside the two lines above (never added again)
+      // the same total split another way (each sums back to toBePaid / unpaid above):
+      rent: part(acc.rent), // rent only (opening rent, cycle rent, new / advance bill rent)
+      gst: part(acc.gst), // all GST (direct + hold, opening GST included)
+      cycle: part(acc.cycle), // normal rent: bill cycles + opening balances (rent + GST)
     },
   };
   const buckets = [...months].map(([key, m]) => ({
     key, toBePaid: r2(m.toBePaid), unpaid: r2(m.unpaid), paid: r2(m.toBePaid - m.unpaid), sites: siteCount(m.sites), unpaidSites: siteCount(m.unpaidSites), paidSites: siteCount(m.paidSites),
+    parts: { rent: part(m.rent), gst: part(m.gst), cycle: part(m.cycle), newBill: part(m.newBill), advanceBill: part(m.advanceBill) },
   }));
   const records = rows
     ? [...rows.values()]
@@ -862,7 +887,12 @@ const cyclePaymentIndex = (docs, f, lib, now = nowIST()) => {
   const end = new Date(Date.UTC(f.end.getUTCFullYear(), f.end.getUTCMonth() + 1, 0, 23, 59, 59, 999));
   const { records } = computePeriodDue(docs, { ...f, start, end, details: true }, lib, now);
   const out = new Map();
-  for (const r of records || []) out.set(`${r.siteId}|${r.month}`, { due: num(r.rentDue), unpaid: num(r.rentUnpaid) });
+  for (const r of records || []) {
+    const key = `${r.siteId}|${r.month}`;
+    // an Advance Bill row never replaces the month's own cycle evidence
+    if (r.kind === "advanceBill" && out.has(key)) continue;
+    out.set(key, { due: num(r.rentDue), unpaid: num(r.rentUnpaid) });
+  }
   return out;
 };
 
@@ -1294,13 +1324,66 @@ const parseMonthLabel = (label) => {
  *   direct GST = effective withGst 2 (the bill's own withGst, else its parent rentalDue bill's) — anything else is held GST.
  * The Ledger cycle split values (splitCur*) do NOT contain these bills, so adding them never double counts.
  */
-const newBillsOf = (doc) => {
+// advance=false → New Bills (every non-advance arrearsDue bill); advance=true → Advance Bills (type "advance").
+// An Advance Bill is counted ONCE, in its billing month (dueMonth = advanceMonth); createdOn (createdAt ?? ownerApprovalDate)
+// is informational only and never moves the bill to another month.
+const billCreatedOn = (b) => ((c) => (c ? dayKeyOf(c) : null))(toDate(b && (b.createdAt ?? b.ownerApprovalDate)));
+// Pending rent-revision / advance requests of a site, as New / Advance Bill parts (same shape as storedBillsOf).
+// Only status "Pending" — an approved revision already exists as an arrearsDue bill, so counting it here would double it.
+// rent = monthsDetail amount (GST EXCLUDED); gst counts only when gstOnIncrease === 1; withGst 2 = direct GST.
+const revisionBillsOf = (doc, advance, revisions = []) => {
+  const out = [];
+  const docRevisions = (revisions || []).filter((rv) => rv && rv.status === "Pending" && idOf(rv.mediaId) === idOf(doc._id));
+  for (const rv of docRevisions) {
+    const isAdv = rv.billType === "ADVANCE";
+    if (isAdv !== advance) continue;
+    const detail = Array.isArray(rv.monthsDetail) && rv.monthsDetail.length ? rv.monthsDetail : (Array.isArray(rv.months) && rv.months.length ? rv.months : null);
+    const withGstPart = Number(rv.gstOnIncrease) === 1;
+
+    const parts = detail
+      ? detail.map((d) => ({
+          dueMonth: (typeof d === "string" ? d : d.month) || "",
+          rent: Math.max(0, num(typeof d === "string" ? rv.increaseAmount ?? rv.difference : d.amount)),
+          gst: withGstPart ? Math.max(0, num(typeof d === "string" ? rv.increaseGstAmount : d.gstAmount)) : 0,
+        }))
+      : [{
+          dueMonth: rv.fromMonth || "",
+          rent: Math.max(0, isAdv ? num(rv.advanceAmount) : num(rv.increaseAmount ?? rv.difference)),
+          gst: withGstPart ? Math.max(0, isAdv ? num(rv.advanceGstAmount) : num(rv.increaseGstAmount)) : 0,
+        }];
+
+    for (const p of parts) {
+      const rawDate = parseMonthLabel(p.dueMonth) || toDate(rv.requestedAt) || toDate(rv.createdAt);
+      const d = rawDate ? new Date(Date.UTC(rawDate.getUTCFullYear(), rawDate.getUTCMonth(), 1)) : null;
+      out.push({
+        // netPayable / gstAmount: the request's own amounts, so its payment state (Unpaid — nothing is paid on a request) is stated
+        bill: { _id: rv._id, type: isAdv ? "advance" : "arrears", dueMonth: p.dueMonth, approvalStatus: 1, netPayable: p.rent, gstAmount: p.gst },
+        date: d,
+        label: text(p.dueMonth),
+        rent: p.rent,
+        rentPaid: 0,
+        gst: p.gst,
+        gstPaid: 0,
+        directGst: Number(rv.withGst || 0) === 2,
+        createdOn: billCreatedOn(rv),
+        adjustInMonth: null,
+      });
+    }
+  }
+
+  return out;
+};
+const storedBillsOf = (doc, advance, pendingRevisions = []) => {
   const parentWithGst = new Map((doc.rentalDue || []).filter(Boolean).map((d) => [idOf(d._id), d.withGst]));
   const out = [];
   for (const b of doc.arrearsDue || []) {
     // Same New Bill set as Outstanding Payments (computeBillApprovals): every non-advance arrearsDue bill, stale ones skipped
-    if (!b || b.type === "advance" || isStaleBill(doc, b)) continue;
-    const d = parseMonthLabel(b.dueMonth) || toDate(b.dueDate ?? b.dueMonth);
+    if (!b || (b.type === "advance") !== advance || isStaleBill(doc, b)) continue;
+    const isAdv = advance || b.type === "advance";
+    const rawDate = isAdv
+      ? (toDate(b.createdAt) || toDate(b.ownerApprovalDate) || toDate(b.dueDate) || parseMonthLabel(b.dueMonth))
+      : (parseMonthLabel(b.dueMonth) || toDate(b.dueDate ?? b.dueMonth));
+    const d = rawDate ? new Date(Date.UTC(rawDate.getUTCFullYear(), rawDate.getUTCMonth(), 1)) : null;
     // New Bill netPayable/baseAmount = arrearsAmount (the rent increase, GST EXCLUDED); GST is stored separately in gstAmount
     // (rentRevisionArrears.toArrearsBill) — same split the Ledger uses (rent = netPayable, gst = gstAmount).
     const gst = Math.max(0, num(b.gstAmount));
@@ -1316,10 +1399,52 @@ const newBillsOf = (doc) => {
       gst,
       gstPaid: Math.min(gst, Math.max(0, num(b.gstPaid))),
       directGst: withGst === 2,
+      createdOn: billCreatedOn(b),
+      adjustInMonth: text(b.adjustInMonth),
     });
   }
+
+  out.push(...revisionBillsOf(doc, advance, pendingRevisions));
   return out;
 };
+const newBillsOf = (doc, allRevisions) => storedBillsOf(doc, false, allRevisions);
+const advanceBillsOf = (doc, allRevisions) => storedBillsOf(doc, true, allRevisions);
+// Every stored bill (New + Advance) of a site with its Analytics part name — each bill is in exactly one of the two sets.
+const storedBillParts = (doc, allRevisions) => [
+  ...newBillsOf(doc, allRevisions).map((x) => ({ ...x, kind: "newBill" })),
+  ...advanceBillsOf(doc, allRevisions).map((x) => ({ ...x, kind: "advanceBill" })),
+];
+// ✅ CHANGED — last month a stored bill may fall in: the selected period end, for New AND Advance Bills — the same bound
+// Payment analytics uses (computePeriodDue inPeriod), so Rent / GST / Payments count the same New Bills. A stored bill is a
+// real bill already raised (or a pending revision) for its billing month, so it is never "projected" like a cycle.
+const storedLimitKey = (f) => f.end.getUTCFullYear() * 12 + f.end.getUTCMonth();
+// ✅ NEW — payment state of ONE stored bill (New / Advance), from the same amounts Payment analytics counts (storedBillsOf):
+// rent = netPayable ?? baseAmount (GST excluded), gst = gstAmount, rentPaid / gstPaid capped at their part. Approval is never
+// taken as payment. Every popup (Payments, Outstanding, Rent, GST) reads these fields, so a bill shows one status everywhere.
+const storedBillPayment = (bill) => {
+  if (!bill) return {};
+  const rent = Math.max(0, num(bill.netPayable ?? bill.baseAmount));
+  const gst = Math.max(0, num(bill.gstAmount));
+  const paid = Math.min(rent, Math.max(0, num(bill.rentPaid))) + Math.min(gst, Math.max(0, num(bill.gstPaid)));
+  const total = rent + gst;
+  const unpaid = Math.max(0, total - paid);
+  return {
+    billRent: r2(rent),
+    billGst: r2(gst),
+    billTotal: r2(total),
+    paidAmount: r2(paid),
+    unpaidAmount: r2(unpaid),
+    paymentStatus: total <= 0.005 ? "Nothing due" : unpaid <= 0.005 ? "Paid" : paid > 0.005 ? "Partially Paid" : "Unpaid",
+  };
+};
+// extra detail-row fields of a stored bill: when it was created (informational), for an Advance its adjust-in month, and
+// (✅ NEW) the bill's own amounts and payment status
+const storedBillRowInfo = (kind, bill) =>
+  kind === "advanceBill" && bill
+    ? { createdOn: billCreatedOn(bill), adjustInMonth: text(bill.adjustInMonth) || null, ...storedBillPayment(bill) }
+    : kind === "newBill" && bill
+      ? { createdOn: billCreatedOn(bill), ...storedBillPayment(bill) }
+      : {};
 
 /**
  * GST by data source (never mixed):
@@ -1364,9 +1489,9 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
   const f = { ...filters, granularity: "month" };
   const mk = () => ({ amount: 0, sites: new Set(), records: 0 });
   const part = () => ({ due: 0, paid: 0, remaining: 0 });
-  const buckets = buildBuckets(f, () => ({ paid: mk(), remaining: mk(), parts: { hold: part(), direct: part(), opening: part(), newBill: part() } }));
+  const buckets = buildBuckets(f, () => ({ paid: mk(), remaining: mk(), parts: { hold: part(), direct: part(), opening: part(), newBill: part(), advanceBill: part() } }));
   const totals = { paid: mk(), remaining: mk() };
-  const parts = { hold: part(), direct: part(), opening: part(), newBill: part() };
+  const parts = { hold: part(), direct: part(), opening: part(), newBill: part(), advanceBill: part() };
   // the GST cards: generated = paid + unpaid + hold. Every remaining amount lands in exactly ONE of three places (the cycle's stored
   // bill decides, approval is never taken as payment):
   //   pending — the cycle has no approved bill yet (bill awaiting approval, or not billed): unpaid, "Pending Approval"
@@ -1378,15 +1503,16 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
   const bucketCards = new Map();
   const cardsOf = (key) => { if (!bucketCards.has(key)) bucketCards.set(key, mkCard()); return bucketCards.get(key); };
   const excl = newExclusions();
-  const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0, newBillsCounted: 0, newBillsWithoutDate: 0 };
+  const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0, newBillsCounted: 0, newBillsWithoutDate: 0, advanceBillsCounted: 0, advanceBillsWithoutDate: 0 };
   const startKey = f.start.getUTCFullYear() * 12 + f.start.getUTCMonth();
   const capEnd = f.end < now ? f.end : now; // never beyond the current month
   const capKey = capEnd.getUTCFullYear() * 12 + capEnd.getUTCMonth();
   const rows = f.details ? [] : null; // per site cycle / opening row, behind the monthly totals (only when asked for)
   let curDoc = null;
-  // a New Bill's GST is held or direct by its own (effective) withGst, like a cycle's
+  // a New / Advance Bill's GST is held or direct by its own (effective) withGst, like a cycle's
+  const isStored = (kind) => kind === "newBill" || kind === "advanceBill";
   const remainingAsOf = (kind, approved, direct) =>
-    kind === "opening" ? "ledger" : !approved ? "pending" : kind === "hold" || (kind === "newBill" && !direct) ? "hold" : "ledger";
+    kind === "opening" ? "ledger" : !approved ? "pending" : kind === "hold" || (isStored(kind) && !direct) ? "hold" : "ledger";
   const add = (sid, d, kind, paid, remaining, billMonth, approved = true, bill = null, direct = false) => {
     const b = buckets.get(monthKeyOf(d));
     if (!b) return;
@@ -1401,7 +1527,7 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
       rows.push({
         ...detailBase(curDoc),
         kind,
-        ...(kind === "newBill" ? { gstType: direct ? "direct" : "hold" } : {}),
+        ...(isStored(kind) ? { gstType: direct ? "direct" : "hold", ...storedBillRowInfo(kind, bill) } : {}),
         remainingAs: as,
         approvalStatus,
         approvalSteps: bill ? approvalStepsOf(bill) : [],
@@ -1460,19 +1586,20 @@ const computeLedgerGst = (docs, filters, lib, now = nowIST()) => {
       add(sid, cycleDate, isDirectGstCycle(doc, cycleDate, lib) ? "direct" : "hold", num(sm.splitCurGstPaid), num(sm.splitCurGstRemaining), undefined, approved, bill);
     }
 
-    // New Bills — their GST only (the rent of a New Bill belongs to Rent Analytics), by the bill's own month
-    for (const nb of newBillsOf(doc)) {
+    // New + Advance Bills — their GST only (the rent belongs to Rent Analytics), by the bill's own billing month (dueMonth);
+    // an Advance Bill is counted once, in its billing month, never in its creation month
+    for (const nb of storedBillParts(doc, lib?.allRevisions)) { // ✅ CHANGED — pending rent-revision bills too, as Payment analytics
       if (nb.gst <= 0) continue;
-      if (!nb.date) { meta.newBillsWithoutDate += 1; continue; }
+      if (!nb.date) { meta[`${nb.kind}sWithoutDate`] += 1; continue; }
       const k = nb.date.getUTCFullYear() * 12 + nb.date.getUTCMonth();
-      if (k < startKey || k > capKey) continue;
-      meta.newBillsCounted += 1;
-      add(sid, nb.date, "newBill", nb.gstPaid, nb.gst - nb.gstPaid, nb.label, isCmdApproved(nb.bill), nb.bill, nb.directGst);
+      if (k < startKey || k > storedLimitKey(f)) continue;
+      meta[`${nb.kind}sCounted`] += 1;
+      add(sid, nb.date, nb.kind, nb.gstPaid, nb.gst - nb.gstPaid, nb.label, isCmdApproved(nb.bill), nb.bill, nb.directGst);
     }
   }
   const fin = (t) => ({ amount: r2(t.amount), sites: siteCount(t.sites), records: t.records });
   const finPart = (p) => ({ due: r2(p.due), paid: r2(p.paid), remaining: r2(p.remaining) });
-  const finParts = (ps) => ({ hold: finPart(ps.hold), direct: finPart(ps.direct), opening: finPart(ps.opening), newBill: finPart(ps.newBill) });
+  const finParts = (ps) => ({ hold: finPart(ps.hold), direct: finPart(ps.direct), opening: finPart(ps.opening), newBill: finPart(ps.newBill), advanceBill: finPart(ps.advanceBill) });
   const finCards = (c) => ({ generated: fin(c.generated), paid: fin(c.paid), unpaid: fin(c.unpaid), unpaidPending: fin(c.unpaidPending), unpaidLedger: fin(c.unpaidLedger), hold: fin(c.hold) });
   const list = [...buckets].map(([key, b]) => ({ key, paid: fin(b.paid), remaining: fin(b.remaining), due: r2(b.paid.amount + b.remaining.amount), parts: finParts(b.parts), cards: finCards(cardsOf(key)) }));
   return {
@@ -1505,7 +1632,7 @@ const computeLedgerRent = (docs, filters, lib, now = nowIST()) => {
   const f = { ...filters, granularity: "month" };
   const mk = () => ({ amount: 0, sites: new Set(), records: 0 });
   const part = () => ({ due: 0, paid: 0, remaining: 0 });
-  const mkParts = () => ({ rent: part(), opening: part(), newBill: part() });
+  const mkParts = () => ({ rent: part(), opening: part(), newBill: part(), advanceBill: part() });
   const buckets = buildBuckets(f, () => ({ paid: mk(), remaining: mk(), parts: mkParts() }));
   const totals = { paid: mk(), remaining: mk() };
   const parts = mkParts();
@@ -1514,7 +1641,7 @@ const computeLedgerRent = (docs, filters, lib, now = nowIST()) => {
   const bucketCards = new Map();
   const cardsOf = (key) => { if (!bucketCards.has(key)) bucketCards.set(key, mkCard()); return bucketCards.get(key); };
   const excl = newExclusions();
-  const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0, newBillsCounted: 0, newBillsWithoutDate: 0 };
+  const meta = { cyclesCounted: 0, openingRowsWithoutDate: 0, newBillsCounted: 0, newBillsWithoutDate: 0, advanceBillsCounted: 0, advanceBillsWithoutDate: 0 };
   const startKey = f.start.getUTCFullYear() * 12 + f.start.getUTCMonth();
   const capEnd = f.end < now ? f.end : now;
   const capKey = capEnd.getUTCFullYear() * 12 + capEnd.getUTCMonth();
@@ -1535,6 +1662,7 @@ const computeLedgerRent = (docs, filters, lib, now = nowIST()) => {
       rows.push({
         ...detailBase(curDoc),
         kind,
+        ...storedBillRowInfo(kind, bill),
         remainingAs: as,
         held: !!held,
         approvalStatus,
@@ -1600,19 +1728,20 @@ const computeLedgerRent = (docs, filters, lib, now = nowIST()) => {
       add(sid, cycleDate, "rent", num(sm.splitCurRentPaid), num(sm.splitCurRentRemaining), undefined, approved, bill, held);
     }
 
-    // New Bills — their rent only (netPayable, GST excluded; the GST belongs to GST Analytics), by the bill's own month
-    for (const nb of newBillsOf(doc)) {
+    // New + Advance Bills — their rent only (netPayable, GST excluded; the GST belongs to GST Analytics), by the bill's own
+    // billing month (dueMonth); an Advance Bill is counted once, in its billing month, never in its creation month
+    for (const nb of storedBillParts(doc, lib?.allRevisions)) { // ✅ CHANGED — pending rent-revision bills too, as Payment analytics
       if (nb.rent <= 0) continue;
-      if (!nb.date) { meta.newBillsWithoutDate += 1; continue; }
+      if (!nb.date) { meta[`${nb.kind}sWithoutDate`] += 1; continue; }
       const k = nb.date.getUTCFullYear() * 12 + nb.date.getUTCMonth();
-      if (k < startKey || k > capKey) continue;
-      meta.newBillsCounted += 1;
-      add(sid, nb.date, "newBill", nb.rentPaid, nb.rent - nb.rentPaid, nb.label, isCmdApproved(nb.bill), nb.bill, false);
+      if (k < startKey || k > storedLimitKey(f)) continue;
+      meta[`${nb.kind}sCounted`] += 1;
+      add(sid, nb.date, nb.kind, nb.rentPaid, nb.rent - nb.rentPaid, nb.label, isCmdApproved(nb.bill), nb.bill, false);
     }
   }
   const fin = (t) => ({ amount: r2(t.amount), sites: siteCount(t.sites), records: t.records });
   const finPart = (p) => ({ due: r2(p.due), paid: r2(p.paid), remaining: r2(p.remaining) });
-  const finParts = (ps) => ({ rent: finPart(ps.rent), opening: finPart(ps.opening), newBill: finPart(ps.newBill) });
+  const finParts = (ps) => ({ rent: finPart(ps.rent), opening: finPart(ps.opening), newBill: finPart(ps.newBill), advanceBill: finPart(ps.advanceBill) });
   const finCards = (c) => ({ total: fin(c.generated), generated: fin(c.generated), paid: fin(c.paid), unpaid: fin(c.unpaid), unpaidPending: fin(c.unpaidPending), unpaidLedger: fin(c.unpaidLedger), hold: fin(c.hold) });
   const list = [...buckets].map(([key, b]) => ({ key, paid: fin(b.paid), remaining: fin(b.remaining), due: r2(b.paid.amount + b.remaining.amount), parts: finParts(b.parts), cards: finCards(cardsOf(key)) }));
   return {
@@ -1626,7 +1755,7 @@ const computeLedgerRent = (docs, filters, lib, now = nowIST()) => {
 };
 
 /** GST — source "rentalMaster" (see the definitions above). */
-const computeGst = (docs, f) => {
+const computeGst = (docs, f, lib) => {
   const cats = GST_CATEGORIES.rentalMaster;
   const mk = () => ({ amount: 0, sites: new Set(), records: 0 });
   const mkAll = () => Object.fromEntries(cats.map((c) => [c, mk()]));
@@ -1653,6 +1782,13 @@ const computeGst = (docs, f) => {
       add(doc, attr, num(bill.withGst) === 2 ? "direct" : "hold", toDate(bill.dueDate), num(bill.gstAmount), {
         billMonth: text(bill.dueMonth),
         status: BILL_STATUS[num(bill.approvalStatus ?? bill.status)] || "Unknown",
+      });
+    }
+    // ✅ FIX — New Bill + Advance Bill GST (doc.arrearsDue, stored apart from rentalDue): each bill once, in its billing month
+    for (const sb of storedBillParts(doc, lib?.allRevisions)) { // ✅ CHANGED — pending rent-revision bills too
+      add(doc, attr, sb.directGst ? "direct" : "hold", sb.date, sb.gst, {
+        billMonth: sb.label,
+        status: `${sb.kind === "advanceBill" ? "Advance Bill" : "New Bill"} · ${BILL_STATUS[num(sb.bill.approvalStatus ?? sb.bill.status)] || "Unknown"}`,
       });
     }
     for (const o of (doc.rentalPayment && doc.rentalPayment.gstOutstandingHistory) || []) {
@@ -2451,7 +2587,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
   const today = startOfUtcDay(now);
   const mkCat = () => ({ bills: 0, sites: new Set(), amount: 0 });
   const mkStage = () => ({ sales: { bills: 0, amount: 0 }, manager: { bills: 0, amount: 0 }, cmd: { bills: 0, amount: 0 }, unknown: { bills: 0, amount: 0 } });
-  const mk = () => ({ generated: mkCat(), approved: mkCat(), pending: mkCat(), pastDue: mkCat(), pendingByStage: mkStage(), pendingByType: {}, generatedByType: {}, advanceBill: mkCat(), newBill: mkCat() });
+  const mk = () => ({ generated: mkCat(), approved: mkCat(), pending: mkCat(), pastDue: mkCat(), pendingByStage: mkStage(), pendingByType: {}, generatedByType: {}, advanceBill: mkCat(), newBill: mkCat(), bill: mkCat() });
   const buckets = buildBuckets(f, mk);
   const total = mk();
   const excl = newExclusions();
@@ -2464,20 +2600,23 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
   const arrearsAmount = (b) => num(b.netPayable ?? b.baseAmount);
 
   const processBill = (doc, sid, faces, bill, kind) => {
-    const d = toDate(bill.dueDate ?? bill.dueMonth);
+    const isAdv = kind === "advance" || bill.type === "advance";
+    const d = isAdv
+      ? (toDate(bill.createdAt) || toDate(bill.ownerApprovalDate) || toDate(bill.dueDate) || parseMonthLabel(bill.dueMonth))
+      : (toDate(bill.dueDate) || parseMonthLabel(bill.dueMonth) || toDate(bill.dueMonth));
     if (!d) { meta.billsWithoutDueDate += 1; return; }
-    if (!inRange(d, f)) return;
+    if (!inRange(d, f)) { return; }
     const base = arrearsAmount(bill);
     const isStale = isStaleBill(doc, bill);
-    if (isStale) return;
+    if (isStale) { return; }
     const type = billMediaType(doc, bill);
     if (f.mediaType) {
       if (type === MIXED) { excl.sites.add(sid); excl.amount += base; return; }
-      if (type !== f.mediaType) return;
+      if (type !== f.mediaType) { return; }
     }
-    if (!siteMatches(doc, siteAttr(doc), { ...f, mediaType: "" }, excl, base)) return;
+    if (!siteMatches(doc, siteAttr(doc), { ...f, mediaType: "" }, excl, base)) { return; }
     const b = buckets.get(bucketKey(d, f.granularity));
-    if (!b) return;
+    if (!b) { return; }
     const status = num(bill.approvalStatus ?? bill.status);
     const approved = status === 3;
     const pending = status === 1 || status === 2;
@@ -2506,7 +2645,7 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
       month: monthKeyOf(d),
       bucket: bucketKey(d, f.granularity),
       billMonth: text(bill.dueMonth) || null,
-      billKind: kind, // "advance" | "newBill"
+      billKind: kind, // "advance" | "newBill" | "bill"
       isAdvance: kind === "advance",
       approvalStatus: BILL_STATUS[status] || "Unknown",
       stage,
@@ -2516,11 +2655,12 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
       gst: r2(direct ? gst : 0),
       holdGst: r2(direct ? 0 : gst),
       total: r2(base),
+      ...(storedBillRowInfo(kind === "advance" ? "advanceBill" : kind === "newBill" ? "newBill" : null, bill)),
     };
     for (const part of [b, total]) {
       bump(part.generated, sid, base);
       bumpType(part.generatedByType, tl, base);
-      bump(part[kind], sid, base); // advanceBill or newBill
+      if (part[kind]) bump(part[kind], sid, base); // advanceBill or newBill
       if (approved) bump(part.approved, sid, base);
       if (pending) {
         bump(part.pending, sid, base);
@@ -2540,10 +2680,70 @@ const computeBillApprovals = (docs, f, lib, now = nowIST()) => {
     const faces = faceList(doc);
     const siteBillStatuses = siteBillStatusesByMonth(doc);
     for (const bill of doc.rentalDue || []) {
-      processBill(doc, sid, faces, bill, "newBill");
+      processBill(doc, sid, faces, bill, "bill");
     }
     for (const bill of doc.arrearsDue || []) {
       processBill(doc, sid, faces, bill, billKindOf(bill));
+    }
+  }
+
+  const sourceRevisions = Array.isArray(lib?.allRevisions) && lib.allRevisions.length ? lib.allRevisions : (Array.isArray(lib?.pendingRevisions) ? lib.pendingRevisions : null);
+
+  if (sourceRevisions) {
+    const mediaMap = new Map((lib?.loaded || docs).map((d) => [idOf(d._id), d]));
+    for (const rv of sourceRevisions) {
+      if (!rv || rv.status === "Rejected") continue;
+      let doc = mediaMap.get(idOf(rv.mediaId));
+      if (!doc) {
+        doc = { _id: rv.mediaId, siteCode: rv.mediaCode || "", mediaName: rv.mediaName || "", mediaDetails: [] };
+      }
+      const sid = idOf(doc._id);
+      const faces = faceList(doc);
+      const isAdv = rv.billType === "ADVANCE";
+      const kind = isAdv ? "advance" : "newBill";
+      const approved = rv.status === "Approved";
+      const pending = rv.status === "Pending";
+      if (!approved && !pending) continue;
+
+      const baseAmt = Number(isAdv ? rv.advanceAmount : rv.increaseAmount ?? rv.difference) || 0;
+      const baseGst = Number(isAdv ? rv.advanceGstAmount : rv.increaseGstAmount) || 0;
+      const withGst = Number(rv.withGst || 0);
+      const withGstPart = Number(rv.gstOnIncrease) === 1;
+
+      const detail = Array.isArray(rv.monthsDetail) && rv.monthsDetail.length ? rv.monthsDetail : (Array.isArray(rv.months) && rv.months.length ? rv.months : null);
+
+      const items = detail
+        ? detail.map((d) => ({
+            month: (typeof d === "string" ? d : d.month) || rv.fromMonth || "",
+            amount: Number(typeof d === "string" ? baseAmt : (d.amount ?? baseAmt)) || 0,
+            gstAmount: withGstPart ? Number(typeof d === "string" ? baseGst : (d.gstAmount ?? baseGst)) || 0 : 0,
+          }))
+        : [{
+            month: rv.fromMonth || "",
+            amount: baseAmt,
+            gstAmount: withGstPart ? baseGst : 0,
+          }];
+
+      for (const item of items) {
+        const base = item.amount + item.gstAmount;
+        if (base <= 0) continue;
+        const fakeBill = {
+          _id: rv._id,
+          type: isAdv ? "advance" : "arrears",
+          dueMonth: item.month,
+          dueDate: parseMonthLabel(item.month) || toDate(rv.approvedAt) || toDate(rv.requestedAt) || toDate(rv.createdAt),
+          createdAt: rv.requestedAt || rv.createdAt,
+          ownerApprovalDate: rv.approvedAt || rv.createdAt,
+          approvalStatus: approved ? 3 : 1,
+          status: approved ? 3 : 1,
+          currentPendingRole: rv.currentPendingRole || 1,
+          netPayable: base,
+          baseAmount: item.amount,
+          gstAmount: item.gstAmount,
+          withGst,
+        };
+        const resRec = processBill(doc, sid, faces, fakeBill, kind);
+      }
     }
   }
   const round = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { bills: v.bills, amount: r2(v.amount) }]));
@@ -2590,14 +2790,13 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
   const records = [];
   const add = (target, r) => {
     const keys = [];
-    if (r.advance || r.isAdvance || r.billKind === "advance") {
-      keys.push("advance");
-    } else {
-      if (r.generated !== false) keys.push("generated");
-      if (r.approved === true) keys.push("approved");
-      if (r.pending === true) keys.push("pending");
-      if (r.pastDue === true) keys.push("pastDue");
-    }
+    // ✅ CHANGED — an advance bill is part of Generated / Approved / Pending / Past Due like any bill (billing month = dueMonth);
+    // the Advance card is a SUBSET view of those same bills (never added to Generated again → no double counting)
+    if (r.generated !== false) keys.push("generated");
+    if (r.approved === true) keys.push("approved");
+    if (r.pending === true) keys.push("pending");
+    if (r.pastDue === true) keys.push("pastDue");
+    if (r.advance || r.isAdvance || r.billKind === "advance") keys.push("advance");
     for (const key of keys) {
       const t = target[key];
       if (!t) continue;
@@ -2609,7 +2808,7 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
       const x = map[key] ||= { bills: 0, amount: 0 };
       x.bills += 1; x.amount += r.total;
     };
-    if (r.generated !== false && !r.advance && !r.isAdvance && r.billKind !== "advance") {
+    if (r.generated !== false) {
       by(target.generatedByType, r.mediaType);
     }
     if (r.pending === true) {
@@ -2687,7 +2886,8 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
   const selected = applySiteStatus(docs, f);
   const period = computePeriodDue(selected, f, lib, now, (e) => {
     if (e.kind === "cycle") cycle(e.doc, e.date, e.summary, e.direct);
-    else opening(e.doc, e.date, e.amount, e.hold, e.paid, e.row);
+    // ✅ FIX — only opening balances go to opening(); New / Advance Bills are emitted once by the arrears loop below
+    else if (e.kind === "opening") opening(e.doc, e.date, e.amount, e.hold, e.paid, e.row);
   });
   // Earlier cycles are part of Rental Master's overdue card even when outside
   // Total/Approved/Pending's selected period. Group the shared helper's past
@@ -2727,7 +2927,10 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
       }
     }
     for (const bill of doc.arrearsDue || []) {
-      const d = toDate(bill.dueDate ?? bill.dueMonth);
+      const isAdv = bill.type === "advance";
+      const d = isAdv
+        ? (toDate(bill.createdAt) || toDate(bill.ownerApprovalDate) || toDate(bill.dueDate) || parseMonthLabel(bill.dueMonth))
+        : (toDate(bill.dueDate) || parseMonthLabel(bill.dueMonth));
       if (!d || !inRange(d, f)) continue;
       const arrearsAmount = (b) => num(b.netPayable ?? b.baseAmount);
       const base = arrearsAmount(bill);
@@ -2742,12 +2945,30 @@ const computeRentalMasterApprovals = (docs, f, lib, now = nowIST()) => {
       const approved = status === 3;
       const pending = status === 1 || status === 2;
       const pastDue = !approved && d < today;
-      const isAdv = bill.type === "advance";
+      // netPayable/baseAmount EXCLUDES GST (GST is stored separately in gstAmount) — rental is base itself, not base - gst.
       const gst = num(bill.gstAmount || 0);
-      const direct = num(bill.withGst) === 2;
-      emit(doc, d, { rental: r2(base - gst), gst: direct ? r2(gst) : 0, holdGst: direct ? 0 : r2(gst) }, bill, null,
-        { generated: !isAdv, approved: !isAdv && approved, pending: !isAdv && pending, pastDue: !isAdv && pastDue, advance: isAdv },
-        { kind: "arrears", billKind: isAdv ? "advance" : "newBill", isAdvance: isAdv });
+      const ownGst = num(bill.withGst);
+      const parentDue = ownGst > 0 ? null : (doc.rentalDue || []).find((x) => x && idOf(x._id) === idOf(bill.parentRentalDueId));
+      const direct = (ownGst > 0 ? ownGst : num(parentDue?.withGst)) === 2;
+      emit(doc, d, { rental: r2(base), gst: direct ? r2(gst) : 0, holdGst: direct ? 0 : r2(gst) }, bill, null,
+        { generated: true, approved, pending, pastDue, advance: isAdv },
+        { kind: "arrears", billKind: isAdv ? "advance" : "newBill", isAdvance: isAdv, ...storedBillRowInfo(isAdv ? "advanceBill" : "newBill", bill) });
+    }
+    // Pending rent-revision / advance requests are New / Advance Bills awaiting approval (not yet in arrearsDue) —
+    // Outstanding Payments' Bill Generated / Pending must include them, same as Bill Approvals does.
+    for (const p of [...revisionBillsOf(doc, false, lib?.pendingRevisions), ...revisionBillsOf(doc, true, lib?.pendingRevisions)]) {
+      if (!p.date || !inRange(p.date, f)) continue;
+      const isAdv = p.bill.type === "advance";
+      const amount = p.rent + p.gst;
+      const type = billMediaType(doc, p.bill);
+      if (f.mediaType) {
+        if (type === MIXED) { excl.sites.add(idOf(doc._id)); excl.amount += amount; continue; }
+        if (type !== f.mediaType) continue;
+      }
+      if (!siteMatches(doc, siteAttr(doc), { ...f, mediaType: "" }, excl, amount)) continue;
+      emit(doc, p.date, { rental: r2(p.rent), gst: p.directGst ? r2(p.gst) : 0, holdGst: p.directGst ? 0 : r2(p.gst) }, p.bill, null,
+        { generated: true, approved: false, pending: true, pastDue: p.date < today, advance: isAdv },
+        { kind: "arrears", billKind: isAdv ? "advance" : "newBill", isAdvance: isAdv, ...storedBillPayment(p.bill), createdOn: p.createdOn, ...(isAdv ? { adjustInMonth: null } : {}) });
     }
   }
   const finish = (a) => {

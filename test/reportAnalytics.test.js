@@ -1016,8 +1016,12 @@ const newBillFixture = () => {
       nb({ dueMonth: "October 2026", netPayable: 1000, rentPaid: 5000, gstAmount: 180, gstPaid: 900, withGst: 1, approvalStatus: 3 }),
       // Oct: GST-only bill, approved, held GST → GST Hold; never in rent
       nb({ dueMonth: "October 2026", netPayable: 0, gstAmount: 90, withGst: 1, approvalStatus: 3 }),
-      // excluded: Advance bill, stale bill, outside the FY, future month, zero/null amounts
+      // Advance bills: counted once, in their billing month (dueMonth) — Aug not approved (pending), Dec raised in Oct
+      // for an upcoming month, approved, direct GST (counted up to the period end, not capped at today)
       nb({ type: "advance", dueMonth: "August 2026", netPayable: 9999, gstAmount: 999 }),
+      nb({ type: "advance", dueMonth: "December 2026", netPayable: 4000, gstAmount: 720, withGst: 2, approvalStatus: 3,
+        createdAt: "2026-10-05T00:00:00.000Z", adjustInMonth: "December 2026" }),
+      // excluded: stale bill, outside the FY, future-month New Bill, zero/null amounts
       nb({ dueMonth: "August 2026", netPayable: 7777, gstAmount: 777, mediaDetailId: "deleted-face" }),
       nb({ dueMonth: "January 2026", netPayable: 6666, gstAmount: 666 }),
       nb({ dueMonth: "December 2026", netPayable: 5555, gstAmount: 555 }),
@@ -1029,21 +1033,33 @@ const newBillFixture = () => {
   })]);
 };
 
-test("Rent Ledger: New Bill rent is added (GST excluded, Advance/stale/out-of-range skipped)", () => {
+test("Rent Ledger: New + Advance Bill rent is added (GST excluded, stale/out-of-range skipped)", () => {
   const r = ledRent(newBillFixture(), { fy: 2026, details: true });
-  assert.equal(r.summary.due, 6000);
+  assert.equal(r.summary.due, 19999);
   assert.equal(r.summary.paid.amount, 2000);
   assert.deepEqual(r.summary.parts.newBill, { due: 6000, paid: 2000, remaining: 4000 });
-  assert.equal(r.summary.parts.rent.due + r.summary.parts.opening.due + r.summary.parts.newBill.due, r.summary.due);
+  assert.deepEqual(r.summary.parts.advanceBill, { due: 13999, paid: 0, remaining: 13999 });
+  const p = r.summary.parts;
+  assert.equal(p.rent.due + p.opening.due + p.newBill.due + p.advanceBill.due, r.summary.due);
   const c = r.summary.cards;
-  assert.equal(c.generated.amount, 6000);
-  assert.equal(c.unpaidLedger.amount, 2000); // Aug, approved
-  assert.equal(c.unpaidPending.amount, 2000); // Sep, not approved
+  assert.equal(c.generated.amount, 19999);
+  assert.equal(c.unpaidLedger.amount, 6000); // Aug New Bill + Dec Advance, approved
+  assert.equal(c.unpaidPending.amount, 11999); // Sep New Bill + Aug Advance, not approved
   assert.equal(c.hold.amount, 0);
   assert.equal(c.generated.amount, c.paid.amount + c.unpaid.amount + c.hold.amount);
   assert.deepEqual(bucket(r, "2026-08").parts.newBill, { due: 3000, paid: 1000, remaining: 2000 });
+  assert.deepEqual(bucket(r, "2026-08").parts.advanceBill, { due: 9999, paid: 0, remaining: 9999 });
   assert.deepEqual(bucket(r, "2026-10").parts.newBill, { due: 1000, paid: 1000, remaining: 0 });
-  assert.equal(bucket(r, "2026-12").due, 0);
+  // Dec: only the Advance (billing month), the future-month New Bill stays out; never in its Oct creation month
+  assert.equal(bucket(r, "2026-12").due, 4000);
+  assert.equal(bucket(r, "2026-12").parts.newBill.due, 0);
+  assert.equal(bucket(r, "2026-10").parts.advanceBill.due, 0);
+  assert.equal(r.meta.advanceBillsCounted, 2);
+  const adv = r.records.filter((x) => x.kind === "advanceBill");
+  assert.deepEqual(adv.map((x) => [x.bucket, x.remainingAs, x.createdOn, x.adjustInMonth]), [
+    ["2026-08", "pending", null, null],
+    ["2026-12", "ledger", "2026-10-05", "December 2026"],
+  ]);
   assert.equal(r.buckets.reduce((x, b) => x + b.due, 0), r.summary.due);
   assert.equal(r.meta.newBillsCounted, 3);
   assert.equal(r.meta.newBillsWithoutDate, 1);
@@ -1052,17 +1068,23 @@ test("Rent Ledger: New Bill rent is added (GST excluded, Advance/stale/out-of-ra
   assert.deepEqual(rows.map((x) => x.remainingAs), ["ledger", "pending", null]);
 });
 
-test("GST Ledger: New Bill GST is added (rent excluded), direct by effective withGst, held otherwise", () => {
+test("GST Ledger: New + Advance Bill GST is added (rent excluded), direct by effective withGst, held otherwise", () => {
   const r = ledGst(newBillFixture(), { fy: 2026, details: true });
-  assert.equal(r.summary.due, 1170);
+  assert.equal(r.summary.due, 2889);
   assert.equal(r.summary.paid.amount, 180);
   assert.deepEqual(r.summary.parts.newBill, { due: 1170, paid: 180, remaining: 990 });
+  assert.deepEqual(r.summary.parts.advanceBill, { due: 1719, paid: 0, remaining: 1719 });
   const p = r.summary.parts;
-  assert.equal(p.hold.due + p.direct.due + p.opening.due + p.newBill.due, r.summary.due);
+  assert.equal(p.hold.due + p.direct.due + p.opening.due + p.newBill.due + p.advanceBill.due, r.summary.due);
   const c = r.summary.cards;
-  assert.equal(c.unpaidLedger.amount, 540); // Aug, approved, direct
-  assert.equal(c.unpaidPending.amount, 360); // Sep, not approved
+  assert.equal(c.unpaidLedger.amount, 1260); // Aug New Bill + Dec Advance, approved, direct
+  assert.equal(c.unpaidPending.amount, 1359); // Sep New Bill + Aug Advance, not approved
   assert.equal(c.hold.amount, 90); // Oct GST-only bill, approved, held
+  assert.equal(r.meta.advanceBillsCounted, 2);
+  assert.deepEqual(r.records.filter((x) => x.kind === "advanceBill").map((x) => [x.bucket, x.gstType, x.remainingAs]), [
+    ["2026-08", "hold", "pending"],
+    ["2026-12", "direct", "ledger"],
+  ]);
   assert.equal(r.buckets.reduce((x, b) => x + b.due, 0), r.summary.due);
   assert.equal(r.meta.newBillsCounted, 4);
   assert.equal(r.meta.newBillsWithoutDate, 1);
@@ -1412,7 +1434,7 @@ test("data sources: each chart + source reads exactly the top-level fields its l
     bills: { rentalMaster: ["appraisal", "arrearsDue", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"] },
     gst: {
       ledger: ["appraisal", "arrearsDue", "gstApplicableFlag", "gstBalanceHistory", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalDue", "rentalPayment"],
-      rentalMaster: ["landOwners", "mediaDetails", "rentalDue", "rentalPayment"],
+      rentalMaster: ["arrearsDue", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"],
     },
     tds: { ledger: ["appraisal", "landOwners", "ledger", "ledgerHistory", "mediaDetails", "rentalPayment", "tdsBalanceHistory"], rentalMaster: ["appraisal", "landOwners", "mediaDetails", "rentalDue", "rentalPayment"] },
   };
@@ -1825,6 +1847,30 @@ test("live projection: the outstanding-payments query loads every field the cycl
   assert.equal(live.meta.staleRowsIgnored, 1);
   assert.ok(live.summary.total.amount > 0);
 });
+
+test("Outstanding — Bill Generated (New Bills): approved arrears bill + pending rent revision with direct GST add up rent + GST, no double count (regression)", () => {
+  // Reproduces the real report: approved New Bill 2,000 + pending revisions 3,000 and 4,000 + 720 direct GST = 9,720
+  const s = dsite("NB", 10000, { start: D(2026, 3) });
+  const docs = [
+    { ...s, rentalDue: [{ _id: "NB-due", mediaDetailId: "NB", dueDate: D(2026, 4), baseAmount: 10000, approvalStatus: 3, withGst: 2 }],
+      arrearsDue: [{ _id: "NB-a1", type: "arrears", parentRentalDueId: "NB-due", dueMonth: "May 2026", dueDate: D(2026, 4), netPayable: 2000, gstAmount: 0, approvalStatus: 3 }] },
+  ];
+  const pendingRevisions = [
+    { _id: "RV1", mediaId: "NB", status: "Pending", billType: "NEW", gstOnIncrease: 0, withGst: 2, monthsDetail: [{ month: "June 2026", amount: 3000, gstAmount: 0 }] },
+    { _id: "RV2", mediaId: "NB", status: "Pending", billType: "NEW", gstOnIncrease: 1, withGst: 2, monthsDetail: [{ month: "July 2026", amount: 4000, gstAmount: 720 }] },
+    { _id: "RV3", mediaId: "NB", status: "Approved", billType: "NEW", gstOnIncrease: 1, withGst: 2, monthsDetail: [{ month: "May 2026", amount: 2000, gstAmount: 360 }] }, // already in arrearsDue
+  ];
+  const f = RA.parseFilters({ startDate: "2026-01-01", endDate: "2026-12-31", details: true }, NOW).filters;
+  const out = RA.computeOutstanding(deepFreeze(docs), f, { ...LIB, pendingRevisions }, NOW);
+  const s0 = out.approvals.summary;
+  assert.equal(s0.generated.amount, 9720);
+  assert.equal(s0.generated.bills, 3);
+  assert.equal(s0.approved.amount, 2000);
+  assert.equal(s0.pending.amount, 7720);
+  // without the pending revisions only the approved bill remains (the old, wrong 2,000)
+  assert.equal(RA.computeOutstanding(deepFreeze(docs), f, LIB, NOW).approvals.summary.generated.amount, 2000);
+});
+
 
 // ── Stored bills by timing (computeBills: upcoming / due today / overdue / past approved) ──
 // NOW = 21 Oct 2026 (an IST-wall-clock Date, like nowIST()); "today" is that calendar day.
