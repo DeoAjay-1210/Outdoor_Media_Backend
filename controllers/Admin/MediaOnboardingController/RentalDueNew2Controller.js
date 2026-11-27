@@ -2484,6 +2484,42 @@ async function processSingleRentalDueInternal({
   return internalResult;
 }
 
+// ✅ NEW — SINGLE-bill site with several active faces: one bill, but one rentalDue row
+// per face. When a role approves one face's row in a request, the other active faces'
+// rows of the SAME month get the same approval (same processSingleRentalDueInternal
+// rules, no field changes). Only rows not approved by that role yet and not sent in
+// the same request (excludeIds). Separate-bill / single-face sites → nothing.
+// Returns [{ rentalDueId, approvalStatus, entryDoc }] of the synced rows.
+async function syncSingleBillSiblingApprovals({ media, entry, userType, userId, userName, excludeIds = new Set() }) {
+  const synced = [];
+  try {
+    if (!media || !entry || !entry.dueMonth) return synced;
+    const activeFaces = (media.mediaDetails || []).filter((d) => Number(d.status) === 1);
+    if (activeFaces.length < 2 || !activeFaces.every((d) => Number(d.siteBillMode) !== 2)) return synced;
+    const activeIds = new Set(activeFaces.map((d) => String(d._id)));
+    const siblings = (media.rentalDue || []).filter(
+      (e) =>
+        e &&
+        String(e._id) !== String(entry._id) &&
+        e.dueMonth === entry.dueMonth &&
+        activeIds.has(String(e.mediaDetailId)) &&
+        !excludeIds.has(String(e._id)) &&
+        Number(e.approvalStatus) !== 3 &&
+        !isRoleStepApproved(e, userType),
+    );
+    for (const sib of siblings) {
+      const r = await processSingleRentalDueInternal({ media, rentalDueId: sib._id, userType, userId, userName });
+      if (r && r.success && isRoleStepApproved(r.entryDoc, userType)) {
+        synced.push({ rentalDueId: r.rentalDueId, approvalStatus: r.approvalStatus, entryDoc: r.entryDoc });
+      }
+    }
+  } catch (err) {
+    console.error("syncSingleBillSiblingApprovals:", err.message);
+  }
+  return synced;
+}
+exports.syncSingleBillSiblingApprovals = syncSingleBillSiblingApprovals; // ✅ NEW — tests
+
 // ── saveRentalDue — one site ───────────────────────────────────
 async function processSingleRentalDue({
   mediaId,
@@ -2535,6 +2571,12 @@ async function processSingleRentalDue({
       changeLog,
       campaignStatus, // ✅ NEW
     });
+
+    // ✅ NEW — single-bill site: the other faces' rows of the month get the same approval
+    if (result.success && !roleStepWasApproved && isRoleStepApproved(result.entryDoc, userType) && !result.lateApproval) {
+      const synced = await syncSingleBillSiblingApprovals({ media, entry: result.entryDoc, userType, userId, userName });
+      if (synced.length) result.singleBillSyncedRentalDueIds = synced.map((x) => x.rentalDueId);
+    }
 
     if (result.success) {
       await media.save({ timestamps: false });
@@ -2865,6 +2907,15 @@ exports.saveRentalDue = async (req, res) => {
             changeLog: itemChangeLog,
             campaignStatus: item.campaignStatus ?? req.body.campaignStatus, // ✅ NEW
           });
+
+          // ✅ NEW — single-bill site: the other faces' rows of the month (not in this request) get the same approval
+          if (processResult.success && !roleStepWasApproved && isRoleStepApproved(processResult.entryDoc, userType) && !processResult.lateApproval) {
+            const synced = await syncSingleBillSiblingApprovals({
+              media, entry: processResult.entryDoc, userType, userId, userName,
+              excludeIds: new Set(group.map((g) => String(g.rentalDueId))),
+            });
+            if (synced.length) processResult.singleBillSyncedRentalDueIds = synced.map((x) => x.rentalDueId);
+          }
 
           results.push({ ...processResult, originalIndex: index });
           if (processResult.success && itemChangeLog.length) {
