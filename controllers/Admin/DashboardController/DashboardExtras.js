@@ -174,6 +174,9 @@ function computeRental(docs, range, filters, opts = {}) {
   // ✅ NEW — Due card: this period's due faces (total) + generated New Bill / Advance bills
   // (arrearsDue, CMD approved) of the bill's OWN month (dueMonth inside the period)
   const due = { curFaces: new Set(), newBill: aprBucket(), advance: aprBucket(), newBillMonths: new Map(), advanceMonths: new Map() };
+  // ✅ NEW — Overdue card: New Bill / Advance (rent revision) still not CMD approved whose bill
+  // month is up to the period's last month (this month included), any role
+  const odNb = { newBill: aprBucket(), newBillMonths: new Map(), advance: aprBucket(), advanceMonths: new Map() };
   // ✅ NEW — GST card: GST of the same New Bill / Advance bills as the Due card (faces = site ids, like gstSites)
   const gstx = { newBill: aprBucket(), advance: aprBucket(), newBillMonths: new Map(), advanceMonths: new Map() };
   const addGstx = (kind, monthLabel, sortKey, gst, media, owners = []) => {
@@ -360,6 +363,24 @@ function computeRental(docs, range, filters, opts = {}) {
         });
         addGstx(kind, part.month, keyOf(part.month) ?? k, num(part.gst), media); // ✅ NEW — GST card
       });
+      // ✅ NEW — Overdue card: pending New Bill / Advance up to the period's last month (any role)
+      {
+        const last = range.months[range.months.length - 1];
+        const refKey = last.year * 12 + (last.month - 1);
+        const byMonth = kind === "advance" ? odNb.advanceMonths : odNb.newBillMonths;
+        pendingRevisionMonthParts(rv).forEach((part) => {
+          const k = keyOf(part.month);
+          if (k === null || k > refKey) return;
+          const amount = num(part.rent) + num(part.gst);
+          if (amount <= 0) return;
+          if (!byMonth.has(part.month)) byMonth.set(part.month, { sortKey: k, ...aprBucket() });
+          [odNb[kind], byMonth.get(part.month)].forEach((t) => {
+            t.amount += amount;
+            activeFaces(media).forEach((f) => t.faces.add(f));
+            addLandlords(t.ll, media);
+          });
+        });
+      }
       if (targetRole && num(rv.currentPendingRole) !== num(targetRole)) return;
       pendingRevisionMonthParts(rv).forEach((part) => {
         const k = keyOf(part.month);
@@ -452,7 +473,22 @@ function computeRental(docs, range, filters, opts = {}) {
         })(),
       },
       tds: { landlords: LL.tds.size, amount: r0(sum.tds), sites: tdsSites.size },
-      overdue: { landlords: LL.overdue.size, sites: sum.overdue[0], amount: r0(sum.overdue[1]) },
+      overdue: {
+        landlords: LL.overdue.size, sites: sum.overdue[0], amount: r0(sum.overdue[1]),
+        // ✅ NEW — + New Bill / Advance not CMD approved yet (bill month up to the period) and the total
+        ...(() => {
+          const out = (b) => ({ landlords: b.ll.size, sites: b.faces.size, amount: r0(b.amount) });
+          const outMonths = (m) => [...m.entries()].sort((a, b) => a[1].sortKey - b[1].sortKey).map(([month, b]) => ({ month, ...out(b) }));
+          const ll = new Set([...LL.overdue, ...odNb.newBill.ll, ...odNb.advance.ll]);
+          const extraFaces = new Set([...odNb.newBill.faces, ...odNb.advance.faces]);
+          return {
+            currentMonth: { landlords: LL.overdue.size, sites: sum.overdue[0], amount: r0(sum.overdue[1]) },
+            newBill: { ...out(odNb.newBill), months: outMonths(odNb.newBillMonths) },
+            advance: { ...out(odNb.advance), months: outMonths(odNb.advanceMonths) },
+            total: { landlords: ll.size, sites: sum.overdue[0] + extraFaces.size, amount: r0(sum.overdue[1] + odNb.newBill.amount + odNb.advance.amount) },
+          };
+        })(),
+      },
       approved: {
         landlords: LL.approved.size, sites: sum.approved[0], amount: r0(sum.approved[1]),
         // ✅ NEW — breakdown + total (bills CMD approved inside the range)
