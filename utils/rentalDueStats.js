@@ -200,7 +200,7 @@ function advanceAmountOfMonth(media, dueMonth) {
   }, 0);
 }
 
-function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false, replacedFaceApproval = false, overdueAnyFacePending = false, advanceFullAmountInDue = false }) {
+function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trackLandOwners = false, faceFilter = null, onFace = null, pendingAtRoleOnly = false, singleBillAsSite = false, overdueFrom = null, overdueByRole = false, dueThisMonthByRole = false, pastOverdueOnly = false, overdueByMonth = false, pastApprovedInMonth = false, pastPendingByMonth = false, overdueSitesByMonth = false, includeZeroAmountBills = false, replacedFaceApproval = false, overdueAnyFacePending = false, advanceFullAmountInDue = false, onPastApproved = null }) {
   const overdueSiteRows = overdueByMonth && overdueSitesByMonth ? new Map() : null; // ✅ NEW — month label → Map(faceKey → site row)
   const overdueMonthBuckets = overdueByMonth || pastPendingByMonth ? new Map() : null; // ✅ NEW
   const pastApproved = pastApprovedInMonth ? { faces: new Set(), owners: new Map(), months: new Map() } : null; // ✅ NEW
@@ -365,11 +365,15 @@ function computeRentalDueStats(mediaDocs, { year, month, targetRole = null, trac
         const entry = replacedFaceApproval ? withReplacedFaceApproval(ownEntry, pastCycleEntries, activeFacesList) : ownEntry; // ✅ NEW
         if (faceFilter && !faceFilter(entry, media, face)) continue;
         // ✅ NEW — pastApprovedInMonth: this past bill approved inside this month
-        if (pastApproved && approvedAtInRange(entry, targetRole, monthStart, monthEnd)) {
+        // ✅ NEW — onPastApproved (opt-in callback, dashboard/v2): the same past bills, per face
+        if ((pastApproved || onPastApproved) && approvedAtInRange(entry, targetRole, monthStart, monthEnd)) {
           const gstShare = Number(pastSummary.currentMonthGstAmount || 0) / faceCount;
-          addToMonthBucket(pastApproved.months, cycleLabel, cycleYear * 12 + cycleMonthIdx, media, faceId, pastFaceAmount, gstShare);
-          pastApproved.faces.add(`${String(media._id)}_${faceId}`);
-          addFaceToOwnerBucket(pastApproved.owners, media, faceId, pastFaceAmount);
+          if (pastApproved) {
+            addToMonthBucket(pastApproved.months, cycleLabel, cycleYear * 12 + cycleMonthIdx, media, faceId, pastFaceAmount, gstShare);
+            pastApproved.faces.add(`${String(media._id)}_${faceId}`);
+            addFaceToOwnerBucket(pastApproved.owners, media, faceId, pastFaceAmount);
+          }
+          if (onPastApproved) onPastApproved({ media, face, entry, amount: pastFaceAmount, gstShare, cycleLabel, cycleSortKey: cycleYear * 12 + cycleMonthIdx });
         }
         const odEntry = pastOpenFaceBill || entry; // ✅ NEW — overdueAnyFacePending (same as entry without it)
         const { isOpen } = roleStatus(odEntry, null); // overdue is role independent

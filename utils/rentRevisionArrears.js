@@ -454,13 +454,15 @@ function pickAdvanceBill(m, advanceDate, adjustInDate) {
 
   // ✅ NEW — advance for a not-generated bill: advanceMonth must be after the
   // last generated bill and before the next one (yearly: Sep 2026 generated,
-  // next Sep 2027 → only Oct 2026 – Aug 2027; monthly → only the next month)
+  // next Sep 2027 → only Oct 2026 – Sep 2027; monthly → only the next month)
   const advanceWindowError = () => {
     if (!byKey.size || advanceKey === null) return null;
     const lastKey = Math.max(...byKey.keys());
     const cycle = cycleMonthsOf(m.rentalPayment);
     const nextKey = lastKey + cycle;
-    const maxKey = cycle > 1 ? nextKey - 1 : nextKey;
+    // ✅ CHANGED — the next bill month itself is allowed too (yearly: Nov 2026
+    // generated → Dec 2026 – Nov 2027; Nov 2027 advance → deducted from the Nov 2027 bill)
+    const maxKey = nextKey;
     if (advanceKey > lastKey && advanceKey <= maxKey) return null;
     return {
       error:

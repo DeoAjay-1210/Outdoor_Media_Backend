@@ -23,6 +23,7 @@ const {
   calculateOverallLedgerSummary,
   calculateNewOverallLedgerSummary, // ✅ NEW
   pendingRevisionAmounts, // ✅ NEW
+  pendingRevisionMonthParts, // ✅ NEW — New Bill / Advance CurrentMonth / PastMonth filters
   getOverallSummaryForCycle,
   ensureRentalDueForCycles,
 isOwnerModePaidForCycle,
@@ -3651,6 +3652,12 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     // ✅ CHANGED — rentRevisionAmount (summary) → every revision in scope;
     // entries[] → revisionStatus aware (absent → same as the summary)
     const revisionsByMedia = buildRevisionsByMedia(allRevisions.filter(revisionInScope));
+    // ✅ NEW — summary totals with roleType → pending at that role + approved by
+    // that role (same as pendingAmount + approvedAmount), so the amount stays
+    // after the role approves. Without roleType → unchanged.
+    const revisionsByMediaSummary = revisionTargetRole
+      ? buildRevisionsByMedia(allRevisions.filter((r) => revisionState(r) !== null))
+      : revisionsByMedia;
     const revisionsByMediaForEntries = revisionStatusFilter
       ? buildRevisionsByMedia(allRevisions.filter(revisionInTotals))
       : revisionsByMedia;
@@ -3731,11 +3738,26 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
     //   newBillHoldGstPaid / newBillHoldGstRemaining (withGst 1 / not set)
     //   newBillCannotHoldGstPaid / newBillCannotHoldGstRemaining (withGst 2)
     // and the same for advance. Any flag matching keeps the site.
-    const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) => [
-      ...["Remaining", "Paid"].map((state) => ({ name: `${kind}Rent${state}`, kind, part: "Rent", state })),
-      ...["Remaining", "Paid"].map((state) => ({ name: `${kind}HoldGst${state}`, kind, part: "GstHold", state })), // ✅ CHANGED — key name
-      ...["Remaining", "Paid"].map((state) => ({ name: `${kind}CannotHoldGst${state}`, kind, part: "GstCannotHold", state })), // ✅ CHANGED — Paid / Remaining
-    ]).filter((fl) => bodyFlag(fl.name));
+    // ✅ NEW — + CurrentMonth / PastMonth (bill month = monthFilter month / before it),
+    // e.g. newBillPastMonthRentRemaining, advanceCurrentMonthHoldGstPaid
+    const revisionPaidFlags = ["newBill", "advance"].flatMap((kind) =>
+      [["", "all"], ["CurrentMonth", "cur"], ["PastMonth", "past"], ...(kind === "advance" ? [["FutureMonth", "future"]] : [])].flatMap(([label, scope]) => [ // ✅ NEW — advance FutureMonth
+        ...["Remaining", "Paid"].map((state) => ({ name: `${kind}${label}Rent${state}`, kind, scope, part: "Rent", state })),
+        ...["Remaining", "Paid"].map((state) => ({ name: `${kind}${label}HoldGst${state}`, kind, scope, part: "GstHold", state })), // ✅ CHANGED — key name
+        ...["Remaining", "Paid"].map((state) => ({ name: `${kind}${label}CannotHoldGst${state}`, kind, scope, part: "GstCannotHold", state })), // ✅ CHANGED — Paid / Remaining
+      ]),
+    ).filter((fl) => bodyFlag(fl.name));
+    // ✅ NEW — bill month → "cur" (monthFilter month) / "past" (before) / null (later)
+    const revisionMonthIndex = statsYear * 12 + (statsMonth - 1);
+    const revisionMonthScope = (label) => {
+      const parts = String(label || "").trim().split(/\s+/);
+      const MONTHS_FULL = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+      const mIdx = MONTHS_FULL.indexOf(String(parts[0] || "").toLowerCase());
+      const year = Number(parts[1]);
+      if (mIdx < 0 || !year) return null;
+      const idx = year * 12 + mIdx;
+      return idx < revisionMonthIndex ? "past" : idx === revisionMonthIndex ? "cur" : "future"; // ✅ CHANGED — later → "future" (only advance has future flags)
+    };
     if (revisionPaidFlags.length) {
       const entryMediaIds = [...new Set(entries.flatMap((e) => (e.sites || []).map((s) => String(s.mediaId))))];
       const arrearsDocs = await MediaOnboarding.find({ _id: { $in: entryMediaIds } }, "arrearsDue rentalDue._id rentalDue.withGst").lean(); // ✅ CHANGED — + parent bill withGst
@@ -3746,6 +3768,9 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           newBill: { Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() },
           advance: { Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() },
         };
+        // ✅ NEW — the same per month scope (acc stays the all-months one)
+        const scoped = () => ({ Rent: parts(), Gst: parts(), GstHold: parts(), GstCannotHold: parts() });
+        const accByScope = { cur: { newBill: scoped(), advance: scoped() }, past: { newBill: scoped(), advance: scoped() }, future: { newBill: scoped(), advance: scoped() } }; // ✅ NEW — future
         const mark = (st, total, paid) => {
           if (total <= 0) return;
           if (total - Math.min(total, paid) > 0) st.Remaining = true;
@@ -3761,6 +3786,14 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
           const own = Number(b.withGst || 0);
           const withGst = own > 0 ? own : parentWithGst.get(String(b.parentRentalDueId)) || 0;
           mark(withGst === 2 ? a.GstCannotHold : a.GstHold, Number(b.gstAmount || 0), Number(b.gstPaid || 0)); // ✅ NEW
+          // ✅ NEW — by the bill's month
+          const scope = revisionMonthScope(b.dueMonth);
+          if (scope) {
+            const sa = accByScope[scope][b.type === "advance" ? "advance" : "newBill"];
+            mark(sa.Rent, Number(b.netPayable || 0), Number(b.rentPaid || 0));
+            mark(sa.Gst, Number(b.gstAmount || 0), Number(b.gstPaid || 0));
+            mark(withGst === 2 ? sa.GstCannotHold : sa.GstHold, Number(b.gstAmount || 0), Number(b.gstPaid || 0));
+          }
         });
         // ✅ NEW — Pending rent revisions (no bill yet) → Remaining
         allRevisions.forEach((rv) => {
@@ -3772,13 +3805,24 @@ gstBalanceHistory: mediaDoc.gstBalanceHistory,
             a.Gst.Remaining = true;
             a[`Gst${p.gstKind}`].Remaining = true;
           }
+          // ✅ NEW — by month
+          pendingRevisionMonthParts(rv).forEach((part) => {
+            const scope = revisionMonthScope(part.month);
+            if (!scope) return;
+            const sa = accByScope[scope][p.kind];
+            if (part.rent > 0) sa.Rent.Remaining = true;
+            if (part.gst > 0) {
+              sa.Gst.Remaining = true;
+              sa[`Gst${p.gstKind}`].Remaining = true;
+            }
+          });
         });
-        paidByMedia.set(String(m._id), acc);
+        paidByMedia.set(String(m._id), { all: acc, ...accByScope });
       });
       const siteMatches = (mediaId) => {
         const acc = paidByMedia.get(String(mediaId));
         if (!acc) return false;
-        return revisionPaidFlags.some(({ kind, part, state }) => acc[kind][part][state]);
+        return revisionPaidFlags.some(({ kind, scope, part, state }) => acc[scope][kind][part][state]);
       };
       for (let i = entries.length - 1; i >= 0; i--) {
         entries[i].sites = (entries[i].sites || []).filter((s) => siteMatches(s.mediaId));
@@ -4103,7 +4147,7 @@ const cityMatchQuery = city
             let count = 0;
             let amount = 0;
             let gstAmount = 0;
-            revisionsByMedia.forEach((rev, mediaId) => {
+            revisionsByMediaSummary.forEach((rev, mediaId) => {
               if (!ownerKeysById.has(mediaId) || rev[kind].length === 0) return;
               sites.add(mediaId);
               ownerKeysById.get(mediaId).forEach((k) => owners.add(k));

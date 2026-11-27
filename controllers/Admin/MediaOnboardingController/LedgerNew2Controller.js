@@ -4,6 +4,7 @@ const Media = require("../../../models/Admin/MediaOnboardingSchema/MediaOnboardi
 const OverDueHistory = require("../../../models/Admin/MediaOnboardingSchema/OverDueHistorySchema");
 // ✅ NEW — rent revision arrears (paid via ledger-save, shown in ledger-list)
 const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema");
+const LedgerPaymentInfo = require("../../../utils/ledgerPaymentInfo"); // ✅ NEW — ledger row payment details + cmdApproval / paymentInfoStatus filters
 const { applyArrearsPayment, arrearsBlock, decorateLedgerItem, decorateLedgerHistoryBlock, overallArrearsTotals, effectiveWithGst, newBillLabel, withSiteOwnerCategory } = require("../../../utils/rentRevisionArrears"); // ✅ CHANGED — + withSiteOwnerCategory
 const escapeRegex = (str) => (str ? String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "");
 const {
@@ -2827,6 +2828,26 @@ function findRentalDueForMonth(rentalDue, dueMonth) {
   return best || undefined;
 }
 
+// ✅ NEW — ledger-list cmdApproval: a CMD approved month is settled once every
+// owner's required rent mode(s) are entered for that cycle AND, when GST is held
+// (withGst 1), every GST row of that month is paid. Same rule as
+// landowner/site-filter isCmdDueFullySettled (direct GST is paid with the rent).
+function cmdDueSettledForLedger(mediaLike, owners, due) {
+  const ownerList = owners || [];
+  if (!due?.dueDate || ownerList.length === 0) return false;
+  const cycleDate = new Date(due.dueDate);
+  if (Number.isNaN(cycleDate.getTime())) return false;
+  const isRentPaid = ownerList.every((owner) =>
+    getRequiredModesShared(Number(owner.paymentCategory || 1)).every((mode) => isOwnerModePaidForCycle(mediaLike, owner, mode, cycleDate)),
+  );
+  if (!isRentPaid) return false;
+  if (Number(due.withGst) === 1) {
+    const gstRows = (mediaLike.gstBalanceHistory || []).filter((r) => r.dueMonth === due.dueMonth);
+    return gstRows.every((r) => r.isPaid || (r.utrNumber && String(r.utrNumber).trim() !== ""));
+  }
+  return true;
+}
+
 exports.listMediaByLedger = async (req, res) => {
   try {
     const {
@@ -2846,7 +2867,14 @@ exports.listMediaByLedger = async (req, res) => {
       totalLedgerGstAmount, // ✅ NEW
       totalLedgerPendingAmount, // ✅ NEW
       totalGstPendingAmount, // ✅ NEW
+      cmdApproval, // ✅ NEW — 1: CMD approved bills whose payment is not entered yet
+      paymentInfoStatus, // ✅ NEW — 1: Yet to Payment / 2: Completed (rows with payment details)
     } = req.body;
+    // ✅ NEW — row filters (ledger[] / gstBalanceHistory[] rows): every site is built,
+    // filtered by its rows, then paged. Not sent → unchanged.
+    const wantCmdApprovalRows = Number(cmdApproval) === 1;
+    const wantPaymentInfoStatus = [1, 2, 3, 4].includes(Number(paymentInfoStatus)) ? Number(paymentInfoStatus) : null; // ✅ CHANGED — + 3 Partial Paid (rent or GST paid, not both), 4 Unpaid (nothing paid)
+    const rowFilterMode = wantCmdApprovalRows || wantPaymentInfoStatus !== null;
 
     const pageNumbers = parseInt(pageNumber) || 1;
     const pageSize = parseInt(count) || 10;
@@ -2860,6 +2888,7 @@ exports.listMediaByLedger = async (req, res) => {
       filter.$or = [
         { "mediaDetails.mediaName": { $regex: search, $options: "i" } },
         { "mediaDetails.mediaCode": { $regex: search, $options: "i" } },
+        { "landOwners.name": { $regex: search, $options: "i" } }, // ✅ NEW — landowner name
       ];
     }
 if (city) {
@@ -3016,7 +3045,8 @@ if (city) {
       isTotalLedgerGstAmountFilter ||
       isTotalLedgerPendingAmountFilter ||
       isTotalGstPendingAmountFilter ||
-      !!isPendingExplicitCutoff;
+      !!isPendingExplicitCutoff ||
+      rowFilterMode; // ✅ NEW — rows filtered after the build
 
     const MONTH_NAME_TO_INDEX_FOR_HELPER = MONTH_NAMES.reduce(
       (acc, name, idx) => {
@@ -4454,7 +4484,8 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
       !isTotalLedgerGstAmountFilter &&
       !isTotalLedgerPendingAmountFilter &&
       !isTotalGstPendingAmountFilter &&
-      !mediaIdExplicitlyRequested
+      !mediaIdExplicitlyRequested &&
+      !rowFilterMode // ✅ NEW — cmdApproval / paymentInfoStatus: every CMD approved unpaid row (past months too), not only sites active in currentMonth
     ) {
       const requestedMonthName =
         MONTH_NAMES[requestedMonthRange.startDate.getUTCMonth()];
@@ -4771,7 +4802,7 @@ const details = (mediaObj.mediaDetails || []).map((d) => ({
     );
 
     let effectiveTotalCount = totalCount;
-    if (needsFullFetch) {
+    if (needsFullFetch && !rowFilterMode) { // ✅ CHANGED — row filters page after the rows are filtered (below)
       effectiveTotalCount = finalMediaListData.length;
       finalMediaListData = finalMediaListData.slice(skip, skip + pageSize);
     }
@@ -4929,6 +4960,110 @@ const cityFilter = [
       }));
     }
 
+    // ✅ NEW — paymentInfo on every ledger / gstBalanceHistory row (null when not
+    // saved) + cmdApproval / paymentInfoStatus row filters, then the page
+    let paymentInfoCounts;
+    {
+      const pageIds = finalMediaListData.map((m) => m._id || m.mediaId).filter(Boolean);
+      const infoDocs = await Media.find({ _id: { $in: pageIds } })
+        .select(wantCmdApprovalRows ? "ledgerPaymentInfo rentalDue landOwners ledger ledgerHistory gstBalanceHistory arrearsDue" : "ledgerPaymentInfo") // ✅ CHANGED — + arrearsDue (last CMD approval sort)
+        .lean();
+      const infosBySite = new Map(infoDocs.map((d) => [String(d._id), d.ledgerPaymentInfo || []]));
+      // ✅ NEW — counts always with the old paid fallback (same numbers as the
+      // paymentInfoStatus 1 / 2 / 3 / 4 tabs); rows of the cmdApproval-only list unchanged
+      const countSourceData =
+        rowFilterMode && wantPaymentInfoStatus === null
+          ? finalMediaListData.map((m) => {
+              const infos = infosBySite.get(String(m._id || m.mediaId)) || [];
+              const opts = { oldPaid: true };
+              return {
+                ...m,
+                ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withRentPaymentInfo(m.ledger, infos, opts) } : {}),
+                ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withGstPaymentInfo(m.gstBalanceHistory, infos, opts) } : {}),
+              };
+            })
+          : null;
+      finalMediaListData = finalMediaListData.map((m) => {
+        const infos = infosBySite.get(String(m._id || m.mediaId)) || [];
+        const piOpts = { oldPaid: wantPaymentInfoStatus !== null }; // ✅ NEW — paymentInfoStatus tabs: old paid rows (UTR without saved details) = Completed
+        return {
+          ...m,
+          ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withRentPaymentInfo(m.ledger, infos, piOpts) } : {}),
+          ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withGstPaymentInfo(m.gstBalanceHistory, infos, piOpts) } : {}),
+        };
+      });
+      if (rowFilterMode) {
+        // cmdApproval — the same bills as landowner/site-filter cmdApproval: up to
+        // currentMonth (else this month), CMD approved, not fully settled
+        const cmdBySite = new Map();
+        if (wantCmdApprovalRows) {
+          const ref = requestedMonthYearParsed || (() => { const n = nowIST(); return { year: n.getUTCFullYear(), month: n.getUTCMonth() + 1 }; })();
+          const refKey = ref.year * 12 + (ref.month - 1);
+          infoDocs.forEach((d) => {
+            const cmd = { approved: new Set(), open: new Set(), bills: new Map() };
+            (d.rentalDue || []).forEach((due) => {
+              const p = parseDueMonthLabel(due.dueMonth);
+              if (!p || p.year * 12 + p.monthIdx > refKey) return;
+              if (!LedgerPaymentInfo.cmdApprovedBill(due)) return;
+              const id = String(due._id);
+              cmd.approved.add(id);
+              cmd.bills.set(id, due);
+              if (!cmdDueSettledForLedger(d, d.landOwners, due)) cmd.open.add(id);
+            });
+            cmdBySite.set(String(d._id), cmd);
+          });
+        }
+        const filterOpts = {
+          cmdApproval: wantCmdApprovalRows,
+          paymentInfoStatus: wantPaymentInfoStatus,
+          cmdBySite,
+          // ✅ NEW — Unpaid: bills up to currentMonth (else this month)
+          refKey: (() => { const ref = requestedMonthYearParsed || (() => { const n = nowIST(); return { year: n.getUTCFullYear(), month: n.getUTCMonth() + 1 }; })(); return ref.year * 12 + (ref.month - 1); })(),
+        };
+        const r = LedgerPaymentInfo.filterLedgerRows(finalMediaListData, filterOpts);
+        // ✅ CHANGED — cmdApproval only → counts from the old-paid-aware rows (same as the tabs)
+        paymentInfoCounts = countSourceData ? LedgerPaymentInfo.filterLedgerRows(countSourceData, filterOpts).counts : r.counts;
+        effectiveTotalCount = r.sites.length;
+        // ✅ NEW — cmdApproval: last CMD approved site on top. ✅ CHANGED — the site's latest CMD
+        // approval of ANY kind: rentalDue bill (CMD step approvedAt, any month) or New Bill /
+        // Advance (arrearsDue approved on CMD approval: ownerApprovalDate / createdAt)
+        if (wantCmdApprovalRows) {
+          const ms = (v) => (v ? new Date(v).getTime() || 0 : 0);
+          const docById = new Map(infoDocs.map((d) => [String(d._id), d]));
+          const lastAt = (m) => {
+            const d = docById.get(String(m._id || m.mediaId));
+            if (!d) return 0;
+            let t = 0;
+            (d.rentalDue || []).forEach((due) => {
+              if (!LedgerPaymentInfo.cmdApprovedBill(due)) return;
+              (due.approvalSteps || []).forEach((s) => {
+                if (Number(s.role) === 3 && Number(s.status) === 2) t = Math.max(t, ms(s.approvedAt));
+              });
+            });
+            (d.arrearsDue || []).forEach((b) => {
+              if (!b || (b.type !== "arrears" && b.type !== "advance")) return;
+              if (Number(b.approvalStatus || 3) !== 3) return;
+              t = Math.max(t, ms(b.ownerApprovalDate || b.createdAt));
+            });
+            return t;
+          };
+          r.sites = r.sites
+            .map((m, i) => ({ m, i, t: lastAt(m) }))
+            .sort((a, b) => b.t - a.t || a.i - b.i)
+            .map(({ m, t }) => ({ ...m, lastCmdApprovedAt: t ? new Date(t).toISOString() : null }));
+        }
+        finalMediaListData = r.sites.slice(skip, skip + pageSize);
+      }
+      // ✅ NEW — output only: a row without payment details gets an empty
+      // paymentInfo (status 0) instead of null; filters / counts above used null
+      // ⛔ COMMENTED — empty default paymentInfo not sent (row without details → paymentInfo: null)
+      // finalMediaListData = finalMediaListData.map((m) => ({
+      //   ...m,
+      //   ...(Array.isArray(m.ledger) ? { ledger: LedgerPaymentInfo.withDefaultPaymentInfo(m.ledger) } : {}),
+      //   ...(Array.isArray(m.gstBalanceHistory) ? { gstBalanceHistory: LedgerPaymentInfo.withDefaultPaymentInfo(m.gstBalanceHistory) } : {}),
+      // }));
+    }
+
     return successResponse(
       res,
       "Media list fetched successfully",
@@ -4945,6 +5080,7 @@ const cityFilter = [
         TDSPeningCount,
         ...overallOutstandingTotals, // ✅ NEW
         overallLedgerSummary, // ✅ NEW
+        ...(paymentInfoCounts ? { paymentInfoCounts } : {}), // ✅ NEW — only with cmdApproval / paymentInfoStatus
         // billGroups, // ✅ NEW
         mediaList: await withBillNos(Media, finalMediaListData), // ✅ CHANGED — + billNo on bill rows
       },
@@ -4985,6 +5121,201 @@ function isYMInRange(ym, rangeStart, rangeEnd) {
   if (rangeEnd && compareYM(ym, rangeEnd) > 0) return false;
   return true;
 }
+// ✅ NEW — landOwnerId (and a rent row's paymentMode) not sent: a site with ONE
+// landowner → that landowner (paymentMode from its category: Cash / Online; Cash +
+// Online → must be sent). Rent rows and a bill's GST rows only (New Bill / Advance
+// GST rows are site-level, no landowner). More landowners → error. Sent → unchanged.
+// Returns { body } or { statusCode, message }.
+async function fillSingleLandOwner(body) {
+  const b = body || {};
+  const isGst = String(b.entryType || "rent").toLowerCase() === "gst";
+  const needOwner = !b.landOwnerId && (!isGst || (!b.gstBalanceHistoryId && b.rentalDueId));
+  const needMode = !isGst && !b.paymentMode;
+  if (!needOwner && !needMode) return { body: b };
+  const media = await Media.findById(b.mediaId).select("landOwners._id landOwners.paymentCategory rentalDue._id").lean();
+  if (!media) return { statusCode: 404, message: "Media not found" };
+  // GST: only a rentalDue bill's GST row is per landowner
+  if (isGst && !(media.rentalDue || []).some((r) => String(r._id) === String(b.rentalDueId))) return { body: b };
+  const owners = media.landOwners || [];
+  let owner = null;
+  if (b.landOwnerId) owner = owners.find((o) => String(o._id) === String(b.landOwnerId)) || null;
+  else if (owners.length === 1) owner = owners[0];
+  else return { statusCode: 400, message: `landOwnerId is required — this bill has ${owners.length} landowners` };
+  const out = { ...b, landOwnerId: b.landOwnerId || (owner ? String(owner._id) : b.landOwnerId) };
+  if (needMode && owner) {
+    const category = Number(owner.paymentCategory || 1);
+    if (category === 3) return { statusCode: 400, message: "paymentMode is required — this landowner is paid Cash + Online" };
+    out.paymentMode = category === 2 ? "Online" : "Cash";
+  }
+  return { body: out };
+}
+
+// one row's payment details → { statusCode, message } on error, else { action, data }
+async function saveOneLedgerPaymentInfo(bodyIn, userName, now) {
+  const { mediaId } = bodyIn || {};
+  if (!mongoose.Types.ObjectId.isValid(String(mediaId || ""))) return { statusCode: 400, message: "mediaId is not a valid ObjectId" };
+  const filled = await fillSingleLandOwner(bodyIn);
+  if (filled.message) return filled;
+  const body = filled.body;
+  const parsed = LedgerPaymentInfo.parsePaymentInfoBody(body);
+  if (parsed.error) return { statusCode: 400, message: parsed.error };
+  const { key, values } = parsed;
+  for (const k of ["rentalDueId", "landOwnerId", "gstBalanceHistoryId"]) {
+    if (key[k] && !mongoose.Types.ObjectId.isValid(key[k])) return { statusCode: 400, message: k + " is not a valid ObjectId" };
+  }
+
+  const media = await Media.findById(mediaId)
+    .select("ledgerPaymentInfo rentalDue._id rentalDue.dueMonth arrearsDue._id arrearsDue.dueMonth arrearsDue.type arrearsDue.owners landOwners._id landOwners.name gstBalanceHistory._id gstBalanceHistory.rentalDueId gstBalanceHistory.dueMonth")
+    .lean();
+  if (!media) return { statusCode: 404, message: "Media not found" };
+
+  const same = (x, y) => String(x || "") === String(y || "");
+  const rentalBill = key.rentalDueId ? (media.rentalDue || []).find((r) => same(r._id, key.rentalDueId)) || null : null;
+  const bill = rentalBill || (key.rentalDueId ? (media.arrearsDue || []).find((r) => r && same(r._id, key.rentalDueId)) || null : null);
+  const gstRow = key.gstBalanceHistoryId
+    ? (media.gstBalanceHistory || []).find((g) => same(g._id, key.gstBalanceHistoryId)) ||
+      (media.arrearsDue || []).find((r) => r && r.type === "advance" && same(r._id, key.gstBalanceHistoryId)) || // advance GST row _id = advance bill id
+      null
+    : null;
+  if (key.entryType === "gst" && key.gstBalanceHistoryId && !gstRow) return { statusCode: 404, message: "gstBalanceHistoryId not found on this site" };
+  if (key.rentalDueId && !bill) return { statusCode: 404, message: "rentalDueId not found on this site" };
+  // ✅ NEW — a bill's GST row without _id (not paid yet) is per landowner → landOwnerId needed
+  if (key.entryType === "gst" && !key.gstBalanceHistoryId && rentalBill && !key.landOwnerId) {
+    return { statusCode: 400, message: "landOwnerId is required for a GST row without gstBalanceHistoryId (send the row's ownerId / landOwnerId)" };
+  }
+  if (key.landOwnerId) {
+    const isOwner =
+      (media.landOwners || []).some((o) => same(o._id, key.landOwnerId)) ||
+      ((bill && bill.owners) || []).some((o) => same(o.landOwnerId, key.landOwnerId) || same(o.landOwnerMasterId, key.landOwnerId));
+    if (!isOwner) return { statusCode: 400, message: "landOwnerId is not a landowner of this bill" };
+  }
+
+  const infos = media.ledgerPaymentInfo || [];
+  const at = LedgerPaymentInfo.findInfoIndex(infos, key);
+  let saved;
+  let action;
+  if (at >= 0) {
+    const old = infos[at];
+    const $set = { "ledgerPaymentInfo.$[p].updatedBy": userName, "ledgerPaymentInfo.$[p].updatedAt": now };
+    Object.entries(values).forEach(([k, v]) => ($set["ledgerPaymentInfo.$[p]." + k] = v));
+    // ✅ NEW — row ids learnt later (e.g. GST row got its _id once paid)
+    if (key.gstBalanceHistoryId && !old.gstBalanceHistoryId) $set["ledgerPaymentInfo.$[p].gstBalanceHistoryId"] = new mongoose.Types.ObjectId(key.gstBalanceHistoryId);
+    const before = {};
+    LedgerPaymentInfo.PAYMENT_INFO_FIELDS.forEach((k) => (before[k] = old[k] ?? ""));
+    await Media.updateOne(
+      { _id: media._id },
+      { $set, $push: { "ledgerPaymentInfo.$[p].history": { ...before, updatedBy: old.updatedBy || "", updatedAt: old.updatedAt || null, replacedBy: userName, replacedAt: now } } },
+      { arrayFilters: [{ "p._id": old._id }], timestamps: false },
+    );
+    saved = { ...old, ...values, updatedBy: userName, updatedAt: now };
+    action = "updated";
+  } else {
+    saved = {
+      _id: new mongoose.Types.ObjectId(),
+      ...key,
+      rentalDueId: key.rentalDueId ? new mongoose.Types.ObjectId(key.rentalDueId) : null,
+      landOwnerId: key.landOwnerId ? new mongoose.Types.ObjectId(key.landOwnerId) : null,
+      gstBalanceHistoryId: key.gstBalanceHistoryId ? new mongoose.Types.ObjectId(key.gstBalanceHistoryId) : null,
+      dueMonth: (bill && bill.dueMonth) || (gstRow && gstRow.dueMonth) || "",
+      paymentThrough: "",
+      typeOfPayment: "",
+      bankRefNo: "",
+      narration: "",
+      ...values,
+      createdBy: userName,
+      createdAt: now,
+      updatedBy: userName,
+      updatedAt: now,
+      history: [],
+    };
+    await Media.updateOne({ _id: media._id }, { $push: { ledgerPaymentInfo: saved } }, { timestamps: false });
+    action = "created";
+  }
+  const { history, _id, ...data } = saved;
+  return {
+    action,
+    data: { mediaId: media._id, ...data, paymentInfoStatus: 1, paymentInfoStatusLabel: LedgerPaymentInfo.STATUS_LABEL[1] },
+  };
+}
+
+// ✅ NEW — POST /admin/ledger-payment-info-save: Payment Through / Type Of Payment /
+// Bank Ref / Narration of ledger rows (entryType "rent") or GST rows ("gst"),
+// saved before their UTR is entered. Same row again → updated (old values in history[]).
+// Stored in media.ledgerPaymentInfo[]; ledger / GST rows and UTR logic unchanged.
+//   { items: [ {...row}, ... ] } → many rows (any sites / landowners / months, max 200;
+//     valid items saved, the others in errors[] with their index)
+//   { ...row } (no items) → one row (same response as before)
+const LEDGER_PAYMENT_INFO_MAX_ITEMS = 200;
+exports.saveLedgerPaymentInfo = async (req, res) => {
+  try {
+    const userName = req.user?.userName || "";
+    const body = req.body || {};
+
+    if (body.items === undefined) {
+      const r = await saveOneLedgerPaymentInfo(body, userName, nowIST());
+      if (r.message) return errorResponse(res, r.message, null, r.statusCode);
+      return successResponse(res, "Payment details saved", r.data, 200);
+    }
+
+    const items = body.items;
+    if (!Array.isArray(items) || !items.length || items.length > LEDGER_PAYMENT_INFO_MAX_ITEMS) {
+      return errorResponse(res, "items must be a non-empty array (max " + LEDGER_PAYMENT_INFO_MAX_ITEMS + ")", null, 400);
+    }
+    // same row twice in this request → the later item is used
+    const keyOf = (it) => {
+      const p = LedgerPaymentInfo.parsePaymentInfoBody(it);
+      if (p.error) return null;
+      const k = p.key;
+      return k.entryType === "gst"
+        ? [it.mediaId, "gst", k.gstBalanceHistoryId || k.rentalDueId + "|" + k.landOwnerId].join("|")
+        : [it.mediaId, "rent", k.rentalDueId, k.landOwnerId, k.paymentMode].join("|");
+    };
+    const isObj = (it) => !!it && typeof it === "object" && !Array.isArray(it);
+    const lastIndexOfKey = new Map();
+    items.forEach((it, i) => {
+      const k = isObj(it) ? keyOf(it) : null;
+      if (k) lastIndexOfKey.set(k, i);
+    });
+
+    const now = nowIST();
+    const saved = [];
+    const errors = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const it = items[i];
+      if (!isObj(it)) {
+        errors.push({ index: i, message: "item must be an object" });
+        continue;
+      }
+      const ref = { mediaId: it.mediaId ?? null, rentalDueId: it.rentalDueId ?? null, landOwnerId: it.landOwnerId ?? null, gstBalanceHistoryId: it.gstBalanceHistoryId ?? null };
+      const k = keyOf(it);
+      if (k && lastIndexOfKey.get(k) !== i) {
+        errors.push({ index: i, ...ref, message: "duplicate row in this request — later item used" });
+        continue;
+      }
+      try {
+        const r = await saveOneLedgerPaymentInfo(it, userName, now);
+        if (r.message) errors.push({ index: i, ...ref, message: r.message });
+        else saved.push({ index: i, action: r.action, ...r.data });
+      } catch (e) {
+        errors.push({ index: i, ...ref, message: e.message || "Save failed" });
+      }
+    }
+
+    const data = { total: items.length, savedCount: saved.length, failedCount: errors.length, saved, errors };
+    // every item failed → 400, saved / errors under data (same keys as a partial save)
+    if (!saved.length) return res.status(400).json({ success: false, statusCode: 400, message: "Payment details not saved — 0 of " + items.length, data });
+    return successResponse(
+      res,
+      "Payment details saved — " + saved.length + " of " + items.length + (errors.length ? " (" + errors.length + " failed)" : ""),
+      data,
+      200,
+    );
+  } catch (error) {
+    console.error("saveLedgerPaymentInfo error:", error);
+    return errorResponse(res, "Something went wrong while saving payment details", { error: error.message }, 500);
+  }
+};
+
 exports.getLedgerHistory = async (req, res) => {
   try {
      const { mediaId, landOwnerMasterId, year, startMonth, endMonth, currentMonth } = req.body;
@@ -7618,6 +7949,17 @@ function pendingRevisionAmounts(r) {
   };
 }
 
+// ✅ NEW — the same Pending revision amounts per bill month: [{ month, rent, gst }]
+// BILL → monthsDetail months (else fromMonth), ADVANCE → the advance month (fromMonth).
+// Adds up to pendingRevisionAmounts(r) rent / gst.
+function pendingRevisionMonthParts(r) {
+  const p = pendingRevisionAmounts(r);
+  const detail = r.billType !== "ADVANCE" && Array.isArray(r.monthsDetail) && r.monthsDetail.length ? r.monthsDetail : null;
+  if (!detail) return [{ month: r.fromMonth || "", rent: p.rent, gst: p.gst }];
+  const withGstPart = Number(r.gstOnIncrease) === 1;
+  return detail.map((d) => ({ month: d.month || "", rent: Math.max(0, Number(d.amount || 0)), gst: withGstPart ? Math.max(0, Number(d.gstAmount || 0)) : 0 }));
+}
+
 // ✅ CHANGED — options.pendingRevisions (optional, site-filter): rent revisions
 // still Pending are added to the New Bill / Advance OverAll + Remaining
 function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
@@ -7673,6 +8015,19 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
     newBill: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
     advance: { rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 },
   };
+  // ✅ NEW — the same totals by the bill's month: cur = requested month, past = before it
+  // (later months only in the all-months totals above)
+  const emptyRevisionTotals = () => ({ rentTotal: 0, rentPaid: 0, gstHoldTotal: 0, gstHoldPaid: 0, gstCannotHoldTotal: 0, gstCannotHoldPaid: 0, rentPendingApproval: 0, gstPendingApproval: 0 });
+  const revisionMonthTotals = {
+    newBill: { cur: emptyRevisionTotals(), past: emptyRevisionTotals() },
+    advance: { cur: emptyRevisionTotals(), past: emptyRevisionTotals(), future: emptyRevisionTotals() }, // ✅ NEW — future: advance only
+  };
+  // ✅ NEW — advance month after the requested month → "future" (advance only; New Bill unchanged)
+  const revisionBucket = (kind, dueMonthLabel) => {
+    const bucket = legacyBucket(dueMonthLabel);
+    if (bucket) return bucket;
+    return kind === "advance" && targetIndex !== null ? "future" : null;
+  };
   // ✅ NEW — Pending rent revisions of active sites (no bill yet → paid 0)
   if (Array.isArray(options.pendingRevisions) && options.pendingRevisions.length) {
     const activeIds = new Set(
@@ -7688,6 +8043,18 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
         tt[`gst${p.gstKind}Total`] += p.gst;
         tt.gstPendingApproval += p.gst;
       }
+      // ✅ NEW — by month
+      pendingRevisionMonthParts(rv).forEach((part) => {
+        const bucket = revisionBucket(p.kind, part.month);
+        if (!bucket) return;
+        const mt = revisionMonthTotals[p.kind][bucket];
+        mt.rentTotal += part.rent;
+        mt.rentPendingApproval += part.rent;
+        if (part.gst > 0) {
+          mt[`gst${p.gstKind}Total`] += part.gst;
+          mt.gstPendingApproval += part.gst;
+        }
+      });
     });
   }
   const addRevisionTotals = (media) => {
@@ -7703,6 +8070,18 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
         const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
         tt[`gst${kind}Total`] += gst;
         tt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
+      }
+      // ✅ NEW — by the bill's month
+      const bucket = revisionBucket(b.type === "advance" ? "advance" : "newBill", b.dueMonth);
+      if (bucket) {
+        const mt = revisionMonthTotals[b.type === "advance" ? "advance" : "newBill"][bucket];
+        mt.rentTotal += rent;
+        mt.rentPaid += Math.min(rent, Number(b.rentPaid || 0));
+        if (gst > 0) {
+          const kind = effectiveWithGst(b, parentWithGst.get(String(b.parentRentalDueId))) === 2 ? "CannotHold" : "Hold";
+          mt[`gst${kind}Total`] += gst;
+          mt[`gst${kind}Paid`] += Math.min(gst, Number(b.gstPaid || 0));
+        }
       }
     });
   };
@@ -7839,12 +8218,28 @@ function calculateNewOverallLedgerSummary(mediaDocs, requestedMonthYear, options
       });
       acc[`${k}RentPendingApprovalAmount`] = r(tt.rentPendingApproval); // ✅ NEW — part of OverAll not yet CMD approved
       acc[`${k}GstPendingApprovalAmount`] = r(tt.gstPendingApproval); // ✅ NEW
+      // ✅ NEW — same keys for the requested month (CurrentMonth) and past months (PastMonth)
+      // ✅ NEW — advance also FutureMonth (advance month after the requested month)
+      [["CurrentMonth", "cur"], ["PastMonth", "past"], ...(k === "advance" ? [["FutureMonth", "future"]] : [])].forEach(([label, bucket]) => {
+        const mt = revisionMonthTotals[k][bucket];
+        acc[`${k}${label}RentOverAllAmount`] = r(mt.rentTotal);
+        acc[`${k}${label}RentPaidAmount`] = r(mt.rentPaid);
+        acc[`${k}${label}RentRemainingAmount`] = r(mt.rentTotal - mt.rentPaid);
+        ["Hold", "CannotHold"].forEach((kind) => {
+          acc[`${k}${label}Gst${kind}OverAllAmount`] = r(mt[`gst${kind}Total`]);
+          acc[`${k}${label}Gst${kind}PaidAmount`] = r(mt[`gst${kind}Paid`]);
+          acc[`${k}${label}Gst${kind}RemainingAmount`] = r(mt[`gst${kind}Total`] - mt[`gst${kind}Paid`]);
+        });
+        acc[`${k}${label}RentPendingApprovalAmount`] = r(mt.rentPendingApproval);
+        acc[`${k}${label}GstPendingApprovalAmount`] = r(mt.gstPendingApproval);
+      });
       return acc;
     }, {}),
   };
 }
 exports.calculateNewOverallLedgerSummary = calculateNewOverallLedgerSummary;
 exports.pendingRevisionAmounts = pendingRevisionAmounts; // ✅ NEW
+exports.pendingRevisionMonthParts = pendingRevisionMonthParts; // ✅ NEW — site-filter month filters
 
 function calculateOverallLedgerSummary(mediaDocs, requestedMonthYear, options = {}) {
   const includeLandOwnerCounts = !!options.includeLandOwnerCounts;

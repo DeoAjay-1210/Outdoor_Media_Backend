@@ -1886,3 +1886,35 @@ test("W2. a line the mail client broke (UTR on the next line, no-break spaces) s
   for (const t of [`Landlord 1 - UTR :\n${U1},`, `Landlord\u00a01\u00a0-\u00a0UTR\u00a0:\u00a0${U1}`, `Landlord 1 -\nUTR : ${U1}`]) assert.deepEqual(findCandidates(t).map((c) => c.utr), [U1], JSON.stringify(t));
   assert.equal((await x.p.processPendingUtrs({ dryRun: false, force: true })).results[0].status, "found_and_saved");
 });
+
+// ✅ NEW — Rent line right + GST line wrong: the rent is saved AND an error row (→ UTR error chat) is written for the GST
+const { extractRejectedUtrLines } = require("../utils/landlordUtrParser");
+for (const [name, gstLine, reason] of [
+  ["GST value with no digit", "GST - UTR: ABCDEFGH", "invalid_utr"],
+  ["two different GST UTRs", `GST - UTR: ${GU}
+GST - UTR: ${GU}9`, "conflicting_utr_for_kind"],
+  ["wrong GST label", `GSTT - UTR: ${GU}`, "landlord_name_not_found"],
+]) {
+  test(`PS. rent right, ${name} → rent saved, GST error logged once`, async () => {
+    const text = `Rent - UTR: ${RU}\n${gstLine}`;
+    const Log = fakeProcLog();
+    const written = [];
+    const create = Log.create.bind(Log);
+    Log.create = async (d) => { written.push(d); return create(d); };
+    const x = setup({ docs: [splitDoc()], gstSave: true, log: Log, lookupLandlords: lkS([{ ...rep2("R1", text, RENT_AT), rejected: extractRejectedUtrLines(text) }]) });
+    await x.p.processPendingUtrs({ dryRun: false, force: true });
+    assert.deepEqual(kinds(x.calls).map((k) => k[0]), ["rental"]);
+    assert.deepEqual(written.map((w) => [w.status, w.reason]), [["found_and_saved", ""], ["ambiguous_mapping", reason]]);
+    assert.deepEqual(written[1].partialPending.map((p) => p.kind), ["gst"]);
+    assert.deepEqual(written[1].partialSaved.map((p) => p.kind), ["rent"]);
+  });
+}
+test("PS. rent right, GST not written yet → no error row", async () => {
+  const Log = fakeProcLog();
+  const written = [];
+  const create = Log.create.bind(Log);
+  Log.create = async (d) => { written.push(d); return create(d); };
+  const x = setup({ docs: [splitDoc()], gstSave: true, log: Log, lookupLandlords: lkS([rep2("R1", `Rent - UTR: ${RU}`, RENT_AT)]) });
+  await x.p.processPendingUtrs({ dryRun: false, force: true });
+  assert.deepEqual(written.map((w) => w.status), ["found_and_saved"]);
+});

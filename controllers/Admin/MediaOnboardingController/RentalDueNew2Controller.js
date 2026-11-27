@@ -22,6 +22,7 @@ const { FREQ_LABEL, STATUS_LABEL } = require("../../../utils/Labels");
 const { getRentForDueDate, getRentRatioForDueDate, getGstRatioForDueDate, mediaAsOfDate, keptOwnerSplit, withOwnerSplit } = require("../../../utils/appraisalRent"); // ✅ CHANGED — + keptOwnerSplit, withOwnerSplit
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const { advanceApprovalFields } = require("../../../utils/rentRevisionArrears"); // ✅ NEW — full-advance bill approval
+const { isCmdApprovalMailOn, CMD_APPROVAL_MAIL_OFF_MESSAGE } = require("../../../utils/cmdApprovalMailSwitch"); // ✅ NEW — CMD_APPROVAL_MAIL on / off
 const {
   createRentalApprovalNotification,
   createOverdueRemarkNotification,
@@ -1833,6 +1834,21 @@ function computeGstSplit(media, withGst, targetFaceId = null, dueDate = null) {
         "📧 RENTAL DUE MAIL PAYLOAD:",
         JSON.stringify(mailPayload, null, 2)
       );
+
+      // ✅ NEW — CMD_APPROVAL_MAIL off / not set → no mail (the approval is unchanged)
+      if (!isCmdApprovalMailOn()) {
+        console.log("📭 CMD_APPROVAL_MAIL off — skipping the CMD approval mail. Payload logged above only.");
+        return {
+          mailtype: "cmdapproval",
+          to: toArray,
+          ...(ccArray.length > 0 ? { cc: ccArray } : {}),
+          success: true,
+          sent: false,
+          statusCode: 200,
+          message: CMD_APPROVAL_MAIL_OFF_MESSAGE,
+          data: mailPayload.data,
+        };
+      }
 
       if (mailMode !== "production") {
         console.log(

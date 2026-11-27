@@ -11,6 +11,7 @@ const {
 const { successResponse, errorResponse } = require("../../../utils/response");
 const { computeRentalDueStats } = require("../../../utils/rentalDueStats");
 const mongoose = require("mongoose");
+const RentRevision = require("../../../models/Admin/MediaOnboardingSchema/RentRevisionSchema"); // ✅ NEW — Pending card New Bill / Advance
 
 const IST_OFFSET_MS = 330 * 60000; // 5h 30m
 const nowIST = () => new Date(Date.now() + IST_OFFSET_MS);
@@ -524,7 +525,9 @@ const getDashboardV2 = async (req, res) => {
       }
     }
 
-    const rental = X.computeRental(active, range, filters);
+    // ✅ CHANGED — + Pending rent revisions (Pending card New Bill / Advance)
+    const pendingRevisions = await RentRevision.find({ status: "Pending" }).lean();
+    const rental = X.computeRental(active, range, filters, { pendingRevisions });
     // Past pending = outstanding before the selected period (existing ledger definition, evaluated at the period start)
     const past = calculateOverallLedgerSummary(X.applyGst(active, filters.gst), { month: range.first.month, year: range.first.year });
     rental.cards.pastRent = { sites: past.pastRentPendingSites || 0, amount: Math.floor(past.pastRentPending || 0) };
