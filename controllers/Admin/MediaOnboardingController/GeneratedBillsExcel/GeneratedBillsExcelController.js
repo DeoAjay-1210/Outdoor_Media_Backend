@@ -72,6 +72,24 @@ const combinedStatus = (bills) => {
   return BILL_STATUS[Math.min(...statuses)] || BILL_STATUS[1];
 };
 
+// ✅ NEW — month fully paid by CMD approved advance(s) (rentalPayment.advanceAdjustments of
+// that month) → "Paid by Advance (<month the advance was given>)", else null. Used only for a ₹0 row.
+const paidByAdvanceStatus = (media, key) => {
+  const label = `${MONTH_NAMES[key % 12]} ${Math.floor(key / 12)}`;
+  const rows = (media?.rentalPayment?.advanceAdjustments || []).filter((a) => a && a.dueMonth === label && Number(a.amount || 0) > 0);
+  if (!rows.length) return null;
+  // ✅ CHANGED — the month the advance was given (CMD approved / generated: the
+  // adjustment's createdAt, else the advance bill's approval date), not the advance bill month
+  const givenMonth = (a) => {
+    const bill = (media.arrearsDue || []).find((b) => b && String(b._id) === String(a.advanceBillId)) || {};
+    const d = new Date(a.createdAt || bill.ownerApprovalDate || bill.createdAt || 0);
+    if (Number.isNaN(d.getTime()) || d.getTime() <= 0) return bill.dueMonth || null;
+    return `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  };
+  const months = [...new Set(rows.map(givenMonth).filter(Boolean))];
+  return months.length ? `Paid by Advance (${months.join(", ")})` : "Paid by Advance";
+};
+
 // ✅ NEW — the site's billing frequency (rentalPayment.paymentFrequency): 1 Monthly … 6 Custom (N months)
 const FREQUENCY_LABEL = { 1: "Monthly", 2: "Quarterly", 3: "Half Yearly", 4: "Yearly", 5: "2 Years" };
 const frequencyLabel = (media) => {
@@ -591,6 +609,8 @@ const downloadGeneratedBillsExcel = async (req, res) => {
         }
         const rent = Math.round(rentSum * share);
         const gst = Math.round(gstSum * share);
+        // ✅ NEW — ₹0 bill fully paid by advance → "Paid by Advance (<month>)"
+        const advanceStatus = rent === 0 && gst === 0 ? paidByAdvanceStatus(media, key) : null;
         monthByKey.get(key).rows.push([
           0,
           joinUnique(shownFaces.map((f) => f.mediaCode)) || "-",
@@ -603,7 +623,7 @@ const downloadGeneratedBillsExcel = async (req, res) => {
           ownerNames,
           frequency, // ✅ NEW — Payment Frequency
           formatDMY(dueDates[0]),
-          combinedStatus(bills),
+          advanceStatus || combinedStatus(bills), // ✅ CHANGED — + Paid by Advance
           gstApply,
           rent,
           gst,
@@ -704,7 +724,9 @@ const downloadGeneratedBillsExcel = async (req, res) => {
           if (!cycle || cycle.getUTCFullYear() !== year || cycle.getUTCMonth() !== monthIdx) continue;
           const rent = Math.round(Number(getRentForDueDate(media, cycle) || 0) * share);
           const gst = Math.round(Number(resolveExpectedGstForCycle(mediaAsOfDate(media, cycle)) || 0) * share);
-          if (rent <= 0 && gst <= 0) continue;
+          // ✅ CHANGED — ₹0 month fully paid by advance → still shown ("Paid by Advance (<month>)")
+          const advanceStatus = rent <= 0 && gst <= 0 ? paidByAdvanceStatus(media, m.key) : null;
+          if (rent <= 0 && gst <= 0 && !advanceStatus) continue;
           const row = [
             0,
             joinUnique(projectedFaces.map((f) => f.mediaCode)) || "-",
@@ -717,7 +739,7 @@ const downloadGeneratedBillsExcel = async (req, res) => {
             ownerNames,
             frequency, // ✅ NEW — Payment Frequency
             formatDMY(cycle),
-            cycle.getTime() > now.getTime() ? "Upcoming (Not Generated)" : "Not Generated",
+            advanceStatus || (cycle.getTime() > now.getTime() ? "Upcoming (Not Generated)" : "Not Generated"), // ✅ CHANGED — + Paid by Advance
             gstApply,
             rent,
             gst,
